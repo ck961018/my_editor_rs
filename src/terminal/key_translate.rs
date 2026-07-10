@@ -142,6 +142,24 @@ mod tests {
     }
 
     #[test]
+    fn unknown_key_keeps_all_modifiers() {
+        assert_eq!(
+            super::translate_key(key(
+                CrosstermCode::Tab,
+                CrosstermModifiers::CONTROL | CrosstermModifiers::ALT | CrosstermModifiers::SHIFT,
+            )),
+            KeyEvent::modified(
+                KeyCode::Unknown,
+                KeyModifiers {
+                    ctrl: true,
+                    alt: true,
+                    shift: true,
+                },
+            )
+        );
+    }
+
+    #[test]
     fn shift_arrow_becomes_shift_variant() {
         assert_eq!(
             super::translate_key(key(CrosstermCode::Left, CrosstermModifiers::SHIFT)),
