@@ -4,7 +4,7 @@ use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures::{Stream, StreamExt};
 
 use crate::protocol::frontend_event::{FrontendEvent, ResizeEvent};
-use crate::protocol::key_event::translate_key;
+use crate::terminal::key_translate::translate_key;
 
 pub struct Input<S = EventStream>
 where
