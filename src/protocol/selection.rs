@@ -1,0 +1,201 @@
+//! Selection 数据模型：cursor 是 selection 的退化形态（collapsed，anchor==head）。
+//! Helix 风集合：ranges + primary_index。v0.2 恒 collapsed、ranges.len()==1。
+
+/// 光标位置值类型。char_index 为权威字段，row/col 为派生缓存（由 core::buffer 维护）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorPos {
+    pub char_index: usize,
+    pub row: usize,
+    pub col: usize,
+}
+
+impl CursorPos {
+    pub const fn origin() -> Self {
+        Self {
+            char_index: 0,
+            row: 0,
+            col: 0,
+        }
+    }
+}
+
+/// 选区：anchor 选择起点，head 光标位置（驱动编辑/渲染）。空 selection：anchor==head。
+/// 方向隐含：head>anchor=forward。不加 direction 字段。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Selection {
+    pub anchor: CursorPos,
+    pub head: CursorPos,
+}
+
+impl Selection {
+    pub fn collapsed(at: CursorPos) -> Self {
+        Self {
+            anchor: at,
+            head: at,
+        }
+    }
+    #[allow(dead_code)] // v0.3：仅供测试/未来选区判空；生产路径直接用 anchor!=head 比较
+    pub fn is_empty(&self) -> bool {
+        self.anchor == self.head
+    }
+    pub fn head(&self) -> CursorPos {
+        self.head
+    }
+}
+
+/// 多选区容器（Helix 风）。ranges 恒按 head.char_index 升序（v0.2 单元素，约定在）。
+/// v0.2 不变量：ranges.len()==1、primary_index==0、所有 Selection collapsed。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Selections {
+    ranges: Vec<Selection>,
+    primary_index: usize,
+}
+
+impl Selections {
+    pub fn single(sel: Selection) -> Self {
+        Self {
+            ranges: vec![sel],
+            primary_index: 0,
+        }
+    }
+
+    pub fn primary(&self) -> &Selection {
+        &self.ranges[self.primary_index]
+    }
+    pub fn primary_mut(&mut self) -> &mut Selection {
+        &mut self.ranges[self.primary_index]
+    }
+    pub fn all(&self) -> impl Iterator<Item = &Selection> {
+        self.ranges.iter()
+    }
+    pub fn all_mut(&mut self) -> impl Iterator<Item = &mut Selection> {
+        self.ranges.iter_mut()
+    }
+
+    /// 清除 secondary ranges，仅保留 primary（v0.2 noop：ranges 本就 len==1）。
+    pub fn retain_primary(&mut self) {
+        let primary = self.ranges[self.primary_index];
+        self.ranges = vec![primary];
+        self.primary_index = 0;
+    }
+
+    /// 测试构造器：多 ranges + 指定 primary_index。非 v0.2 正常路径使用。
+    #[cfg(test)]
+    pub(crate) fn from_parts(ranges: Vec<Selection>, primary_index: usize) -> Self {
+        assert!(primary_index < ranges.len());
+        Self {
+            ranges,
+            primary_index,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn origin_is_zero() {
+        let c = CursorPos::origin();
+        assert_eq!((c.char_index, c.row, c.col), (0, 0, 0));
+    }
+
+    #[test]
+    fn copy_and_eq() {
+        let a = CursorPos {
+            char_index: 3,
+            row: 1,
+            col: 2,
+        };
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn collapsed_is_empty() {
+        let s = Selection::collapsed(CursorPos::origin());
+        assert!(s.is_empty());
+        assert_eq!(s.head(), CursorPos::origin());
+    }
+
+    #[test]
+    fn non_empty_selection() {
+        let s = Selection {
+            anchor: CursorPos::origin(),
+            head: CursorPos {
+                char_index: 3,
+                row: 0,
+                col: 3,
+            },
+        };
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn single_has_one_range_primary_index_zero() {
+        let s = Selections::single(Selection::collapsed(CursorPos::origin()));
+        assert_eq!(s.primary(), &Selection::collapsed(CursorPos::origin()));
+        let count = s.all().count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn primary_mut_updates_head() {
+        let mut s = Selections::single(Selection::collapsed(CursorPos::origin()));
+        s.primary_mut().head = CursorPos {
+            char_index: 5,
+            row: 0,
+            col: 5,
+        };
+        assert_eq!(s.primary().head().char_index, 5);
+    }
+
+    #[test]
+    fn all_mut_updates_all_ranges() {
+        let mut s = Selections::from_parts(
+            vec![
+                Selection::collapsed(CursorPos::origin()),
+                Selection::collapsed(CursorPos {
+                    char_index: 3,
+                    row: 0,
+                    col: 3,
+                }),
+            ],
+            0,
+        );
+        for sel in s.all_mut() {
+            sel.head = CursorPos {
+                char_index: 9,
+                row: 0,
+                col: 9,
+            };
+        }
+        assert_eq!(s.all().count(), 2);
+        assert!(s.all().all(|sel| sel.head.char_index == 9));
+    }
+
+    #[test]
+    fn retain_primary_drops_secondaries() {
+        let mut s = Selections::from_parts(
+            vec![
+                Selection::collapsed(CursorPos::origin()),
+                Selection::collapsed(CursorPos {
+                    char_index: 3,
+                    row: 0,
+                    col: 3,
+                }),
+            ],
+            0,
+        );
+        s.retain_primary();
+        assert_eq!(s.all().count(), 1);
+        assert_eq!(s.primary(), &Selection::collapsed(CursorPos::origin()));
+    }
+
+    #[test]
+    fn retain_primary_on_single_is_noop() {
+        let mut s = Selections::single(Selection::collapsed(CursorPos::origin()));
+        s.retain_primary();
+        assert_eq!(s.all().count(), 1);
+    }
+}
