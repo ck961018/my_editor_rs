@@ -59,7 +59,7 @@ impl SceneBuilder {
         self.next_id += 1;
         let children = match &kind {
             SpaceKind::Container { children, .. } => children.clone(),
-            SpaceKind::Host { .. } => Vec::new(),
+            SpaceKind::Content { .. } => Vec::new(),
         };
         let node = SpaceNode {
             id,
@@ -76,9 +76,9 @@ impl SceneBuilder {
         id
     }
 
-    pub fn host(&mut self, content: ContentId) -> SpaceHandle {
+    pub fn content(&mut self, content: ContentId) -> SpaceHandle {
         SpaceHandle {
-            id: self.alloc(SpaceKind::Host { content }),
+            id: self.alloc(SpaceKind::Content { content }),
         }
     }
 
@@ -98,13 +98,13 @@ impl SceneBuilder {
         id
     }
 
-    pub fn host_grow(&mut self, content: ContentId, weight: u32) -> SpaceId {
-        let id = self.host(content).id;
+    pub fn content_grow(&mut self, content: ContentId, weight: u32) -> SpaceId {
+        let id = self.content(content).id;
         self.set_sizing(id, Sizing::Grow(weight))
     }
 
-    pub fn host_fixed(&mut self, content: ContentId, size: i32) -> SpaceId {
-        let id = self.host(content).id;
+    pub fn content_fixed(&mut self, content: ContentId, size: i32) -> SpaceId {
+        let id = self.content(content).id;
         self.set_sizing(id, Sizing::Fixed(size))
     }
 
@@ -169,7 +169,7 @@ pub struct SpaceHandle {
     pub id: SpaceId,
 }
 impl SpaceHandle {
-    // 预留链式 API；生产路径用 host_grow/host_fixed。
+    // 预留链式 API；生产路径用 content_grow/content_fixed。
     #[allow(dead_code)]
     pub fn fixed(self, b: &mut SceneBuilder, size: i32) -> SpaceId {
         if let Some(n) = b.nodes.get_mut(&self.id) {
@@ -177,7 +177,7 @@ impl SpaceHandle {
         }
         self.id
     }
-    // 预留链式 API；生产路径用 host_grow/host_fixed。
+    // 预留链式 API；生产路径用 content_grow/content_fixed。
     #[allow(dead_code)]
     pub fn grow(self, b: &mut SceneBuilder, weight: u32) -> SpaceId {
         if let Some(n) = b.nodes.get_mut(&self.id) {
@@ -196,8 +196,8 @@ pub fn build_editor_scene(
     editor: ContentId,
     status: ContentId,
 ) -> Result<(Scene, SpaceId), BuildError> {
-    let ed = b.host_grow(editor, 1);
-    let st = b.host_fixed(status, 1);
+    let ed = b.content_grow(editor, 1);
+    let st = b.content_fixed(status, 1);
     let root = b.container_grow(
         Arrangement::Flex {
             direction: Axis::Vertical,
@@ -215,7 +215,7 @@ pub fn build_editor_scene(
 mod tests {
     use super::*;
     #[test]
-    fn build_editor_scene_has_two_hosts() {
+    fn build_editor_scene_has_two_content_spaces() {
         let mut builder = SceneBuilder::new();
         let (scene, editor_space) =
             build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
@@ -233,7 +233,7 @@ mod tests {
         let (scene, editor_space) =
             build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
         assert_eq!(editor_space, SpaceId(0));
-        let extra = builder.host_grow(ContentId(2), 1);
+        let extra = builder.content_grow(ContentId(2), 1);
         assert_eq!(extra, SpaceId(3));
         assert!(scene.node(editor_space).space.id == SpaceId(0));
     }
@@ -253,7 +253,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let extra = builder.host_fixed(ContentId(2), 1);
+        let extra = builder.content_fixed(ContentId(2), 1);
         assert_eq!(extra, SpaceId(3));
     }
 }

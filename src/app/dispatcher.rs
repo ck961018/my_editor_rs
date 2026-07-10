@@ -126,7 +126,7 @@ impl Dispatcher {
         let mut cur = Some(focused);
         while let Some(sid) = cur {
             let node = scene.node(sid);
-            if let SpaceKind::Host { content } = &node.space.kind {
+            if let SpaceKind::Content { content } = &node.space.kind {
                 if let Some(c) = contents.get(*content) {
                     chain.push(CaptureEntry {
                         keymap: c.keymap(),
@@ -218,7 +218,7 @@ fn view_content_target(
 fn focused_content_id(scene: &Scene, focused: SpaceId) -> Option<ContentId> {
     let node = scene.node(focused);
     match &node.space.kind {
-        SpaceKind::Host { content } => Some(*content),
+        SpaceKind::Content { content } => Some(*content),
         _ => None,
     }
 }
@@ -536,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn content_overrides_global_and_resolves_to_host_source() {
+    fn content_overrides_global_and_resolves_to_content_source() {
         let (mut dispatcher, scene, focused, mut contents) = fixture();
         // Buffer 默认 vim Normal 无 Ctrl+Q；这里改 content 自持 keymap 绑 Ctrl+Q → InsertText。
         // 注意：Buffer::keymap() 返回空 keymap，绑到它不会影响 mode runtime（resolve_key 走 modes），
@@ -607,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn prefix_completion_keeps_original_host_source() {
+    fn prefix_completion_keeps_original_content_source() {
         let (mut dispatcher, scene, focused, mut contents) = fixture();
         let mut sub = Keymap::new();
         sub.bind(
@@ -630,7 +630,7 @@ mod tests {
             .dispatch(KeyEvent::char('s'), focused, &scene, &contents)
             .unwrap();
 
-        // 前缀始于 content keymap（host source），完成时 Save 命令的目标 content 仍是该来源 content。
+        // 前缀始于 content keymap（content source），完成时 Save 命令的目标 content 仍是该来源 content。
         assert_eq!(
             command,
             DispatchCommand::Content {

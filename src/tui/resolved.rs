@@ -1,9 +1,10 @@
 use crate::protocol::geometry::Rect;
-use crate::protocol::ids::ContentId;
+use crate::protocol::ids::{ContentId, SpaceId};
 use crate::protocol::space::Layer;
 
 #[derive(Clone)]
 pub struct RenderItem {
+    pub space_id: SpaceId,
     pub content_id: ContentId,
     pub rect: Rect,
     #[allow(dead_code)] // 预留布局原语，v0.2 renderer 不做 clip
@@ -27,6 +28,7 @@ mod tests {
     #[test]
     fn render_item_holds_fields() {
         let it = RenderItem {
+            space_id: SpaceId(1),
             content_id: ContentId(0),
             rect: Rect {
                 x: 0,
@@ -39,6 +41,7 @@ mod tests {
             z_index: 0,
             order: 0,
         };
+        assert_eq!(it.space_id, SpaceId(1));
         assert_eq!(it.content_id, ContentId(0));
         assert_eq!(it.rect.width, 80);
     }

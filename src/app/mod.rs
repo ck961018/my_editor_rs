@@ -245,22 +245,22 @@ impl<F: Frontend> App<F> {
     }
 }
 
-/// 遍历 scene 所有 Host space，为每个建 View（绑定其 content）。
+/// 遍历 scene 所有 Content space，为每个建 View（绑定其 content）。
 fn build_views(scene: &Scene) -> HashMap<SpaceId, View> {
     let mut views = HashMap::new();
-    collect_host_spaces(scene, scene.root, &mut views);
+    collect_content_spaces(scene, scene.root, &mut views);
     views
 }
 
-fn collect_host_spaces(scene: &Scene, sid: SpaceId, out: &mut HashMap<SpaceId, View>) {
+fn collect_content_spaces(scene: &Scene, sid: SpaceId, out: &mut HashMap<SpaceId, View>) {
     let node = scene.node(sid);
     match &node.space.kind {
-        SpaceKind::Host { content } => {
+        SpaceKind::Content { content } => {
             out.insert(sid, View::new(*content));
         }
         SpaceKind::Container { children, .. } => {
             for c in children {
-                collect_host_spaces(scene, *c, out);
+                collect_content_spaces(scene, *c, out);
             }
         }
     }
@@ -470,7 +470,7 @@ mod tests {
     fn execute_edit_uses_resolved_view_content_target() {
         let mut app = make_app(vec![], None);
         let other_cid = ContentId(9);
-        let other_sid = app.scene_builder.host_grow(other_cid, 1);
+        let other_sid = app.scene_builder.content_grow(other_cid, 1);
         let scene = app
             .scene_builder
             .snapshot(

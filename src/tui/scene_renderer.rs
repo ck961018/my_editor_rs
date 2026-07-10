@@ -48,7 +48,7 @@ impl SceneRenderer {
                 vp.ensure_cursor_visible(focused_head.row, item.rect.height as usize);
             }
         }
-        // 逐 Host item paint
+        // 逐 Content item paint
         for item in &resolved.items {
             paint_item(item, scene, query, &self.viewports, canvas)?;
         }
@@ -80,7 +80,7 @@ impl Default for SceneRenderer {
 fn focused_content_id(scene: &Scene, focused: SpaceId) -> Option<ContentId> {
     let node = scene.node(focused);
     match &node.space.kind {
-        SpaceKind::Host { content } => Some(*content),
+        SpaceKind::Content { content } => Some(*content),
         _ => None,
     }
 }
@@ -224,7 +224,7 @@ fn find_space_by_content(scene: &Scene, cid: ContentId) -> Option<SpaceId> {
     fn dfs(scene: &Scene, sid: SpaceId, cid: ContentId) -> Option<SpaceId> {
         let node = scene.node(sid);
         match &node.space.kind {
-            SpaceKind::Host { content } if *content == cid => Some(sid),
+            SpaceKind::Content { content } if *content == cid => Some(sid),
             SpaceKind::Container { children, .. } => {
                 for c in children {
                     if let Some(found) = dfs(scene, *c, cid) {

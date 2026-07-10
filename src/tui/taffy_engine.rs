@@ -65,7 +65,7 @@ impl TaffyEngine {
                     .collect();
                 self.tree.new_with_children(style, &child_ids).unwrap()
             }
-            SpaceKind::Host { .. } => self.tree.new_leaf(style).unwrap(),
+            SpaceKind::Content { .. } => self.tree.new_leaf(style).unwrap(),
         };
         map.insert(sid, taffy_id);
         taffy_id
@@ -93,11 +93,12 @@ impl TaffyEngine {
             None => Some(rect),
         };
         let content_id = match &node.space.kind {
-            SpaceKind::Host { content } => Some(*content),
+            SpaceKind::Content { content } => Some(*content),
             SpaceKind::Container { .. } => None,
         };
         if let Some(cid) = content_id {
             out.items.push(RenderItem {
+                space_id: sid,
                 content_id: cid,
                 rect,
                 clip,
@@ -170,8 +171,10 @@ fn style_for(node: &SpaceNode, parent_axis: Option<Axis>, root_size: Option<Scen
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::geometry::Size;
     use crate::protocol::ids::ContentId;
     use crate::protocol::scene::{SceneBuilder, build_editor_scene};
+    use crate::protocol::space::{Align, Arrangement, Axis};
 
     fn item_for(scene: &ResolvedScene, content: ContentId) -> &RenderItem {
         scene
@@ -215,7 +218,7 @@ mod tests {
             build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
         let mut engine = TaffyEngine::new();
         let resolved = engine.layout(&scene);
-        assert_eq!(resolved.items.len(), 2); // 仅 Host 进 items（container 不进）
+        assert_eq!(resolved.items.len(), 2); // 仅 Content 进 items（container 不进）
         assert_eq!(resolved.items[0].content_id, ContentId(0));
         assert_eq!(resolved.items[1].content_id, ContentId(1));
     }
@@ -230,5 +233,39 @@ mod tests {
         let resolved = engine.layout(&scene);
         assert_eq!(item_for(&resolved, ContentId(0)).rect.height, 39);
         assert_eq!(item_for(&resolved, ContentId(0)).rect.width, 100);
+    }
+
+    #[test]
+    fn shared_content_items_keep_their_source_space_ids() {
+        let mut builder = SceneBuilder::new();
+        let left = builder.content_grow(ContentId(0), 1);
+        let right = builder.content_grow(ContentId(0), 1);
+        let root = builder.container_grow(
+            Arrangement::Flex {
+                direction: Axis::Horizontal,
+                gap: 0,
+                align: Align::Stretch,
+            },
+            vec![left, right],
+            1,
+        );
+        let scene = builder
+            .snapshot(
+                root,
+                Size {
+                    width: 20,
+                    height: 1,
+                },
+            )
+            .unwrap();
+
+        let mut engine = TaffyEngine::new();
+        let resolved = engine.layout(&scene);
+
+        assert_eq!(resolved.items.len(), 2);
+        assert_eq!(resolved.items[0].content_id, ContentId(0));
+        assert_eq!(resolved.items[1].content_id, ContentId(0));
+        assert_eq!(resolved.items[0].space_id, left);
+        assert_eq!(resolved.items[1].space_id, right);
     }
 }

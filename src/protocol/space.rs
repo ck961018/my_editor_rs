@@ -17,7 +17,7 @@ pub enum SpaceKind {
         arrangement: Arrangement,
         children: Vec<SpaceId>,
     },
-    Host {
+    Content {
         content: ContentId,
     },
 }
