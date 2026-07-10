@@ -5,9 +5,8 @@ use std::collections::HashMap;
 use std::io;
 
 use crate::protocol::content_query::{ContentQuery, RowRange};
-use crate::protocol::ids::{ContentId, SpaceId};
+use crate::protocol::ids::SpaceId;
 use crate::protocol::scene::Scene;
-use crate::protocol::space::SpaceKind;
 use crate::protocol::status::StatusMessage;
 use crate::protocol::viewport::Viewport;
 use crate::terminal::output::Canvas;
@@ -37,35 +36,30 @@ impl SceneRenderer {
         let resolved: ResolvedScene = self.engine.layout(scene);
         canvas.hide_cursor()?;
         // 焦点 viewport 跟随
-        let focused_cid = focused_content_id(scene, focused);
+        let focused_item = resolved.items.iter().find(|item| item.space_id == focused);
         let focused_head = query.selections(focused).primary().head();
-        if let Some(cid) = focused_cid {
-            if let Some(item) = resolved.items.iter().find(|i| i.content_id == cid) {
-                let vp = self
-                    .viewports
-                    .entry(focused)
-                    .or_insert_with(Viewport::origin);
-                vp.ensure_cursor_visible(focused_head.row, item.rect.height as usize);
-            }
+        if let Some(item) = focused_item {
+            let viewport = self
+                .viewports
+                .entry(focused)
+                .or_insert_with(Viewport::origin);
+            viewport.ensure_cursor_visible(focused_head.row, item.rect.height as usize);
         }
         // 逐 Content item paint
         for item in &resolved.items {
-            paint_item(item, scene, query, &self.viewports, canvas)?;
+            paint_item(item, query, &self.viewports, canvas)?;
         }
         // 焦点光标定位
-        if let Some(cid) = focused_cid {
-            if let Some(item) = resolved.items.iter().find(|i| i.content_id == cid) {
-                let vp = self
-                    .viewports
-                    .get(&focused)
-                    .copied()
-                    .unwrap_or_else(Viewport::origin);
-                let screen_row = focused_head.row.saturating_sub(vp.top_row) + item.rect.y as usize;
-                let screen_col =
-                    focused_head.col.saturating_sub(vp.left_col) + item.rect.x as usize;
-                canvas.move_cursor(screen_row, screen_col)?;
-                canvas.show_cursor()?;
-            }
+        if let Some(item) = focused_item {
+            let vp = self
+                .viewports
+                .get(&focused)
+                .copied()
+                .unwrap_or_else(Viewport::origin);
+            let screen_row = focused_head.row.saturating_sub(vp.top_row) + item.rect.y as usize;
+            let screen_col = focused_head.col.saturating_sub(vp.left_col) + item.rect.x as usize;
+            canvas.move_cursor(screen_row, screen_col)?;
+            canvas.show_cursor()?;
         }
         canvas.flush()
     }
@@ -77,25 +71,13 @@ impl Default for SceneRenderer {
     }
 }
 
-fn focused_content_id(scene: &Scene, focused: SpaceId) -> Option<ContentId> {
-    let node = scene.node(focused);
-    match &node.space.kind {
-        SpaceKind::Content { content } => Some(*content),
-        _ => None,
-    }
-}
-
 fn paint_item(
     item: &RenderItem,
-    scene: &Scene,
     query: &dyn ContentQuery,
     viewports: &HashMap<SpaceId, Viewport>,
     canvas: &mut dyn Canvas,
 ) -> io::Result<()> {
-    let sid = match find_space_by_content(scene, item.content_id) {
-        Some(s) => s,
-        None => return Ok(()),
-    };
+    let sid = item.space_id;
     let vp = viewports
         .get(&sid)
         .copied()
@@ -220,25 +202,6 @@ fn paint_line_with_highlight(
     Ok(())
 }
 
-fn find_space_by_content(scene: &Scene, cid: ContentId) -> Option<SpaceId> {
-    fn dfs(scene: &Scene, sid: SpaceId, cid: ContentId) -> Option<SpaceId> {
-        let node = scene.node(sid);
-        match &node.space.kind {
-            SpaceKind::Content { content } if *content == cid => Some(sid),
-            SpaceKind::Container { children, .. } => {
-                for c in children {
-                    if let Some(found) = dfs(scene, *c, cid) {
-                        return Some(found);
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-    dfs(scene, scene.root, cid)
-}
-
 fn status_line(file_name: Option<&str>, modified: bool, message: &StatusMessage) -> String {
     let name = file_name.unwrap_or("[No Name]");
     let modified = if modified { "[+]" } else { "" };
@@ -256,11 +219,14 @@ fn status_line(file_name: Option<&str>, modified: bool, message: &StatusMessage)
 mod tests {
     use super::*;
     use crate::protocol::content_query::{ContentQuery, RowRange, StatusBarData};
+    use crate::protocol::geometry::Size;
     use crate::protocol::ids::{ContentId, SpaceId};
     use crate::protocol::scene::{SceneBuilder, build_editor_scene};
     use crate::protocol::selection::{CursorPos, Selection, Selections};
+    use crate::protocol::space::{Align, Arrangement, Axis};
     use crate::protocol::status::StatusMessage;
     use crate::terminal::output::Output;
+    use std::collections::HashMap;
 
     struct StubQuery {
         editor_cid: ContentId,
@@ -294,6 +260,112 @@ mod tests {
                 0
             }
         }
+    }
+
+    struct MultiSpaceQuery {
+        lines: Vec<String>,
+        selections: HashMap<SpaceId, Selections>,
+    }
+
+    impl ContentQuery for MultiSpaceQuery {
+        fn lines(&self, cid: ContentId, range: RowRange) -> Vec<String> {
+            assert_eq!(cid, ContentId(0));
+            self.lines
+                .iter()
+                .skip(range.start)
+                .take(range.end.saturating_sub(range.start))
+                .cloned()
+                .collect()
+        }
+
+        fn status_bar(&self, _cid: ContentId) -> StatusBarData {
+            StatusBarData {
+                file_name: None,
+                modified: false,
+                message: StatusMessage::None,
+            }
+        }
+
+        fn selections(&self, sid: SpaceId) -> Selections {
+            self.selections[&sid].clone()
+        }
+
+        fn line_count(&self, cid: ContentId) -> usize {
+            if cid == ContentId(0) {
+                self.lines.len()
+            } else {
+                0
+            }
+        }
+    }
+
+    #[test]
+    fn shared_content_spaces_use_their_own_selections() {
+        let mut builder = SceneBuilder::new();
+        let left = builder.content_grow(ContentId(0), 1);
+        let right = builder.content_grow(ContentId(0), 1);
+        let root = builder.container_grow(
+            Arrangement::Flex {
+                direction: Axis::Horizontal,
+                gap: 0,
+                align: Align::Stretch,
+            },
+            vec![left, right],
+            1,
+        );
+        let scene = builder
+            .snapshot(
+                root,
+                Size {
+                    width: 20,
+                    height: 1,
+                },
+            )
+            .unwrap();
+        let query = MultiSpaceQuery {
+            lines: vec!["abcd".to_string()],
+            selections: HashMap::from([
+                (
+                    left,
+                    Selections::single(Selection {
+                        anchor: CursorPos {
+                            char_index: 0,
+                            row: 0,
+                            col: 0,
+                        },
+                        head: CursorPos {
+                            char_index: 1,
+                            row: 0,
+                            col: 1,
+                        },
+                    }),
+                ),
+                (
+                    right,
+                    Selections::single(Selection {
+                        anchor: CursorPos {
+                            char_index: 2,
+                            row: 0,
+                            col: 2,
+                        },
+                        head: CursorPos {
+                            char_index: 3,
+                            row: 0,
+                            col: 3,
+                        },
+                    }),
+                ),
+            ]),
+        };
+        let mut renderer = SceneRenderer::new();
+        let mut out = Output::new(Vec::new());
+        renderer
+            .render(&scene, &query, left, &mut out as &mut dyn Canvas)
+            .unwrap();
+        let output = String::from_utf8(out.into_inner()).unwrap();
+
+        assert!(output.contains("\x1b[7ma\x1b[27mbcd"), "left: {output}");
+        assert!(output.contains("ab\x1b[7mc\x1b[27md"), "right: {output}");
     }
 
     #[test]
