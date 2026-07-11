@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use crate::core::command::Command;
 use crate::core::content_runtime::BufferRuntime;
 use crate::core::keymap::Keymap;
-use crate::core::mode::{ModeActionId, ModeId, ModeRuntime, ModeSet};
+use crate::core::mode::{ModeActionId, ModeId, ModeSet};
 use crate::protocol::key_event::KeyEvent;
 use crate::protocol::selection::{CursorPos, Selection, Selections};
 use crate::protocol::status::StatusMessage;
@@ -19,13 +19,11 @@ pub struct Buffer {
     /// 静态 Content 分发使用的普通 keymap；模式化按键走 `modes`。
     keymap: Keymap,
     modes: ModeSet,
-    mode_runtime: ModeRuntime,
 }
 
 impl Buffer {
     pub fn new() -> Self {
         let modes = ModeSet::vim();
-        let mode_runtime = modes.create_runtime();
         Self {
             rope: Rope::new(),
             path: None,
@@ -33,7 +31,6 @@ impl Buffer {
             status: StatusMessage::None,
             keymap: Keymap::new(),
             modes,
-            mode_runtime,
         }
     }
 
@@ -46,27 +43,15 @@ impl Buffer {
         &mut self.keymap
     }
 
-    pub(crate) fn resolve_key(&self, key: KeyEvent) -> Option<Command> {
-        self.modes.resolve_key(&self.mode_runtime, key)
-    }
-
     pub(crate) fn create_runtime(&self) -> BufferRuntime {
         BufferRuntime::new(self.modes.create_runtime())
     }
 
-    pub(crate) fn resolve_key_with_runtime(
-        &self,
-        runtime: &BufferRuntime,
-        key: KeyEvent,
-    ) -> Option<Command> {
+    pub(crate) fn resolve_key(&self, runtime: &BufferRuntime, key: KeyEvent) -> Option<Command> {
         self.modes.resolve_key(runtime.modes(), key)
     }
 
-    pub(crate) fn handle_mode_command(&mut self, mode: ModeId, action: ModeActionId) {
-        self.modes.execute(&mut self.mode_runtime, mode, action);
-    }
-
-    pub(crate) fn execute_mode_with_runtime(
+    pub(crate) fn execute_mode(
         &self,
         runtime: &mut BufferRuntime,
         mode: ModeId,
@@ -472,28 +457,33 @@ mod tests {
     #[test]
     fn buffer_keymap_shift_arrow_binds_extend() {
         // 模式化后 shift+方向键绑在 vim Insert keymap；Normal 无此绑定。
-        let mut b = Buffer::new();
-        b.handle_mode_command(ModeId::new("vim"), ModeActionId::new("enter-insert"));
+        let b = Buffer::new();
+        let mut runtime = b.create_runtime();
+        b.execute_mode(
+            &mut runtime,
+            ModeId::new("vim"),
+            ModeActionId::new("enter-insert"),
+        );
         assert_eq!(
-            b.resolve_key(KeyEvent::shift_arrow(ArrowKey::Left)),
+            b.resolve_key(&runtime, KeyEvent::shift_arrow(ArrowKey::Left)),
             Some(Command::Content(ContentCommand::Edit(
                 EditCommand::ExtendLeftBy(1)
             )))
         );
         assert_eq!(
-            b.resolve_key(KeyEvent::shift_arrow(ArrowKey::Right)),
+            b.resolve_key(&runtime, KeyEvent::shift_arrow(ArrowKey::Right)),
             Some(Command::Content(ContentCommand::Edit(
                 EditCommand::ExtendRightBy(1)
             )))
         );
         assert_eq!(
-            b.resolve_key(KeyEvent::shift_arrow(ArrowKey::Up)),
+            b.resolve_key(&runtime, KeyEvent::shift_arrow(ArrowKey::Up)),
             Some(Command::Content(ContentCommand::Edit(
                 EditCommand::ExtendUpBy(1)
             )))
         );
         assert_eq!(
-            b.resolve_key(KeyEvent::shift_arrow(ArrowKey::Down)),
+            b.resolve_key(&runtime, KeyEvent::shift_arrow(ArrowKey::Down)),
             Some(Command::Content(ContentCommand::Edit(
                 EditCommand::ExtendDownBy(1)
             )))
@@ -624,22 +614,28 @@ mod tests {
     #[test]
     fn default_buffer_uses_vim_normal_and_plain_char_is_not_insert() {
         let b = Buffer::new();
-        assert!(b.resolve_key(KeyEvent::char('a')).is_none());
+        let runtime = b.create_runtime();
+        assert!(b.resolve_key(&runtime, KeyEvent::char('a')).is_none());
     }
 
     #[test]
     fn vim_i_enters_insert_and_plain_char_inserts() {
-        let mut b = Buffer::new();
+        let b = Buffer::new();
+        let mut runtime = b.create_runtime();
         assert_eq!(
-            b.resolve_key(KeyEvent::char('i')),
+            b.resolve_key(&runtime, KeyEvent::char('i')),
             Some(Command::Content(ContentCommand::Mode {
                 mode: ModeId::new("vim"),
                 action: ModeActionId::new("enter-insert"),
             }))
         );
-        b.handle_mode_command(ModeId::new("vim"), ModeActionId::new("enter-insert"));
+        b.execute_mode(
+            &mut runtime,
+            ModeId::new("vim"),
+            ModeActionId::new("enter-insert"),
+        );
         assert_eq!(
-            b.resolve_key(KeyEvent::char('a')),
+            b.resolve_key(&runtime, KeyEvent::char('a')),
             Some(Command::Content(ContentCommand::Edit(
                 EditCommand::InsertText("a".to_string())
             )))
@@ -648,16 +644,25 @@ mod tests {
 
     #[test]
     fn vim_escape_returns_to_normal() {
-        let mut b = Buffer::new();
-        b.handle_mode_command(ModeId::new("vim"), ModeActionId::new("enter-insert"));
+        let b = Buffer::new();
+        let mut runtime = b.create_runtime();
+        b.execute_mode(
+            &mut runtime,
+            ModeId::new("vim"),
+            ModeActionId::new("enter-insert"),
+        );
         assert_eq!(
-            b.resolve_key(KeyEvent::plain(KeyCode::Escape)),
+            b.resolve_key(&runtime, KeyEvent::plain(KeyCode::Escape)),
             Some(Command::Content(ContentCommand::Mode {
                 mode: ModeId::new("vim"),
                 action: ModeActionId::new("enter-normal"),
             }))
         );
-        b.handle_mode_command(ModeId::new("vim"), ModeActionId::new("enter-normal"));
-        assert!(b.resolve_key(KeyEvent::char('a')).is_none());
+        b.execute_mode(
+            &mut runtime,
+            ModeId::new("vim"),
+            ModeActionId::new("enter-normal"),
+        );
+        assert!(b.resolve_key(&runtime, KeyEvent::char('a')).is_none());
     }
 }

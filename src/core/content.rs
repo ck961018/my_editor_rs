@@ -12,12 +12,6 @@ use crate::protocol::status::StatusMessage;
 
 pub enum ContentInput<'a> {
     Command(ContentCommand),
-    #[allow(dead_code)]
-    // Task 3 removes this compatibility input after production routing switches.
-    WithSelections {
-        command: ContentCommand,
-        selections: &'a mut Selections,
-    },
     View {
         command: ContentCommand,
         selections: &'a mut Selections,
@@ -63,16 +57,6 @@ impl Content {
         }
     }
 
-    pub fn resolve_key(&self, key: KeyEvent) -> Option<Command> {
-        match self {
-            Self::Buffer(buffer) => buffer.resolve_key(key),
-            Self::StatusBar(_) => match self.keymap().lookup(key) {
-                Some(KeyBinding::Command(command)) => Some(command.clone()),
-                Some(KeyBinding::Prefix(_)) | None => None,
-            },
-        }
-    }
-
     pub fn create_runtime(&self) -> ContentRuntime {
         match self {
             Self::Buffer(buffer) => ContentRuntime::Buffer(buffer.create_runtime()),
@@ -80,14 +64,10 @@ impl Content {
         }
     }
 
-    pub fn resolve_key_with_runtime(
-        &self,
-        runtime: &ContentRuntime,
-        key: KeyEvent,
-    ) -> Option<Command> {
+    pub fn resolve_key(&self, runtime: &ContentRuntime, key: KeyEvent) -> Option<Command> {
         match (self, runtime) {
             (Self::Buffer(buffer), ContentRuntime::Buffer(runtime)) => {
-                buffer.resolve_key_with_runtime(runtime, key)
+                buffer.resolve_key(runtime, key)
             }
             (Self::StatusBar(_), ContentRuntime::StatusBar(_)) => match self.keymap().lookup(key) {
                 Some(KeyBinding::Command(command)) => Some(command.clone()),
@@ -118,7 +98,7 @@ impl Content {
                     ..
                 },
             ) => {
-                buffer.execute_mode_with_runtime(runtime, mode, action);
+                buffer.execute_mode(runtime, mode, action);
                 ContentEffect::None
             }
             (
@@ -144,23 +124,6 @@ impl Content {
                     ..
                 },
             ) => ContentEffect::None,
-            (
-                Self::Buffer(buffer),
-                ContentInput::WithSelections {
-                    command: ContentCommand::Edit(command),
-                    selections,
-                },
-            ) => {
-                apply_edit(command, buffer, selections);
-                ContentEffect::None
-            }
-            (
-                Self::Buffer(buffer),
-                ContentInput::Command(ContentCommand::Mode { mode, action }),
-            ) => {
-                buffer.handle_mode_command(mode, action);
-                ContentEffect::None
-            }
             (Self::Buffer(buffer), ContentInput::Command(ContentCommand::Save)) => {
                 match buffer.path().cloned() {
                     Some(path) => ContentEffect::Save(SaveSnapshot {
@@ -190,14 +153,7 @@ impl Content {
                     ..
                 },
             )
-            | (Self::Buffer(_), ContentInput::Command(ContentCommand::Edit(_)))
-            | (
-                Self::Buffer(_),
-                ContentInput::WithSelections {
-                    command: ContentCommand::Save | ContentCommand::Mode { .. },
-                    ..
-                },
-            )
+            | (Self::Buffer(_), ContentInput::Command(_))
             | (Self::StatusBar(_), _) => ContentEffect::None,
         }
     }
@@ -245,16 +201,8 @@ mod tests {
             runtime: &mut first,
         });
 
-        assert!(
-            content
-                .resolve_key_with_runtime(&first, KeyEvent::char('a'))
-                .is_some()
-        );
-        assert!(
-            content
-                .resolve_key_with_runtime(&second, KeyEvent::char('a'))
-                .is_none()
-        );
+        assert!(content.resolve_key(&first, KeyEvent::char('a')).is_some());
+        assert!(content.resolve_key(&second, KeyEvent::char('a')).is_none());
     }
 
     #[test]

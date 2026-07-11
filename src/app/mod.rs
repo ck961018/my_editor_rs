@@ -132,10 +132,16 @@ impl<F: Frontend> App<F> {
                 self.scene.resize(r.width as i32, r.height as i32);
             }
             FrontendEvent::Key(k) => {
-                if let Some(command) =
+                let command = {
+                    let runtime = self
+                        .views
+                        .get(&self.focused)
+                        .expect("focused view exists")
+                        .runtime();
                     self.dispatcher
-                        .dispatch(k, self.focused, &self.scene, &self.contents)
-                {
+                        .dispatch(k, self.focused, &self.scene, &self.contents, runtime)
+                };
+                if let Some(command) = command {
                     self.execute_command(command)?;
                 }
             }
@@ -285,7 +291,9 @@ mod tests {
         ContentData, ContentQuery, DocumentStatus, RenderQuery, RowRange,
     };
     use crate::protocol::frontend_event::ResizeEvent;
+    use crate::protocol::geometry::Size;
     use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
+    use crate::protocol::space::{Align, Arrangement, Axis};
     use crate::protocol::status::StatusMessage;
     use std::collections::VecDeque;
 
@@ -331,13 +339,21 @@ mod tests {
     fn production_content_paths_have_no_dynamic_type_probes() {
         let app = include_str!("mod.rs");
         let content = include_str!("../core/content.rs");
+        let content_runtime = include_str!("../core/content_runtime.rs");
         let dynamic_handler = concat!("Box<dyn ", "Content", "Handler>");
         let buffer_probe = concat!("buffer", "_mut(");
         let buffer_read_probe = concat!("as_", "buffer(");
+        let forbidden = [
+            ["Box<dyn ", "ContentRuntime>"].concat(),
+            ["Box<dyn ", "Content>"].concat(),
+        ];
 
         assert!(!app.contains(dynamic_handler));
         assert!(!app.contains(buffer_probe));
         assert!(!content.contains(buffer_read_probe));
+        for fragment in forbidden {
+            assert!(!content_runtime.contains(&fragment), "{fragment}");
+        }
     }
 
     fn text_rows(app: &App<ScriptedFrontend>, content: ContentId) -> Vec<String> {
@@ -383,6 +399,48 @@ mod tests {
         );
         let sels = query.selections(app.focused);
         assert_eq!(sels.primary().head().char_index, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_views_of_one_buffer_keep_independent_mode_runtime() {
+        let mut app = make_app(vec![], None);
+        let mut builder = SceneBuilder::new();
+        let left = builder.content_grow(editor_cid(), 1);
+        let right = builder.content_grow(editor_cid(), 1);
+        let root = builder.container_grow(
+            Arrangement::Flex {
+                direction: Axis::Horizontal,
+                gap: 0,
+                align: Align::Stretch,
+            },
+            vec![left, right],
+            1,
+        );
+        let scene = builder
+            .snapshot(
+                root,
+                Size {
+                    width: 40,
+                    height: 5,
+                },
+            )
+            .unwrap();
+        app.scene = scene;
+        app.views = build_views(&app.scene, &app.contents);
+
+        app.focused = left;
+        app.handle_event(FrontendEvent::Key(KeyEvent::char('i')))
+            .await
+            .unwrap();
+        app.handle_event(FrontendEvent::Key(KeyEvent::char('a')))
+            .await
+            .unwrap();
+        app.focused = right;
+        app.handle_event(FrontendEvent::Key(KeyEvent::char('a')))
+            .await
+            .unwrap();
+
+        assert_eq!(text_rows(&app, editor_cid()), vec!["a"]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -27,27 +27,16 @@ impl ContentStore {
     pub fn resolve_key(
         &self,
         id: ContentId,
-        key: KeyEvent,
-    ) -> Option<crate::core::command::Command> {
-        self.contents
-            .get(&id)
-            .and_then(|content| content.resolve_key(key))
-    }
-
-    pub fn create_runtime(&self, id: ContentId) -> Option<ContentRuntime> {
-        self.contents.get(&id).map(Content::create_runtime)
-    }
-
-    #[allow(dead_code)] // Task 3 switches Dispatcher to this runtime-aware key resolution path.
-    pub fn resolve_key_with_runtime(
-        &self,
-        id: ContentId,
         runtime: &ContentRuntime,
         key: KeyEvent,
     ) -> Option<crate::core::command::Command> {
         self.contents
             .get(&id)
-            .and_then(|content| content.resolve_key_with_runtime(runtime, key))
+            .and_then(|content| content.resolve_key(runtime, key))
+    }
+
+    pub fn create_runtime(&self, id: ContentId) -> Option<ContentRuntime> {
+        self.contents.get(&id).map(Content::create_runtime)
     }
 
     pub fn execute(
