@@ -3,10 +3,10 @@ use std::borrow::Cow;
 use std::io;
 use std::path::PathBuf;
 
-use crate::core::command::{Command, ContentCommand, EditCommand};
+use crate::core::command::Command;
 use crate::core::keymap::Keymap;
-use crate::core::mode::{Mode, ModeActionId, ModeId};
-use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
+use crate::core::mode::{ModeActionId, ModeId, ModeRuntime, ModeSet};
+use crate::protocol::key_event::KeyEvent;
 use crate::protocol::selection::{CursorPos, Selection, Selections};
 use crate::protocol::status::StatusMessage;
 
@@ -17,18 +17,22 @@ pub struct Buffer {
     status: StatusMessage,
     /// 静态 Content 分发使用的普通 keymap；模式化按键走 `modes`。
     keymap: Keymap,
-    modes: BufferModes,
+    modes: ModeSet,
+    mode_runtime: ModeRuntime,
 }
 
 impl Buffer {
     pub fn new() -> Self {
+        let modes = ModeSet::vim();
+        let mode_runtime = modes.create_runtime();
         Self {
             rope: Rope::new(),
             path: None,
             modified: false,
             status: StatusMessage::None,
             keymap: Keymap::new(),
-            modes: BufferModes::vim(),
+            modes,
+            mode_runtime,
         }
     }
 
@@ -42,11 +46,11 @@ impl Buffer {
     }
 
     pub(crate) fn resolve_key(&self, key: KeyEvent) -> Option<Command> {
-        self.modes.resolve_key(key)
+        self.modes.resolve_key(&self.mode_runtime, key)
     }
 
     pub(crate) fn handle_mode_command(&mut self, mode: ModeId, action: ModeActionId) {
-        self.modes.handle_mode_command(mode, action);
+        self.modes.execute(&mut self.mode_runtime, mode, action);
     }
 
     pub fn load_from_file(&mut self, path: &str) -> io::Result<()> {
@@ -338,211 +342,6 @@ impl Default for Buffer {
     }
 }
 
-/// Buffer 模式 runtime：单 Base 层（默认 vim）。Box<dyn Mode> 非 Clone，
-/// 但 Buffer 不需要 Clone（全仓无 derive/impl Clone、无 .clone() 调用）。
-struct BufferModes {
-    base: Box<dyn Mode>,
-}
-
-impl BufferModes {
-    fn vim() -> Self {
-        Self {
-            base: Box::new(VimMode::new()),
-        }
-    }
-
-    #[cfg(test)]
-    fn plain_edit() -> Self {
-        Self {
-            base: Box::new(PlainEditMode::new()),
-        }
-    }
-
-    // 不变式：mode keymap 不得使用 prefix 绑定。dispatcher 的 prefix 状态机只看
-    // Content::keymap()（Buffer 保持空），看不到 mode runtime keymap；
-    // 此处若命中 Prefix 会落入 typing 兜底而非挂起等待，前缀将被静默丢弃。
-    fn resolve_key(&self, key: KeyEvent) -> Option<Command> {
-        match self.base.keymap().lookup(key) {
-            Some(crate::core::keymap::KeyBinding::Command(command)) => Some(command.clone()),
-            Some(crate::core::keymap::KeyBinding::Prefix(_)) | None => self.base.typing(key),
-        }
-    }
-
-    fn handle_mode_command(&mut self, mode: ModeId, action: ModeActionId) {
-        if self.base.id() == mode {
-            self.base.handle_mode_command(action);
-        }
-    }
-}
-
-#[cfg(test)]
-struct PlainEditMode {
-    keymap: Keymap,
-}
-
-#[cfg(test)]
-impl PlainEditMode {
-    fn new() -> Self {
-        Self {
-            keymap: plain_edit_keymap(),
-        }
-    }
-}
-
-#[cfg(test)]
-impl Mode for PlainEditMode {
-    fn id(&self) -> ModeId {
-        ModeId::new("plain-edit")
-    }
-
-    fn label(&self) -> &str {
-        "PLAIN"
-    }
-
-    fn keymap(&self) -> &Keymap {
-        &self.keymap
-    }
-
-    fn typing(&self, key: KeyEvent) -> Option<Command> {
-        key.is_plain_char()
-            .map(|ch| EditCommand::InsertText(ch.to_string()).into())
-    }
-
-    fn handle_mode_command(&mut self, _action: ModeActionId) {}
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum VimState {
-    Normal,
-    Insert,
-}
-
-struct VimMode {
-    state: VimState,
-    normal_keymap: Keymap,
-    insert_keymap: Keymap,
-}
-
-impl VimMode {
-    fn new() -> Self {
-        Self {
-            state: VimState::Normal,
-            normal_keymap: vim_normal_keymap(),
-            insert_keymap: vim_insert_keymap(),
-        }
-    }
-}
-
-impl Mode for VimMode {
-    fn id(&self) -> ModeId {
-        ModeId::new("vim")
-    }
-
-    fn label(&self) -> &str {
-        match self.state {
-            VimState::Normal => "NORMAL",
-            VimState::Insert => "INSERT",
-        }
-    }
-
-    fn keymap(&self) -> &Keymap {
-        match self.state {
-            VimState::Normal => &self.normal_keymap,
-            VimState::Insert => &self.insert_keymap,
-        }
-    }
-
-    fn typing(&self, key: KeyEvent) -> Option<Command> {
-        match self.state {
-            VimState::Normal => None,
-            VimState::Insert => key
-                .is_plain_char()
-                .map(|ch| EditCommand::InsertText(ch.to_string()).into()),
-        }
-    }
-
-    fn handle_mode_command(&mut self, action: ModeActionId) {
-        match action.as_str() {
-            "enter-insert" => self.state = VimState::Insert,
-            "enter-normal" => self.state = VimState::Normal,
-            _ => {}
-        }
-    }
-}
-
-#[cfg(test)]
-fn plain_edit_keymap() -> Keymap {
-    default_text_keymap(true)
-}
-
-fn vim_insert_keymap() -> Keymap {
-    default_text_keymap(false)
-}
-
-fn default_text_keymap(bind_escape_to_collapse: bool) -> Keymap {
-    let mut km = Keymap::new();
-    km.bind_edit(
-        KeyEvent::plain(KeyCode::Enter),
-        EditCommand::InsertText("\n".to_string()),
-    );
-    km.bind_edit(KeyEvent::plain(KeyCode::Backspace), EditCommand::Delete(-1));
-    km.bind_edit(KeyEvent::arrow(ArrowKey::Left), EditCommand::MoveLeftBy(1));
-    km.bind_edit(
-        KeyEvent::arrow(ArrowKey::Right),
-        EditCommand::MoveRightBy(1),
-    );
-    km.bind_edit(KeyEvent::arrow(ArrowKey::Up), EditCommand::MoveUpBy(1));
-    km.bind_edit(KeyEvent::arrow(ArrowKey::Down), EditCommand::MoveDownBy(1));
-    km.bind_edit(
-        KeyEvent::shift_arrow(ArrowKey::Left),
-        EditCommand::ExtendLeftBy(1),
-    );
-    km.bind_edit(
-        KeyEvent::shift_arrow(ArrowKey::Right),
-        EditCommand::ExtendRightBy(1),
-    );
-    km.bind_edit(
-        KeyEvent::shift_arrow(ArrowKey::Up),
-        EditCommand::ExtendUpBy(1),
-    );
-    km.bind_edit(
-        KeyEvent::shift_arrow(ArrowKey::Down),
-        EditCommand::ExtendDownBy(1),
-    );
-    if bind_escape_to_collapse {
-        km.bind_edit(
-            KeyEvent::plain(KeyCode::Escape),
-            EditCommand::CollapseSelections,
-        );
-    } else {
-        km.bind(
-            KeyEvent::plain(KeyCode::Escape),
-            Command::Content(ContentCommand::Mode {
-                mode: ModeId::new("vim"),
-                action: ModeActionId::new("enter-normal"),
-            }),
-        );
-    }
-    km
-}
-
-fn vim_normal_keymap() -> Keymap {
-    let mut km = Keymap::new();
-    km.bind_edit(KeyEvent::char('h'), EditCommand::MoveLeftBy(1));
-    km.bind_edit(KeyEvent::char('j'), EditCommand::MoveDownBy(1));
-    km.bind_edit(KeyEvent::char('k'), EditCommand::MoveUpBy(1));
-    km.bind_edit(KeyEvent::char('l'), EditCommand::MoveRightBy(1));
-    km.bind(
-        KeyEvent::char('i'),
-        Command::Content(ContentCommand::Mode {
-            mode: ModeId::new("vim"),
-            action: ModeActionId::new("enter-insert"),
-        }),
-    );
-    km.bind(KeyEvent::plain(KeyCode::Escape), Command::Noop);
-    km
-}
-
 fn line_content_len(rope: &Rope, row: usize) -> usize {
     let s = rope.line(row).to_string();
     match s.strip_suffix('\n') {
@@ -554,6 +353,8 @@ fn line_content_len(rope: &Rope, row: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::command::{ContentCommand, EditCommand};
+    use crate::protocol::key_event::{ArrowKey, KeyCode};
     use crate::protocol::selection::{Selection, Selections};
     use tempfile::tempdir;
 
@@ -681,9 +482,10 @@ mod tests {
     fn buffer_keymap_escape_binds_collapse_selections() {
         // PlainEditMode（非 vim）Escape → CollapseSelections。
         // vim 的 Escape 语义由 vim_*_escape_* 测试覆盖。
-        let modes = BufferModes::plain_edit();
+        let modes = ModeSet::plain_edit();
+        let runtime = modes.create_runtime();
         assert_eq!(
-            modes.resolve_key(KeyEvent::plain(KeyCode::Escape)),
+            modes.resolve_key(&runtime, KeyEvent::plain(KeyCode::Escape)),
             Some(Command::Content(ContentCommand::Edit(
                 EditCommand::CollapseSelections
             )))
