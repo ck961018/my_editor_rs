@@ -3,7 +3,7 @@
 use std::io;
 
 use crate::frontend::Frontend;
-use crate::protocol::content_query::ContentQuery;
+use crate::protocol::content_query::RenderQuery;
 use crate::protocol::frontend_event::FrontendEvent;
 use crate::protocol::ids::SpaceId;
 use crate::protocol::scene::Scene;
@@ -34,7 +34,7 @@ impl<W: io::Write> Frontend for TuiFrontend<W> {
     fn render(
         &mut self,
         scene: &Scene,
-        query: &dyn ContentQuery,
+        query: &dyn RenderQuery,
         focused: SpaceId,
     ) -> io::Result<()> {
         self.renderer

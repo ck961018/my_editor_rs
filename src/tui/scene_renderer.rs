@@ -4,7 +4,9 @@
 use std::collections::HashMap;
 use std::io;
 
-use crate::protocol::content_query::{ContentQuery, RowRange};
+use crate::protocol::content_query::{
+    ContentData, ContentQuery, RenderQuery, RowRange, StatusBarData,
+};
 use crate::protocol::ids::SpaceId;
 use crate::protocol::scene::Scene;
 use crate::protocol::status::StatusMessage;
@@ -29,7 +31,7 @@ impl SceneRenderer {
     pub fn render(
         &mut self,
         scene: &Scene,
-        query: &dyn ContentQuery,
+        query: &dyn RenderQuery,
         focused: SpaceId,
         canvas: &mut dyn Canvas,
     ) -> io::Result<()> {
@@ -73,7 +75,7 @@ impl Default for SceneRenderer {
 
 fn paint_item(
     item: &RenderItem,
-    query: &dyn ContentQuery,
+    query: &dyn RenderQuery,
     viewports: &HashMap<SpaceId, Viewport>,
     canvas: &mut dyn Canvas,
 ) -> io::Result<()> {
@@ -82,18 +84,26 @@ fn paint_item(
         .get(&sid)
         .copied()
         .unwrap_or_else(Viewport::origin);
-    let line_count = query.line_count(item.content_id);
+    let line_count = match query.content(item.content_id, ContentQuery::TextLineCount) {
+        ContentData::TextLineCount(line_count) => line_count,
+        ContentData::Unsupported => 0,
+        _ => 0,
+    };
     if line_count > 0 {
         // editor：拉可见行
         let height = item.rect.height as usize;
         let start = vp.top_row;
-        let lines = query.lines(
+        let lines = match query.content(
             item.content_id,
-            RowRange {
+            ContentQuery::TextRows(RowRange {
                 start,
                 end: start + height,
-            },
-        );
+            }),
+        ) {
+            ContentData::TextRows(lines) => lines,
+            ContentData::Unsupported => Vec::new(),
+            _ => Vec::new(),
+        };
         // 选区高亮：primary 非空时算 [start,end] 端点（按 char_index 排序）
         let sels = query.selections(sid);
         let prim = sels.primary();
@@ -136,7 +146,19 @@ fn paint_item(
         }
     } else {
         // status_bar
-        let data = query.status_bar(item.content_id);
+        let data = match query.content(item.content_id, ContentQuery::StatusBarData) {
+            ContentData::StatusBarData(data) => data,
+            ContentData::Unsupported => StatusBarData {
+                file_name: None,
+                modified: false,
+                message: StatusMessage::None,
+            },
+            _ => StatusBarData {
+                file_name: None,
+                modified: false,
+                message: StatusMessage::None,
+            },
+        };
         let screen_row = item.rect.y as usize;
         canvas.move_cursor(screen_row, item.rect.x as usize)?;
         canvas.clear_line()?;
@@ -218,7 +240,7 @@ fn status_line(file_name: Option<&str>, modified: bool, message: &StatusMessage)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::content_query::{ContentQuery, RowRange, StatusBarData};
+    use crate::protocol::content_query::{ContentData, ContentQuery, RenderQuery, StatusBarData};
     use crate::protocol::geometry::Size;
     use crate::protocol::ids::{ContentId, SpaceId};
     use crate::protocol::scene::{SceneBuilder, build_editor_scene};
@@ -233,32 +255,35 @@ mod tests {
         lines: Vec<String>,
         selections: Selections,
     }
-    impl ContentQuery for StubQuery {
-        fn lines(&self, cid: ContentId, range: RowRange) -> Vec<String> {
-            assert_eq!(cid, self.editor_cid, "only editor content has lines");
-            self.lines
-                .iter()
-                .skip(range.start)
-                .take(range.end.saturating_sub(range.start))
-                .cloned()
-                .collect()
-        }
-        fn status_bar(&self, _cid: ContentId) -> StatusBarData {
-            StatusBarData {
+    impl RenderQuery for StubQuery {
+        fn content(&self, cid: ContentId, query: ContentQuery) -> ContentData {
+            let status = StatusBarData {
                 file_name: Some("f.txt".to_string()),
                 modified: false,
                 message: StatusMessage::None,
+            };
+            match query {
+                ContentQuery::TextRows(range) => {
+                    assert_eq!(cid, self.editor_cid, "only editor content has lines");
+                    ContentData::TextRows(
+                        self.lines
+                            .iter()
+                            .skip(range.start)
+                            .take(range.end.saturating_sub(range.start))
+                            .cloned()
+                            .collect(),
+                    )
+                }
+                ContentQuery::TextLineCount if cid == self.editor_cid => {
+                    ContentData::TextLineCount(self.lines.len())
+                }
+                ContentQuery::DocumentStatus => ContentData::DocumentStatus(status),
+                ContentQuery::StatusBarData => ContentData::StatusBarData(status),
+                _ => ContentData::Unsupported,
             }
         }
         fn selections(&self, _sid: SpaceId) -> Selections {
             self.selections.clone()
-        }
-        fn line_count(&self, cid: ContentId) -> usize {
-            if cid == self.editor_cid {
-                self.lines.len()
-            } else {
-                0
-            }
         }
     }
 
@@ -267,35 +292,36 @@ mod tests {
         selections: HashMap<SpaceId, Selections>,
     }
 
-    impl ContentQuery for MultiSpaceQuery {
-        fn lines(&self, cid: ContentId, range: RowRange) -> Vec<String> {
-            assert_eq!(cid, ContentId(0));
-            self.lines
-                .iter()
-                .skip(range.start)
-                .take(range.end.saturating_sub(range.start))
-                .cloned()
-                .collect()
-        }
-
-        fn status_bar(&self, _cid: ContentId) -> StatusBarData {
-            StatusBarData {
+    impl RenderQuery for MultiSpaceQuery {
+        fn content(&self, cid: ContentId, query: ContentQuery) -> ContentData {
+            let status = StatusBarData {
                 file_name: None,
                 modified: false,
                 message: StatusMessage::None,
+            };
+            match query {
+                ContentQuery::TextRows(range) => {
+                    assert_eq!(cid, ContentId(0));
+                    ContentData::TextRows(
+                        self.lines
+                            .iter()
+                            .skip(range.start)
+                            .take(range.end.saturating_sub(range.start))
+                            .cloned()
+                            .collect(),
+                    )
+                }
+                ContentQuery::TextLineCount if cid == ContentId(0) => {
+                    ContentData::TextLineCount(self.lines.len())
+                }
+                ContentQuery::DocumentStatus => ContentData::DocumentStatus(status),
+                ContentQuery::StatusBarData => ContentData::StatusBarData(status),
+                _ => ContentData::Unsupported,
             }
         }
 
         fn selections(&self, sid: SpaceId) -> Selections {
             self.selections[&sid].clone()
-        }
-
-        fn line_count(&self, cid: ContentId) -> usize {
-            if cid == ContentId(0) {
-                self.lines.len()
-            } else {
-                0
-            }
         }
     }
 

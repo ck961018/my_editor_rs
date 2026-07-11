@@ -23,7 +23,9 @@ use crate::core::command::{AppCommand, ContentCommand};
 use crate::core::content::{ContentHandler, ContentLookup};
 use crate::core::status_bar::StatusBar;
 use crate::frontend::Frontend;
-use crate::protocol::content_query::{ContentQuery, RowRange, StatusBarData};
+use crate::protocol::content_query::{
+    ContentData, ContentQuery, RenderQuery, RowRange, StatusBarData,
+};
 use crate::protocol::frontend_event::FrontendEvent;
 use crate::protocol::ids::{ContentId, SpaceId};
 use crate::protocol::scene::{Scene, SceneBuilder, build_editor_scene};
@@ -241,7 +243,7 @@ impl<F: Frontend> App<F> {
             views: &self.views,
         };
         self.frontend
-            .render(&self.scene, &query as &dyn ContentQuery, self.focused)
+            .render(&self.scene, &query as &dyn RenderQuery, self.focused)
     }
 }
 
@@ -266,14 +268,14 @@ fn collect_content_spaces(scene: &Scene, sid: SpaceId, out: &mut HashMap<SpaceId
     }
 }
 
-/// 借 App 数据字段的查询适配器：render 时用它做 `&dyn ContentQuery`，
+/// 借 App 数据字段的查询适配器：render 时用它做 `&dyn RenderQuery`，
 /// 与 `&mut self.frontend` 不冲突（字段级 split borrow）。
 struct AppQuery<'a> {
     contents: &'a HashMap<ContentId, Box<dyn ContentHandler>>,
     views: &'a HashMap<SpaceId, View>,
 }
 
-impl<'a> ContentQuery for AppQuery<'a> {
+impl<'a> AppQuery<'a> {
     fn lines(&self, cid: ContentId, range: RowRange) -> Vec<String> {
         let Some(buf) = self.contents.get(&cid).and_then(|c| c.as_buffer()) else {
             return Vec::new();
@@ -302,12 +304,7 @@ impl<'a> ContentQuery for AppQuery<'a> {
             },
         }
     }
-    fn selections(&self, sid: SpaceId) -> Selections {
-        self.views
-            .get(&sid)
-            .map(|v| v.selections().clone())
-            .unwrap_or_else(|| Selections::single(Selection::collapsed(CursorPos::origin())))
-    }
+
     fn line_count(&self, cid: ContentId) -> usize {
         self.contents
             .get(&cid)
@@ -317,34 +314,21 @@ impl<'a> ContentQuery for AppQuery<'a> {
     }
 }
 
-impl<F: Frontend> ContentQuery for App<F> {
-    fn lines(&self, cid: ContentId, range: RowRange) -> Vec<String> {
-        AppQuery {
-            contents: &self.contents,
-            views: &self.views,
+impl RenderQuery for AppQuery<'_> {
+    fn content(&self, cid: ContentId, query: ContentQuery) -> ContentData {
+        match query {
+            ContentQuery::TextRows(range) => ContentData::TextRows(self.lines(cid, range)),
+            ContentQuery::TextLineCount => ContentData::TextLineCount(self.line_count(cid)),
+            ContentQuery::DocumentStatus => ContentData::DocumentStatus(self.status_bar(cid)),
+            ContentQuery::StatusBarData => ContentData::StatusBarData(self.status_bar(cid)),
         }
-        .lines(cid, range)
     }
-    fn status_bar(&self, cid: ContentId) -> StatusBarData {
-        AppQuery {
-            contents: &self.contents,
-            views: &self.views,
-        }
-        .status_bar(cid)
-    }
+
     fn selections(&self, sid: SpaceId) -> Selections {
-        AppQuery {
-            contents: &self.contents,
-            views: &self.views,
-        }
-        .selections(sid)
-    }
-    fn line_count(&self, cid: ContentId) -> usize {
-        AppQuery {
-            contents: &self.contents,
-            views: &self.views,
-        }
-        .line_count(cid)
+        self.views
+            .get(&sid)
+            .map(|v| v.selections().clone())
+            .unwrap_or_else(|| Selections::single(Selection::collapsed(CursorPos::origin())))
     }
 }
 
@@ -353,7 +337,7 @@ mod tests {
     use super::*;
     use crate::core::command::{Command, TextCommand};
     use crate::frontend::Frontend;
-    use crate::protocol::content_query::{ContentQuery, RowRange};
+    use crate::protocol::content_query::{ContentData, ContentQuery, RenderQuery, RowRange};
     use crate::protocol::frontend_event::ResizeEvent;
     use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
     use std::collections::VecDeque;
@@ -380,7 +364,7 @@ mod tests {
         fn render(
             &mut self,
             _scene: &Scene,
-            _query: &dyn ContentQuery,
+            _query: &dyn RenderQuery,
             _focused: SpaceId,
         ) -> io::Result<()> {
             self.renders += 1;
@@ -397,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn content_query_lines_and_selections() {
+    fn content_query_reads_buffer_and_view() {
         let mut app = make_app(vec![], None);
         let buf = app
             .contents
@@ -406,10 +390,22 @@ mod tests {
             .unwrap();
         buf.insert_char(0, 'h');
         buf.insert_char(1, 'i');
-        let lines = ContentQuery::lines(&app, editor_cid(), RowRange { start: 0, end: 5 });
-        assert_eq!(lines, vec!["hi".to_string()]);
-        assert_eq!(ContentQuery::line_count(&app, editor_cid()), 1);
-        let sels = ContentQuery::selections(&app, app.focused);
+        let query = AppQuery {
+            contents: &app.contents,
+            views: &app.views,
+        };
+        assert_eq!(
+            query.content(
+                editor_cid(),
+                ContentQuery::TextRows(RowRange { start: 0, end: 5 })
+            ),
+            ContentData::TextRows(vec!["hi".to_string()])
+        );
+        assert_eq!(
+            query.content(editor_cid(), ContentQuery::TextLineCount),
+            ContentData::TextLineCount(1)
+        );
+        let sels = query.selections(app.focused);
         assert_eq!(sels.primary().head(), CursorPos::origin());
     }
 

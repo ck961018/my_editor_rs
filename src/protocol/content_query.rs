@@ -11,21 +11,39 @@ pub struct RowRange {
     pub end: usize,
 }
 
-/// 状态栏显示数据（owned）。
+/// 文档状态显示数据（owned）。
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StatusBarData {
+pub struct DocumentStatus {
     pub file_name: Option<String>,
     pub modified: bool,
     pub message: StatusMessage,
 }
 
-/// 前端查询后端内容的契约。同进程同步调用。
-/// 返回 Vec 长度 = min(range.len(), line_count - start)；超出末尾的行不返回。
-pub trait ContentQuery {
-    fn lines(&self, cid: ContentId, range: RowRange) -> Vec<String>;
-    fn status_bar(&self, cid: ContentId) -> StatusBarData;
+pub type StatusBarData = DocumentStatus;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContentQuery {
+    TextRows(RowRange),
+    TextLineCount,
+    #[allow(dead_code)]
+    DocumentStatus,
+    StatusBarData,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContentData {
+    TextRows(Vec<String>),
+    TextLineCount(usize),
+    DocumentStatus(DocumentStatus),
+    StatusBarData(StatusBarData),
+    #[allow(dead_code)]
+    Unsupported,
+}
+
+/// 前端通过消息拉取后端内容的只读契约。
+pub trait RenderQuery {
+    fn content(&self, id: ContentId, query: ContentQuery) -> ContentData;
     fn selections(&self, sid: SpaceId) -> Selections;
-    fn line_count(&self, cid: ContentId) -> usize;
 }
 
 #[cfg(test)]
@@ -39,11 +57,24 @@ mod tests {
     }
     #[test]
     fn status_bar_data_eq() {
-        let a = StatusBarData {
+        let a = DocumentStatus {
             file_name: None,
             modified: false,
             message: StatusMessage::None,
         };
         assert_eq!(a, a.clone());
+    }
+
+    #[test]
+    fn content_query_and_data_preserve_owned_status() {
+        let status = DocumentStatus {
+            file_name: Some("note.txt".to_string()),
+            modified: true,
+            message: StatusMessage::Saved,
+        };
+        let data = ContentData::DocumentStatus(status.clone());
+
+        assert_eq!(data, ContentData::DocumentStatus(status));
+        assert_eq!(ContentData::Unsupported, ContentData::Unsupported);
     }
 }
