@@ -57,6 +57,9 @@ impl Scene {
             };
             match &node.space.kind {
                 SpaceKind::Container { .. } => {
+                    if node.children.is_empty() {
+                        return false;
+                    }
                     for child in &node.children {
                         let Some(child_node) = self.nodes.get(child) else {
                             return false;
@@ -79,6 +82,7 @@ impl Scene {
 pub enum SceneError {
     UnknownSpace(SpaceId),
     ExpectedContentLeaf(SpaceId),
+    CannotCloseRoot(SpaceId),
     InvalidTree,
 }
 
@@ -86,8 +90,15 @@ pub struct SceneBuilder {
     next_space_id: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SplitResult {
     pub new_space: SpaceId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CloseResult {
+    pub removed_space: SpaceId,
+    pub surviving_neighbor: Option<SpaceId>,
 }
 
 impl SceneBuilder {
@@ -177,6 +188,9 @@ impl SceneBuilder {
         focusable: bool,
         direction: SplitDirection,
     ) -> Result<SplitResult, SceneError> {
+        if !scene.is_tree_valid() {
+            return Err(SceneError::InvalidTree);
+        }
         let target_node = scene
             .nodes
             .get(&target)
@@ -247,6 +261,149 @@ impl SceneBuilder {
 
         debug_assert!(scene.is_tree_valid());
         Ok(SplitResult { new_space })
+    }
+
+    pub fn close(&mut self, scene: &mut Scene, target: SpaceId) -> Result<CloseResult, SceneError> {
+        if !scene.is_tree_valid() {
+            return Err(SceneError::InvalidTree);
+        }
+
+        let target_node = scene
+            .nodes
+            .get(&target)
+            .ok_or(SceneError::UnknownSpace(target))?;
+        if !matches!(&target_node.space.kind, SpaceKind::Content { .. })
+            || !target_node.children.is_empty()
+        {
+            return Err(SceneError::ExpectedContentLeaf(target));
+        }
+
+        let parent = target_node
+            .parent
+            .ok_or(SceneError::CannotCloseRoot(target))?;
+        let (target_index, surviving_neighbor) = {
+            let parent_node = scene.nodes.get(&parent).ok_or(SceneError::InvalidTree)?;
+            if !matches!(&parent_node.space.kind, SpaceKind::Container { .. }) {
+                return Err(SceneError::InvalidTree);
+            }
+            let index = parent_node
+                .children
+                .iter()
+                .position(|child| *child == target)
+                .ok_or(SceneError::InvalidTree)?;
+            let neighbor = parent_node
+                .children
+                .get(index + 1)
+                .copied()
+                .or_else(|| {
+                    index
+                        .checked_sub(1)
+                        .and_then(|previous| parent_node.children.get(previous).copied())
+                })
+                .ok_or(SceneError::InvalidTree)?;
+            (index, neighbor)
+        };
+
+        scene
+            .nodes
+            .get_mut(&parent)
+            .expect("validated parent exists")
+            .children
+            .remove(target_index);
+        scene.nodes.remove(&target);
+
+        let mut container = parent;
+        loop {
+            let (remaining, grandparent) = {
+                let node = scene
+                    .nodes
+                    .get(&container)
+                    .expect("validated container exists");
+                if node.children.len() != 1 {
+                    break;
+                }
+                (node.children[0], node.parent)
+            };
+
+            if let Some(grandparent) = grandparent {
+                let parent_index = scene
+                    .nodes
+                    .get(&grandparent)
+                    .expect("validated grandparent exists")
+                    .children
+                    .iter()
+                    .position(|child| *child == container)
+                    .expect("validated container is linked to grandparent");
+                self.replace_child(scene, grandparent, parent_index, remaining);
+                scene.nodes.remove(&container);
+                container = grandparent;
+            } else {
+                scene.root = remaining;
+                scene
+                    .nodes
+                    .get_mut(&remaining)
+                    .expect("validated remaining child exists")
+                    .parent = None;
+                scene.nodes.remove(&container);
+                break;
+            }
+        }
+
+        debug_assert!(scene.is_tree_valid());
+        Ok(CloseResult {
+            removed_space: target,
+            surviving_neighbor: Some(surviving_neighbor),
+        })
+    }
+
+    pub fn replace_content(
+        &mut self,
+        scene: &mut Scene,
+        target: SpaceId,
+        content: ContentId,
+        focusable: bool,
+    ) -> Result<(), SceneError> {
+        if !scene.is_tree_valid() {
+            return Err(SceneError::InvalidTree);
+        }
+
+        let node = scene
+            .nodes
+            .get_mut(&target)
+            .ok_or(SceneError::UnknownSpace(target))?;
+        if node.children.is_empty() {
+            if let SpaceKind::Content {
+                content: current_content,
+                focusable: current_focusable,
+            } = &mut node.space.kind
+            {
+                *current_content = content;
+                *current_focusable = focusable;
+                debug_assert!(scene.is_tree_valid());
+                return Ok(());
+            }
+        }
+        Err(SceneError::ExpectedContentLeaf(target))
+    }
+
+    pub fn set_sizing(
+        &mut self,
+        scene: &mut Scene,
+        target: SpaceId,
+        sizing: Sizing,
+    ) -> Result<(), SceneError> {
+        if !scene.is_tree_valid() {
+            return Err(SceneError::InvalidTree);
+        }
+
+        let node = scene
+            .nodes
+            .get_mut(&target)
+            .ok_or(SceneError::UnknownSpace(target))?;
+        node.space.sizing = sizing;
+
+        debug_assert!(scene.is_tree_valid());
+        Ok(())
     }
 }
 
@@ -353,6 +510,112 @@ mod tests {
             }
         ));
         assert_tree_valid(&scene);
+    }
+
+    #[test]
+    fn close_collapses_single_child_container_and_updates_root() {
+        let mut builder = SceneBuilder::new();
+        let (mut scene, editor) =
+            build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
+        let status = scene.node(scene.root()).children[1];
+
+        let closed = builder.close(&mut scene, status).unwrap();
+
+        assert_eq!(closed.removed_space, status);
+        assert_eq!(closed.surviving_neighbor, Some(editor));
+        assert_eq!(scene.root(), editor);
+        assert_tree_valid(&scene);
+    }
+
+    #[test]
+    fn replace_content_keeps_space_id_and_changes_focusability() {
+        let mut builder = SceneBuilder::new();
+        let (mut scene, editor) =
+            build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
+
+        builder
+            .replace_content(&mut scene, editor, ContentId(9), false)
+            .unwrap();
+
+        assert!(matches!(
+            &scene.node(editor).space.kind,
+            SpaceKind::Content {
+                content: ContentId(9),
+                focusable: false,
+            }
+        ));
+    }
+
+    #[test]
+    fn set_sizing_changes_only_the_requested_space() {
+        let mut builder = SceneBuilder::new();
+        let (mut scene, editor) =
+            build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
+        let status = scene.node(scene.root()).children[1];
+
+        builder
+            .set_sizing(&mut scene, editor, Sizing::Fixed(12))
+            .unwrap();
+
+        assert!(matches!(scene.node(editor).space.sizing, Sizing::Fixed(12)));
+        assert!(matches!(scene.node(status).space.sizing, Sizing::Fixed(1)));
+    }
+
+    #[test]
+    fn failed_split_leaves_tree_and_next_id_unchanged() {
+        let mut builder = SceneBuilder::new();
+        let (mut scene, editor) =
+            build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
+
+        assert_eq!(
+            builder.split(
+                &mut scene,
+                SpaceId(999),
+                ContentId(0),
+                true,
+                SplitDirection::Right,
+            ),
+            Err(SceneError::UnknownSpace(SpaceId(999)))
+        );
+
+        let split = builder
+            .split(
+                &mut scene,
+                editor,
+                ContentId(0),
+                true,
+                SplitDirection::Right,
+            )
+            .unwrap();
+        assert_eq!(split.new_space, SpaceId(3));
+    }
+
+    #[test]
+    fn deleted_space_ids_are_not_reused() {
+        let mut builder = SceneBuilder::new();
+        let (mut scene, editor) =
+            build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
+        let first = builder
+            .split(
+                &mut scene,
+                editor,
+                ContentId(0),
+                true,
+                SplitDirection::Right,
+            )
+            .unwrap();
+        builder.close(&mut scene, first.new_space).unwrap();
+
+        let second = builder
+            .split(
+                &mut scene,
+                editor,
+                ContentId(0),
+                true,
+                SplitDirection::Right,
+            )
+            .unwrap();
+        assert_eq!(second.new_space, SpaceId(5));
     }
 
     fn content_focusable(scene: &Scene, space: SpaceId) -> bool {
