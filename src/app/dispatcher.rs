@@ -1,5 +1,5 @@
 use crate::core::command::{AppCommand, Command, ContentCommand};
-use crate::core::content::ContentLookup;
+use crate::core::content_store::ContentStore;
 use crate::core::keymap::{KeyBinding, Keymap};
 use crate::protocol::ids::{ContentId, SpaceId};
 use crate::protocol::key_event::KeyEvent;
@@ -66,7 +66,7 @@ impl Dispatcher {
         key: KeyEvent,
         focused: SpaceId,
         scene: &Scene,
-        contents: &dyn ContentLookup,
+        contents: &ContentStore,
     ) -> Option<DispatchCommand> {
         if let Some(pending) = self.pending.take() {
             return match lookup_in(&pending.keymap, &key) {
@@ -103,7 +103,7 @@ impl Dispatcher {
         // 兜底：focused content 自治解析（Buffer 走 mode runtime keymap + typing）。
         // resolve_key 默认查 content keymap；Buffer 覆写为走 mode runtime keymap + typing。
         let cid = focused_content_id(scene, focused)?;
-        let command = contents.get(cid)?.resolve_key(key)?;
+        let command = contents.resolve_key(cid, key)?;
         resolve_command(
             command,
             CommandSource {
@@ -120,16 +120,16 @@ impl Dispatcher {
         &'a self,
         focused: SpaceId,
         scene: &'a Scene,
-        contents: &'a dyn ContentLookup,
+        contents: &'a ContentStore,
     ) -> Vec<CaptureEntry<'a>> {
         let mut chain = Vec::new();
         let mut cur = Some(focused);
         while let Some(sid) = cur {
             let node = scene.node(sid);
             if let SpaceKind::Content { content } = &node.space.kind {
-                if let Some(c) = contents.get(*content) {
+                if let Some(keymap) = contents.keymap(*content) {
                     chain.push(CaptureEntry {
-                        keymap: c.keymap(),
+                        keymap,
                         source: CommandSource {
                             sid: Some(sid),
                             cid: Some(*content),
@@ -173,7 +173,7 @@ fn resolve_command(
     source: CommandSource,
     focused: SpaceId,
     scene: &Scene,
-    contents: &dyn ContentLookup,
+    contents: &ContentStore,
 ) -> Option<DispatchCommand> {
     match command {
         Command::App(command) => Some(DispatchCommand::App(command)),
@@ -188,10 +188,8 @@ fn resolve_command(
         }
         Command::Content(command @ ContentCommand::Save)
         | Command::Content(command @ ContentCommand::Mode { .. }) => {
-            let content = source
-                .cid
-                .or_else(|| focused_content_id(scene, focused))?;
-            contents.get(content)?;
+            let content = source.cid.or_else(|| focused_content_id(scene, focused))?;
+            contents.keymap(content)?;
             Some(DispatchCommand::Content { command, content })
         }
     }
@@ -202,7 +200,7 @@ fn view_content_target(
     source: CommandSource,
     focused: SpaceId,
     scene: &Scene,
-    contents: &dyn ContentLookup,
+    contents: &ContentStore,
 ) -> Option<(SpaceId, ContentId)> {
     let (space, content) = match (source.sid, source.cid) {
         (Some(space), Some(content)) => (space, content),
@@ -211,7 +209,7 @@ fn view_content_target(
             (focused, content)
         }
     };
-    contents.get(content)?;
+    contents.keymap(content)?;
     Some((space, content))
 }
 
@@ -235,27 +233,37 @@ mod tests {
     use super::*;
     use crate::core::buffer::Buffer;
     use crate::core::command::{AppCommand, ContentCommand, EditCommand};
-    use crate::core::content::ContentHandler;
+    use crate::core::content::{Content, ContentInput};
+    use crate::core::content_store::ContentStore;
     use crate::core::mode::{ModeActionId, ModeId};
     use crate::core::status_bar::StatusBar;
     use crate::protocol::ids::ContentId;
     use crate::protocol::key_event::{ArrowKey, KeyCode};
     use crate::protocol::scene::{SceneBuilder, build_editor_scene};
-    use std::collections::HashMap;
-
     fn fixture() -> (
         Dispatcher,
         crate::protocol::scene::Scene,
         SpaceId,
-        HashMap<ContentId, Box<dyn ContentHandler>>,
+        ContentStore,
+    ) {
+        fixture_with_buffer(Buffer::new())
+    }
+
+    fn fixture_with_buffer(
+        buffer: Buffer,
+    ) -> (
+        Dispatcher,
+        crate::protocol::scene::Scene,
+        SpaceId,
+        ContentStore,
     ) {
         let editor = ContentId(0);
         let status = ContentId(1);
         let mut builder = SceneBuilder::new();
         let (scene, ed_space) = build_editor_scene(&mut builder, 40, 5, editor, status).unwrap();
-        let mut contents: HashMap<ContentId, Box<dyn ContentHandler>> = HashMap::new();
-        contents.insert(editor, Box::new(Buffer::new()));
-        contents.insert(status, Box::new(StatusBar::new(editor)));
+        let mut contents = ContentStore::default();
+        contents.insert(editor, Content::Buffer(buffer));
+        contents.insert(status, Content::StatusBar(StatusBar::new(editor)));
         let d = Dispatcher::new(default_global_keymap());
         (d, scene, ed_space, contents)
     }
@@ -421,10 +429,13 @@ mod tests {
     fn vim_insert_char_after_enter_insert_resolves_to_view_content() {
         let (mut dispatcher, scene, focused, mut contents) = fixture();
         // 进入 Insert：通过 handle_mode_command 改 Buffer 状态（模拟 dispatcher 先发出 Mode 命令后由 App 执行）。
-        contents
-            .get_mut(&ContentId(0))
-            .unwrap()
-            .handle_mode_command(ModeId::new("vim"), ModeActionId::new("enter-insert"));
+        contents.execute(
+            ContentId(0),
+            ContentInput::Command(ContentCommand::Mode {
+                mode: ModeId::new("vim"),
+                action: ModeActionId::new("enter-insert"),
+            }),
+        );
 
         let command = dispatcher
             .dispatch(KeyEvent::char('a'), focused, &scene, &contents)
@@ -443,10 +454,13 @@ mod tests {
     #[test]
     fn buffer_keymap_enter_inserts_newline_when_insert_mode() {
         let (mut dispatcher, scene, focused, mut contents) = fixture();
-        contents
-            .get_mut(&ContentId(0))
-            .unwrap()
-            .handle_mode_command(ModeId::new("vim"), ModeActionId::new("enter-insert"));
+        contents.execute(
+            ContentId(0),
+            ContentInput::Command(ContentCommand::Mode {
+                mode: ModeId::new("vim"),
+                action: ModeActionId::new("enter-insert"),
+            }),
+        );
 
         let command = dispatcher
             .dispatch(KeyEvent::plain(KeyCode::Enter), focused, &scene, &contents)
@@ -465,18 +479,16 @@ mod tests {
     #[test]
     fn buffer_keymap_arrow_left_when_insert_mode() {
         let (mut dispatcher, scene, focused, mut contents) = fixture();
-        contents
-            .get_mut(&ContentId(0))
-            .unwrap()
-            .handle_mode_command(ModeId::new("vim"), ModeActionId::new("enter-insert"));
+        contents.execute(
+            ContentId(0),
+            ContentInput::Command(ContentCommand::Mode {
+                mode: ModeId::new("vim"),
+                action: ModeActionId::new("enter-insert"),
+            }),
+        );
 
         let command = dispatcher
-            .dispatch(
-                KeyEvent::arrow(ArrowKey::Left),
-                focused,
-                &scene,
-                &contents,
-            )
+            .dispatch(KeyEvent::arrow(ArrowKey::Left), focused, &scene, &contents)
             .unwrap();
 
         assert_eq!(
@@ -496,14 +508,16 @@ mod tests {
         let status = ContentId(1);
         let mut builder = SceneBuilder::new();
         let (scene, focused) = build_editor_scene(&mut builder, 40, 5, editor, status).unwrap();
-        let mut contents: HashMap<ContentId, Box<dyn ContentHandler>> = HashMap::new();
-        contents.insert(editor, Box::new(Buffer::new()));
-        contents.insert(status, Box::new(StatusBar::new(editor)));
+        let mut contents = ContentStore::default();
+        contents.insert(editor, Content::Buffer(Buffer::new()));
+        contents.insert(status, Content::StatusBar(StatusBar::new(editor)));
 
         let mut global = Keymap::new();
         global.bind(
             KeyEvent::char('g'),
-            Command::Content(ContentCommand::Edit(EditCommand::InsertText("g".to_string()))),
+            Command::Content(ContentCommand::Edit(EditCommand::InsertText(
+                "g".to_string(),
+            ))),
         );
         let mut dispatcher = Dispatcher::new(global);
 
@@ -537,14 +551,17 @@ mod tests {
 
     #[test]
     fn content_overrides_global_and_resolves_to_content_source() {
-        let (mut dispatcher, scene, focused, mut contents) = fixture();
+        let mut buffer = Buffer::new();
         // Buffer 默认 vim Normal 无 Ctrl+Q；这里改 content 自持 keymap 绑 Ctrl+Q → InsertText。
         // 注意：Buffer::keymap() 返回空 keymap，绑到它不会影响 mode runtime（resolve_key 走 modes），
-        // 但 capture_chain 用 c.keymap()（空 keymap 的 ContentHandler 实现）——绑 Ctrl+Q 到它即可命中。
-        contents.get_mut(&ContentId(0)).unwrap().keymap_mut().bind(
+        // capture_chain reads the static Content keymap, so this binding wins over the global map.
+        buffer.keymap_mut().bind(
             KeyEvent::ctrl('q'),
-            Command::Content(ContentCommand::Edit(EditCommand::InsertText("q".to_string()))),
+            Command::Content(ContentCommand::Edit(EditCommand::InsertText(
+                "q".to_string(),
+            ))),
         );
+        let (mut dispatcher, scene, focused, contents) = fixture_with_buffer(buffer);
 
         let command = dispatcher
             .dispatch(KeyEvent::ctrl('q'), focused, &scene, &contents)
@@ -573,17 +590,11 @@ mod tests {
 
     #[test]
     fn prefix_key_waits_then_completes() {
-        let (mut dispatcher, scene, focused, mut contents) = fixture();
+        let mut buffer = Buffer::new();
         let mut sub = Keymap::new();
-        sub.bind(
-            KeyEvent::char('s'),
-            Command::Content(ContentCommand::Save),
-        );
-        contents
-            .get_mut(&ContentId(0))
-            .unwrap()
-            .keymap_mut()
-            .bind_prefix(KeyEvent::char('x'), sub);
+        sub.bind(KeyEvent::char('s'), Command::Content(ContentCommand::Save));
+        buffer.keymap_mut().bind_prefix(KeyEvent::char('x'), sub);
+        let (mut dispatcher, scene, focused, contents) = fixture_with_buffer(buffer);
 
         assert!(
             dispatcher
@@ -608,17 +619,11 @@ mod tests {
 
     #[test]
     fn prefix_completion_keeps_original_content_source() {
-        let (mut dispatcher, scene, focused, mut contents) = fixture();
+        let mut buffer = Buffer::new();
         let mut sub = Keymap::new();
-        sub.bind(
-            KeyEvent::char('s'),
-            Command::Content(ContentCommand::Save),
-        );
-        contents
-            .get_mut(&ContentId(0))
-            .unwrap()
-            .keymap_mut()
-            .bind_prefix(KeyEvent::char('x'), sub);
+        sub.bind(KeyEvent::char('s'), Command::Content(ContentCommand::Save));
+        buffer.keymap_mut().bind_prefix(KeyEvent::char('x'), sub);
+        let (mut dispatcher, scene, focused, contents) = fixture_with_buffer(buffer);
 
         assert!(
             dispatcher
@@ -642,17 +647,11 @@ mod tests {
 
     #[test]
     fn prefix_interrupt_resets() {
-        let (mut dispatcher, scene, focused, mut contents) = fixture();
+        let mut buffer = Buffer::new();
         let mut sub = Keymap::new();
-        sub.bind(
-            KeyEvent::char('s'),
-            Command::Content(ContentCommand::Save),
-        );
-        contents
-            .get_mut(&ContentId(0))
-            .unwrap()
-            .keymap_mut()
-            .bind_prefix(KeyEvent::char('x'), sub);
+        sub.bind(KeyEvent::char('s'), Command::Content(ContentCommand::Save));
+        buffer.keymap_mut().bind_prefix(KeyEvent::char('x'), sub);
+        let (mut dispatcher, scene, focused, contents) = fixture_with_buffer(buffer);
         dispatcher.dispatch(KeyEvent::char('x'), focused, &scene, &contents);
         assert!(dispatcher.is_pending());
         // 'z' 不在 sub 表：Miss，重置 Idle。但 'z' 会落入 capture_chain + typing 兜底——
@@ -667,19 +666,13 @@ mod tests {
 
     #[test]
     fn nested_prefix() {
-        let (mut dispatcher, scene, focused, mut contents) = fixture();
+        let mut buffer = Buffer::new();
         let mut inner = Keymap::new();
-        inner.bind(
-            KeyEvent::char('s'),
-            Command::Content(ContentCommand::Save),
-        );
+        inner.bind(KeyEvent::char('s'), Command::Content(ContentCommand::Save));
         let mut outer = Keymap::new();
         outer.bind_prefix(KeyEvent::char('c'), inner);
-        contents
-            .get_mut(&ContentId(0))
-            .unwrap()
-            .keymap_mut()
-            .bind_prefix(KeyEvent::char('x'), outer);
+        buffer.keymap_mut().bind_prefix(KeyEvent::char('x'), outer);
+        let (mut dispatcher, scene, focused, contents) = fixture_with_buffer(buffer);
 
         assert!(
             dispatcher

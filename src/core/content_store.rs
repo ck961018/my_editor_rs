@@ -14,7 +14,6 @@ pub struct ContentStore {
     contents: HashMap<ContentId, Content>,
 }
 
-#[allow(dead_code)] // The app-layer migration constructs and owns this store in Task 3.
 impl ContentStore {
     pub fn insert(&mut self, id: ContentId, content: Content) {
         self.contents.insert(id, content);

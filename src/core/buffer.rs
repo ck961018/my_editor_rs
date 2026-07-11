@@ -4,7 +4,6 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::core::command::{Command, ContentCommand, EditCommand};
-use crate::core::content::ContentHandler;
 use crate::core::keymap::Keymap;
 use crate::core::mode::{Mode, ModeActionId, ModeId};
 use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
@@ -16,7 +15,7 @@ pub struct Buffer {
     path: Option<PathBuf>,
     modified: bool,
     status: StatusMessage,
-    /// 兼容 `ContentHandler::keymap`：保持空，模式化按键走 `modes`。
+    /// 静态 Content 分发使用的普通 keymap；模式化按键走 `modes`。
     keymap: Keymap,
     modes: BufferModes,
 }
@@ -37,6 +36,7 @@ impl Buffer {
         &self.keymap
     }
 
+    #[cfg(test)]
     pub(crate) fn keymap_mut(&mut self) -> &mut Keymap {
         &mut self.keymap
     }
@@ -96,7 +96,6 @@ impl Buffer {
         self.status = msg;
     }
 
-    #[allow(dead_code)] // 测试用：生产路径走 AppQuery::status_bar → as_buffer().status()
     pub fn status(&self) -> StatusMessage {
         self.status.clone()
     }
@@ -141,7 +140,6 @@ impl Buffer {
             .and_then(|n| n.to_str())
     }
 
-    #[allow(dead_code)] // 测试用：生产路径走 AppQuery::status_bar → as_buffer().modified()
     pub fn modified(&self) -> bool {
         self.modified
     }
@@ -340,27 +338,6 @@ impl Default for Buffer {
     }
 }
 
-impl ContentHandler for Buffer {
-    fn keymap(&self) -> &Keymap {
-        Buffer::keymap(self)
-    }
-    fn keymap_mut(&mut self) -> &mut Keymap {
-        Buffer::keymap_mut(self)
-    }
-    fn resolve_key(&self, key: KeyEvent) -> Option<Command> {
-        Buffer::resolve_key(self, key)
-    }
-    fn handle_mode_command(&mut self, mode: ModeId, action: ModeActionId) {
-        Buffer::handle_mode_command(self, mode, action);
-    }
-    fn buffer_mut(&mut self) -> Option<&mut Buffer> {
-        Some(self)
-    }
-    fn as_buffer(&self) -> Option<&Buffer> {
-        Some(self)
-    }
-}
-
 /// Buffer 模式 runtime：单 Base 层（默认 vim）。Box<dyn Mode> 非 Clone，
 /// 但 Buffer 不需要 Clone（全仓无 derive/impl Clone、无 .clone() 调用）。
 struct BufferModes {
@@ -382,7 +359,7 @@ impl BufferModes {
     }
 
     // 不变式：mode keymap 不得使用 prefix 绑定。dispatcher 的 prefix 状态机只看
-    // ContentHandler::keymap()（Buffer 保持空），看不到 mode runtime keymap；
+    // Content::keymap()（Buffer 保持空），看不到 mode runtime keymap；
     // 此处若命中 Prefix 会落入 typing 兜底而非挂起等待，前缀将被静默丢弃。
     fn resolve_key(&self, key: KeyEvent) -> Option<Command> {
         match self.base.keymap().lookup(key) {
@@ -711,12 +688,6 @@ mod tests {
                 EditCommand::CollapseSelections
             )))
         );
-    }
-
-    #[test]
-    fn buffer_mut_returns_self() {
-        let mut b = Buffer::new();
-        assert!(b.buffer_mut().is_some());
     }
 
     #[test]

@@ -1,10 +1,8 @@
 //! App：tokio::select! 多路复用 evloop。不感知 tui/gui（只依赖 Frontend trait + Scene）。
-//! 事件分发委托 Dispatcher（捕获链 + 前缀状态机），Command 执行委托 executor。
+//! 事件分发委托 Dispatcher（捕获链 + 前缀状态机），Command 执行通过 ContentStore。
 //! 不持 editor_content/status_content 角色 ID——从 scene/focused 推导。
 
-mod content;
 mod dispatcher;
-mod executor;
 mod message;
 mod tasks;
 mod view;
@@ -19,22 +17,20 @@ use crate::app::message::AppMessage;
 use crate::app::tasks::AppTasks;
 use crate::app::view::View;
 use crate::core::buffer::Buffer;
-use crate::core::command::{AppCommand, ContentCommand};
-use crate::core::content::{ContentHandler, ContentLookup};
+use crate::core::command::AppCommand;
+use crate::core::content::{Content, ContentEffect, ContentEvent, ContentInput};
+use crate::core::content_store::ContentStore;
 use crate::core::status_bar::StatusBar;
 use crate::frontend::Frontend;
-use crate::protocol::content_query::{
-    ContentData, ContentQuery, RenderQuery, RowRange, StatusBarData,
-};
+use crate::protocol::content_query::{ContentData, ContentQuery, RenderQuery};
 use crate::protocol::frontend_event::FrontendEvent;
 use crate::protocol::ids::{ContentId, SpaceId};
 use crate::protocol::scene::{Scene, SceneBuilder, build_editor_scene};
 use crate::protocol::selection::{CursorPos, Selection, Selections};
 use crate::protocol::space::SpaceKind;
-use crate::protocol::status::StatusMessage;
 
 pub struct App<F: Frontend> {
-    contents: HashMap<ContentId, Box<dyn ContentHandler>>,
+    contents: ContentStore,
     scene: Scene,
     // 预留：动态 space 分配（split/panel/overlay/minibuffer）经此 builder，避免重置 SpaceId。
     #[allow(dead_code)]
@@ -58,9 +54,9 @@ impl<F: Frontend> App<F> {
             buffer.open_path(p)?;
         }
         let status_bar = StatusBar::new(editor_content);
-        let mut contents: HashMap<ContentId, Box<dyn ContentHandler>> = HashMap::new();
-        contents.insert(editor_content, Box::new(buffer));
-        contents.insert(status_content, Box::new(status_bar));
+        let mut contents = ContentStore::default();
+        contents.insert(editor_content, Content::Buffer(buffer));
+        contents.insert(status_content, Content::StatusBar(status_bar));
         let mut scene_builder = SceneBuilder::new();
         let (scene, editor_space) = build_editor_scene(
             &mut scene_builder,
@@ -136,9 +132,9 @@ impl<F: Frontend> App<F> {
                 self.scene.resize(r.width as i32, r.height as i32);
             }
             FrontendEvent::Key(k) => {
-                if let Some(command) = self
-                    .dispatcher
-                    .dispatch(k, self.focused, &self.scene, &self.contents)
+                if let Some(command) =
+                    self.dispatcher
+                        .dispatch(k, self.focused, &self.scene, &self.contents)
                 {
                     self.execute_command(command)?;
                 }
@@ -154,31 +150,29 @@ impl<F: Frontend> App<F> {
                 AppCommand::Quit => self.tasks.cancel(),
                 AppCommand::FocusNext | AppCommand::FocusPrev => {}
             },
-            DispatchCommand::Content { command, content } => match command {
-                ContentCommand::Save => {
-                    self.spawn_save(content);
-                }
-                ContentCommand::Mode { mode, action } => {
-                    if let Some(content) = self.contents.get_mut(&content) {
-                        content.handle_mode_command(mode, action);
-                    }
-                }
-                ContentCommand::Edit(_) => {}
-            },
+            DispatchCommand::Content { command, content } => {
+                let effect = self
+                    .contents
+                    .execute(content, ContentInput::Command(command));
+                self.handle_content_effect(content, effect);
+            }
             DispatchCommand::ViewContent {
                 command,
                 space,
                 content,
             } => {
-                if let ContentCommand::Edit(command) = command {
-                    let content = self
-                        .contents
-                        .get_mut(&content)
-                        .and_then(|c| c.buffer_mut())
-                        .expect("text command target is a buffer");
-                    let view = self.views.get_mut(&space).expect("target view exists");
-                    executor::execute_edit_command(command, content, view.selections_mut());
-                }
+                let effect = self.contents.execute(
+                    content,
+                    ContentInput::WithSelections {
+                        command,
+                        selections: self
+                            .views
+                            .get_mut(&space)
+                            .expect("target view exists")
+                            .selections_mut(),
+                    },
+                );
+                self.handle_content_effect(content, effect);
             }
             DispatchCommand::Noop => {}
         }
@@ -189,46 +183,31 @@ impl<F: Frontend> App<F> {
         match message {
             AppMessage::SaveCompleted { content, result } => {
                 self.pending_saves.remove(&content);
-                let buf = self
-                    .contents
-                    .get_mut(&content)
-                    .and_then(|c| c.buffer_mut())
-                    .expect("saved buffer exists");
-                match result {
-                    Ok(()) => {
-                        buf.mark_saved();
-                        buf.set_status(StatusMessage::Saved);
-                    }
-                    Err(_) => buf.set_status(StatusMessage::SaveFailed),
-                }
+                let effect = self.contents.execute(
+                    content,
+                    ContentInput::Event(ContentEvent::SaveFinished(result)),
+                );
+                self.handle_content_effect(content, effect);
             }
         }
         Ok(())
     }
 
+    fn handle_content_effect(&mut self, id: ContentId, effect: ContentEffect) {
+        if let ContentEffect::Save(snapshot) = effect {
+            self.spawn_save(id, snapshot);
+        }
+    }
+
     /// 发起异步保存。返回是否真正发起（同一 content 已在保存时忽略）。
-    fn spawn_save(&mut self, id: ContentId) -> bool {
+    fn spawn_save(&mut self, id: ContentId, snapshot: crate::core::content::SaveSnapshot) -> bool {
         if self.pending_saves.contains(&id) {
             return false;
         }
-        let (path, bytes) = {
-            let buf = match self.contents.get_mut(&id).and_then(|c| c.buffer_mut()) {
-                Some(b) => b,
-                None => return false,
-            };
-            let path = match buf.path().map(|p| p.to_path_buf()) {
-                Some(p) => p,
-                None => {
-                    buf.set_status(StatusMessage::SaveFailed);
-                    return false;
-                }
-            };
-            (path, buf.slice().to_string())
-        };
         let tx = self.message_tx.clone();
         self.pending_saves.insert(id);
         self.tasks.spawn_critical(async move {
-            let result = tokio::fs::write(path, bytes).await;
+            let result = tokio::fs::write(snapshot.path, snapshot.bytes).await;
             let _ = tx.send(AppMessage::SaveCompleted {
                 content: id,
                 result,
@@ -271,57 +250,13 @@ fn collect_content_spaces(scene: &Scene, sid: SpaceId, out: &mut HashMap<SpaceId
 /// 借 App 数据字段的查询适配器：render 时用它做 `&dyn RenderQuery`，
 /// 与 `&mut self.frontend` 不冲突（字段级 split borrow）。
 struct AppQuery<'a> {
-    contents: &'a HashMap<ContentId, Box<dyn ContentHandler>>,
+    contents: &'a ContentStore,
     views: &'a HashMap<SpaceId, View>,
-}
-
-impl<'a> AppQuery<'a> {
-    fn lines(&self, cid: ContentId, range: RowRange) -> Vec<String> {
-        let Some(buf) = self.contents.get(&cid).and_then(|c| c.as_buffer()) else {
-            return Vec::new();
-        };
-        let total = buf.len_lines();
-        let start = range.start.min(total);
-        let end = range.end.min(total).max(start);
-        (start..end)
-            .map(|i| buf.line(i).trim_end_matches('\n').to_string())
-            .collect()
-    }
-    fn status_bar(&self, cid: ContentId) -> StatusBarData {
-        let Some(c) = self.contents.get(&cid) else {
-            return StatusBarData {
-                file_name: None,
-                modified: false,
-                message: StatusMessage::None,
-            };
-        };
-        match c.as_status_bar() {
-            Some(sb) => sb.status_bar_data(self.contents as &dyn ContentLookup),
-            None => StatusBarData {
-                file_name: None,
-                modified: false,
-                message: StatusMessage::None,
-            },
-        }
-    }
-
-    fn line_count(&self, cid: ContentId) -> usize {
-        self.contents
-            .get(&cid)
-            .and_then(|c| c.as_buffer())
-            .map(|b| b.len_lines())
-            .unwrap_or(0)
-    }
 }
 
 impl RenderQuery for AppQuery<'_> {
     fn content(&self, cid: ContentId, query: ContentQuery) -> ContentData {
-        match query {
-            ContentQuery::TextRows(range) => ContentData::TextRows(self.lines(cid, range)),
-            ContentQuery::TextLineCount => ContentData::TextLineCount(self.line_count(cid)),
-            ContentQuery::DocumentStatus => ContentData::DocumentStatus(self.status_bar(cid)),
-            ContentQuery::StatusBarData => ContentData::StatusBarData(self.status_bar(cid)),
-        }
+        self.contents.query(cid, query)
     }
 
     fn selections(&self, sid: SpaceId) -> Selections {
@@ -335,11 +270,15 @@ impl RenderQuery for AppQuery<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::command::{Command, EditCommand};
+    use crate::core::command::{Command, ContentCommand, EditCommand};
+    use crate::core::content::Content;
     use crate::frontend::Frontend;
-    use crate::protocol::content_query::{ContentData, ContentQuery, RenderQuery, RowRange};
+    use crate::protocol::content_query::{
+        ContentData, ContentQuery, DocumentStatus, RenderQuery, RowRange,
+    };
     use crate::protocol::frontend_event::ResizeEvent;
     use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
+    use crate::protocol::status::StatusMessage;
     use std::collections::VecDeque;
 
     struct ScriptedFrontend {
@@ -380,16 +319,32 @@ mod tests {
         ContentId(0)
     }
 
+    fn text_rows(app: &App<ScriptedFrontend>, content: ContentId) -> Vec<String> {
+        match app.contents.query(
+            content,
+            ContentQuery::TextRows(RowRange { start: 0, end: 5 }),
+        ) {
+            ContentData::TextRows(rows) => rows,
+            data => panic!("expected text rows, got {data:?}"),
+        }
+    }
+
+    fn document_status(app: &App<ScriptedFrontend>, content: ContentId) -> DocumentStatus {
+        match app.contents.query(content, ContentQuery::DocumentStatus) {
+            ContentData::DocumentStatus(status) => status,
+            data => panic!("expected document status, got {data:?}"),
+        }
+    }
+
     #[test]
     fn content_query_reads_buffer_and_view() {
         let mut app = make_app(vec![], None);
-        let buf = app
-            .contents
-            .get_mut(&editor_cid())
-            .and_then(|c| c.buffer_mut())
-            .unwrap();
-        buf.insert_char(0, 'h');
-        buf.insert_char(1, 'i');
+        app.execute_command(DispatchCommand::ViewContent {
+            command: ContentCommand::Edit(EditCommand::InsertText("hi".to_string())),
+            space: app.focused,
+            content: editor_cid(),
+        })
+        .unwrap();
         let query = AppQuery {
             contents: &app.contents,
             views: &app.views,
@@ -406,7 +361,7 @@ mod tests {
             ContentData::TextLineCount(1)
         );
         let sels = query.selections(app.focused);
-        assert_eq!(sels.primary().head(), CursorPos::origin());
+        assert_eq!(sels.primary().head().char_index, 2);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -422,12 +377,7 @@ mod tests {
             None,
         );
         app.run().await.unwrap();
-        let buf = app
-            .contents
-            .get_mut(&editor_cid())
-            .and_then(|c| c.buffer_mut())
-            .unwrap();
-        assert_eq!(buf.slice().to_string(), "a");
+        assert_eq!(text_rows(&app, editor_cid()), vec!["a"]);
         assert!(app.tasks.is_cancelled());
     }
 
@@ -446,12 +396,7 @@ mod tests {
             None,
         );
         app.run().await.unwrap();
-        let buf = app
-            .contents
-            .get_mut(&editor_cid())
-            .and_then(|c| c.buffer_mut())
-            .unwrap();
-        assert_eq!(buf.slice().to_string(), "a");
+        assert_eq!(text_rows(&app, editor_cid()), vec!["a"]);
         let cursor = app
             .views
             .get(&app.focused)
@@ -463,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_edit_uses_resolved_view_content_target() {
+    fn multi_space_edit_targets_only_focused_content() {
         let mut app = make_app(vec![], None);
         let other_cid = ContentId(9);
         let other_sid = app.scene_builder.content_grow(other_cid, 1);
@@ -478,7 +423,8 @@ mod tests {
             )
             .unwrap();
         app.scene = scene;
-        app.contents.insert(other_cid, Box::new(Buffer::new()));
+        app.contents
+            .insert(other_cid, Content::Buffer(Buffer::new()));
         app.views.insert(other_sid, View::new(other_cid));
 
         app.execute_command(DispatchCommand::ViewContent {
@@ -488,19 +434,20 @@ mod tests {
         })
         .unwrap();
 
-        let focused_buf = app
-            .contents
-            .get_mut(&editor_cid())
-            .and_then(|c| c.buffer_mut())
-            .unwrap();
-        assert_eq!(focused_buf.slice().to_string(), "");
-
-        let other_buf = app
-            .contents
-            .get_mut(&other_cid)
-            .and_then(|c| c.buffer_mut())
-            .unwrap();
-        assert_eq!(other_buf.slice().to_string(), "Z");
+        assert_eq!(
+            app.contents.query(
+                editor_cid(),
+                ContentQuery::TextRows(RowRange { start: 0, end: 1 }),
+            ),
+            ContentData::TextRows(vec!["".to_string()]),
+        );
+        assert_eq!(
+            app.contents.query(
+                other_cid,
+                ContentQuery::TextRows(RowRange { start: 0, end: 1 }),
+            ),
+            ContentData::TextRows(vec!["Z".to_string()]),
+        );
         assert_eq!(
             app.views
                 .get(&other_sid)
@@ -548,13 +495,15 @@ mod tests {
         );
         app.run().await.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "Xhi");
-        let buf = app
-            .contents
-            .get_mut(&editor_cid())
-            .and_then(|c| c.buffer_mut())
-            .unwrap();
-        assert!(!buf.modified());
-        assert_eq!(buf.status(), StatusMessage::Saved);
+        assert!(matches!(
+            app.contents
+                .query(editor_cid(), ContentQuery::DocumentStatus),
+            ContentData::DocumentStatus(DocumentStatus {
+                modified: false,
+                message: StatusMessage::Saved,
+                ..
+            }),
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -573,41 +522,29 @@ mod tests {
             Some(&path_str),
         );
         // 给 Buffer 绑前缀
-        {
-            let buf = app
-                .contents
-                .get_mut(&editor_cid())
-                .and_then(|c| c.buffer_mut())
-                .unwrap();
-            let mut sub = crate::core::keymap::Keymap::new();
-            sub.bind(
-                KeyEvent::char('s'),
-                Command::Content(ContentCommand::Save),
-            );
-            buf.keymap_mut().bind_prefix(KeyEvent::char('z'), sub);
-        }
+        let mut buffer = Buffer::new();
+        buffer.open_path(&path_str).unwrap();
+        let mut sub = crate::core::keymap::Keymap::new();
+        sub.bind(KeyEvent::char('s'), Command::Content(ContentCommand::Save));
+        buffer.keymap_mut().bind_prefix(KeyEvent::char('z'), sub);
+        app.contents.insert(editor_cid(), Content::Buffer(buffer));
         app.run().await.unwrap();
-        // 未修改 buffer，Save 仍 mark_saved（无变化）+ Saved 状态
-        let buf = app
-            .contents
-            .get_mut(&editor_cid())
-            .and_then(|c| c.buffer_mut())
-            .unwrap();
-        assert_eq!(buf.status(), StatusMessage::Saved);
+        assert_eq!(
+            document_status(&app, editor_cid()).message,
+            StatusMessage::Saved
+        );
     }
 
     #[test]
     fn save_completed_ok_marks_buffer_saved() {
         let mut app = make_app(vec![], None);
-        {
-            let buf = app
-                .contents
-                .get_mut(&editor_cid())
-                .and_then(|c| c.buffer_mut())
-                .unwrap();
-            buf.insert_char(0, 'x');
-            assert!(buf.modified());
-        }
+        app.execute_command(DispatchCommand::ViewContent {
+            command: ContentCommand::Edit(EditCommand::InsertText("x".to_string())),
+            space: app.focused,
+            content: editor_cid(),
+        })
+        .unwrap();
+        assert!(document_status(&app, editor_cid()).modified);
         app.pending_saves.insert(editor_cid());
 
         app.handle_app_message(AppMessage::SaveCompleted {
@@ -616,14 +553,10 @@ mod tests {
         })
         .unwrap();
 
-        let buf = app
-            .contents
-            .get_mut(&editor_cid())
-            .and_then(|c| c.buffer_mut())
-            .unwrap();
         assert!(!app.pending_saves.contains(&editor_cid()));
-        assert!(!buf.modified());
-        assert_eq!(buf.status(), StatusMessage::Saved);
+        let status = document_status(&app, editor_cid());
+        assert!(!status.modified);
+        assert_eq!(status.message, StatusMessage::Saved);
     }
 
     #[test]
@@ -637,13 +570,11 @@ mod tests {
         })
         .unwrap();
 
-        let buf = app
-            .contents
-            .get_mut(&editor_cid())
-            .and_then(|c| c.buffer_mut())
-            .unwrap();
         assert!(!app.pending_saves.contains(&editor_cid()));
-        assert_eq!(buf.status(), StatusMessage::SaveFailed);
+        assert_eq!(
+            document_status(&app, editor_cid()).message,
+            StatusMessage::SaveFailed
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -654,20 +585,26 @@ mod tests {
         let path_str = path.to_str().unwrap().to_owned();
         let mut app = make_app(vec![], Some(&path_str));
 
-        assert!(app.spawn_save(editor_cid()));
-        assert!(!app.spawn_save(editor_cid()));
+        app.execute_command(DispatchCommand::Content {
+            command: ContentCommand::Save,
+            content: editor_cid(),
+        })
+        .unwrap();
+        app.execute_command(DispatchCommand::Content {
+            command: ContentCommand::Save,
+            content: editor_cid(),
+        })
+        .unwrap();
         assert!(app.pending_saves.contains(&editor_cid()));
 
         app.shutdown_tasks().await.unwrap();
 
         assert!(!app.pending_saves.contains(&editor_cid()));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
-        let buf = app
-            .contents
-            .get_mut(&editor_cid())
-            .and_then(|c| c.buffer_mut())
-            .unwrap();
-        assert_eq!(buf.status(), StatusMessage::Saved);
+        assert_eq!(
+            document_status(&app, editor_cid()).message,
+            StatusMessage::Saved
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -685,7 +622,7 @@ mod tests {
         let mut other = Buffer::new();
         other.open_path(&other_path_str).unwrap();
         other.insert_char(0, 'X');
-        app.contents.insert(other_cid, Box::new(other));
+        app.contents.insert(other_cid, Content::Buffer(other));
 
         app.execute_command(DispatchCommand::Content {
             command: ContentCommand::Save,
@@ -721,12 +658,10 @@ mod tests {
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "Xhi");
         assert!(!app.pending_saves.contains(&editor_cid()));
-        let buf = app
-            .contents
-            .get_mut(&editor_cid())
-            .and_then(|c| c.buffer_mut())
-            .unwrap();
-        assert_eq!(buf.status(), StatusMessage::Saved);
+        assert_eq!(
+            document_status(&app, editor_cid()).message,
+            StatusMessage::Saved
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -745,12 +680,7 @@ mod tests {
             None,
         );
         app.run().await.unwrap();
-        let buf = app
-            .contents
-            .get_mut(&editor_cid())
-            .and_then(|c| c.buffer_mut())
-            .unwrap();
-        assert_eq!(buf.slice().to_string(), "abX");
+        assert_eq!(text_rows(&app, editor_cid()), vec!["abX"]);
         let head = app
             .views
             .get(&app.focused)
@@ -781,20 +711,15 @@ mod tests {
                 FrontendEvent::Key(KeyEvent::char('b')),
                 FrontendEvent::Key(KeyEvent::char('c')),
                 FrontendEvent::Key(KeyEvent::shift_arrow(ArrowKey::Left)), // 选区 [2,3)
-                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)), // 回 Normal（选区保留）
-                FrontendEvent::Key(KeyEvent::char('h')),              // shrink→head=2 collapse
-                FrontendEvent::Key(KeyEvent::char('h')),              // collapsed 左移 → head=1
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),      // 回 Normal（选区保留）
+                FrontendEvent::Key(KeyEvent::char('h')),                   // shrink→head=2 collapse
+                FrontendEvent::Key(KeyEvent::char('h')), // collapsed 左移 → head=1
                 FrontendEvent::Key(KeyEvent::ctrl('q')),
             ],
             None,
         );
         app.run().await.unwrap();
-        let buf = app
-            .contents
-            .get_mut(&editor_cid())
-            .and_then(|c| c.buffer_mut())
-            .unwrap();
-        assert_eq!(buf.slice().to_string(), "abc"); // Escape/h 不改文本
+        assert_eq!(text_rows(&app, editor_cid()), vec!["abc"]); // Escape/h 不改文本
         let head = app
             .views
             .get(&app.focused)
@@ -830,12 +755,7 @@ mod tests {
 
         app.run().await.unwrap();
 
-        let buf = app
-            .contents
-            .get_mut(&editor_cid())
-            .and_then(|c| c.buffer_mut())
-            .unwrap();
-        assert_eq!(buf.slice().to_string(), "ab");
+        assert_eq!(text_rows(&app, editor_cid()), vec!["ab"]);
         let head = app
             .views
             .get(&app.focused)
@@ -859,11 +779,6 @@ mod tests {
         );
         app.run().await.unwrap();
         assert!(app.frontend.renders >= 1);
-        let buf = app
-            .contents
-            .get_mut(&editor_cid())
-            .and_then(|c| c.buffer_mut())
-            .unwrap();
-        assert_eq!(buf.slice().to_string(), "a");
+        assert_eq!(text_rows(&app, editor_cid()), vec!["a"]);
     }
 }
