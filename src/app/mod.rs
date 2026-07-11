@@ -161,11 +161,9 @@ impl<F: Frontend> App<F> {
                 space,
                 content,
             } => {
-                let (selections, runtime) = self
-                    .views
-                    .get_mut(&space)
-                    .expect("target view exists")
-                    .selections_and_runtime_mut();
+                let view = self.views.get_mut(&space).expect("target view exists");
+                assert_eq!(view.content(), content, "view/content target mismatch");
+                let (selections, runtime) = view.selections_and_runtime_mut();
                 let effect = self.contents.execute(
                     content,
                     ContentInput::View {
@@ -485,6 +483,22 @@ mod tests {
                 .char_index,
             1
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "view/content target mismatch")]
+    fn view_content_rejects_mismatched_view_content_target() {
+        let mut app = make_app(vec![], None);
+        let other_cid = ContentId(9);
+        app.contents
+            .insert(other_cid, Content::Buffer(Buffer::new()));
+
+        app.execute_command(DispatchCommand::ViewContent {
+            command: ContentCommand::Edit(EditCommand::InsertText("Z".to_string())),
+            space: app.focused,
+            content: other_cid,
+        })
+        .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
