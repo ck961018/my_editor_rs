@@ -47,6 +47,7 @@ impl Content {
         }
     }
 
+    #[allow(dead_code)] // Static Content API reserves keymap mutation for future bindings.
     pub fn keymap_mut(&mut self) -> &mut Keymap {
         match self {
             Self::Buffer(buffer) => buffer.keymap_mut(),

@@ -36,6 +36,7 @@ impl Buffer {
         &self.keymap
     }
 
+    #[allow(dead_code)] // Static Content API reserves keymap mutation for future bindings.
     pub(crate) fn keymap_mut(&mut self) -> &mut Keymap {
         &mut self.keymap
     }

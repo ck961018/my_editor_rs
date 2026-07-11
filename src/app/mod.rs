@@ -319,6 +319,19 @@ mod tests {
         ContentId(0)
     }
 
+    #[test]
+    fn production_content_paths_have_no_dynamic_type_probes() {
+        let app = include_str!("mod.rs");
+        let content = include_str!("../core/content.rs");
+        let dynamic_handler = concat!("Box<dyn ", "Content", "Handler>");
+        let buffer_probe = concat!("buffer", "_mut(");
+        let buffer_read_probe = concat!("as_", "buffer(");
+
+        assert!(!app.contains(dynamic_handler));
+        assert!(!app.contains(buffer_probe));
+        assert!(!content.contains(buffer_read_probe));
+    }
+
     fn text_rows(app: &App<ScriptedFrontend>, content: ContentId) -> Vec<String> {
         match app.contents.query(
             content,
