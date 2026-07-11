@@ -235,7 +235,7 @@ impl<F: Frontend> App<F> {
 /// 遍历 scene 所有 Content space，为每个建 View（绑定其 content）。
 fn build_views(scene: &Scene, contents: &ContentStore) -> HashMap<SpaceId, View> {
     let mut views = HashMap::new();
-    collect_content_spaces(scene, scene.root, contents, &mut views);
+    collect_content_spaces(scene, scene.root(), contents, &mut views);
     views
 }
 

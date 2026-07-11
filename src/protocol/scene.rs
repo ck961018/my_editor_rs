@@ -16,12 +16,16 @@ pub struct SpaceNode {
 }
 
 pub struct Scene {
-    pub root: SpaceId,
+    root: SpaceId,
     pub size: Size,
     nodes: HashMap<SpaceId, SpaceNode>,
 }
 
 impl Scene {
+    pub fn root(&self) -> SpaceId {
+        self.root
+    }
+
     pub fn contains(&self, id: SpaceId) -> bool {
         self.nodes.contains_key(&id)
     }
@@ -292,7 +296,7 @@ mod tests {
             build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
 
         assert!(content_focusable(&scene, editor));
-        let status = scene.node(scene.root).children[1];
+        let status = scene.node(scene.root()).children[1];
         assert!(!content_focusable(&scene, status));
     }
 
@@ -301,7 +305,7 @@ mod tests {
         let mut builder = SceneBuilder::new();
         let (mut scene, _) =
             build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
-        let status = scene.node(scene.root).children[1];
+        let status = scene.node(scene.root()).children[1];
 
         let result = builder
             .split(
@@ -360,7 +364,7 @@ mod tests {
 
     fn assert_tree_valid(scene: &Scene) {
         let mut visited = HashSet::new();
-        let mut stack = vec![scene.root];
+        let mut stack = vec![scene.root()];
 
         while let Some(space) = stack.pop() {
             assert!(visited.insert(space), "space visited twice: {space:?}");

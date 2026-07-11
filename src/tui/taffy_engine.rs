@@ -27,7 +27,7 @@ impl TaffyEngine {
     pub fn layout(&mut self, scene: &Scene) -> ResolvedScene {
         self.tree = TaffyTree::new();
         let mut map: HashMap<SpaceId, NodeId> = HashMap::new();
-        let root_node = self.build_node(scene, scene.root, None, Some(scene.size), &mut map);
+        let root_node = self.build_node(scene, scene.root(), None, Some(scene.size), &mut map);
         let available = Size {
             width: AvailableSpace::Definite(scene.size.width as f32),
             height: AvailableSpace::Definite(scene.size.height as f32),
@@ -37,7 +37,7 @@ impl TaffyEngine {
             items: Vec::new(),
             order: 0,
         };
-        self.collect(scene, scene.root, None, &map, &mut out);
+        self.collect(scene, scene.root(), None, &map, &mut out);
         ResolvedScene { items: out.items }
     }
 
