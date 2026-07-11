@@ -241,11 +241,10 @@ fn status_line(file_name: Option<&str>, modified: bool, message: &StatusMessage)
 mod tests {
     use super::*;
     use crate::protocol::content_query::{ContentData, ContentQuery, RenderQuery, StatusBarData};
-    use crate::protocol::geometry::Size;
     use crate::protocol::ids::{ContentId, SpaceId};
     use crate::protocol::scene::{SceneBuilder, build_editor_scene};
     use crate::protocol::selection::{CursorPos, Selection, Selections};
-    use crate::protocol::space::{Align, Arrangement, Axis};
+    use crate::protocol::space::SplitDirection;
     use crate::protocol::status::StatusMessage;
     use crate::terminal::output::Output;
     use std::collections::HashMap;
@@ -328,26 +327,12 @@ mod tests {
     #[test]
     fn shared_content_spaces_use_their_own_selections() {
         let mut builder = SceneBuilder::new();
-        let left = builder.content_grow(ContentId(0), 1);
-        let right = builder.content_grow(ContentId(0), 1);
-        let root = builder.container_grow(
-            Arrangement::Flex {
-                direction: Axis::Horizontal,
-                gap: 0,
-                align: Align::Stretch,
-            },
-            vec![left, right],
-            1,
-        );
-        let scene = builder
-            .snapshot(
-                root,
-                Size {
-                    width: 20,
-                    height: 1,
-                },
-            )
-            .unwrap();
+        let (mut scene, left) =
+            build_editor_scene(&mut builder, 20, 2, ContentId(0), ContentId(1)).unwrap();
+        let right = builder
+            .split(&mut scene, left, ContentId(0), true, SplitDirection::Right)
+            .unwrap()
+            .new_space;
         let query = MultiSpaceQuery {
             lines: vec!["abcd".to_string()],
             selections: HashMap::from([

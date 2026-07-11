@@ -1,20 +1,20 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::protocol::geometry::Size;
 use crate::protocol::ids::{ContentId, SpaceId};
-use crate::protocol::space::{Align, Arrangement, Axis, Layer, Sizing, Space, SpaceKind};
+use crate::protocol::space::{
+    Align, Arrangement, Axis, Layer, Sizing, Space, SpaceKind, SplitDirection,
+};
 
 #[derive(Clone)]
 pub struct SpaceNode {
-    #[allow(dead_code)] // 结构性 identity 字段，与 HashMap key 冗余但保留
+    #[allow(dead_code)]
     pub id: SpaceId,
     pub parent: Option<SpaceId>,
     pub children: Vec<SpaceId>,
     pub space: Space,
 }
 
-#[derive(Clone)]
 pub struct Scene {
     pub root: SpaceId,
     pub size: Size,
@@ -22,140 +22,227 @@ pub struct Scene {
 }
 
 impl Scene {
+    pub fn contains(&self, id: SpaceId) -> bool {
+        self.nodes.contains_key(&id)
+    }
+
     pub fn node(&self, id: SpaceId) -> &SpaceNode {
         self.nodes.get(&id).expect("space id exists")
     }
-    #[allow(dead_code)] // 预留：v0.2 renderer 只读遍历，未来多场景编辑/space 增删时启用
-    pub fn node_mut(&mut self, id: SpaceId) -> &mut SpaceNode {
-        self.nodes.get_mut(&id).expect("space id exists")
-    }
+
     pub fn resize(&mut self, width: i32, height: i32) {
         self.size = Size { width, height };
     }
+
+    fn is_tree_valid(&self) -> bool {
+        let Some(root) = self.nodes.get(&self.root) else {
+            return false;
+        };
+        if root.parent.is_some() {
+            return false;
+        }
+
+        let mut visited = HashSet::new();
+        let mut stack = vec![self.root];
+        while let Some(space) = stack.pop() {
+            if !visited.insert(space) {
+                return false;
+            }
+            let Some(node) = self.nodes.get(&space) else {
+                return false;
+            };
+            match &node.space.kind {
+                SpaceKind::Container { .. } => {
+                    for child in &node.children {
+                        let Some(child_node) = self.nodes.get(child) else {
+                            return false;
+                        };
+                        if child_node.parent != Some(space) {
+                            return false;
+                        }
+                        stack.push(*child);
+                    }
+                }
+                SpaceKind::Content { .. } if !node.children.is_empty() => return false,
+                SpaceKind::Content { .. } => {}
+            }
+        }
+        visited.len() == self.nodes.len()
+    }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum BuildError {
-    UnknownRoot,
-    CycleDetected,
-    DanglingChild,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SceneError {
+    UnknownSpace(SpaceId),
+    ExpectedContentLeaf(SpaceId),
+    InvalidTree,
 }
 
 pub struct SceneBuilder {
-    nodes: HashMap<SpaceId, SpaceNode>,
-    next_id: u64,
+    next_space_id: u64,
+}
+
+pub struct SplitResult {
+    pub new_space: SpaceId,
 }
 
 impl SceneBuilder {
     pub fn new() -> Self {
-        Self {
-            nodes: HashMap::new(),
-            next_id: 0,
-        }
+        Self { next_space_id: 0 }
     }
 
-    fn alloc(&mut self, kind: SpaceKind) -> SpaceId {
-        let id = SpaceId(self.next_id);
-        self.next_id += 1;
-        let children = match &kind {
-            SpaceKind::Container { children, .. } => children.clone(),
-            SpaceKind::Content { .. } => Vec::new(),
-        };
-        let node = SpaceNode {
-            id,
-            parent: None,
-            children,
-            space: Space {
-                id,
-                kind,
-                sizing: Sizing::Grow(1),
-                layer: Layer::Base,
-            },
-        };
-        self.nodes.insert(id, node);
+    fn alloc(&mut self) -> SpaceId {
+        let id = SpaceId(self.next_space_id);
+        self.next_space_id += 1;
         id
     }
 
-    pub fn content(&mut self, content: ContentId) -> SpaceHandle {
-        SpaceHandle {
-            id: self.alloc(SpaceKind::Content { content }),
-        }
-    }
-
-    pub fn container(&mut self, arrangement: Arrangement, children: Vec<SpaceId>) -> SpaceHandle {
-        SpaceHandle {
-            id: self.alloc(SpaceKind::Container {
-                arrangement,
-                children,
-            }),
-        }
-    }
-
-    pub fn set_sizing(&mut self, id: SpaceId, sizing: Sizing) -> SpaceId {
-        if let Some(node) = self.nodes.get_mut(&id) {
-            node.space.sizing = sizing;
-        }
-        id
-    }
-
-    pub fn content_grow(&mut self, content: ContentId, weight: u32) -> SpaceId {
-        let id = self.content(content).id;
-        self.set_sizing(id, Sizing::Grow(weight))
-    }
-
-    pub fn content_fixed(&mut self, content: ContentId, size: i32) -> SpaceId {
-        let id = self.content(content).id;
-        self.set_sizing(id, Sizing::Fixed(size))
-    }
-
-    pub fn container_grow(
+    fn add_content(
         &mut self,
-        arrangement: Arrangement,
-        children: Vec<SpaceId>,
-        weight: u32,
+        scene: &mut Scene,
+        content: ContentId,
+        focusable: bool,
+        sizing: Sizing,
     ) -> SpaceId {
-        let id = self.container(arrangement, children).id;
-        self.set_sizing(id, Sizing::Grow(weight))
+        self.add_node(scene, SpaceKind::Content { content, focusable }, sizing)
     }
 
-    pub fn snapshot(&mut self, root: SpaceId, size: Size) -> Result<Scene, BuildError> {
-        if !self.nodes.contains_key(&root) {
-            return Err(BuildError::UnknownRoot);
-        }
-        let mut visited: HashSet<SpaceId> = HashSet::new();
-        let mut stack: Vec<SpaceId> = vec![root];
-        while let Some(sid) = stack.pop() {
-            if visited.contains(&sid) {
-                return Err(BuildError::CycleDetected);
-            }
-            visited.insert(sid);
-            let children = self
-                .nodes
-                .get(&sid)
-                .ok_or(BuildError::DanglingChild)?
-                .children
-                .clone();
-            for c in &children {
-                if !self.nodes.contains_key(c) {
-                    return Err(BuildError::DanglingChild);
-                }
-                if let Some(cnode) = self.nodes.get_mut(c) {
-                    cnode.parent = Some(sid);
-                }
-                stack.push(*c);
-            }
-        }
-        Ok(Scene {
-            root,
-            size,
-            nodes: self.nodes.clone(),
-        })
+    fn add_container(
+        &mut self,
+        scene: &mut Scene,
+        arrangement: Arrangement,
+        sizing: Sizing,
+    ) -> SpaceId {
+        self.add_node(scene, SpaceKind::Container { arrangement }, sizing)
     }
 
-    // 兼容包装：保留为预留 API（生产路径用 snapshot）。
-    #[allow(dead_code)]
-    pub fn finish(mut self, root: SpaceId, size: Size) -> Result<Scene, BuildError> {
-        self.snapshot(root, size)
+    fn add_node(&mut self, scene: &mut Scene, kind: SpaceKind, sizing: Sizing) -> SpaceId {
+        let id = self.alloc();
+        scene.nodes.insert(
+            id,
+            SpaceNode {
+                id,
+                parent: None,
+                children: Vec::new(),
+                space: Space {
+                    id,
+                    kind,
+                    sizing,
+                    layer: Layer::Base,
+                },
+            },
+        );
+        id
+    }
+
+    fn insert_child(&mut self, scene: &mut Scene, parent: SpaceId, child: SpaceId, index: usize) {
+        scene
+            .nodes
+            .get_mut(&parent)
+            .expect("parent exists")
+            .children
+            .insert(index, child);
+        scene.nodes.get_mut(&child).expect("child exists").parent = Some(parent);
+    }
+
+    fn replace_child(&mut self, scene: &mut Scene, parent: SpaceId, index: usize, child: SpaceId) {
+        scene
+            .nodes
+            .get_mut(&parent)
+            .expect("parent exists")
+            .children[index] = child;
+        scene.nodes.get_mut(&child).expect("child exists").parent = Some(parent);
+    }
+
+    fn set_children(&mut self, scene: &mut Scene, parent: SpaceId, children: &[SpaceId]) {
+        scene
+            .nodes
+            .get_mut(&parent)
+            .expect("parent exists")
+            .children = children.to_vec();
+        for child in children {
+            scene.nodes.get_mut(child).expect("child exists").parent = Some(parent);
+        }
+    }
+
+    pub fn split(
+        &mut self,
+        scene: &mut Scene,
+        target: SpaceId,
+        content: ContentId,
+        focusable: bool,
+        direction: SplitDirection,
+    ) -> Result<SplitResult, SceneError> {
+        let target_node = scene
+            .nodes
+            .get(&target)
+            .ok_or(SceneError::UnknownSpace(target))?;
+        if !matches!(&target_node.space.kind, SpaceKind::Content { .. })
+            || !target_node.children.is_empty()
+        {
+            return Err(SceneError::ExpectedContentLeaf(target));
+        }
+
+        let target_parent = target_node.parent;
+        let target_sizing = target_node.space.sizing.clone();
+        let (parent_axis, target_index) = match target_parent {
+            Some(parent) => {
+                let parent_node = scene.nodes.get(&parent).ok_or(SceneError::InvalidTree)?;
+                let arrangement = match &parent_node.space.kind {
+                    SpaceKind::Container { arrangement } => arrangement,
+                    SpaceKind::Content { .. } => return Err(SceneError::InvalidTree),
+                };
+                let index = parent_node
+                    .children
+                    .iter()
+                    .position(|child| *child == target)
+                    .ok_or(SceneError::InvalidTree)?;
+                let axis = match arrangement {
+                    Arrangement::Flex { direction, .. } => *direction,
+                };
+                (Some(axis), Some(index))
+            }
+            None if scene.root == target => (None, None),
+            None => return Err(SceneError::InvalidTree),
+        };
+
+        let new_space = self.add_content(scene, content, focusable, Sizing::Grow(1));
+        if parent_axis == Some(direction.axis()) {
+            let parent = target_parent.expect("matching axis has a parent");
+            let index = target_index.expect("matching axis has an index")
+                + usize::from(!direction.inserts_before());
+            self.insert_child(scene, parent, new_space, index);
+        } else {
+            let container = self.add_container(
+                scene,
+                Arrangement::Flex {
+                    direction: direction.axis(),
+                    gap: 0,
+                    align: Align::Stretch,
+                },
+                target_sizing,
+            );
+            let children = if direction.inserts_before() {
+                [new_space, target]
+            } else {
+                [target, new_space]
+            };
+
+            if let Some(parent) = target_parent {
+                self.replace_child(
+                    scene,
+                    parent,
+                    target_index.expect("parent has target index"),
+                    container,
+                );
+            } else {
+                scene.root = container;
+            }
+            self.set_children(scene, container, &children);
+        }
+
+        debug_assert!(scene.is_tree_valid());
+        Ok(SplitResult { new_space })
     }
 }
 
@@ -165,95 +252,130 @@ impl Default for SceneBuilder {
     }
 }
 
-pub struct SpaceHandle {
-    pub id: SpaceId,
-}
-impl SpaceHandle {
-    // 预留链式 API；生产路径用 content_grow/content_fixed。
-    #[allow(dead_code)]
-    pub fn fixed(self, b: &mut SceneBuilder, size: i32) -> SpaceId {
-        if let Some(n) = b.nodes.get_mut(&self.id) {
-            n.space.sizing = Sizing::Fixed(size);
-        }
-        self.id
-    }
-    // 预留链式 API；生产路径用 content_grow/content_fixed。
-    #[allow(dead_code)]
-    pub fn grow(self, b: &mut SceneBuilder, weight: u32) -> SpaceId {
-        if let Some(n) = b.nodes.get_mut(&self.id) {
-            n.space.sizing = Sizing::Grow(weight);
-        }
-        self.id
-    }
-}
-
-/// 标准布局：root Vertical [editor Grow(1), status Fixed(1)]。
-/// 返回 (Scene, editor_space_id)。
 pub fn build_editor_scene(
-    b: &mut SceneBuilder,
+    builder: &mut SceneBuilder,
     width: i32,
     height: i32,
     editor: ContentId,
     status: ContentId,
-) -> Result<(Scene, SpaceId), BuildError> {
-    let ed = b.content_grow(editor, 1);
-    let st = b.content_fixed(status, 1);
-    let root = b.container_grow(
+) -> Result<(Scene, SpaceId), SceneError> {
+    let mut scene = Scene {
+        root: SpaceId(u64::MAX),
+        size: Size { width, height },
+        nodes: HashMap::new(),
+    };
+    let editor_space = builder.add_content(&mut scene, editor, true, Sizing::Grow(1));
+    let status_space = builder.add_content(&mut scene, status, false, Sizing::Fixed(1));
+    let root = builder.add_container(
+        &mut scene,
         Arrangement::Flex {
             direction: Axis::Vertical,
             gap: 0,
             align: Align::Stretch,
         },
-        vec![ed, st],
-        1,
+        Sizing::Grow(1),
     );
-    let scene = b.snapshot(root, Size { width, height })?;
-    Ok((scene, ed))
+    scene.root = root;
+    builder.set_children(&mut scene, root, &[editor_space, status_space]);
+    debug_assert!(scene.is_tree_valid());
+    Ok((scene, editor_space))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn build_editor_scene_has_two_content_spaces() {
+    fn standard_scene_marks_editor_focusable_and_status_inert() {
         let mut builder = SceneBuilder::new();
-        let (scene, editor_space) =
+        let (scene, editor) =
             build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
-        let root = scene.node(scene.root);
-        match &root.space.kind {
-            SpaceKind::Container { children, .. } => assert_eq!(children.len(), 2),
-            _ => panic!("root must be container"),
-        }
-        assert_eq!(editor_space, SpaceId(0));
+
+        assert!(content_focusable(&scene, editor));
+        let status = scene.node(scene.root).children[1];
+        assert!(!content_focusable(&scene, status));
     }
 
     #[test]
-    fn snapshot_does_not_reset_next_space_id() {
+    fn split_on_matching_axis_inserts_a_sibling_and_advances_id() {
         let mut builder = SceneBuilder::new();
-        let (scene, editor_space) =
+        let (mut scene, _) =
             build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
-        assert_eq!(editor_space, SpaceId(0));
-        let extra = builder.content_grow(ContentId(2), 1);
-        assert_eq!(extra, SpaceId(3));
-        assert!(scene.node(editor_space).space.id == SpaceId(0));
-    }
+        let status = scene.node(scene.root).children[1];
 
-    #[test]
-    fn repeated_snapshot_keeps_allocating_after_existing_nodes() {
-        let mut builder = SceneBuilder::new();
-        let (scene, _) =
-            build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
-        let root = scene.root;
-        let _second = builder
-            .snapshot(
-                root,
-                Size {
-                    width: 100,
-                    height: 40,
-                },
+        let result = builder
+            .split(
+                &mut scene,
+                status,
+                ContentId(1),
+                false,
+                SplitDirection::Down,
             )
             .unwrap();
-        let extra = builder.content_fixed(ContentId(2), 1);
-        assert_eq!(extra, SpaceId(3));
+
+        assert_eq!(result.new_space, SpaceId(3));
+        assert_eq!(
+            scene.node(status).parent,
+            scene.node(result.new_space).parent
+        );
+        assert_tree_valid(&scene);
+    }
+
+    #[test]
+    fn split_on_different_axis_wraps_target_in_a_new_container() {
+        let mut builder = SceneBuilder::new();
+        let (mut scene, editor) =
+            build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
+
+        let result = builder
+            .split(
+                &mut scene,
+                editor,
+                ContentId(0),
+                true,
+                SplitDirection::Right,
+            )
+            .unwrap();
+
+        let parent = scene.node(editor).parent.expect("split parent exists");
+        assert_eq!(parent, scene.node(result.new_space).parent.unwrap());
+        assert!(matches!(
+            &scene.node(parent).space.kind,
+            SpaceKind::Container {
+                arrangement: Arrangement::Flex {
+                    direction: Axis::Horizontal,
+                    ..
+                }
+            }
+        ));
+        assert_tree_valid(&scene);
+    }
+
+    fn content_focusable(scene: &Scene, space: SpaceId) -> bool {
+        match &scene.node(space).space.kind {
+            SpaceKind::Content { focusable, .. } => *focusable,
+            SpaceKind::Container { .. } => panic!("space must be content"),
+        }
+    }
+
+    fn assert_tree_valid(scene: &Scene) {
+        let mut visited = HashSet::new();
+        let mut stack = vec![scene.root];
+
+        while let Some(space) = stack.pop() {
+            assert!(visited.insert(space), "space visited twice: {space:?}");
+            let node = scene.node(space);
+            match &node.space.kind {
+                SpaceKind::Container { .. } => {
+                    for child in &node.children {
+                        assert_eq!(scene.node(*child).parent, Some(space));
+                        stack.push(*child);
+                    }
+                }
+                SpaceKind::Content { .. } => assert!(node.children.is_empty()),
+            }
+        }
+
+        assert_eq!(visited.len(), scene.nodes.len());
     }
 }

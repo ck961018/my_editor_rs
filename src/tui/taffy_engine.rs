@@ -52,14 +52,12 @@ impl TaffyEngine {
         let node = scene.node(sid);
         let style = style_for(node, parent_axis, root_size);
         let taffy_id = match &node.space.kind {
-            SpaceKind::Container {
-                children,
-                arrangement,
-            } => {
+            SpaceKind::Container { arrangement } => {
                 let axis = match arrangement {
                     Arrangement::Flex { direction, .. } => *direction,
                 };
-                let child_ids: Vec<NodeId> = children
+                let child_ids: Vec<NodeId> = node
+                    .children
                     .iter()
                     .map(|c| self.build_node(scene, *c, Some(axis), None, map))
                     .collect();
@@ -93,7 +91,7 @@ impl TaffyEngine {
             None => Some(rect),
         };
         let content_id = match &node.space.kind {
-            SpaceKind::Content { content } => Some(*content),
+            SpaceKind::Content { content, .. } => Some(*content),
             SpaceKind::Container { .. } => None,
         };
         if let Some(cid) = content_id {
@@ -108,8 +106,8 @@ impl TaffyEngine {
             });
             out.order += 1;
         }
-        if let SpaceKind::Container { children, .. } = &node.space.kind {
-            for c in children {
+        if let SpaceKind::Container { .. } = &node.space.kind {
+            for c in &node.children {
                 self.collect(scene, *c, clip, map, out);
             }
         }
@@ -171,10 +169,9 @@ fn style_for(node: &SpaceNode, parent_axis: Option<Axis>, root_size: Option<Scen
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::geometry::Size;
     use crate::protocol::ids::ContentId;
     use crate::protocol::scene::{SceneBuilder, build_editor_scene};
-    use crate::protocol::space::{Align, Arrangement, Axis};
+    use crate::protocol::space::SplitDirection;
 
     fn item_for(scene: &ResolvedScene, content: ContentId) -> &RenderItem {
         scene
@@ -238,34 +235,22 @@ mod tests {
     #[test]
     fn shared_content_items_keep_their_source_space_ids() {
         let mut builder = SceneBuilder::new();
-        let left = builder.content_grow(ContentId(0), 1);
-        let right = builder.content_grow(ContentId(0), 1);
-        let root = builder.container_grow(
-            Arrangement::Flex {
-                direction: Axis::Horizontal,
-                gap: 0,
-                align: Align::Stretch,
-            },
-            vec![left, right],
-            1,
-        );
-        let scene = builder
-            .snapshot(
-                root,
-                Size {
-                    width: 20,
-                    height: 1,
-                },
-            )
-            .unwrap();
+        let (mut scene, left) =
+            build_editor_scene(&mut builder, 20, 2, ContentId(0), ContentId(1)).unwrap();
+        let right = builder
+            .split(&mut scene, left, ContentId(0), true, SplitDirection::Right)
+            .unwrap()
+            .new_space;
 
         let mut engine = TaffyEngine::new();
         let resolved = engine.layout(&scene);
 
-        assert_eq!(resolved.items.len(), 2);
-        assert_eq!(resolved.items[0].content_id, ContentId(0));
-        assert_eq!(resolved.items[1].content_id, ContentId(0));
-        assert_eq!(resolved.items[0].space_id, left);
-        assert_eq!(resolved.items[1].space_id, right);
+        let spaces: Vec<_> = resolved
+            .items
+            .iter()
+            .filter(|item| item.content_id == ContentId(0))
+            .map(|item| item.space_id)
+            .collect();
+        assert_eq!(spaces, vec![left, right]);
     }
 }

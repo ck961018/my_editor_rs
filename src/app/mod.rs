@@ -247,14 +247,14 @@ fn collect_content_spaces(
 ) {
     let node = scene.node(sid);
     match &node.space.kind {
-        SpaceKind::Content { content } => {
+        SpaceKind::Content { content, .. } => {
             let runtime = contents
                 .create_runtime(*content)
                 .expect("scene content exists in content store");
             out.insert(sid, View::new(*content, runtime));
         }
-        SpaceKind::Container { children, .. } => {
-            for c in children {
+        SpaceKind::Container { .. } => {
+            for c in &node.children {
                 collect_content_spaces(scene, *c, contents, out);
             }
         }
@@ -291,9 +291,8 @@ mod tests {
         ContentData, ContentQuery, DocumentStatus, RenderQuery, RowRange,
     };
     use crate::protocol::frontend_event::ResizeEvent;
-    use crate::protocol::geometry::Size;
     use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
-    use crate::protocol::space::{Align, Arrangement, Axis};
+    use crate::protocol::space::SplitDirection;
     use crate::protocol::status::StatusMessage;
     use std::collections::VecDeque;
 
@@ -404,28 +403,18 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn two_views_of_one_buffer_keep_independent_mode_runtime() {
         let mut app = make_app(vec![], None);
-        let mut builder = SceneBuilder::new();
-        let left = builder.content_grow(editor_cid(), 1);
-        let right = builder.content_grow(editor_cid(), 1);
-        let root = builder.container_grow(
-            Arrangement::Flex {
-                direction: Axis::Horizontal,
-                gap: 0,
-                align: Align::Stretch,
-            },
-            vec![left, right],
-            1,
-        );
-        let scene = builder
-            .snapshot(
-                root,
-                Size {
-                    width: 40,
-                    height: 5,
-                },
+        let left = app.focused;
+        let right = app
+            .scene_builder
+            .split(
+                &mut app.scene,
+                left,
+                editor_cid(),
+                true,
+                SplitDirection::Right,
             )
-            .unwrap();
-        app.scene = scene;
+            .unwrap()
+            .new_space;
         app.views = build_views(&app.scene, &app.contents);
 
         app.focused = left;
@@ -490,18 +479,17 @@ mod tests {
     fn multi_space_edit_targets_only_focused_content() {
         let mut app = make_app(vec![], None);
         let other_cid = ContentId(9);
-        let other_sid = app.scene_builder.content_grow(other_cid, 1);
-        let scene = app
+        let other_sid = app
             .scene_builder
-            .snapshot(
-                app.scene.root,
-                crate::protocol::geometry::Size {
-                    width: app.scene.size.width,
-                    height: app.scene.size.height,
-                },
+            .split(
+                &mut app.scene,
+                app.focused,
+                other_cid,
+                true,
+                SplitDirection::Right,
             )
-            .unwrap();
-        app.scene = scene;
+            .unwrap()
+            .new_space;
         app.contents
             .insert(other_cid, Content::Buffer(Buffer::new()));
         let runtime = app

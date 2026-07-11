@@ -13,13 +13,29 @@ pub struct Space {
 
 #[derive(Clone)]
 pub enum SpaceKind {
-    Container {
-        arrangement: Arrangement,
-        children: Vec<SpaceId>,
-    },
-    Content {
-        content: ContentId,
-    },
+    Container { arrangement: Arrangement },
+    Content { content: ContentId, focusable: bool },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl SplitDirection {
+    pub const fn axis(self) -> Axis {
+        match self {
+            Self::Left | Self::Right => Axis::Horizontal,
+            Self::Up | Self::Down => Axis::Vertical,
+        }
+    }
+
+    pub const fn inserts_before(self) -> bool {
+        matches!(self, Self::Left | Self::Up)
+    }
 }
 
 #[derive(Clone)]

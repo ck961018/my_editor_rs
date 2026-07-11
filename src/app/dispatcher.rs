@@ -127,7 +127,7 @@ impl Dispatcher {
         let mut cur = Some(focused);
         while let Some(sid) = cur {
             let node = scene.node(sid);
-            if let SpaceKind::Content { content } = &node.space.kind {
+            if let SpaceKind::Content { content, .. } = &node.space.kind {
                 if let Some(keymap) = contents.keymap(*content) {
                     chain.push(CaptureEntry {
                         keymap,
@@ -216,7 +216,7 @@ fn view_content_target(
 fn focused_content_id(scene: &Scene, focused: SpaceId) -> Option<ContentId> {
     let node = scene.node(focused);
     match &node.space.kind {
-        SpaceKind::Content { content } => Some(*content),
+        SpaceKind::Content { content, .. } => Some(*content),
         _ => None,
     }
 }
