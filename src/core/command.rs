@@ -18,21 +18,36 @@ pub enum AppCommand {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContentCommand {
-    Text(TextCommand),
+    Text(EditCommand),
     Save,
     Mode { mode: ModeId, action: ModeActionId },
 }
 
+impl ContentCommand {
+    #[allow(non_snake_case)] // Temporary constructor bridge while Task 3 migrates pattern matches.
+    pub fn Edit(command: EditCommand) -> Self {
+        Self::Text(command)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TextCommand {
-    #[allow(dead_code)] // 预留：仅 executor 单测构造，生产 keymap 用 MoveLeftBy/RightBy/UpBy/DownBy
-    MoveBy { chars: isize, lines: isize },
+pub enum EditCommand {
+    #[allow(dead_code)]
+    // 预留：仅 executor 单测构造，生产 keymap 用 MoveLeftBy/RightBy/UpBy/DownBy
+    MoveBy {
+        chars: isize,
+        lines: isize,
+    },
     MoveLeftBy(usize),
     MoveRightBy(usize),
     MoveUpBy(usize),
     MoveDownBy(usize),
-    #[allow(dead_code)] // 预留：仅 executor 单测构造，生产 keymap 用 MoveLeftBy/RightBy/UpBy/DownBy
-    MoveTo { char_idx: usize, line_idx: usize },
+    #[allow(dead_code)]
+    // 预留：仅 executor 单测构造，生产 keymap 用 MoveLeftBy/RightBy/UpBy/DownBy
+    MoveTo {
+        char_idx: usize,
+        line_idx: usize,
+    },
     ExtendLeftBy(usize),
     ExtendRightBy(usize),
     ExtendUpBy(usize),
@@ -42,11 +57,14 @@ pub enum TextCommand {
     CollapseSelections,
 }
 
-impl From<TextCommand> for Command {
-    fn from(command: TextCommand) -> Self {
-        Command::Content(ContentCommand::Text(command))
+impl From<EditCommand> for Command {
+    fn from(command: EditCommand) -> Self {
+        Command::Content(ContentCommand::Edit(command))
     }
 }
+
+/// Temporary app-layer compatibility alias. Task 3 removes its remaining callers.
+pub type TextCommand = EditCommand;
 
 #[cfg(test)]
 mod tests {
@@ -54,10 +72,10 @@ mod tests {
 
     #[test]
     fn text_command_wraps_as_content_command() {
-        let command: Command = TextCommand::MoveLeftBy(1).into();
+        let command: Command = EditCommand::MoveLeftBy(1).into();
         assert_eq!(
             command,
-            Command::Content(ContentCommand::Text(TextCommand::MoveLeftBy(1)))
+            Command::Content(ContentCommand::Edit(EditCommand::MoveLeftBy(1)))
         );
     }
 

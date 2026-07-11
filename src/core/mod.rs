@@ -1,6 +1,8 @@
 pub mod buffer;
 pub mod command;
 pub mod content;
+pub mod content_store;
+pub mod edit;
 pub mod keymap;
 pub mod mode;
 pub mod status_bar;

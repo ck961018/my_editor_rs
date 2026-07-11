@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::core::command::{Command, ContentCommand, TextCommand};
+use crate::core::command::{Command, ContentCommand, EditCommand};
 use crate::protocol::key_event::KeyEvent;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,11 +25,8 @@ impl Keymap {
     pub fn bind(&mut self, key: KeyEvent, command: Command) {
         self.bindings.insert(key, KeyBinding::Command(command));
     }
-    pub fn bind_text(&mut self, key: KeyEvent, command: TextCommand) {
-        self.bind(
-            key,
-            Command::Content(ContentCommand::Text(command)),
-        );
+    pub fn bind_edit(&mut self, key: KeyEvent, command: EditCommand) {
+        self.bind(key, Command::Content(ContentCommand::Edit(command)));
     }
     #[allow(dead_code)] // 测试用：生产 keymap 不绑前缀，前缀链仅 dispatcher 单测构造
     pub fn bind_prefix(&mut self, key: KeyEvent, sub: Keymap) {
@@ -44,21 +41,21 @@ impl Keymap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::command::{Command, ContentCommand, TextCommand};
+    use crate::core::command::{Command, ContentCommand, EditCommand};
     use crate::protocol::key_event::{ArrowKey, KeyCode};
 
     #[test]
     fn bind_and_lookup_command() {
         let mut km = Keymap::new();
-        km.bind_text(
+        km.bind_edit(
             KeyEvent::plain(KeyCode::Enter),
-            TextCommand::InsertText("\n".to_string()),
+            EditCommand::InsertText("\n".to_string()),
         );
         let binding = km.lookup(KeyEvent::plain(KeyCode::Enter)).unwrap();
         assert_eq!(
             binding,
-            &KeyBinding::Command(Command::Content(ContentCommand::Text(
-                TextCommand::InsertText("\n".to_string())
+            &KeyBinding::Command(Command::Content(ContentCommand::Edit(
+                EditCommand::InsertText("\n".to_string())
             )))
         );
     }
@@ -72,7 +69,7 @@ mod tests {
     #[test]
     fn unbind_removes() {
         let mut km = Keymap::new();
-        km.bind_text(KeyEvent::plain(KeyCode::Backspace), TextCommand::Delete(-1));
+        km.bind_edit(KeyEvent::plain(KeyCode::Backspace), EditCommand::Delete(-1));
         km.unbind(KeyEvent::plain(KeyCode::Backspace));
         assert!(km.lookup(KeyEvent::plain(KeyCode::Backspace)).is_none());
     }
@@ -97,7 +94,7 @@ mod tests {
     #[test]
     fn keymap_clone_eq() {
         let mut km = Keymap::new();
-        km.bind_text(KeyEvent::arrow(ArrowKey::Left), TextCommand::MoveLeftBy(1));
+        km.bind_edit(KeyEvent::arrow(ArrowKey::Left), EditCommand::MoveLeftBy(1));
         let cloned = km.clone();
         assert_eq!(km, cloned);
     }

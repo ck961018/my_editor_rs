@@ -18,6 +18,12 @@ impl StatusBar {
             keymap: Keymap::new(),
         }
     }
+    pub(crate) fn keymap(&self) -> &Keymap {
+        &self.keymap
+    }
+    pub(crate) fn keymap_mut(&mut self) -> &mut Keymap {
+        &mut self.keymap
+    }
     #[allow(dead_code)] // 测试用
     pub fn target_content_id(&self) -> ContentId {
         self.target_content_id
@@ -43,10 +49,10 @@ impl StatusBar {
 
 impl ContentHandler for StatusBar {
     fn keymap(&self) -> &Keymap {
-        &self.keymap
+        StatusBar::keymap(self)
     }
     fn keymap_mut(&mut self) -> &mut Keymap {
-        &mut self.keymap
+        StatusBar::keymap_mut(self)
     }
     fn as_status_bar(&self) -> Option<&StatusBar> {
         Some(self)

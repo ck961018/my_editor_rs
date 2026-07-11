@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use std::io;
 use std::path::PathBuf;
 
-use crate::core::command::{Command, ContentCommand, TextCommand};
+use crate::core::command::{Command, ContentCommand, EditCommand};
 use crate::core::content::ContentHandler;
 use crate::core::keymap::Keymap;
 use crate::core::mode::{Mode, ModeActionId, ModeId};
@@ -31,6 +31,22 @@ impl Buffer {
             keymap: Keymap::new(),
             modes: BufferModes::vim(),
         }
+    }
+
+    pub(crate) fn keymap(&self) -> &Keymap {
+        &self.keymap
+    }
+
+    pub(crate) fn keymap_mut(&mut self) -> &mut Keymap {
+        &mut self.keymap
+    }
+
+    pub(crate) fn resolve_key(&self, key: KeyEvent) -> Option<Command> {
+        self.modes.resolve_key(key)
+    }
+
+    pub(crate) fn handle_mode_command(&mut self, mode: ModeId, action: ModeActionId) {
+        self.modes.handle_mode_command(mode, action);
     }
 
     pub fn load_from_file(&mut self, path: &str) -> io::Result<()> {
@@ -114,7 +130,7 @@ impl Buffer {
     }
 
     /// 取第 idx 行（含尾部换行），供 ContentQuery::lines 用。
-    pub fn line(&self, idx: usize) -> Cow<str> {
+    pub fn line(&self, idx: usize) -> Cow<'_, str> {
         Cow::Owned(self.slice().line(idx).to_string())
     }
 
@@ -326,16 +342,16 @@ impl Default for Buffer {
 
 impl ContentHandler for Buffer {
     fn keymap(&self) -> &Keymap {
-        &self.keymap
+        Buffer::keymap(self)
     }
     fn keymap_mut(&mut self) -> &mut Keymap {
-        &mut self.keymap
+        Buffer::keymap_mut(self)
     }
     fn resolve_key(&self, key: KeyEvent) -> Option<Command> {
-        self.modes.resolve_key(key)
+        Buffer::resolve_key(self, key)
     }
     fn handle_mode_command(&mut self, mode: ModeId, action: ModeActionId) {
-        self.modes.handle_mode_command(mode, action);
+        Buffer::handle_mode_command(self, mode, action);
     }
     fn buffer_mut(&mut self) -> Option<&mut Buffer> {
         Some(self)
@@ -412,7 +428,7 @@ impl Mode for PlainEditMode {
 
     fn typing(&self, key: KeyEvent) -> Option<Command> {
         key.is_plain_char()
-            .map(|ch| TextCommand::InsertText(ch.to_string()).into())
+            .map(|ch| EditCommand::InsertText(ch.to_string()).into())
     }
 
     fn handle_mode_command(&mut self, _action: ModeActionId) {}
@@ -464,7 +480,7 @@ impl Mode for VimMode {
             VimState::Normal => None,
             VimState::Insert => key
                 .is_plain_char()
-                .map(|ch| TextCommand::InsertText(ch.to_string()).into()),
+                .map(|ch| EditCommand::InsertText(ch.to_string()).into()),
         }
     }
 
@@ -488,35 +504,38 @@ fn vim_insert_keymap() -> Keymap {
 
 fn default_text_keymap(bind_escape_to_collapse: bool) -> Keymap {
     let mut km = Keymap::new();
-    km.bind_text(
+    km.bind_edit(
         KeyEvent::plain(KeyCode::Enter),
-        TextCommand::InsertText("\n".to_string()),
+        EditCommand::InsertText("\n".to_string()),
     );
-    km.bind_text(KeyEvent::plain(KeyCode::Backspace), TextCommand::Delete(-1));
-    km.bind_text(KeyEvent::arrow(ArrowKey::Left), TextCommand::MoveLeftBy(1));
-    km.bind_text(KeyEvent::arrow(ArrowKey::Right), TextCommand::MoveRightBy(1));
-    km.bind_text(KeyEvent::arrow(ArrowKey::Up), TextCommand::MoveUpBy(1));
-    km.bind_text(KeyEvent::arrow(ArrowKey::Down), TextCommand::MoveDownBy(1));
-    km.bind_text(
+    km.bind_edit(KeyEvent::plain(KeyCode::Backspace), EditCommand::Delete(-1));
+    km.bind_edit(KeyEvent::arrow(ArrowKey::Left), EditCommand::MoveLeftBy(1));
+    km.bind_edit(
+        KeyEvent::arrow(ArrowKey::Right),
+        EditCommand::MoveRightBy(1),
+    );
+    km.bind_edit(KeyEvent::arrow(ArrowKey::Up), EditCommand::MoveUpBy(1));
+    km.bind_edit(KeyEvent::arrow(ArrowKey::Down), EditCommand::MoveDownBy(1));
+    km.bind_edit(
         KeyEvent::shift_arrow(ArrowKey::Left),
-        TextCommand::ExtendLeftBy(1),
+        EditCommand::ExtendLeftBy(1),
     );
-    km.bind_text(
+    km.bind_edit(
         KeyEvent::shift_arrow(ArrowKey::Right),
-        TextCommand::ExtendRightBy(1),
+        EditCommand::ExtendRightBy(1),
     );
-    km.bind_text(
+    km.bind_edit(
         KeyEvent::shift_arrow(ArrowKey::Up),
-        TextCommand::ExtendUpBy(1),
+        EditCommand::ExtendUpBy(1),
     );
-    km.bind_text(
+    km.bind_edit(
         KeyEvent::shift_arrow(ArrowKey::Down),
-        TextCommand::ExtendDownBy(1),
+        EditCommand::ExtendDownBy(1),
     );
     if bind_escape_to_collapse {
-        km.bind_text(
+        km.bind_edit(
             KeyEvent::plain(KeyCode::Escape),
-            TextCommand::CollapseSelections,
+            EditCommand::CollapseSelections,
         );
     } else {
         km.bind(
@@ -532,10 +551,10 @@ fn default_text_keymap(bind_escape_to_collapse: bool) -> Keymap {
 
 fn vim_normal_keymap() -> Keymap {
     let mut km = Keymap::new();
-    km.bind_text(KeyEvent::char('h'), TextCommand::MoveLeftBy(1));
-    km.bind_text(KeyEvent::char('j'), TextCommand::MoveDownBy(1));
-    km.bind_text(KeyEvent::char('k'), TextCommand::MoveUpBy(1));
-    km.bind_text(KeyEvent::char('l'), TextCommand::MoveRightBy(1));
+    km.bind_edit(KeyEvent::char('h'), EditCommand::MoveLeftBy(1));
+    km.bind_edit(KeyEvent::char('j'), EditCommand::MoveDownBy(1));
+    km.bind_edit(KeyEvent::char('k'), EditCommand::MoveUpBy(1));
+    km.bind_edit(KeyEvent::char('l'), EditCommand::MoveRightBy(1));
     km.bind(
         KeyEvent::char('i'),
         Command::Content(ContentCommand::Mode {
@@ -657,26 +676,26 @@ mod tests {
         b.handle_mode_command(ModeId::new("vim"), ModeActionId::new("enter-insert"));
         assert_eq!(
             b.resolve_key(KeyEvent::shift_arrow(ArrowKey::Left)),
-            Some(Command::Content(ContentCommand::Text(
-                TextCommand::ExtendLeftBy(1)
+            Some(Command::Content(ContentCommand::Edit(
+                EditCommand::ExtendLeftBy(1)
             )))
         );
         assert_eq!(
             b.resolve_key(KeyEvent::shift_arrow(ArrowKey::Right)),
-            Some(Command::Content(ContentCommand::Text(
-                TextCommand::ExtendRightBy(1)
+            Some(Command::Content(ContentCommand::Edit(
+                EditCommand::ExtendRightBy(1)
             )))
         );
         assert_eq!(
             b.resolve_key(KeyEvent::shift_arrow(ArrowKey::Up)),
-            Some(Command::Content(ContentCommand::Text(
-                TextCommand::ExtendUpBy(1)
+            Some(Command::Content(ContentCommand::Edit(
+                EditCommand::ExtendUpBy(1)
             )))
         );
         assert_eq!(
             b.resolve_key(KeyEvent::shift_arrow(ArrowKey::Down)),
-            Some(Command::Content(ContentCommand::Text(
-                TextCommand::ExtendDownBy(1)
+            Some(Command::Content(ContentCommand::Edit(
+                EditCommand::ExtendDownBy(1)
             )))
         );
     }
@@ -688,8 +707,8 @@ mod tests {
         let modes = BufferModes::plain_edit();
         assert_eq!(
             modes.resolve_key(KeyEvent::plain(KeyCode::Escape)),
-            Some(Command::Content(ContentCommand::Text(
-                TextCommand::CollapseSelections
+            Some(Command::Content(ContentCommand::Edit(
+                EditCommand::CollapseSelections
             )))
         );
     }
@@ -826,9 +845,9 @@ mod tests {
         b.handle_mode_command(ModeId::new("vim"), ModeActionId::new("enter-insert"));
         assert_eq!(
             b.resolve_key(KeyEvent::char('a')),
-            Some(Command::Content(ContentCommand::Text(TextCommand::InsertText(
-                "a".to_string()
-            ))))
+            Some(Command::Content(ContentCommand::Edit(
+                EditCommand::InsertText("a".to_string())
+            )))
         );
     }
 
