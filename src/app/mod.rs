@@ -163,21 +163,21 @@ impl<F: Frontend> App<F> {
                         content.handle_mode_command(mode, action);
                     }
                 }
-                ContentCommand::Text(_) => {}
+                ContentCommand::Edit(_) => {}
             },
             DispatchCommand::ViewContent {
                 command,
                 space,
                 content,
             } => {
-                if let ContentCommand::Text(command) = command {
+                if let ContentCommand::Edit(command) = command {
                     let content = self
                         .contents
                         .get_mut(&content)
                         .and_then(|c| c.buffer_mut())
                         .expect("text command target is a buffer");
                     let view = self.views.get_mut(&space).expect("target view exists");
-                    executor::execute_text_command(command, content, view.selections_mut());
+                    executor::execute_edit_command(command, content, view.selections_mut());
                 }
             }
             DispatchCommand::Noop => {}
@@ -335,7 +335,7 @@ impl RenderQuery for AppQuery<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::command::{Command, TextCommand};
+    use crate::core::command::{Command, EditCommand};
     use crate::frontend::Frontend;
     use crate::protocol::content_query::{ContentData, ContentQuery, RenderQuery, RowRange};
     use crate::protocol::frontend_event::ResizeEvent;
@@ -482,7 +482,7 @@ mod tests {
         app.views.insert(other_sid, View::new(other_cid));
 
         app.execute_command(DispatchCommand::ViewContent {
-            command: ContentCommand::Text(TextCommand::InsertText("Z".to_string())),
+            command: ContentCommand::Edit(EditCommand::InsertText("Z".to_string())),
             space: other_sid,
             content: other_cid,
         })

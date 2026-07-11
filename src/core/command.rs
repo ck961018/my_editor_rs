@@ -18,16 +18,9 @@ pub enum AppCommand {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContentCommand {
-    Text(EditCommand),
+    Edit(EditCommand),
     Save,
     Mode { mode: ModeId, action: ModeActionId },
-}
-
-impl ContentCommand {
-    #[allow(non_snake_case)] // Temporary constructor bridge while Task 3 migrates pattern matches.
-    pub fn Edit(command: EditCommand) -> Self {
-        Self::Text(command)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,20 +56,24 @@ impl From<EditCommand> for Command {
     }
 }
 
-/// Temporary app-layer compatibility alias. Task 3 removes its remaining callers.
-pub type TextCommand = EditCommand;
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn text_command_wraps_as_content_command() {
+    fn edit_command_wraps_as_content_command() {
         let command: Command = EditCommand::MoveLeftBy(1).into();
         assert_eq!(
             command,
             Command::Content(ContentCommand::Edit(EditCommand::MoveLeftBy(1)))
         );
+    }
+
+    #[test]
+    fn edit_command_uses_the_edit_variant() {
+        let command = ContentCommand::Edit(EditCommand::MoveLeftBy(1));
+
+        assert!(matches!(command, ContentCommand::Edit(_)));
     }
 
     #[test]

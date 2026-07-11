@@ -1,16 +1,16 @@
 use crate::core::buffer::Buffer;
-use crate::core::command::TextCommand;
+use crate::core::command::EditCommand;
 use crate::protocol::selection::Selections;
 
 /// 执行文本编辑命令。全局/多光标变体不进此处（App 分流）。
-pub fn execute_text_command(
-    command: TextCommand,
+pub fn execute_edit_command(
+    command: EditCommand,
     buffer: &mut Buffer,
     selections: &mut Selections,
 ) {
     match command {
         // Left/Right 有端点语义：非空收缩到 min/max（不额外移），空则移动 head
-        TextCommand::MoveLeftBy(n) => {
+        EditCommand::MoveLeftBy(n) => {
             for sel in selections.all_mut() {
                 if sel.anchor != sel.head {
                     sel.head = if sel.anchor.char_index < sel.head.char_index {
@@ -24,7 +24,7 @@ pub fn execute_text_command(
                 Buffer::collapse_to_head(sel);
             }
         }
-        TextCommand::MoveRightBy(n) => {
+        EditCommand::MoveRightBy(n) => {
             for sel in selections.all_mut() {
                 if sel.anchor != sel.head {
                     sel.head = if sel.anchor.char_index > sel.head.char_index {
@@ -39,59 +39,59 @@ pub fn execute_text_command(
             }
         }
         // Up/Down 无端点语义：统一 move_head + collapse（取消并继续上下移）
-        TextCommand::MoveUpBy(n) => {
+        EditCommand::MoveUpBy(n) => {
             for sel in selections.all_mut() {
                 buffer.move_head_up(sel, n);
                 Buffer::collapse_to_head(sel);
             }
         }
-        TextCommand::MoveDownBy(n) => {
+        EditCommand::MoveDownBy(n) => {
             for sel in selections.all_mut() {
                 buffer.move_head_down(sel, n);
                 Buffer::collapse_to_head(sel);
             }
         }
-        TextCommand::MoveBy { chars, lines } => {
+        EditCommand::MoveBy { chars, lines } => {
             for sel in selections.all_mut() {
                 buffer.move_head_by(sel, chars, lines);
                 Buffer::collapse_to_head(sel);
             }
         }
         // Extend：只动 head 不碰 anchor，不 collapse（选区变非空）
-        TextCommand::ExtendLeftBy(n) => {
+        EditCommand::ExtendLeftBy(n) => {
             for sel in selections.all_mut() {
                 buffer.move_head_left(sel, n);
             }
         }
-        TextCommand::ExtendRightBy(n) => {
+        EditCommand::ExtendRightBy(n) => {
             for sel in selections.all_mut() {
                 buffer.move_head_right(sel, n);
             }
         }
-        TextCommand::ExtendUpBy(n) => {
+        EditCommand::ExtendUpBy(n) => {
             for sel in selections.all_mut() {
                 buffer.move_head_up(sel, n);
             }
         }
-        TextCommand::ExtendDownBy(n) => {
+        EditCommand::ExtendDownBy(n) => {
             for sel in selections.all_mut() {
                 buffer.move_head_down(sel, n);
             }
         }
         // Escape：collapse to head + 仅留 primary
-        TextCommand::CollapseSelections => {
+        EditCommand::CollapseSelections => {
             for sel in selections.all_mut() {
                 Buffer::collapse_to_head(sel);
             }
             selections.retain_primary();
         }
-        TextCommand::MoveTo { char_idx, line_idx } => {
+        EditCommand::MoveTo { char_idx, line_idx } => {
             buffer.set_head(selections.primary_mut(), char_idx, line_idx);
             Buffer::collapse_to_head(selections.primary_mut());
             selections.retain_primary();
         }
-        TextCommand::InsertText(text) => buffer.insert_at_selections(selections, &text),
-        TextCommand::Delete(n) => buffer.delete_at_selections(selections, n),
+        EditCommand::InsertText(text) => buffer.insert_at_selections(selections, &text),
+        EditCommand::Delete(n) => buffer.delete_at_selections(selections, n),
     }
 }
 
@@ -99,7 +99,7 @@ pub fn execute_text_command(
 mod tests {
     use super::*;
     use crate::core::buffer::Buffer;
-    use crate::core::command::TextCommand;
+    use crate::core::command::EditCommand;
     use crate::protocol::selection::{CursorPos, Selection, Selections};
 
     fn single_sel(at: CursorPos) -> Selections {
@@ -110,7 +110,7 @@ mod tests {
     fn insert_text_changes_buffer_and_selection() {
         let mut buf = Buffer::new();
         let mut s = single_sel(CursorPos::origin());
-        execute_text_command(TextCommand::InsertText("hi".to_string()), &mut buf, &mut s);
+        execute_edit_command(EditCommand::InsertText("hi".to_string()), &mut buf, &mut s);
         assert_eq!(buf.slice().to_string(), "hi");
         assert_eq!(s.primary().head().char_index, 2);
         assert_eq!(s.primary().anchor, s.primary().head());
@@ -127,7 +127,7 @@ mod tests {
             buf.recompute_cursor(&mut c);
             single_sel(c)
         };
-        execute_text_command(TextCommand::Delete(-1), &mut buf, &mut s);
+        execute_edit_command(EditCommand::Delete(-1), &mut buf, &mut s);
         assert_eq!(buf.slice().to_string(), "a");
         assert_eq!(s.primary().head().char_index, 1);
         assert_eq!(s.primary().anchor, s.primary().head());
@@ -138,7 +138,7 @@ mod tests {
         let mut buf = Buffer::new();
         buf.insert_char(0, 'a');
         let mut s = single_sel(CursorPos::origin());
-        execute_text_command(TextCommand::MoveRightBy(1), &mut buf, &mut s);
+        execute_edit_command(EditCommand::MoveRightBy(1), &mut buf, &mut s);
         assert_eq!(s.primary().head().char_index, 1);
         assert_eq!(s.primary().anchor, s.primary().head());
     }
@@ -154,8 +154,8 @@ mod tests {
             ],
             0,
         );
-        execute_text_command(
-            TextCommand::MoveTo {
+        execute_edit_command(
+            EditCommand::MoveTo {
                 char_idx: 0,
                 line_idx: 0,
             },
@@ -184,7 +184,7 @@ mod tests {
         buf.insert_char(1, 'b');
         buf.insert_char(2, 'c');
         let mut s = non_empty_sel(1, 3, &buf);
-        execute_text_command(TextCommand::MoveLeftBy(1), &mut buf, &mut s);
+        execute_edit_command(EditCommand::MoveLeftBy(1), &mut buf, &mut s);
         assert_eq!(s.primary().head().char_index, 1);
         assert_eq!(s.primary().anchor, s.primary().head());
     }
@@ -196,7 +196,7 @@ mod tests {
         buf.insert_char(1, 'b');
         buf.insert_char(2, 'c');
         let mut s = non_empty_sel(3, 1, &buf);
-        execute_text_command(TextCommand::MoveLeftBy(1), &mut buf, &mut s);
+        execute_edit_command(EditCommand::MoveLeftBy(1), &mut buf, &mut s);
         assert_eq!(s.primary().head().char_index, 1);
         assert_eq!(s.primary().anchor, s.primary().head());
     }
@@ -208,7 +208,7 @@ mod tests {
         buf.insert_char(1, 'b');
         buf.insert_char(2, 'c');
         let mut s = non_empty_sel(1, 3, &buf);
-        execute_text_command(TextCommand::MoveRightBy(1), &mut buf, &mut s);
+        execute_edit_command(EditCommand::MoveRightBy(1), &mut buf, &mut s);
         assert_eq!(s.primary().head().char_index, 3);
         assert_eq!(s.primary().anchor, s.primary().head());
     }
@@ -219,7 +219,7 @@ mod tests {
         buf.insert_char(0, 'a');
         buf.insert_char(1, 'b');
         let mut s = non_empty_sel(2, 2, &buf);
-        execute_text_command(TextCommand::MoveLeftBy(1), &mut buf, &mut s);
+        execute_edit_command(EditCommand::MoveLeftBy(1), &mut buf, &mut s);
         assert_eq!(s.primary().head().char_index, 1);
         assert_eq!(s.primary().anchor, s.primary().head());
     }
@@ -231,7 +231,7 @@ mod tests {
         buf.insert_char(1, 'b');
         buf.insert_char(2, 'c');
         let mut s = non_empty_sel(2, 2, &buf);
-        execute_text_command(TextCommand::ExtendLeftBy(1), &mut buf, &mut s);
+        execute_edit_command(EditCommand::ExtendLeftBy(1), &mut buf, &mut s);
         assert_eq!(s.primary().head().char_index, 1);
         assert_eq!(s.primary().anchor.char_index, 2);
         assert!(s.primary().anchor != s.primary().head());
@@ -242,7 +242,7 @@ mod tests {
         let mut buf = Buffer::new();
         buf.insert_char(0, 'a');
         let mut s = non_empty_sel(0, 1, &buf);
-        execute_text_command(TextCommand::CollapseSelections, &mut buf, &mut s);
+        execute_edit_command(EditCommand::CollapseSelections, &mut buf, &mut s);
         assert_eq!(s.primary().anchor, s.primary().head());
         assert_eq!(s.primary().head().char_index, 1);
         assert_eq!(s.all().count(), 1);
@@ -256,7 +256,7 @@ mod tests {
             "hello",
         );
         let mut s = non_empty_sel(1, 4, &buf);
-        execute_text_command(TextCommand::InsertText("XY".to_string()), &mut buf, &mut s);
+        execute_edit_command(EditCommand::InsertText("XY".to_string()), &mut buf, &mut s);
         assert_eq!(buf.slice().to_string(), "hXYo");
         assert_eq!(s.primary().head().char_index, 3);
         assert_eq!(s.primary().anchor, s.primary().head());

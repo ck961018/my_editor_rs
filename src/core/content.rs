@@ -76,7 +76,7 @@ impl Content {
 
         match input {
             ContentInput::WithSelections {
-                command: ContentCommand::Text(command),
+                command: ContentCommand::Edit(command),
                 selections,
             } => {
                 apply_edit(command, buffer, selections);
@@ -106,7 +106,7 @@ impl Content {
                 }
                 ContentEffect::None
             }
-            ContentInput::Command(ContentCommand::Text(_))
+            ContentInput::Command(ContentCommand::Edit(_))
             | ContentInput::WithSelections {
                 command: ContentCommand::Save | ContentCommand::Mode { .. },
                 ..

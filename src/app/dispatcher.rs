@@ -178,10 +178,10 @@ fn resolve_command(
     match command {
         Command::App(command) => Some(DispatchCommand::App(command)),
         Command::Noop => Some(DispatchCommand::Noop),
-        Command::Content(ContentCommand::Text(command)) => {
+        Command::Content(ContentCommand::Edit(command)) => {
             let (space, content) = view_content_target(source, focused, scene, contents)?;
             Some(DispatchCommand::ViewContent {
-                command: ContentCommand::Text(command),
+                command: ContentCommand::Edit(command),
                 space,
                 content,
             })
@@ -234,7 +234,7 @@ pub fn default_global_keymap() -> Keymap {
 mod tests {
     use super::*;
     use crate::core::buffer::Buffer;
-    use crate::core::command::{AppCommand, ContentCommand, TextCommand};
+    use crate::core::command::{AppCommand, ContentCommand, EditCommand};
     use crate::core::content::ContentHandler;
     use crate::core::mode::{ModeActionId, ModeId};
     use crate::core::status_bar::StatusBar;
@@ -346,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn vim_h_resolves_to_view_content_text_command() {
+    fn vim_h_resolves_to_view_content_edit_command() {
         let (mut dispatcher, scene, focused, contents) = fixture();
 
         let command = dispatcher
@@ -356,7 +356,7 @@ mod tests {
         assert_eq!(
             command,
             DispatchCommand::ViewContent {
-                command: ContentCommand::Text(TextCommand::MoveLeftBy(1)),
+                command: ContentCommand::Edit(EditCommand::MoveLeftBy(1)),
                 space: focused,
                 content: ContentId(0),
             }
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn vim_j_resolves_to_view_content_text_command() {
+    fn vim_j_resolves_to_view_content_edit_command() {
         let (mut dispatcher, scene, focused, contents) = fixture();
 
         let command = dispatcher
@@ -374,7 +374,7 @@ mod tests {
         assert_eq!(
             command,
             DispatchCommand::ViewContent {
-                command: ContentCommand::Text(TextCommand::MoveDownBy(1)),
+                command: ContentCommand::Edit(EditCommand::MoveDownBy(1)),
                 space: focused,
                 content: ContentId(0),
             }
@@ -382,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn vim_k_resolves_to_view_content_text_command() {
+    fn vim_k_resolves_to_view_content_edit_command() {
         let (mut dispatcher, scene, focused, contents) = fixture();
 
         let command = dispatcher
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(
             command,
             DispatchCommand::ViewContent {
-                command: ContentCommand::Text(TextCommand::MoveUpBy(1)),
+                command: ContentCommand::Edit(EditCommand::MoveUpBy(1)),
                 space: focused,
                 content: ContentId(0),
             }
@@ -400,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn vim_l_resolves_to_view_content_text_command() {
+    fn vim_l_resolves_to_view_content_edit_command() {
         let (mut dispatcher, scene, focused, contents) = fixture();
 
         let command = dispatcher
@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(
             command,
             DispatchCommand::ViewContent {
-                command: ContentCommand::Text(TextCommand::MoveRightBy(1)),
+                command: ContentCommand::Edit(EditCommand::MoveRightBy(1)),
                 space: focused,
                 content: ContentId(0),
             }
@@ -433,7 +433,7 @@ mod tests {
         assert_eq!(
             command,
             DispatchCommand::ViewContent {
-                command: ContentCommand::Text(TextCommand::InsertText("a".to_string())),
+                command: ContentCommand::Edit(EditCommand::InsertText("a".to_string())),
                 space: focused,
                 content: ContentId(0),
             }
@@ -455,7 +455,7 @@ mod tests {
         assert_eq!(
             command,
             DispatchCommand::ViewContent {
-                command: ContentCommand::Text(TextCommand::InsertText("\n".to_string())),
+                command: ContentCommand::Edit(EditCommand::InsertText("\n".to_string())),
                 space: focused,
                 content: ContentId(0),
             }
@@ -482,7 +482,7 @@ mod tests {
         assert_eq!(
             command,
             DispatchCommand::ViewContent {
-                command: ContentCommand::Text(TextCommand::MoveLeftBy(1)),
+                command: ContentCommand::Edit(EditCommand::MoveLeftBy(1)),
                 space: focused,
                 content: ContentId(0),
             }
@@ -503,7 +503,7 @@ mod tests {
         let mut global = Keymap::new();
         global.bind(
             KeyEvent::char('g'),
-            Command::Content(ContentCommand::Text(TextCommand::InsertText("g".to_string()))),
+            Command::Content(ContentCommand::Edit(EditCommand::InsertText("g".to_string()))),
         );
         let mut dispatcher = Dispatcher::new(global);
 
@@ -514,7 +514,7 @@ mod tests {
         assert_eq!(
             command,
             DispatchCommand::ViewContent {
-                command: ContentCommand::Text(TextCommand::InsertText("g".to_string())),
+                command: ContentCommand::Edit(EditCommand::InsertText("g".to_string())),
                 space: focused,
                 content: editor,
             }
@@ -543,7 +543,7 @@ mod tests {
         // 但 capture_chain 用 c.keymap()（空 keymap 的 ContentHandler 实现）——绑 Ctrl+Q 到它即可命中。
         contents.get_mut(&ContentId(0)).unwrap().keymap_mut().bind(
             KeyEvent::ctrl('q'),
-            Command::Content(ContentCommand::Text(TextCommand::InsertText("q".to_string()))),
+            Command::Content(ContentCommand::Edit(EditCommand::InsertText("q".to_string()))),
         );
 
         let command = dispatcher
@@ -553,7 +553,7 @@ mod tests {
         assert_eq!(
             command,
             DispatchCommand::ViewContent {
-                command: ContentCommand::Text(TextCommand::InsertText("q".to_string())),
+                command: ContentCommand::Edit(EditCommand::InsertText("q".to_string())),
                 space: focused,
                 content: ContentId(0),
             }
