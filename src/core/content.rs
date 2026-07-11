@@ -47,6 +47,13 @@ impl Content {
         }
     }
 
+    pub fn keymap_mut(&mut self) -> &mut Keymap {
+        match self {
+            Self::Buffer(buffer) => buffer.keymap_mut(),
+            Self::StatusBar(status_bar) => status_bar.keymap_mut(),
+        }
+    }
+
     pub fn resolve_key(&self, key: KeyEvent) -> Option<Command> {
         match self {
             Self::Buffer(buffer) => buffer.resolve_key(key),
@@ -105,5 +112,24 @@ impl Content {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::core::command::{Command, ContentCommand, EditCommand};
+    use crate::protocol::key_event::KeyEvent;
+
+    #[test]
+    fn keymap_mut_updates_static_buffer_content_keymap() {
+        let mut content = Content::Buffer(Buffer::new());
+        let command = Command::Content(ContentCommand::Edit(EditCommand::CollapseSelections));
+
+        content
+            .keymap_mut()
+            .bind(KeyEvent::char('x'), command.clone());
+
+        assert_eq!(
+            content.keymap().lookup(KeyEvent::char('x')),
+            Some(&KeyBinding::Command(command))
+        );
+    }
+
     // Cursors 测试已移至 protocol::selection。本模块无剩余测试。
 }

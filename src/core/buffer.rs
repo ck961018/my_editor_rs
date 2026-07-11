@@ -36,7 +36,6 @@ impl Buffer {
         &self.keymap
     }
 
-    #[cfg(test)]
     pub(crate) fn keymap_mut(&mut self) -> &mut Keymap {
         &mut self.keymap
     }

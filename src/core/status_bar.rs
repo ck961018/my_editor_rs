@@ -20,6 +20,10 @@ impl StatusBar {
         &self.keymap
     }
 
+    pub(crate) fn keymap_mut(&mut self) -> &mut Keymap {
+        &mut self.keymap
+    }
+
     #[allow(dead_code)] // Test helper.
     pub fn target_content_id(&self) -> ContentId {
         self.target_content_id
