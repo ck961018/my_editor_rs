@@ -66,7 +66,7 @@ impl<F: Frontend> App<F> {
             status_content,
         )
         .expect("valid editor scene");
-        let views = build_views(&scene);
+        let views = build_views(&scene, &contents);
         let dispatcher = Dispatcher::new(default_global_keymap());
         let (message_tx, message_rx) = mpsc::unbounded_channel::<AppMessage>();
         Ok(Self {
@@ -161,15 +161,17 @@ impl<F: Frontend> App<F> {
                 space,
                 content,
             } => {
+                let (selections, runtime) = self
+                    .views
+                    .get_mut(&space)
+                    .expect("target view exists")
+                    .selections_and_runtime_mut();
                 let effect = self.contents.execute(
                     content,
-                    ContentInput::WithSelections {
+                    ContentInput::View {
                         command,
-                        selections: self
-                            .views
-                            .get_mut(&space)
-                            .expect("target view exists")
-                            .selections_mut(),
+                        selections,
+                        runtime,
                     },
                 );
                 self.handle_content_effect(content, effect);
@@ -227,21 +229,29 @@ impl<F: Frontend> App<F> {
 }
 
 /// 遍历 scene 所有 Content space，为每个建 View（绑定其 content）。
-fn build_views(scene: &Scene) -> HashMap<SpaceId, View> {
+fn build_views(scene: &Scene, contents: &ContentStore) -> HashMap<SpaceId, View> {
     let mut views = HashMap::new();
-    collect_content_spaces(scene, scene.root, &mut views);
+    collect_content_spaces(scene, scene.root, contents, &mut views);
     views
 }
 
-fn collect_content_spaces(scene: &Scene, sid: SpaceId, out: &mut HashMap<SpaceId, View>) {
+fn collect_content_spaces(
+    scene: &Scene,
+    sid: SpaceId,
+    contents: &ContentStore,
+    out: &mut HashMap<SpaceId, View>,
+) {
     let node = scene.node(sid);
     match &node.space.kind {
         SpaceKind::Content { content } => {
-            out.insert(sid, View::new(*content));
+            let runtime = contents
+                .create_runtime(*content)
+                .expect("scene content exists in content store");
+            out.insert(sid, View::new(*content, runtime));
         }
         SpaceKind::Container { children, .. } => {
             for c in children {
-                collect_content_spaces(scene, *c, out);
+                collect_content_spaces(scene, *c, contents, out);
             }
         }
     }
@@ -438,7 +448,11 @@ mod tests {
         app.scene = scene;
         app.contents
             .insert(other_cid, Content::Buffer(Buffer::new()));
-        app.views.insert(other_sid, View::new(other_cid));
+        let runtime = app
+            .contents
+            .create_runtime(other_cid)
+            .expect("content exists");
+        app.views.insert(other_sid, View::new(other_cid, runtime));
 
         app.execute_command(DispatchCommand::ViewContent {
             command: ContentCommand::Edit(EditCommand::InsertText("Z".to_string())),

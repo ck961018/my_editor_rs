@@ -1,6 +1,7 @@
 //! 视图实例的编辑会话：绑定一个 content + 持选区。
 //! 按 SpaceId 索引（App.views），同 content 可被多个 View 绑定（多视图铺路）。
 
+use crate::core::content_runtime::ContentRuntime;
 use crate::protocol::ids::ContentId;
 use crate::protocol::selection::{CursorPos, Selection, Selections};
 
@@ -9,13 +10,15 @@ pub struct View {
     #[allow(dead_code)]
     content: ContentId,
     selections: Selections,
+    runtime: ContentRuntime,
 }
 
 impl View {
-    pub fn new(content: ContentId) -> Self {
+    pub fn new(content: ContentId, runtime: ContentRuntime) -> Self {
         Self {
             content,
             selections: Selections::single(Selection::collapsed(CursorPos::origin())),
+            runtime,
         }
     }
     #[allow(dead_code)] // 预留：多视图场景下查询 view 绑定的 content
@@ -25,18 +28,23 @@ impl View {
     pub fn selections(&self) -> &Selections {
         &self.selections
     }
-    pub fn selections_mut(&mut self) -> &mut Selections {
-        &mut self.selections
+    #[allow(dead_code)] // Task 3 reads the focused View runtime during key resolution.
+    pub fn runtime(&self) -> &ContentRuntime {
+        &self.runtime
+    }
+    pub fn selections_and_runtime_mut(&mut self) -> (&mut Selections, &mut ContentRuntime) {
+        (&mut self.selections, &mut self.runtime)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::content_runtime::{ContentRuntime, StatusBarRuntime};
 
     #[test]
     fn new_view_has_collapsed_origin_selection() {
-        let v = View::new(ContentId(0));
+        let v = View::new(ContentId(0), ContentRuntime::StatusBar(StatusBarRuntime));
         assert_eq!(v.content(), ContentId(0));
         let s = v.selections();
         assert_eq!(s.all().count(), 1);
@@ -45,13 +53,11 @@ mod tests {
     }
 
     #[test]
-    fn selections_mut_allows_edit() {
-        let mut v = View::new(ContentId(1));
-        v.selections_mut().primary_mut().head = CursorPos {
-            char_index: 5,
-            row: 0,
-            col: 5,
-        };
-        assert_eq!(v.selections().primary().head().char_index, 5);
+    fn view_borrows_selections_and_runtime_together() {
+        let mut view = View::new(ContentId(0), ContentRuntime::StatusBar(StatusBarRuntime));
+        let (selections, runtime) = view.selections_and_runtime_mut();
+
+        selections.primary_mut().head.char_index = 3;
+        assert!(matches!(runtime, ContentRuntime::StatusBar(_)));
     }
 }

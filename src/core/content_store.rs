@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::core::content::Content;
+use crate::core::content_runtime::ContentRuntime;
 use crate::core::keymap::Keymap;
 use crate::protocol::content_query::{
     ContentData, ContentQuery, DocumentStatus, RowRange, StatusBarData,
@@ -31,6 +32,22 @@ impl ContentStore {
         self.contents
             .get(&id)
             .and_then(|content| content.resolve_key(key))
+    }
+
+    pub fn create_runtime(&self, id: ContentId) -> Option<ContentRuntime> {
+        self.contents.get(&id).map(Content::create_runtime)
+    }
+
+    #[allow(dead_code)] // Task 3 switches Dispatcher to this runtime-aware key resolution path.
+    pub fn resolve_key_with_runtime(
+        &self,
+        id: ContentId,
+        runtime: &ContentRuntime,
+        key: KeyEvent,
+    ) -> Option<crate::core::command::Command> {
+        self.contents
+            .get(&id)
+            .and_then(|content| content.resolve_key_with_runtime(runtime, key))
     }
 
     pub fn execute(
@@ -108,17 +125,19 @@ mod tests {
     use crate::protocol::selection::{CursorPos, Selection, Selections};
 
     #[test]
-    fn edit_with_borrowed_selections_updates_buffer_and_selection() {
+    fn edit_with_view_runtime_updates_buffer_and_selection() {
         let id = ContentId(0);
         let mut store = ContentStore::default();
         store.insert(id, Content::Buffer(Buffer::new()));
         let mut selections = Selections::single(Selection::collapsed(CursorPos::origin()));
+        let mut runtime = store.create_runtime(id).expect("content exists");
 
         let effect = store.execute(
             id,
-            ContentInput::WithSelections {
+            ContentInput::View {
                 command: ContentCommand::Edit(EditCommand::InsertText("x".to_string())),
                 selections: &mut selections,
+                runtime: &mut runtime,
             },
         );
 

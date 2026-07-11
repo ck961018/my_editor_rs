@@ -4,6 +4,7 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::core::command::Command;
+use crate::core::content_runtime::BufferRuntime;
 use crate::core::keymap::Keymap;
 use crate::core::mode::{ModeActionId, ModeId, ModeRuntime, ModeSet};
 use crate::protocol::key_event::KeyEvent;
@@ -49,8 +50,29 @@ impl Buffer {
         self.modes.resolve_key(&self.mode_runtime, key)
     }
 
+    pub(crate) fn create_runtime(&self) -> BufferRuntime {
+        BufferRuntime::new(self.modes.create_runtime())
+    }
+
+    pub(crate) fn resolve_key_with_runtime(
+        &self,
+        runtime: &BufferRuntime,
+        key: KeyEvent,
+    ) -> Option<Command> {
+        self.modes.resolve_key(runtime.modes(), key)
+    }
+
     pub(crate) fn handle_mode_command(&mut self, mode: ModeId, action: ModeActionId) {
         self.modes.execute(&mut self.mode_runtime, mode, action);
+    }
+
+    pub(crate) fn execute_mode_with_runtime(
+        &self,
+        runtime: &mut BufferRuntime,
+        mode: ModeId,
+        action: ModeActionId,
+    ) {
+        self.modes.execute(runtime.modes_mut(), mode, action);
     }
 
     pub fn load_from_file(&mut self, path: &str) -> io::Result<()> {
