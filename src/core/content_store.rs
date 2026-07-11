@@ -20,6 +20,10 @@ impl ContentStore {
         self.contents.insert(id, content);
     }
 
+    pub fn contains(&self, id: ContentId) -> bool {
+        self.contents.contains_key(&id)
+    }
+
     pub fn keymap(&self, id: ContentId) -> Option<&Keymap> {
         self.contents.get(&id).map(Content::keymap)
     }
@@ -150,5 +154,14 @@ mod tests {
             store.query(status_bar_id, ContentQuery::StatusBarData),
             ContentData::StatusBarData(_)
         ));
+    }
+
+    #[test]
+    fn contains_reports_inserted_content_ids() {
+        let mut store = ContentStore::default();
+        store.insert(ContentId(4), Content::Buffer(Buffer::new()));
+
+        assert!(store.contains(ContentId(4)));
+        assert!(!store.contains(ContentId(5)));
     }
 }

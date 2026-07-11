@@ -25,15 +25,17 @@ use crate::frontend::Frontend;
 use crate::protocol::content_query::{ContentData, ContentQuery, RenderQuery};
 use crate::protocol::frontend_event::FrontendEvent;
 use crate::protocol::ids::{ContentId, SpaceId};
-use crate::protocol::scene::{Scene, SceneBuilder, build_editor_scene};
+use crate::protocol::scene::{
+    CloseResult, Scene, SceneBuilder, SceneError, SplitResult, build_editor_scene,
+};
 use crate::protocol::selection::{CursorPos, Selection, Selections};
-use crate::protocol::space::SpaceKind;
+use crate::protocol::space::{Sizing, SpaceKind, SplitDirection};
 
 pub struct App<F: Frontend> {
     contents: ContentStore,
     scene: Scene,
     // 预留：动态 space 分配（split/panel/overlay/minibuffer）经此 builder，避免重置 SpaceId。
-    #[allow(dead_code)]
+    #[allow(dead_code)] // 后续布局命令通过此 builder 进入 Scene。
     scene_builder: SceneBuilder,
     views: HashMap<SpaceId, View>,
     focused: SpaceId,
@@ -66,7 +68,9 @@ impl<F: Frontend> App<F> {
             status_content,
         )
         .expect("valid editor scene");
-        let views = build_views(&scene, &contents);
+        let views = reconcile_views(&scene, &contents, HashMap::new());
+        let focused = resolve_focus(&scene, editor_space, Some(editor_space))
+            .expect("initial scene has a focusable content space");
         let dispatcher = Dispatcher::new(default_global_keymap());
         let (message_tx, message_rx) = mpsc::unbounded_channel::<AppMessage>();
         Ok(Self {
@@ -74,7 +78,7 @@ impl<F: Frontend> App<F> {
             views,
             scene,
             scene_builder,
-            focused: editor_space,
+            focused,
             dispatcher,
             frontend,
             message_tx,
@@ -230,35 +234,174 @@ impl<F: Frontend> App<F> {
         self.frontend
             .render(&self.scene, &query as &dyn RenderQuery, self.focused)
     }
+
+    #[allow(dead_code)] // 本轮只提供后端入口，不接入按键或 UI。
+    fn split_space(
+        &mut self,
+        target: SpaceId,
+        content: ContentId,
+        focusable: bool,
+        direction: SplitDirection,
+        focus_new: bool,
+    ) -> Result<SplitResult, LayoutError> {
+        if !self.contents.contains(content) {
+            return Err(LayoutError::MissingContent(content));
+        }
+
+        let previous = self.focused;
+        let result =
+            self.scene_builder
+                .split(&mut self.scene, target, content, focusable, direction)?;
+        self.reconcile_layout(if focus_new {
+            Some(result.new_space)
+        } else {
+            Some(previous)
+        });
+        Ok(result)
+    }
+
+    #[allow(dead_code)] // 本轮只提供后端入口，不接入按键或 UI。
+    fn close_space(&mut self, target: SpaceId) -> Result<CloseResult, LayoutError> {
+        if content_space_focusable(&self.scene, target) == Some(true)
+            && focusable_content_count(&self.scene) == 1
+        {
+            return Err(LayoutError::WouldRemoveLastFocusable(target));
+        }
+
+        let result = self.scene_builder.close(&mut self.scene, target)?;
+        self.reconcile_layout(result.surviving_neighbor);
+        Ok(result)
+    }
+
+    #[allow(dead_code)] // 本轮只提供后端入口，不接入按键或 UI。
+    fn replace_space_content(
+        &mut self,
+        target: SpaceId,
+        content: ContentId,
+        focusable: bool,
+    ) -> Result<(), LayoutError> {
+        if !self.contents.contains(content) {
+            return Err(LayoutError::MissingContent(content));
+        }
+        if content_space_focusable(&self.scene, target) == Some(true)
+            && !focusable
+            && focusable_content_count(&self.scene) == 1
+        {
+            return Err(LayoutError::NoFocusableSpace);
+        }
+
+        self.scene_builder
+            .replace_content(&mut self.scene, target, content, focusable)?;
+        self.reconcile_layout(Some(target));
+        Ok(())
+    }
+
+    #[allow(dead_code)] // 本轮只提供后端入口，不接入按键或 UI。
+    fn set_space_sizing(&mut self, target: SpaceId, sizing: Sizing) -> Result<(), LayoutError> {
+        self.scene_builder
+            .set_sizing(&mut self.scene, target, sizing)?;
+        Ok(())
+    }
+
+    #[allow(dead_code)] // 由预留布局入口统一调用。
+    fn reconcile_layout(&mut self, preferred: Option<SpaceId>) {
+        let previous = self.focused;
+        self.views = reconcile_views(&self.scene, &self.contents, std::mem::take(&mut self.views));
+        self.focused = resolve_focus(&self.scene, previous, preferred)
+            .expect("App rejects layouts without focusable content spaces");
+    }
+}
+
+#[allow(dead_code)] // 伴随尚未接入 UI 的布局入口。
+#[derive(Debug, PartialEq, Eq)]
+enum LayoutError {
+    MissingContent(ContentId),
+    WouldRemoveLastFocusable(SpaceId),
+    NoFocusableSpace,
+    Scene(SceneError),
+}
+
+impl From<SceneError> for LayoutError {
+    fn from(error: SceneError) -> Self {
+        Self::Scene(error)
+    }
 }
 
 /// 遍历 scene 所有 Content space，为每个建 View（绑定其 content）。
-fn build_views(scene: &Scene, contents: &ContentStore) -> HashMap<SpaceId, View> {
-    let mut views = HashMap::new();
-    collect_content_spaces(scene, scene.root(), contents, &mut views);
-    views
+fn reconcile_views(
+    scene: &Scene,
+    contents: &ContentStore,
+    mut old_views: HashMap<SpaceId, View>,
+) -> HashMap<SpaceId, View> {
+    let mut bindings = Vec::new();
+    collect_content_spaces(scene, scene.root(), &mut bindings);
+    bindings
+        .into_iter()
+        .map(|(space, content)| {
+            assert!(
+                contents.contains(content),
+                "scene content exists in content store"
+            );
+            let view = match old_views.remove(&space) {
+                Some(view) if view.content() == content => view,
+                Some(_) | None => View::new(
+                    content,
+                    contents
+                        .create_runtime(content)
+                        .expect("validated content exists"),
+                ),
+            };
+            (space, view)
+        })
+        .collect()
 }
 
-fn collect_content_spaces(
-    scene: &Scene,
-    sid: SpaceId,
-    contents: &ContentStore,
-    out: &mut HashMap<SpaceId, View>,
-) {
+fn collect_content_spaces(scene: &Scene, sid: SpaceId, out: &mut Vec<(SpaceId, ContentId)>) {
     let node = scene.node(sid);
     match &node.space.kind {
         SpaceKind::Content { content, .. } => {
-            let runtime = contents
-                .create_runtime(*content)
-                .expect("scene content exists in content store");
-            out.insert(sid, View::new(*content, runtime));
+            out.push((sid, *content));
         }
         SpaceKind::Container { .. } => {
             for c in &node.children {
-                collect_content_spaces(scene, *c, contents, out);
+                collect_content_spaces(scene, *c, out);
             }
         }
     }
+}
+
+fn content_space_focusable(scene: &Scene, space: SpaceId) -> Option<bool> {
+    if !scene.contains(space) {
+        return None;
+    }
+    match &scene.node(space).space.kind {
+        SpaceKind::Content { focusable, .. } => Some(*focusable),
+        SpaceKind::Container { .. } => None,
+    }
+}
+
+#[allow(dead_code)] // 由尚未接入 UI 的 close/replace 预检使用。
+fn focusable_content_count(scene: &Scene) -> usize {
+    let mut spaces = Vec::new();
+    collect_content_spaces(scene, scene.root(), &mut spaces);
+    spaces
+        .into_iter()
+        .filter(|(space, _)| content_space_focusable(scene, *space) == Some(true))
+        .count()
+}
+
+fn resolve_focus(scene: &Scene, previous: SpaceId, preferred: Option<SpaceId>) -> Option<SpaceId> {
+    preferred
+        .filter(|space| content_space_focusable(scene, *space) == Some(true))
+        .or_else(|| (content_space_focusable(scene, previous) == Some(true)).then_some(previous))
+        .or_else(|| {
+            let mut spaces = Vec::new();
+            collect_content_spaces(scene, scene.root(), &mut spaces);
+            spaces
+                .into_iter()
+                .map(|(space, _)| space)
+                .find(|space| content_space_focusable(scene, *space) == Some(true))
+        })
 }
 
 /// 借 App 数据字段的查询适配器：render 时用它做 `&dyn RenderQuery`，
@@ -292,7 +435,7 @@ mod tests {
     };
     use crate::protocol::frontend_event::ResizeEvent;
     use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
-    use crate::protocol::space::SplitDirection;
+    use crate::protocol::space::{Sizing, SplitDirection};
     use crate::protocol::status::StatusMessage;
     use std::collections::VecDeque;
 
@@ -404,32 +547,133 @@ mod tests {
     async fn two_views_of_one_buffer_keep_independent_mode_runtime() {
         let mut app = make_app(vec![], None);
         let left = app.focused;
-        let right = app
-            .scene_builder
-            .split(
-                &mut app.scene,
-                left,
-                editor_cid(),
-                true,
-                SplitDirection::Right,
-            )
-            .unwrap()
-            .new_space;
-        app.views = build_views(&app.scene, &app.contents);
-
-        app.focused = left;
         app.handle_event(FrontendEvent::Key(KeyEvent::char('i')))
             .await
             .unwrap();
-        app.handle_event(FrontendEvent::Key(KeyEvent::char('a')))
-            .await
-            .unwrap();
-        app.focused = right;
+        let right = app
+            .split_space(left, editor_cid(), true, SplitDirection::Right, true)
+            .unwrap()
+            .new_space;
+        assert_eq!(app.focused, right);
         app.handle_event(FrontendEvent::Key(KeyEvent::char('a')))
             .await
             .unwrap();
 
-        assert_eq!(text_rows(&app, editor_cid()), vec!["a"]);
+        assert_eq!(text_rows(&app, editor_cid()), vec![""]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unchanged_space_binding_preserves_its_view_selection() {
+        let mut app = make_app(vec![], None);
+        for key in ['i', 'a', 'b', 'c'] {
+            app.handle_event(FrontendEvent::Key(KeyEvent::char(key)))
+                .await
+                .unwrap();
+        }
+
+        app.set_space_sizing(app.focused, Sizing::Fixed(12))
+            .unwrap();
+
+        assert_eq!(
+            app.views
+                .get(&app.focused)
+                .unwrap()
+                .selections()
+                .primary()
+                .head
+                .char_index,
+            3
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn replace_content_rebuilds_view_from_origin() {
+        let mut app = make_app(vec![], None);
+        let other = ContentId(9);
+        app.contents.insert(other, Content::Buffer(Buffer::new()));
+        for key in ['i', 'a', 'b', 'c'] {
+            app.handle_event(FrontendEvent::Key(KeyEvent::char(key)))
+                .await
+                .unwrap();
+        }
+
+        app.replace_space_content(app.focused, other, true).unwrap();
+
+        let view = app.views.get(&app.focused).unwrap();
+        assert_eq!(view.content(), other);
+        assert_eq!(view.selections().primary().head(), CursorPos::origin());
+        app.handle_event(FrontendEvent::Key(KeyEvent::char('a')))
+            .await
+            .unwrap();
+        assert_eq!(text_rows(&app, other), vec![""]);
+    }
+
+    #[test]
+    fn close_focused_space_prefers_surviving_neighbor_and_drops_its_view() {
+        let mut app = make_app(vec![], None);
+        let left = app.focused;
+        let right = app
+            .split_space(left, editor_cid(), true, SplitDirection::Right, true)
+            .unwrap()
+            .new_space;
+
+        app.close_space(right).unwrap();
+
+        assert_eq!(app.focused, left);
+        assert!(!app.views.contains_key(&right));
+    }
+
+    #[test]
+    fn missing_content_is_rejected_before_scene_mutation() {
+        let mut app = make_app(vec![], None);
+        let root = app.scene.root();
+
+        assert!(matches!(
+            app.split_space(root, ContentId(999), true, SplitDirection::Right, true),
+            Err(LayoutError::MissingContent(ContentId(999)))
+        ));
+        assert_eq!(app.scene.root(), root);
+    }
+
+    #[test]
+    fn preferred_inert_status_space_is_not_selected() {
+        let app = make_app(vec![], None);
+        let status = app.scene.node(app.scene.root()).children[1];
+
+        assert_eq!(
+            resolve_focus(&app.scene, app.focused, Some(status)),
+            Some(app.focused)
+        );
+    }
+
+    #[test]
+    fn closing_last_focusable_space_is_rejected() {
+        let mut app = make_app(vec![], None);
+        let status = app.scene.node(app.scene.root()).children[1];
+
+        assert!(matches!(
+            app.close_space(app.focused),
+            Err(LayoutError::WouldRemoveLastFocusable(_))
+        ));
+        assert_ne!(app.focused, status);
+    }
+
+    #[test]
+    fn replacing_only_focusable_content_with_inert_space_is_rejected() {
+        let mut app = make_app(vec![], None);
+        let focused = app.focused;
+        let other = ContentId(9);
+        app.contents.insert(other, Content::Buffer(Buffer::new()));
+
+        assert_eq!(
+            app.replace_space_content(focused, other, false),
+            Err(LayoutError::NoFocusableSpace)
+        );
+        assert_eq!(app.focused, focused);
+        assert!(matches!(
+            &app.scene.node(focused).space.kind,
+            SpaceKind::Content { content, .. } if *content == editor_cid()
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -479,24 +723,12 @@ mod tests {
     fn multi_space_edit_targets_only_focused_content() {
         let mut app = make_app(vec![], None);
         let other_cid = ContentId(9);
-        let other_sid = app
-            .scene_builder
-            .split(
-                &mut app.scene,
-                app.focused,
-                other_cid,
-                true,
-                SplitDirection::Right,
-            )
-            .unwrap()
-            .new_space;
         app.contents
             .insert(other_cid, Content::Buffer(Buffer::new()));
-        let runtime = app
-            .contents
-            .create_runtime(other_cid)
-            .expect("content exists");
-        app.views.insert(other_sid, View::new(other_cid, runtime));
+        let other_sid = app
+            .split_space(app.focused, other_cid, true, SplitDirection::Right, false)
+            .unwrap()
+            .new_space;
 
         app.execute_command(DispatchCommand::ViewContent {
             command: ContentCommand::Edit(EditCommand::InsertText("Z".to_string())),

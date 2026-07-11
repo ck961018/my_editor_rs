@@ -7,7 +7,6 @@ use crate::protocol::selection::{CursorPos, Selection, Selections};
 
 pub struct View {
     /// 绑定的 content；当前仅 View::new 写入，预留给同 content 多视图解析（spec §10）。
-    #[allow(dead_code)]
     content: ContentId,
     selections: Selections,
     runtime: ContentRuntime,
@@ -21,14 +20,12 @@ impl View {
             runtime,
         }
     }
-    #[allow(dead_code)] // 预留：多视图场景下查询 view 绑定的 content
     pub fn content(&self) -> ContentId {
         self.content
     }
     pub fn selections(&self) -> &Selections {
         &self.selections
     }
-    #[allow(dead_code)] // Task 3 reads the focused View runtime during key resolution.
     pub fn runtime(&self) -> &ContentRuntime {
         &self.runtime
     }
