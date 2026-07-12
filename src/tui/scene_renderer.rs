@@ -9,6 +9,7 @@ use crate::protocol::content_query::{
 };
 use crate::protocol::ids::SpaceId;
 use crate::protocol::scene::Scene;
+use crate::protocol::selection::CursorPos;
 use crate::protocol::status::StatusMessage;
 use crate::protocol::viewport::Viewport;
 use crate::terminal::output::Canvas;
@@ -45,14 +46,20 @@ impl SceneRenderer {
                 .viewports
                 .entry(focused)
                 .or_insert_with(Viewport::origin);
-            viewport.ensure_cursor_visible(focused_head.row, item.rect.height as usize);
+            follow_viewport(
+                viewport,
+                focused_head,
+                item.rect.width as usize,
+                item.rect.height as usize,
+            );
         }
         // 逐 Content item paint
         for item in &resolved.items {
             paint_item(item, query, &self.viewports, canvas)?;
         }
         // 焦点光标定位
-        if let Some(item) = focused_item {
+        if let Some(item) = focused_item.filter(|item| item.rect.width > 0 && item.rect.height > 0)
+        {
             let vp = self
                 .viewports
                 .get(&focused)
@@ -70,6 +77,16 @@ impl SceneRenderer {
 impl Default for SceneRenderer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn follow_viewport(viewport: &mut Viewport, head: CursorPos, width: usize, height: usize) {
+    viewport.ensure_cursor_visible(head.row, height);
+
+    if width == 0 || head.col < viewport.left_col {
+        viewport.left_col = head.col;
+    } else if head.col >= viewport.left_col.saturating_add(width) {
+        viewport.left_col = head.col - width + 1;
     }
 }
 
@@ -92,6 +109,7 @@ fn paint_item(
     if line_count > 0 {
         // editor：拉可见行
         let height = item.rect.height as usize;
+        let width = item.rect.width as usize;
         let start = vp.top_row;
         let lines = match query.content(
             item.content_id,
@@ -137,7 +155,7 @@ fn paint_item(
             } else {
                 None
             };
-            paint_line_with_highlight(canvas, line, hi)?;
+            paint_line_with_highlight(canvas, line, vp.left_col, width, hi)?;
         }
         for row in lines.len()..height {
             let screen_row = (item.rect.y + row as i32) as usize;
@@ -176,27 +194,23 @@ fn paint_item(
 fn paint_line_with_highlight(
     canvas: &mut dyn Canvas,
     line: &str,
+    left_col: usize,
+    width: usize,
     hi: Option<(usize, usize)>,
 ) -> io::Result<()> {
-    let (content, tail) = match line.strip_suffix('\n') {
-        Some(c) => (c, "\n"),
-        None => (line, ""),
-    };
+    let content = line.strip_suffix('\n').unwrap_or(line);
     // char 边界（byte offset, char），用于按列切 byte 范围
     let bounds: Vec<(usize, char)> = content.char_indices().collect();
     let content_len = bounds.len();
-    let write_seg =
+    let visible_start = left_col.min(content_len);
+    let visible_end = left_col.saturating_add(width).min(content_len);
+    let write_segment =
         |canvas: &mut dyn Canvas, from: usize, to: usize, reverse: bool| -> io::Result<()> {
             if to <= from {
                 return Ok(());
             }
-            let from = from.min(content_len);
-            let to = to.min(content_len);
-            if to <= from {
-                return Ok(());
-            }
             let start_byte = bounds[from].0;
-            let end_byte = if to >= content_len {
+            let end_byte = if to == content_len {
                 content.len()
             } else {
                 bounds[to].0
@@ -210,18 +224,19 @@ fn paint_line_with_highlight(
             }
             Ok(())
         };
-    match hi {
-        None => {
-            canvas.write_str(content)?;
-        }
-        Some((hs, he)) => {
-            write_seg(canvas, 0, hs, false)?;
-            write_seg(canvas, hs, he, true)?;
-            write_seg(canvas, he, content_len, false)?;
+    let clipped_hi = hi.and_then(|(start, end)| {
+        let start = start.max(visible_start);
+        let end = end.min(visible_end);
+        (start < end).then_some((start, end))
+    });
+    match clipped_hi {
+        None => write_segment(canvas, visible_start, visible_end, false),
+        Some((start, end)) => {
+            write_segment(canvas, visible_start, start, false)?;
+            write_segment(canvas, start, end, true)?;
+            write_segment(canvas, end, visible_end, false)
         }
     }
-    canvas.write_str(tail)?;
-    Ok(())
 }
 
 fn status_line(file_name: Option<&str>, modified: bool, message: &StatusMessage) -> String {
@@ -554,5 +569,134 @@ mod tests {
             s.contains("\x1b[7m"),
             "visible middle rows should reverse: {s}"
         );
+    }
+
+    #[test]
+    fn viewport_follows_cursor_right_and_clips_long_line() {
+        let mut builder = SceneBuilder::new();
+        let (scene, editor) =
+            build_editor_scene(&mut builder, 5, 2, ContentId(0), ContentId(1)).unwrap();
+        let query = StubQuery {
+            editor_cid: ContentId(0),
+            lines: vec!["abcdefgh".to_string()],
+            selections: Selections::single(Selection::collapsed(CursorPos {
+                char_index: 7,
+                row: 0,
+                col: 7,
+            })),
+        };
+        let mut renderer = SceneRenderer::new();
+        let mut out = Output::new(Vec::new());
+
+        renderer
+            .render(&scene, &query, editor, &mut out as &mut dyn Canvas)
+            .unwrap();
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert!(output.contains("defgh"), "output: {output}");
+        assert!(!output.contains("abc"), "output: {output}");
+        assert!(
+            output.contains("1;5H"),
+            "cursor should be at column 4: {output}"
+        );
+    }
+
+    #[test]
+    fn horizontal_viewport_moves_back_when_cursor_returns_left() {
+        let mut builder = SceneBuilder::new();
+        let (scene, editor) =
+            build_editor_scene(&mut builder, 5, 2, ContentId(0), ContentId(1)).unwrap();
+        let mut renderer = SceneRenderer::new();
+        let right_query = StubQuery {
+            editor_cid: ContentId(0),
+            lines: vec!["abcdefgh".to_string()],
+            selections: Selections::single(Selection::collapsed(CursorPos {
+                char_index: 7,
+                row: 0,
+                col: 7,
+            })),
+        };
+        let mut first = Output::new(Vec::new());
+        renderer
+            .render(&scene, &right_query, editor, &mut first as &mut dyn Canvas)
+            .unwrap();
+
+        let left_query = StubQuery {
+            editor_cid: ContentId(0),
+            lines: vec!["abcdefgh".to_string()],
+            selections: Selections::single(Selection::collapsed(CursorPos {
+                char_index: 1,
+                row: 0,
+                col: 1,
+            })),
+        };
+        let mut second = Output::new(Vec::new());
+        renderer
+            .render(&scene, &left_query, editor, &mut second as &mut dyn Canvas)
+            .unwrap();
+
+        let output = String::from_utf8(second.into_inner()).unwrap();
+        assert!(output.contains("bcdef"), "output: {output}");
+        assert!(!output.contains("abcdef"), "output: {output}");
+        assert!(
+            output.contains("1;1H"),
+            "cursor should be at column 0: {output}"
+        );
+    }
+
+    #[test]
+    fn long_row_is_clipped_without_emitting_its_newline() {
+        let mut builder = SceneBuilder::new();
+        let (scene, editor) =
+            build_editor_scene(&mut builder, 5, 2, ContentId(0), ContentId(1)).unwrap();
+        let query = StubQuery {
+            editor_cid: ContentId(0),
+            lines: vec!["abcdefgh\n".to_string()],
+            selections: Selections::single(Selection::collapsed(CursorPos::origin())),
+        };
+        let mut renderer = SceneRenderer::new();
+        let mut out = Output::new(Vec::new());
+
+        renderer
+            .render(&scene, &query, editor, &mut out as &mut dyn Canvas)
+            .unwrap();
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert!(output.contains("abcde"), "output: {output}");
+        assert!(!output.contains("abcdef"), "output: {output}");
+        assert!(!output.contains('\n'), "output: {output:?}");
+    }
+
+    #[test]
+    fn selection_highlight_is_clipped_to_horizontal_viewport() {
+        let mut builder = SceneBuilder::new();
+        let (scene, editor) =
+            build_editor_scene(&mut builder, 5, 2, ContentId(0), ContentId(1)).unwrap();
+        let query = StubQuery {
+            editor_cid: ContentId(0),
+            lines: vec!["abcdefgh".to_string()],
+            selections: Selections::single(Selection {
+                anchor: CursorPos {
+                    char_index: 1,
+                    row: 0,
+                    col: 1,
+                },
+                head: CursorPos {
+                    char_index: 7,
+                    row: 0,
+                    col: 7,
+                },
+            }),
+        };
+        let mut renderer = SceneRenderer::new();
+        let mut out = Output::new(Vec::new());
+
+        renderer
+            .render(&scene, &query, editor, &mut out as &mut dyn Canvas)
+            .unwrap();
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert!(output.contains("\x1b[7mdefg\x1b[27mh"), "output: {output}");
+        assert!(!output.contains("\x1b[7mabc"), "output: {output}");
     }
 }
