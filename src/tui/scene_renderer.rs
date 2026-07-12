@@ -189,8 +189,9 @@ fn paint_item(
     Ok(())
 }
 
-/// 画一行文本，可选反白高亮区间 [hi_start_col, hi_end_col)（按 char 列，end 用 usize::MAX 表示到行尾）。
-/// hi=None 时整行正常画。行尾换行符（若有）始终正常画，不参与反白。
+/// Paint the visible character interval `[left_col, left_col + width)` of one logical row.
+/// A trailing logical newline is discarded. `hi`, when present, is an absolute logical-column
+/// range and is clipped to the visible interval before reverse highlighting is emitted.
 fn paint_line_with_highlight(
     canvas: &mut dyn Canvas,
     line: &str,
