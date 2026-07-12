@@ -362,16 +362,37 @@ impl Buffer {
             })
             .collect();
 
-        ranges.sort_unstable_by_key(|range| std::cmp::Reverse(range.0));
-        ranges.dedup();
+        ranges.sort_unstable_by_key(|range| range.0);
+        let mut normalized_ranges: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
         for (start, end) in ranges {
+            if let Some((_, previous_end)) = normalized_ranges.last_mut()
+                && start <= *previous_end
+            {
+                *previous_end = (*previous_end).max(end);
+            } else {
+                normalized_ranges.push((start, end));
+            }
+        }
+
+        for &(start, end) in normalized_ranges.iter().rev() {
             if end > start {
                 self.rope.remove(start..end);
             }
         }
         self.modified = true;
         for (selection, start) in selections.all_mut().zip(starts) {
+            let mut deleted_before = 0;
             selection.head.char_index = start;
+            for &(range_start, range_end) in &normalized_ranges {
+                if range_start <= start && start < range_end {
+                    selection.head.char_index = range_start - deleted_before;
+                    break;
+                }
+                if range_end <= start {
+                    deleted_before += range_end - range_start;
+                    selection.head.char_index = start - deleted_before;
+                }
+            }
             self.recompute_cursor(&mut selection.head);
             Self::collapse_to_head(selection);
         }
@@ -562,6 +583,80 @@ mod tests {
         assert_eq!(buffer.slice().to_string(), "alpha ");
         assert_eq!(selections.primary().head().char_index, 6);
         assert_eq!(selections.primary().anchor, selections.primary().head());
+    }
+
+    #[test]
+    fn delete_word_backward_rebases_disjoint_non_empty_selection_starts() {
+        let mut buffer = Buffer::new();
+        for (index, ch) in "alpha beta gamma".chars().enumerate() {
+            buffer.insert_char(index, ch);
+        }
+        let mut selections = Selections::from_parts(
+            vec![
+                Selection {
+                    anchor: selection_at(&buffer, 0).primary().head(),
+                    head: selection_at(&buffer, 5).primary().head(),
+                },
+                Selection {
+                    anchor: selection_at(&buffer, 11).primary().head(),
+                    head: selection_at(&buffer, 16).primary().head(),
+                },
+            ],
+            0,
+        );
+
+        buffer.delete_word_backward_at_selections(&mut selections);
+
+        assert_eq!(buffer.slice().to_string(), " beta ");
+        assert_eq!(
+            selections
+                .all()
+                .map(|selection| selection.head.char_index)
+                .collect::<Vec<_>>(),
+            vec![0, 6]
+        );
+        assert!(
+            selections
+                .all()
+                .all(|selection| selection.anchor == selection.head)
+        );
+    }
+
+    #[test]
+    fn delete_word_backward_merges_overlapping_non_empty_selections() {
+        let mut buffer = Buffer::new();
+        for (index, ch) in "alpha beta".chars().enumerate() {
+            buffer.insert_char(index, ch);
+        }
+        let mut selections = Selections::from_parts(
+            vec![
+                Selection {
+                    anchor: selection_at(&buffer, 0).primary().head(),
+                    head: selection_at(&buffer, 7).primary().head(),
+                },
+                Selection {
+                    anchor: selection_at(&buffer, 6).primary().head(),
+                    head: selection_at(&buffer, 10).primary().head(),
+                },
+            ],
+            0,
+        );
+
+        buffer.delete_word_backward_at_selections(&mut selections);
+
+        assert_eq!(buffer.slice().to_string(), "");
+        assert_eq!(
+            selections
+                .all()
+                .map(|selection| selection.head.char_index)
+                .collect::<Vec<_>>(),
+            vec![0, 0]
+        );
+        assert!(
+            selections
+                .all()
+                .all(|selection| selection.anchor == selection.head)
+        );
     }
 
     #[test]
