@@ -677,7 +677,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn default_vim_requires_insert_before_text_input() {
+    async fn default_vim_a_enters_insert_before_text_input() {
         let mut app = make_app(
             vec![
                 FrontendEvent::Key(KeyEvent::char('a')),
@@ -689,8 +689,50 @@ mod tests {
             None,
         );
         app.run().await.unwrap();
-        assert_eq!(text_rows(&app, editor_cid()), vec!["a"]);
+        assert_eq!(text_rows(&app, editor_cid()), vec!["ia"]);
         assert!(app.tasks.is_cancelled());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn default_vim_a_appends_after_cursor_and_enters_insert() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('h')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('x')),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+
+        app.run().await.unwrap();
+
+        assert_eq!(text_rows(&app, editor_cid()), vec!["abx"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn default_vim_ctrl_w_deletes_previous_word() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::char(' ')),
+                FrontendEvent::Key(KeyEvent::char('c')),
+                FrontendEvent::Key(KeyEvent::char('d')),
+                FrontendEvent::Key(KeyEvent::ctrl('w')),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+
+        app.run().await.unwrap();
+
+        assert_eq!(text_rows(&app, editor_cid()), vec!["ab "]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

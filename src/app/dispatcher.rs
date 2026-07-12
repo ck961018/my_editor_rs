@@ -330,12 +330,25 @@ mod tests {
     }
 
     #[test]
-    fn vim_normal_char_without_binding_returns_none() {
+    fn vim_a_resolves_to_view_content_mode_command_and_z_is_unbound() {
         let (mut dispatcher, scene, focused, contents, runtime) = fixture();
 
-        assert!(
+        assert_eq!(
             dispatcher
                 .dispatch(KeyEvent::char('a'), focused, &scene, &contents, &runtime)
+                .unwrap(),
+            DispatchCommand::ViewContent {
+                command: ContentCommand::Mode {
+                    mode: ModeId::new("vim"),
+                    action: ModeActionId::new("append"),
+                },
+                space: focused,
+                content: ContentId(0),
+            }
+        );
+        assert!(
+            dispatcher
+                .dispatch(KeyEvent::char('z'), focused, &scene, &contents, &runtime)
                 .is_none()
         );
     }

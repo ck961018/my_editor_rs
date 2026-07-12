@@ -94,11 +94,13 @@ impl Content {
                 Self::Buffer(buffer),
                 ContentInput::View {
                     command: ContentCommand::Mode { mode, action },
+                    selections,
                     runtime: ContentRuntime::Buffer(runtime),
-                    ..
                 },
             ) => {
-                buffer.execute_mode(runtime, mode, action);
+                if let Some(edit) = buffer.execute_mode(runtime, mode, action) {
+                    apply_edit(edit, buffer, selections);
+                }
                 ContentEffect::None
             }
             (
@@ -210,6 +212,52 @@ mod tests {
             }))
         );
         assert!(content.resolve_key(&second, KeyEvent::char('z')).is_none());
+    }
+
+    #[test]
+    fn vim_append_collapses_selection_to_right_then_enters_insert() {
+        let mut content = Content::Buffer(Buffer::new());
+        let mut selections = Selections::single(Selection::collapsed(CursorPos::origin()));
+        let mut runtime = content.create_runtime();
+        content.execute(ContentInput::View {
+            command: ContentCommand::Mode {
+                mode: ModeId::new("vim"),
+                action: ModeActionId::new("enter-insert"),
+            },
+            selections: &mut selections,
+            runtime: &mut runtime,
+        });
+        content.execute(ContentInput::View {
+            command: ContentCommand::Edit(EditCommand::InsertText("abc".to_string())),
+            selections: &mut selections,
+            runtime: &mut runtime,
+        });
+        content.execute(ContentInput::View {
+            command: ContentCommand::Mode {
+                mode: ModeId::new("vim"),
+                action: ModeActionId::new("enter-normal"),
+            },
+            selections: &mut selections,
+            runtime: &mut runtime,
+        });
+        selections.primary_mut().anchor.char_index = 1;
+        selections.primary_mut().head.char_index = 3;
+
+        content.execute(ContentInput::View {
+            command: ContentCommand::Mode {
+                mode: ModeId::new("vim"),
+                action: ModeActionId::new("append"),
+            },
+            selections: &mut selections,
+            runtime: &mut runtime,
+        });
+
+        assert_eq!(selections.primary().head().char_index, 3);
+        assert_eq!(selections.primary().anchor, selections.primary().head());
+        assert_eq!(
+            content.resolve_key(&runtime, KeyEvent::char('x')),
+            Some(EditCommand::InsertText("x".to_string()).into()),
+        );
     }
 
     #[test]

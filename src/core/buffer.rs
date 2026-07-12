@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use std::io;
 use std::path::PathBuf;
 
-use crate::core::command::Command;
+use crate::core::command::{Command, EditCommand};
 use crate::core::content_runtime::BufferRuntime;
 use crate::core::keymap::Keymap;
 use crate::core::mode::{ModeActionId, ModeId, ModeSet};
@@ -56,8 +56,8 @@ impl Buffer {
         runtime: &mut BufferRuntime,
         mode: ModeId,
         action: ModeActionId,
-    ) {
-        self.modes.execute(runtime.modes_mut(), mode, action);
+    ) -> Option<EditCommand> {
+        self.modes.execute(runtime.modes_mut(), mode, action)
     }
 
     pub fn load_from_file(&mut self, path: &str) -> io::Result<()> {
