@@ -47,6 +47,7 @@ pub enum EditCommand {
     ExtendDownBy(usize),
     InsertText(String),
     Delete(isize),
+    DeleteWordBackward,
     CollapseSelections,
 }
 

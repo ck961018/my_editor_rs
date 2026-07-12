@@ -235,6 +235,7 @@ fn vim_insert_keymap() -> Keymap {
     km.bind_edit(KeyEvent::ctrl('b'), EditCommand::MoveLeftBy(1));
     km.bind_edit(KeyEvent::ctrl('f'), EditCommand::MoveRightBy(1));
     km.bind_edit(KeyEvent::ctrl('h'), EditCommand::Delete(-1));
+    km.bind_edit(KeyEvent::ctrl('w'), EditCommand::DeleteWordBackward);
     km
 }
 
@@ -380,6 +381,25 @@ mod tests {
         assert_eq!(
             modes.resolve_key(&runtime, KeyEvent::ctrl('h')),
             Some(EditCommand::Delete(-1).into()),
+        );
+    }
+
+    #[test]
+    fn vim_insert_ctrl_w_resolves_to_delete_word_backward() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+        assert_eq!(
+            modes.execute(
+                &mut runtime,
+                ModeId::new("vim"),
+                ModeActionId::new("enter-insert"),
+            ),
+            None,
+        );
+
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::ctrl('w')),
+            Some(EditCommand::DeleteWordBackward.into()),
         );
     }
 

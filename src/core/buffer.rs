@@ -341,6 +341,41 @@ impl Buffer {
             Self::collapse_to_head(sel);
         }
     }
+
+    pub fn delete_word_backward_at_selections(&mut self, selections: &mut Selections) {
+        let starts: Vec<usize> = selections
+            .all()
+            .map(|selection| {
+                if selection.anchor != selection.head {
+                    selection.anchor.char_index.min(selection.head.char_index)
+                } else {
+                    backward_word_start(&self.rope, selection.head.char_index)
+                }
+            })
+            .collect();
+        let mut ranges: Vec<(usize, usize)> = selections
+            .all()
+            .zip(starts.iter().copied())
+            .map(|(selection, start)| {
+                let end = selection.anchor.char_index.max(selection.head.char_index);
+                (start, end)
+            })
+            .collect();
+
+        ranges.sort_unstable_by_key(|range| std::cmp::Reverse(range.0));
+        ranges.dedup();
+        for (start, end) in ranges {
+            if end > start {
+                self.rope.remove(start..end);
+            }
+        }
+        self.modified = true;
+        for (selection, start) in selections.all_mut().zip(starts) {
+            selection.head.char_index = start;
+            self.recompute_cursor(&mut selection.head);
+            Self::collapse_to_head(selection);
+        }
+    }
 }
 
 impl Default for Buffer {
@@ -355,6 +390,28 @@ fn line_content_len(rope: &Rope, row: usize) -> usize {
         Some(rest) => rest.chars().count(),
         None => s.chars().count(),
     }
+}
+
+fn backward_word_start(rope: &Rope, char_index: usize) -> usize {
+    let mut start = char_index.min(rope.len_chars());
+    while start > 0 && rope.char(start - 1).is_whitespace() {
+        start -= 1;
+    }
+    if start == 0 {
+        return 0;
+    }
+    if is_word_char(rope.char(start - 1)) {
+        while start > 0 && is_word_char(rope.char(start - 1)) {
+            start -= 1;
+        }
+    } else {
+        start -= 1;
+    }
+    start
+}
+
+fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
 }
 
 #[cfg(test)]
@@ -374,6 +431,13 @@ mod tests {
 
     fn single_sel(at: CursorPos) -> Selections {
         Selections::single(Selection::collapsed(at))
+    }
+
+    fn selection_at(buffer: &Buffer, char_index: usize) -> Selections {
+        let mut cursor = CursorPos::origin();
+        cursor.char_index = char_index;
+        buffer.recompute_cursor(&mut cursor);
+        Selections::single(Selection::collapsed(cursor))
     }
 
     #[test]
@@ -424,6 +488,80 @@ mod tests {
         b.delete_at_selections(&mut s2, -1);
         assert_eq!(b.slice().to_string(), "a");
         assert_eq!(s2.primary().anchor, s2.primary().head());
+    }
+
+    #[test]
+    fn delete_word_backward_removes_unicode_word() {
+        let mut buffer = Buffer::new();
+        for (index, ch) in "caf\u{00e9}_42".chars().enumerate() {
+            buffer.insert_char(index, ch);
+        }
+        let mut selections = selection_at(&buffer, 7);
+
+        buffer.delete_word_backward_at_selections(&mut selections);
+
+        assert_eq!(buffer.slice().to_string(), "");
+        assert_eq!(selections.primary().head().char_index, 0);
+    }
+
+    #[test]
+    fn delete_word_backward_removes_one_punctuation_unit() {
+        let mut buffer = Buffer::new();
+        for (index, ch) in "alpha!!".chars().enumerate() {
+            buffer.insert_char(index, ch);
+        }
+        let mut selections = selection_at(&buffer, 7);
+
+        buffer.delete_word_backward_at_selections(&mut selections);
+
+        assert_eq!(buffer.slice().to_string(), "alpha!");
+        assert_eq!(selections.primary().head().char_index, 6);
+    }
+
+    #[test]
+    fn delete_word_backward_skips_whitespace_and_crosses_newline() {
+        let mut buffer = Buffer::new();
+        for (index, ch) in "alpha \n beta".chars().enumerate() {
+            buffer.insert_char(index, ch);
+        }
+        let mut selections = selection_at(&buffer, 8);
+
+        buffer.delete_word_backward_at_selections(&mut selections);
+
+        assert_eq!(buffer.slice().to_string(), "beta");
+        assert_eq!(selections.primary().head().char_index, 0);
+    }
+
+    #[test]
+    fn delete_word_backward_deletes_non_empty_selection() {
+        let mut buffer = Buffer::new();
+        for (index, ch) in "alpha beta".chars().enumerate() {
+            buffer.insert_char(index, ch);
+        }
+        let mut selections = selection_at(&buffer, 6);
+        selections.primary_mut().head = selection_at(&buffer, 10).primary().head;
+
+        buffer.delete_word_backward_at_selections(&mut selections);
+
+        assert_eq!(buffer.slice().to_string(), "alpha ");
+        assert_eq!(selections.primary().head().char_index, 6);
+        assert_eq!(selections.primary().anchor, selections.primary().head());
+    }
+
+    #[test]
+    fn delete_word_backward_deletes_backward_selection() {
+        let mut buffer = Buffer::new();
+        for (index, ch) in "alpha beta".chars().enumerate() {
+            buffer.insert_char(index, ch);
+        }
+        let mut selections = selection_at(&buffer, 10);
+        selections.primary_mut().head = selection_at(&buffer, 6).primary().head;
+
+        buffer.delete_word_backward_at_selections(&mut selections);
+
+        assert_eq!(buffer.slice().to_string(), "alpha ");
+        assert_eq!(selections.primary().head().char_index, 6);
+        assert_eq!(selections.primary().anchor, selections.primary().head());
     }
 
     #[test]

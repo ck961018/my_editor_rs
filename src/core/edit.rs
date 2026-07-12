@@ -88,6 +88,7 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
         }
         EditCommand::InsertText(text) => buffer.insert_at_selections(selections, &text),
         EditCommand::Delete(n) => buffer.delete_at_selections(selections, n),
+        EditCommand::DeleteWordBackward => buffer.delete_word_backward_at_selections(selections),
     }
 }
 
@@ -127,6 +128,27 @@ mod tests {
         assert_eq!(buf.slice().to_string(), "a");
         assert_eq!(s.primary().head().char_index, 1);
         assert_eq!(s.primary().anchor, s.primary().head());
+    }
+
+    #[test]
+    fn delete_word_backward_dispatches_to_buffer() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(CursorPos::origin()), "alpha beta");
+        let mut selections = single_sel({
+            let mut cursor = CursorPos::origin();
+            cursor.char_index = 10;
+            buffer.recompute_cursor(&mut cursor);
+            cursor
+        });
+
+        apply_edit(
+            EditCommand::DeleteWordBackward,
+            &mut buffer,
+            &mut selections,
+        );
+
+        assert_eq!(buffer.slice().to_string(), "alpha ");
+        assert_eq!(selections.primary().head().char_index, 6);
     }
 
     #[test]
