@@ -41,6 +41,8 @@
 - `src/tui/`：前端布局与渲染层，拥有 Taffy 布局、viewport 跟随逻辑和
   `TuiFrontend<W>`。
 - `src/app/`：主循环、事件分发、操作执行、内容表、View 归属和后台保存。
+- `docs/roadmap/`：用户维护的长期改进方向和后续计划，不使用 Superpowers
+  执行计划格式。
 - `docs/superpowers/specs/`：设计规格。
 - `docs/superpowers/plans/`：执行计划。
 
@@ -93,7 +95,9 @@ protocol -> std
 - 优先保持现有模块边界和命名。用户面操作名仍使用 `Cursor*`，
   Buffer 内部实现面使用 `selection` 术语。
 - 几何和布局 cell 单位使用整数；`f32` 只应出现在 Taffy adapter 边界。
-- `ContentHandler` 是分发契约，不要重新加入渲染方法。
+- `Content` 是静态闭合的内容集合；新增内容类型必须扩展 `Content` 枚举和 `ContentStore` 分派。
+- `ContentStore` 是唯一内容表；app 不得借出或识别 `Buffer`、`StatusBar` 等具体内容类型。
+- 内容执行通过 `Content::execute(ContentInput)`，渲染数据通过 `ContentStore::query`；不要向 Content 加入渲染方法。
 - `SceneRenderer` 负责布局、viewport 跟随、pull 可见行和画布输出。
 - app 测试用局部 `ScriptedFrontend`（impl `Frontend`，事件回放 + render
   计数）驱动集成流程；修改 `Frontend` trait 或 `SceneRenderer` 时要同步

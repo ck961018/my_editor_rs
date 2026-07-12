@@ -268,7 +268,7 @@ impl Buffer {
                 }
             })
             .collect();
-        del_ranges.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        del_ranges.sort_unstable_by_key(|b| std::cmp::Reverse(b.0));
         del_ranges.dedup();
         for (start, end) in del_ranges {
             if end > start {
@@ -319,7 +319,7 @@ impl Buffer {
                 }
             })
             .collect();
-        ranges.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        ranges.sort_unstable_by_key(|b| std::cmp::Reverse(b.0));
         ranges.dedup();
         for (start, end) in ranges {
             if end > start {
