@@ -7,6 +7,7 @@ use crate::core::command::{Command, EditCommand};
 use crate::core::content_runtime::BufferRuntime;
 use crate::core::keymap::Keymap;
 use crate::core::mode::{ModeActionId, ModeId, ModeSet};
+use crate::protocol::content_query::CursorStyle;
 use crate::protocol::key_event::KeyEvent;
 use crate::protocol::selection::{CursorPos, Selection, Selections};
 use crate::protocol::status::StatusMessage;
@@ -49,6 +50,10 @@ impl Buffer {
 
     pub(crate) fn resolve_key(&self, runtime: &BufferRuntime, key: KeyEvent) -> Option<Command> {
         self.modes.resolve_key(runtime.modes(), key)
+    }
+
+    pub(crate) fn cursor_style(&self, runtime: &BufferRuntime) -> CursorStyle {
+        self.modes.cursor_style(runtime.modes())
     }
 
     pub(crate) fn execute_mode(

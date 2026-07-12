@@ -22,9 +22,7 @@ use crate::core::content::{Content, ContentEffect, ContentEvent, ContentInput};
 use crate::core::content_store::ContentStore;
 use crate::core::status_bar::StatusBar;
 use crate::frontend::Frontend;
-use crate::protocol::content_query::{
-    ContentData, ContentQuery, CursorStyle, RenderQuery, ViewData,
-};
+use crate::protocol::content_query::{ContentData, ContentQuery, RenderQuery, ViewData};
 use crate::protocol::frontend_event::FrontendEvent;
 use crate::protocol::ids::{ContentId, SpaceId};
 use crate::protocol::scene::{
@@ -421,7 +419,7 @@ impl RenderQuery for AppQuery<'_> {
         let view = self.views.get(&sid).expect("scene content space has view");
         ViewData {
             selections: view.selections().clone(),
-            cursor_style: CursorStyle::Default,
+            cursor_style: self.contents.cursor_style(view.content(), view.runtime()),
         }
     }
 }
@@ -433,7 +431,7 @@ mod tests {
     use crate::core::content::Content;
     use crate::frontend::Frontend;
     use crate::protocol::content_query::{
-        ContentData, ContentQuery, DocumentStatus, RenderQuery, RowRange,
+        ContentData, ContentQuery, CursorStyle, DocumentStatus, RenderQuery, RowRange,
     };
     use crate::protocol::frontend_event::ResizeEvent;
     use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
@@ -544,7 +542,7 @@ mod tests {
         );
         let view = query.view(app.focused);
         assert_eq!(view.selections.primary().head().char_index, 2);
-        assert_eq!(view.cursor_style, CursorStyle::Default);
+        assert_eq!(view.cursor_style, CursorStyle::Block);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -554,16 +552,28 @@ mod tests {
         app.handle_event(FrontendEvent::Key(KeyEvent::char('i')))
             .await
             .unwrap();
+        app.handle_event(FrontendEvent::Key(KeyEvent::char('a')))
+            .await
+            .unwrap();
         let right = app
             .split_space(left, editor_cid(), true, SplitDirection::Right, true)
             .unwrap()
             .new_space;
         assert_eq!(app.focused, right);
-        app.handle_event(FrontendEvent::Key(KeyEvent::char('a')))
-            .await
-            .unwrap();
 
-        assert_eq!(text_rows(&app, editor_cid()), vec![""]);
+        let query = AppQuery {
+            contents: &app.contents,
+            views: &app.views,
+        };
+        let left_view = query.view(left);
+        let right_view = query.view(right);
+
+        assert_eq!(left_view.cursor_style, CursorStyle::Default);
+        assert_eq!(right_view.cursor_style, CursorStyle::Block);
+        assert_eq!(left_view.selections, *app.views[&left].selections());
+        assert_eq!(right_view.selections, *app.views[&right].selections());
+        assert_eq!(left_view.selections.primary().head().char_index, 1);
+        assert_eq!(right_view.selections.primary().head(), CursorPos::origin());
     }
 
     #[tokio::test(flavor = "multi_thread")]

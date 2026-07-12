@@ -6,6 +6,7 @@ use crate::core::content_runtime::{ContentRuntime, StatusBarRuntime};
 use crate::core::edit::apply_edit;
 use crate::core::keymap::{KeyBinding, Keymap};
 use crate::core::status_bar::StatusBar;
+use crate::protocol::content_query::CursorStyle;
 use crate::protocol::key_event::KeyEvent;
 use crate::protocol::selection::Selections;
 use crate::protocol::status::StatusMessage;
@@ -73,6 +74,14 @@ impl Content {
                 Some(KeyBinding::Command(command)) => Some(command.clone()),
                 Some(KeyBinding::Prefix(_)) | None => None,
             },
+            _ => panic!("content/runtime mismatch"),
+        }
+    }
+
+    pub fn cursor_style(&self, runtime: &ContentRuntime) -> CursorStyle {
+        match (self, runtime) {
+            (Self::Buffer(buffer), ContentRuntime::Buffer(runtime)) => buffer.cursor_style(runtime),
+            (Self::StatusBar(_), ContentRuntime::StatusBar(_)) => CursorStyle::Default,
             _ => panic!("content/runtime mismatch"),
         }
     }
@@ -167,6 +176,7 @@ mod tests {
     use crate::core::command::{Command, ContentCommand, EditCommand};
     use crate::core::content_runtime::{ContentRuntime, StatusBarRuntime};
     use crate::core::mode::{ModeActionId, ModeId};
+    use crate::protocol::content_query::CursorStyle;
     use crate::protocol::ids::ContentId;
     use crate::protocol::key_event::KeyEvent;
     use crate::protocol::selection::{CursorPos, Selection, Selections};
@@ -281,5 +291,13 @@ mod tests {
             content.create_runtime(),
             ContentRuntime::StatusBar(_)
         ));
+    }
+
+    #[test]
+    fn status_bar_runtime_has_default_cursor_style() {
+        let content = Content::StatusBar(StatusBar::new(ContentId(0)));
+        let runtime = content.create_runtime();
+
+        assert_eq!(content.cursor_style(&runtime), CursorStyle::Default);
     }
 }

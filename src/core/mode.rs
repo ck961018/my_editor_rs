@@ -2,6 +2,7 @@ use std::any::Any;
 
 use crate::core::command::{Command, ContentCommand, EditCommand};
 use crate::core::keymap::{KeyBinding, Keymap};
+use crate::protocol::content_query::CursorStyle;
 use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -51,6 +52,7 @@ pub trait Mode {
     fn new_state(&self) -> Box<dyn ModeState>;
     fn keymap(&self, state: &dyn ModeState) -> &Keymap;
     fn typing(&self, state: &dyn ModeState, key: KeyEvent) -> Option<Command>;
+    fn cursor_style(&self, state: &dyn ModeState) -> CursorStyle;
     fn execute(&self, state: &mut dyn ModeState, action: ModeActionId) -> Option<EditCommand>;
 }
 
@@ -89,6 +91,10 @@ impl ModeSet {
             Some(KeyBinding::Command(command)) => Some(command.clone()),
             Some(KeyBinding::Prefix(_)) | None => self.base.typing(runtime.base.as_ref(), key),
         }
+    }
+
+    pub(crate) fn cursor_style(&self, runtime: &ModeRuntime) -> CursorStyle {
+        self.base.cursor_style(runtime.base.as_ref())
     }
 
     pub(crate) fn execute(
@@ -134,6 +140,10 @@ impl Mode for PlainEditMode {
     fn typing(&self, _state: &dyn ModeState, key: KeyEvent) -> Option<Command> {
         key.is_plain_char()
             .map(|ch| EditCommand::InsertText(ch.to_string()).into())
+    }
+
+    fn cursor_style(&self, _state: &dyn ModeState) -> CursorStyle {
+        CursorStyle::Default
     }
 
     fn execute(&self, _state: &mut dyn ModeState, _action: ModeActionId) -> Option<EditCommand> {
@@ -203,6 +213,13 @@ impl Mode for VimMode {
             VimState::Insert => key
                 .is_plain_char()
                 .map(|ch| EditCommand::InsertText(ch.to_string()).into()),
+        }
+    }
+
+    fn cursor_style(&self, state: &dyn ModeState) -> CursorStyle {
+        match self.state(state).state {
+            VimState::Normal => CursorStyle::Block,
+            VimState::Insert => CursorStyle::Default,
         }
     }
 
@@ -355,6 +372,20 @@ mod tests {
                 action: ModeActionId::new("append"),
             }))
         );
+    }
+
+    #[test]
+    fn vim_cursor_style_tracks_runtime_mode() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+
+        assert_eq!(modes.cursor_style(&runtime), CursorStyle::Block);
+        modes.execute(
+            &mut runtime,
+            ModeId::new("vim"),
+            ModeActionId::new("enter-insert"),
+        );
+        assert_eq!(modes.cursor_style(&runtime), CursorStyle::Default);
     }
 
     #[test]
