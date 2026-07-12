@@ -51,7 +51,7 @@ pub trait Mode {
     fn new_state(&self) -> Box<dyn ModeState>;
     fn keymap(&self, state: &dyn ModeState) -> &Keymap;
     fn typing(&self, state: &dyn ModeState, key: KeyEvent) -> Option<Command>;
-    fn execute(&self, state: &mut dyn ModeState, action: ModeActionId);
+    fn execute(&self, state: &mut dyn ModeState, action: ModeActionId) -> Option<EditCommand>;
 }
 
 pub(crate) struct ModeRuntime {
@@ -91,10 +91,15 @@ impl ModeSet {
         }
     }
 
-    pub(crate) fn execute(&self, runtime: &mut ModeRuntime, mode: ModeId, action: ModeActionId) {
-        if self.base.id() == mode {
-            self.base.execute(runtime.base.as_mut(), action);
-        }
+    pub(crate) fn execute(
+        &self,
+        runtime: &mut ModeRuntime,
+        mode: ModeId,
+        action: ModeActionId,
+    ) -> Option<EditCommand> {
+        (self.base.id() == mode)
+            .then(|| self.base.execute(runtime.base.as_mut(), action))
+            .flatten()
     }
 }
 
@@ -131,7 +136,9 @@ impl Mode for PlainEditMode {
             .map(|ch| EditCommand::InsertText(ch.to_string()).into())
     }
 
-    fn execute(&self, _state: &mut dyn ModeState, _action: ModeActionId) {}
+    fn execute(&self, _state: &mut dyn ModeState, _action: ModeActionId) -> Option<EditCommand> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,11 +206,21 @@ impl Mode for VimMode {
         }
     }
 
-    fn execute(&self, state: &mut dyn ModeState, action: ModeActionId) {
+    fn execute(&self, state: &mut dyn ModeState, action: ModeActionId) -> Option<EditCommand> {
         match action.as_str() {
-            "enter-insert" => self.state_mut(state).state = VimState::Insert,
-            "enter-normal" => self.state_mut(state).state = VimState::Normal,
-            _ => {}
+            "enter-insert" => {
+                self.state_mut(state).state = VimState::Insert;
+                None
+            }
+            "enter-normal" => {
+                self.state_mut(state).state = VimState::Normal;
+                None
+            }
+            "append" => {
+                self.state_mut(state).state = VimState::Insert;
+                Some(EditCommand::MoveRightBy(1))
+            }
+            _ => None,
         }
     }
 }
@@ -214,7 +231,11 @@ fn plain_edit_keymap() -> Keymap {
 }
 
 fn vim_insert_keymap() -> Keymap {
-    default_text_keymap(false)
+    let mut km = default_text_keymap(false);
+    km.bind_edit(KeyEvent::ctrl('b'), EditCommand::MoveLeftBy(1));
+    km.bind_edit(KeyEvent::ctrl('f'), EditCommand::MoveRightBy(1));
+    km.bind_edit(KeyEvent::ctrl('h'), EditCommand::Delete(-1));
+    km
 }
 
 fn default_text_keymap(bind_escape_to_collapse: bool) -> Keymap {
@@ -277,6 +298,13 @@ fn vim_normal_keymap() -> Keymap {
             action: ModeActionId::new("enter-insert"),
         }),
     );
+    km.bind(
+        KeyEvent::char('a'),
+        Command::Content(ContentCommand::Mode {
+            mode: ModeId::new("vim"),
+            action: ModeActionId::new("append"),
+        }),
+    );
     km.bind(KeyEvent::plain(KeyCode::Escape), Command::Noop);
     km
 }
@@ -305,10 +333,13 @@ mod tests {
         let modes = ModeSet::vim();
         let mut first = modes.create_runtime();
         let second = modes.create_runtime();
-        modes.execute(
-            &mut first,
-            ModeId::new("vim"),
-            ModeActionId::new("enter-insert"),
+        assert_eq!(
+            modes.execute(
+                &mut first,
+                ModeId::new("vim"),
+                ModeActionId::new("enter-insert"),
+            ),
+            None,
         );
         assert_eq!(
             modes.resolve_key(&first, KeyEvent::char('a')),
@@ -316,6 +347,66 @@ mod tests {
                 EditCommand::InsertText("a".to_string())
             )))
         );
-        assert_eq!(modes.resolve_key(&second, KeyEvent::char('a')), None);
+        assert_eq!(
+            modes.resolve_key(&second, KeyEvent::char('a')),
+            Some(Command::Content(ContentCommand::Mode {
+                mode: ModeId::new("vim"),
+                action: ModeActionId::new("append"),
+            }))
+        );
+    }
+
+    #[test]
+    fn vim_insert_resolves_emacs_motion_and_delete_keys() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+        assert_eq!(
+            modes.execute(
+                &mut runtime,
+                ModeId::new("vim"),
+                ModeActionId::new("enter-insert"),
+            ),
+            None,
+        );
+
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::ctrl('b')),
+            Some(EditCommand::MoveLeftBy(1).into()),
+        );
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::ctrl('f')),
+            Some(EditCommand::MoveRightBy(1).into()),
+        );
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::ctrl('h')),
+            Some(EditCommand::Delete(-1).into()),
+        );
+    }
+
+    #[test]
+    fn vim_append_enters_insert_and_returns_right_move() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+
+        assert_eq!(
+            modes.execute(
+                &mut runtime,
+                ModeId::new("vim"),
+                ModeActionId::new("append"),
+            ),
+            Some(EditCommand::MoveRightBy(1)),
+        );
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('x')),
+            Some(EditCommand::InsertText("x".to_string()).into()),
+        );
+    }
+
+    #[test]
+    fn vim_normal_c_remains_unbound() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+
+        assert_eq!(modes.resolve_key(&runtime, KeyEvent::char('c')), None);
     }
 }
