@@ -202,7 +202,14 @@ mod tests {
         });
 
         assert!(content.resolve_key(&first, KeyEvent::char('a')).is_some());
-        assert!(content.resolve_key(&second, KeyEvent::char('a')).is_none());
+        assert_eq!(
+            content.resolve_key(&second, KeyEvent::char('a')),
+            Some(Command::Content(ContentCommand::Mode {
+                mode: ModeId::new("vim"),
+                action: ModeActionId::new("append"),
+            }))
+        );
+        assert!(content.resolve_key(&second, KeyEvent::char('z')).is_none());
     }
 
     #[test]

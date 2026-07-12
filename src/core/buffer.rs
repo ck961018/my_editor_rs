@@ -753,7 +753,14 @@ mod tests {
     fn default_buffer_uses_vim_normal_and_plain_char_is_not_insert() {
         let b = Buffer::new();
         let runtime = b.create_runtime();
-        assert!(b.resolve_key(&runtime, KeyEvent::char('a')).is_none());
+        assert_eq!(
+            b.resolve_key(&runtime, KeyEvent::char('a')),
+            Some(Command::Content(ContentCommand::Mode {
+                mode: ModeId::new("vim"),
+                action: ModeActionId::new("append"),
+            }))
+        );
+        assert!(b.resolve_key(&runtime, KeyEvent::char('z')).is_none());
     }
 
     #[test]
@@ -801,6 +808,13 @@ mod tests {
             ModeId::new("vim"),
             ModeActionId::new("enter-normal"),
         );
-        assert!(b.resolve_key(&runtime, KeyEvent::char('a')).is_none());
+        assert_eq!(
+            b.resolve_key(&runtime, KeyEvent::char('a')),
+            Some(Command::Content(ContentCommand::Mode {
+                mode: ModeId::new("vim"),
+                action: ModeActionId::new("append"),
+            }))
+        );
+        assert!(b.resolve_key(&runtime, KeyEvent::char('z')).is_none());
     }
 }
