@@ -4,8 +4,9 @@
 
 ## Goal
 
-Render a stable block cursor while a Vim buffer view is in Normal mode. When
-the view enters Insert mode, restore the terminal user's default cursor style.
+Render a stable block cursor while a Vim buffer view is in Normal mode and a
+stable vertical bar while it is in Insert mode. When the editor exits, restore
+the terminal user's default cursor style.
 
 This change also makes view-level render data a complete, typed snapshot so
 the frontend does not grow one `RenderQuery` method per property.
@@ -23,8 +24,8 @@ Included:
 
 Excluded:
 
-- New Vim modes, key bindings, cursor blinking configuration, underline or
-  bar cursor variants.
+- New Vim modes, key bindings, cursor blinking configuration, or underline
+  cursor variants.
 - A cross-process UI event protocol like Neovim's redraw stream.
 - Moving viewport or layout ownership out of the TUI.
 
@@ -50,6 +51,7 @@ Add the following protocol data and replace the selections getter:
 pub enum CursorStyle {
     Default,
     Block,
+    Bar,
 }
 
 pub struct ViewData {
@@ -99,11 +101,13 @@ Vim behavior is:
 | Vim state | `CursorStyle` |
 |---|---|
 | Normal | `Block` |
-| Insert | `Default` |
+| Insert | `Bar` |
 
-Non-buffer content and non-Vim modes return `Default`. A runtime/content type
-mismatch remains a programming invariant violation, consistent with existing
-`Content` runtime dispatch.
+Non-buffer content and non-Vim modes return `Default`. `Default` means the
+terminal user's configured shape, rather than a mode-specific editing shape;
+therefore it is reserved for non-editing content and terminal restoration. A
+runtime/content type mismatch remains a programming invariant violation,
+consistent with existing `Content` runtime dispatch.
 
 ### Rendering and terminal output
 
@@ -130,9 +134,10 @@ this on every frame rather than caching the prior style, so a terminal state
 change outside the renderer is corrected at the next render.
 
 `Canvas` adds `set_cursor_style(CursorStyle)`. `Output` maps `Block` to a
-steady block cursor and `Default` to the terminal user's default cursor style
-through crossterm. Terminals that do not support cursor-shape control may
-ignore the sequence; rendering continues normally.
+steady block cursor, `Bar` to a steady vertical bar, and `Default` to the
+terminal user's default cursor style through crossterm. Terminals that do not
+support cursor-shape control may ignore the sequence; rendering continues
+normally.
 
 `TerminalGuard::drop` explicitly restores the default cursor style before it
 leaves the alternate screen and disables raw mode. This prevents a Normal-mode
@@ -151,7 +156,7 @@ block cursor from leaking into the shell.
 ## Tests
 
 - Protocol: `CursorStyle` and `ViewData` value semantics.
-- Core: Vim Normal reports `Block`; entering Insert reports `Default`; two
+- Core: Vim Normal reports `Block`; entering Insert reports `Bar`; two
   independent runtimes can report different styles.
 - App: `AppQuery::view` keeps selections with the correct cursor style, and
   two views of one Buffer remain independent.
