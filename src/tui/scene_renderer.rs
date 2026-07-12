@@ -40,7 +40,7 @@ impl SceneRenderer {
         canvas.hide_cursor()?;
         // 焦点 viewport 跟随
         let focused_item = resolved.items.iter().find(|item| item.space_id == focused);
-        let focused_head = query.selections(focused).primary().head();
+        let focused_head = query.view(focused).selections.primary().head();
         if let Some(item) = focused_item {
             let viewport = self
                 .viewports
@@ -123,7 +123,7 @@ fn paint_item(
             _ => Vec::new(),
         };
         // 选区高亮：primary 非空时算 [start,end] 端点（按 char_index 排序）
-        let sels = query.selections(sid);
+        let sels = query.view(sid).selections;
         let prim = sels.primary();
         let non_empty = prim.anchor != prim.head;
         let (sel_start, sel_end) = if non_empty {
@@ -256,7 +256,9 @@ fn status_line(file_name: Option<&str>, modified: bool, message: &StatusMessage)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::content_query::{ContentData, ContentQuery, RenderQuery, StatusBarData};
+    use crate::protocol::content_query::{
+        ContentData, ContentQuery, CursorStyle, RenderQuery, StatusBarData, ViewData,
+    };
     use crate::protocol::ids::{ContentId, SpaceId};
     use crate::protocol::scene::{SceneBuilder, build_editor_scene};
     use crate::protocol::selection::{CursorPos, Selection, Selections};
@@ -297,14 +299,17 @@ mod tests {
                 _ => ContentData::Unsupported,
             }
         }
-        fn selections(&self, _sid: SpaceId) -> Selections {
-            self.selections.clone()
+        fn view(&self, _sid: SpaceId) -> ViewData {
+            ViewData {
+                selections: self.selections.clone(),
+                cursor_style: CursorStyle::Default,
+            }
         }
     }
 
     struct MultiSpaceQuery {
         lines: Vec<String>,
-        selections: HashMap<SpaceId, Selections>,
+        selections: HashMap<SpaceId, ViewData>,
     }
 
     impl RenderQuery for MultiSpaceQuery {
@@ -335,7 +340,7 @@ mod tests {
             }
         }
 
-        fn selections(&self, sid: SpaceId) -> Selections {
+        fn view(&self, sid: SpaceId) -> ViewData {
             self.selections[&sid].clone()
         }
     }
@@ -354,33 +359,39 @@ mod tests {
             selections: HashMap::from([
                 (
                     left,
-                    Selections::single(Selection {
-                        anchor: CursorPos {
-                            char_index: 0,
-                            row: 0,
-                            col: 0,
-                        },
-                        head: CursorPos {
-                            char_index: 1,
-                            row: 0,
-                            col: 1,
-                        },
-                    }),
+                    ViewData {
+                        selections: Selections::single(Selection {
+                            anchor: CursorPos {
+                                char_index: 0,
+                                row: 0,
+                                col: 0,
+                            },
+                            head: CursorPos {
+                                char_index: 1,
+                                row: 0,
+                                col: 1,
+                            },
+                        }),
+                        cursor_style: CursorStyle::Default,
+                    },
                 ),
                 (
                     right,
-                    Selections::single(Selection {
-                        anchor: CursorPos {
-                            char_index: 2,
-                            row: 0,
-                            col: 2,
-                        },
-                        head: CursorPos {
-                            char_index: 3,
-                            row: 0,
-                            col: 3,
-                        },
-                    }),
+                    ViewData {
+                        selections: Selections::single(Selection {
+                            anchor: CursorPos {
+                                char_index: 2,
+                                row: 0,
+                                col: 2,
+                            },
+                            head: CursorPos {
+                                char_index: 3,
+                                row: 0,
+                                col: 3,
+                            },
+                        }),
+                        cursor_style: CursorStyle::Default,
+                    },
                 ),
             ]),
         };

@@ -22,6 +22,18 @@ pub struct DocumentStatus {
 pub type StatusBarData = DocumentStatus;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorStyle {
+    Default,
+    Block,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViewData {
+    pub selections: Selections,
+    pub cursor_style: CursorStyle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContentQuery {
     TextRows(RowRange),
     TextLineCount,
@@ -43,12 +55,13 @@ pub enum ContentData {
 /// 前端通过消息拉取后端内容的只读契约。
 pub trait RenderQuery {
     fn content(&self, id: ContentId, query: ContentQuery) -> ContentData;
-    fn selections(&self, sid: SpaceId) -> Selections;
+    fn view(&self, id: SpaceId) -> ViewData;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::selection::{CursorPos, Selection};
     #[test]
     fn row_range_constructs() {
         let r = RowRange { start: 1, end: 5 };
@@ -76,5 +89,15 @@ mod tests {
 
         assert_eq!(data, ContentData::DocumentStatus(status));
         assert_eq!(ContentData::Unsupported, ContentData::Unsupported);
+    }
+
+    #[test]
+    fn view_data_contains_selections_and_cursor_style() {
+        let data = ViewData {
+            selections: Selections::single(Selection::collapsed(CursorPos::origin())),
+            cursor_style: CursorStyle::Block,
+        };
+        assert_eq!(data.cursor_style, CursorStyle::Block);
+        assert_eq!(data.selections.primary().head(), CursorPos::origin());
     }
 }

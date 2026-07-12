@@ -22,13 +22,14 @@ use crate::core::content::{Content, ContentEffect, ContentEvent, ContentInput};
 use crate::core::content_store::ContentStore;
 use crate::core::status_bar::StatusBar;
 use crate::frontend::Frontend;
-use crate::protocol::content_query::{ContentData, ContentQuery, RenderQuery};
+use crate::protocol::content_query::{
+    ContentData, ContentQuery, CursorStyle, RenderQuery, ViewData,
+};
 use crate::protocol::frontend_event::FrontendEvent;
 use crate::protocol::ids::{ContentId, SpaceId};
 use crate::protocol::scene::{
     CloseResult, Scene, SceneBuilder, SceneError, SplitResult, build_editor_scene,
 };
-use crate::protocol::selection::{CursorPos, Selection, Selections};
 use crate::protocol::space::{Sizing, SpaceKind, SplitDirection};
 
 pub struct App<F: Frontend> {
@@ -416,11 +417,12 @@ impl RenderQuery for AppQuery<'_> {
         self.contents.query(cid, query)
     }
 
-    fn selections(&self, sid: SpaceId) -> Selections {
-        self.views
-            .get(&sid)
-            .map(|v| v.selections().clone())
-            .unwrap_or_else(|| Selections::single(Selection::collapsed(CursorPos::origin())))
+    fn view(&self, sid: SpaceId) -> ViewData {
+        let view = self.views.get(&sid).expect("scene content space has view");
+        ViewData {
+            selections: view.selections().clone(),
+            cursor_style: CursorStyle::Default,
+        }
     }
 }
 
@@ -435,6 +437,7 @@ mod tests {
     };
     use crate::protocol::frontend_event::ResizeEvent;
     use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
+    use crate::protocol::selection::CursorPos;
     use crate::protocol::space::{Sizing, SplitDirection};
     use crate::protocol::status::StatusMessage;
     use std::collections::VecDeque;
@@ -539,8 +542,9 @@ mod tests {
             query.content(editor_cid(), ContentQuery::TextLineCount),
             ContentData::TextLineCount(1)
         );
-        let sels = query.selections(app.focused);
-        assert_eq!(sels.primary().head().char_index, 2);
+        let view = query.view(app.focused);
+        assert_eq!(view.selections.primary().head().char_index, 2);
+        assert_eq!(view.cursor_style, CursorStyle::Default);
     }
 
     #[tokio::test(flavor = "multi_thread")]
