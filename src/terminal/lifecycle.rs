@@ -1,6 +1,7 @@
 use std::io;
 
 use crossterm::{
+    cursor::SetCursorStyle,
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -18,7 +19,11 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(
+            io::stdout(),
+            SetCursorStyle::DefaultUserShape,
+            LeaveAlternateScreen
+        );
         let _ = disable_raw_mode();
     }
 }

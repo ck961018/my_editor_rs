@@ -1,5 +1,6 @@
 use std::io::{self, Write};
 
+use crate::protocol::content_query::CursorStyle;
 use crossterm::style::{Attribute, SetAttribute};
 use crossterm::{cursor, queue, terminal};
 
@@ -12,6 +13,7 @@ pub trait Canvas {
     fn write_str(&mut self, s: &str) -> io::Result<()>;
     fn hide_cursor(&mut self) -> io::Result<()>;
     fn show_cursor(&mut self) -> io::Result<()>;
+    fn set_cursor_style(&mut self, style: CursorStyle) -> io::Result<()>;
     fn set_reverse(&mut self, on: bool) -> io::Result<()>;
     fn flush(&mut self) -> io::Result<()>;
 }
@@ -31,6 +33,9 @@ impl<W: Write> Canvas for Output<W> {
     }
     fn show_cursor(&mut self) -> io::Result<()> {
         Output::show_cursor(self)
+    }
+    fn set_cursor_style(&mut self, style: CursorStyle) -> io::Result<()> {
+        Output::set_cursor_style(self, style)
     }
     fn set_reverse(&mut self, on: bool) -> io::Result<()> {
         Output::set_reverse(self, on)
@@ -59,6 +64,14 @@ impl<W: Write> Output<W> {
 
     pub fn show_cursor(&mut self) -> io::Result<()> {
         queue!(self.out, cursor::Show)
+    }
+
+    pub fn set_cursor_style(&mut self, style: CursorStyle) -> io::Result<()> {
+        let style = match style {
+            CursorStyle::Default => cursor::SetCursorStyle::DefaultUserShape,
+            CursorStyle::Block => cursor::SetCursorStyle::SteadyBlock,
+        };
+        queue!(self.out, style)
     }
 
     pub fn set_reverse(&mut self, on: bool) -> io::Result<()> {
@@ -100,6 +113,7 @@ impl<W: Write> Output<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::content_query::CursorStyle;
 
     #[test]
     fn write_str_emits_bytes() {
@@ -165,5 +179,30 @@ mod tests {
         let s = String::from_utf8(out.into_inner()).unwrap();
         assert!(s.contains("\x1b[7m"), "on: {s}");
         assert!(s.contains("\x1b[27m"), "off: {s}");
+    }
+
+    #[test]
+    fn set_cursor_style_block_emits_decsusrps() {
+        let mut out = Output::new(Vec::new());
+        out.set_cursor_style(CursorStyle::Block).unwrap();
+        let s = String::from_utf8(out.into_inner()).unwrap();
+        assert!(s.contains("\x1b[2 q"), "got: {s}");
+    }
+
+    #[test]
+    fn set_cursor_style_default_emits_decsusrps() {
+        let mut out = Output::new(Vec::new());
+        out.set_cursor_style(CursorStyle::Default).unwrap();
+        let s = String::from_utf8(out.into_inner()).unwrap();
+        assert!(s.contains("\x1b[0 q"), "got: {s}");
+    }
+
+    #[test]
+    fn canvas_dispatches_set_cursor_style() {
+        let mut out = Output::new(Vec::new());
+        let c: &mut dyn Canvas = &mut out;
+        c.set_cursor_style(CursorStyle::Block).unwrap();
+        let s = String::from_utf8(out.into_inner()).unwrap();
+        assert!(s.contains("\x1b[2 q"), "got: {s}");
     }
 }

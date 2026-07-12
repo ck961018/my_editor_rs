@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::io;
 
 use crate::protocol::content_query::{
-    ContentData, ContentQuery, RenderQuery, RowRange, StatusBarData,
+    ContentData, ContentQuery, RenderQuery, RowRange, StatusBarData, ViewData,
 };
 use crate::protocol::ids::SpaceId;
 use crate::protocol::scene::Scene;
@@ -37,10 +37,16 @@ impl SceneRenderer {
         canvas: &mut dyn Canvas,
     ) -> io::Result<()> {
         let resolved: ResolvedScene = self.engine.layout(scene);
+        let views: HashMap<SpaceId, ViewData> = resolved
+            .items
+            .iter()
+            .map(|item| (item.space_id, query.view(item.space_id)))
+            .collect();
         canvas.hide_cursor()?;
         // 焦点 viewport 跟随
         let focused_item = resolved.items.iter().find(|item| item.space_id == focused);
-        let focused_head = query.view(focused).selections.primary().head();
+        let focused_view = views.get(&focused).expect("focused view has render data");
+        let focused_head = focused_view.selections.primary().head();
         if let Some(item) = focused_item {
             let viewport = self
                 .viewports
@@ -55,7 +61,15 @@ impl SceneRenderer {
         }
         // 逐 Content item paint
         for item in &resolved.items {
-            paint_item(item, query, &self.viewports, canvas)?;
+            paint_item(
+                item,
+                query,
+                views
+                    .get(&item.space_id)
+                    .expect("resolved item has view data"),
+                &self.viewports,
+                canvas,
+            )?;
         }
         // 焦点光标定位
         if let Some(item) = focused_item.filter(|item| item.rect.width > 0 && item.rect.height > 0)
@@ -68,6 +82,7 @@ impl SceneRenderer {
             let screen_row = focused_head.row.saturating_sub(vp.top_row) + item.rect.y as usize;
             let screen_col = focused_head.col.saturating_sub(vp.left_col) + item.rect.x as usize;
             canvas.move_cursor(screen_row, screen_col)?;
+            canvas.set_cursor_style(focused_view.cursor_style)?;
             canvas.show_cursor()?;
         }
         canvas.flush()
@@ -93,6 +108,7 @@ fn follow_viewport(viewport: &mut Viewport, head: CursorPos, width: usize, heigh
 fn paint_item(
     item: &RenderItem,
     query: &dyn RenderQuery,
+    view: &ViewData,
     viewports: &HashMap<SpaceId, Viewport>,
     canvas: &mut dyn Canvas,
 ) -> io::Result<()> {
@@ -123,8 +139,7 @@ fn paint_item(
             _ => Vec::new(),
         };
         // 选区高亮：primary 非空时算 [start,end] 端点（按 char_index 排序）
-        let sels = query.view(sid).selections;
-        let prim = sels.primary();
+        let prim = view.selections.primary();
         let non_empty = prim.anchor != prim.head;
         let (sel_start, sel_end) = if non_empty {
             if prim.anchor.char_index <= prim.head.char_index {
@@ -341,7 +356,13 @@ mod tests {
         }
 
         fn view(&self, sid: SpaceId) -> ViewData {
-            self.selections[&sid].clone()
+            self.selections
+                .get(&sid)
+                .cloned()
+                .unwrap_or_else(|| ViewData {
+                    selections: Selections::single(Selection::collapsed(CursorPos::origin())),
+                    cursor_style: CursorStyle::Default,
+                })
         }
     }
 
@@ -404,6 +425,52 @@ mod tests {
 
         assert!(output.contains("\x1b[7ma\x1b[27mbcd"), "left: {output}");
         assert!(output.contains("ab\x1b[7mc\x1b[27md"), "right: {output}");
+    }
+
+    #[test]
+    fn focused_view_controls_terminal_cursor_style() {
+        let mut builder = SceneBuilder::new();
+        let (mut scene, left) =
+            build_editor_scene(&mut builder, 20, 2, ContentId(0), ContentId(1)).unwrap();
+        let right = builder
+            .split(&mut scene, left, ContentId(0), true, SplitDirection::Right)
+            .unwrap()
+            .new_space;
+        let query = MultiSpaceQuery {
+            lines: vec!["abcd".to_string()],
+            selections: HashMap::from([
+                (
+                    left,
+                    ViewData {
+                        selections: Selections::single(Selection::collapsed(CursorPos::origin())),
+                        cursor_style: CursorStyle::Default,
+                    },
+                ),
+                (
+                    right,
+                    ViewData {
+                        selections: Selections::single(Selection::collapsed(CursorPos::origin())),
+                        cursor_style: CursorStyle::Block,
+                    },
+                ),
+            ]),
+        };
+        let mut renderer = SceneRenderer::new();
+
+        let mut right_out = Output::new(Vec::new());
+        renderer
+            .render(&scene, &query, right, &mut right_out as &mut dyn Canvas)
+            .unwrap();
+        let right_output = String::from_utf8(right_out.into_inner()).unwrap();
+        assert!(right_output.contains("\x1b[2 q"), "right: {right_output}");
+
+        let mut left_out = Output::new(Vec::new());
+        renderer
+            .render(&scene, &query, left, &mut left_out as &mut dyn Canvas)
+            .unwrap();
+        let left_output = String::from_utf8(left_out.into_inner()).unwrap();
+        assert!(left_output.contains("\x1b[0 q"), "left: {left_output}");
+        assert!(!left_output.contains("\x1b[2 q"), "left: {left_output}");
     }
 
     #[test]
