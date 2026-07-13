@@ -167,10 +167,15 @@ DisplayPoint  前端计算的显示 cell/pixel 位置
 ## 优先级 10：Scene 模型与 wire data 分离
 
 **触发条件：** Scene 开始序列化或远程传输。  
-**状态：** 待触发。
+**状态：** 已完成模型/快照边界分离。
 
 协议层只保留 Scene snapshot/delta 所需的数据。SceneBuilder、split、close、节点修复和焦点
 回退迁移到后端模型层；TUI 继续只消费中立 Scene 数据进行布局。
+
+当前 `protocol::scene` 只定义 `Scene`/`SpaceNode` 快照及只读访问，`app::scene_model` 负责
+SpaceId 分配、标准场景构建和所有树修改/校验。TUI 的生产代码只读 Scene；其测试通过本层
+纯数据 fixture 构造快照，不反向依赖 app。snapshot/delta 消息格式和 serde 仍留到远程传输
+真正实现时选择。
 
 ## 暂不推进
 

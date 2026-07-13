@@ -6,6 +6,7 @@ mod dispatcher;
 mod kernel;
 mod message;
 mod remote;
+mod scene_model;
 mod session;
 mod tasks;
 mod view;
@@ -17,6 +18,9 @@ use std::path::Path;
 use crate::app::dispatcher::{DispatchCommand, Dispatcher, default_global_keymap};
 use crate::app::kernel::{Kernel, PendingSave};
 use crate::app::message::AppMessage;
+use crate::app::scene_model::{
+    CloseResult, SceneBuilder, SceneError, SplitResult, build_editor_scene,
+};
 use crate::app::session::ClientSession;
 use crate::app::view::View;
 use crate::core::buffer::Buffer;
@@ -34,9 +38,7 @@ use crate::protocol::content_query::{
 };
 use crate::protocol::frontend_event::FrontendEvent;
 use crate::protocol::ids::{ContentId, SpaceId, ViewId};
-use crate::protocol::scene::{
-    CloseResult, Scene, SceneBuilder, SceneError, SplitResult, build_editor_scene,
-};
+use crate::protocol::scene::Scene;
 use crate::protocol::space::{Sizing, SpaceKind, SplitDirection};
 
 pub struct App<F: Frontend> {
@@ -147,7 +149,8 @@ impl<F: Frontend> App<F> {
     async fn handle_event(&mut self, event: FrontendEvent) -> io::Result<()> {
         match event {
             FrontendEvent::Resize(r) => {
-                self.session.scene.resize(r.width as i32, r.height as i32);
+                self.session.scene.size.width = r.width as i32;
+                self.session.scene.size.height = r.height as i32;
                 self.session.scene_revision.next();
             }
             FrontendEvent::Key(k) => {
@@ -670,7 +673,8 @@ mod tests {
         let first_view = view_id(&app, app.session.focused);
         let second_view = view_for_space(&second.scene, second.focused).unwrap();
 
-        second.scene.resize(100, 30);
+        second.scene.size.width = 100;
+        second.scene.size.height = 30;
         app.handle_event(FrontendEvent::Key(KeyEvent::char('i')))
             .await
             .unwrap();

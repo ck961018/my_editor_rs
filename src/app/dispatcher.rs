@@ -245,6 +245,7 @@ pub fn default_global_keymap() -> Keymap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::scene_model::{SceneBuilder, build_editor_scene};
     use crate::core::buffer::Buffer;
     use crate::core::command::{AppCommand, ContentCommand, EditCommand};
     use crate::core::content::Content;
@@ -253,7 +254,6 @@ mod tests {
     use crate::core::status_bar::StatusBar;
     use crate::protocol::ids::{ContentId, ViewId};
     use crate::protocol::key_event::{ArrowKey, KeyCode};
-    use crate::protocol::scene::{SceneBuilder, build_editor_scene};
     fn fixture() -> (
         Dispatcher,
         crate::protocol::scene::Scene,

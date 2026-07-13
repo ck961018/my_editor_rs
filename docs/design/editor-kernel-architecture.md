@@ -99,8 +99,9 @@ View:  ViewId  -> ContentId + ModeInstance + view state
 View 再引用 ContentId。同一 View 同时只能被一个 Scene leaf 引用；同一 Content 可以创建
 多个拥有独立 Mode、selection 和 viewport 的 View。
 
-Scene 的协议表示应是可序列化的只读快照或变更消息。SceneBuilder、split、close 和焦点
-修复属于后端模型行为，不应成为远程 wire protocol 的一部分。
+当前 `protocol::scene` 只保留可拥有的 `Scene`/`SpaceNode` 快照数据和只读访问；
+`app::scene_model` 持有 SceneBuilder、split、close、节点修复和树不变量。TUI 只消费快照，
+这些后端模型行为不进入远程 wire protocol。
 
 ### 2.5 文本位置与显示位置
 

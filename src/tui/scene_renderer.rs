@@ -327,11 +327,10 @@ mod tests {
         ViewData, ViewPresentation,
     };
     use crate::protocol::ids::{ContentId, ViewId};
-    use crate::protocol::scene::{SceneBuilder, build_editor_scene};
     use crate::protocol::selection::{Selection, Selections, TextOffset};
-    use crate::protocol::space::SplitDirection;
     use crate::protocol::status::StatusMessage;
     use crate::terminal::output::Output;
+    use crate::tui::test_scene::{editor_scene, split_editor_scene};
     use std::collections::HashMap;
 
     fn points_for_lines(lines: &[String], offsets: Vec<TextOffset>) -> Vec<TextPoint> {
@@ -481,13 +480,7 @@ mod tests {
 
     #[test]
     fn shared_content_spaces_use_their_own_selections() {
-        let mut builder = SceneBuilder::new();
-        let (mut scene, left) =
-            build_editor_scene(&mut builder, 20, 2, ViewId(0), ViewId(1)).unwrap();
-        let _right = builder
-            .split(&mut scene, left, ViewId(2), true, SplitDirection::Right)
-            .unwrap()
-            .new_space;
+        let (scene, left, _right) = split_editor_scene(20, 2, ViewId(0), ViewId(1), ViewId(2));
         let query = MultiSpaceQuery {
             lines: vec!["abcd".to_string()],
             selections: HashMap::from([
@@ -528,13 +521,7 @@ mod tests {
 
     #[test]
     fn moving_a_view_to_another_space_preserves_its_viewport() {
-        let mut builder = SceneBuilder::new();
-        let (mut scene, left) =
-            build_editor_scene(&mut builder, 20, 2, ViewId(0), ViewId(1)).unwrap();
-        let right = builder
-            .split(&mut scene, left, ViewId(2), true, SplitDirection::Right)
-            .unwrap()
-            .new_space;
+        let (scene, _left, right) = split_editor_scene(20, 2, ViewId(3), ViewId(1), ViewId(0));
         let saved_viewport = Viewport {
             top_row: 1,
             left_col: 0,
@@ -542,12 +529,6 @@ mod tests {
         let mut renderer = SceneRenderer::new();
         renderer.viewports.insert(ViewId(0), saved_viewport);
 
-        builder
-            .replace_view(&mut scene, left, ViewId(3), true)
-            .unwrap();
-        builder
-            .replace_view(&mut scene, right, ViewId(0), true)
-            .unwrap();
         let query = MultiSpaceQuery {
             lines: vec!["line0".to_string(), "line1".to_string()],
             selections: HashMap::from([
@@ -585,13 +566,7 @@ mod tests {
 
     #[test]
     fn focused_view_controls_terminal_cursor_style() {
-        let mut builder = SceneBuilder::new();
-        let (mut scene, left) =
-            build_editor_scene(&mut builder, 20, 2, ViewId(0), ViewId(1)).unwrap();
-        let right = builder
-            .split(&mut scene, left, ViewId(2), true, SplitDirection::Right)
-            .unwrap()
-            .new_space;
+        let (scene, left, right) = split_editor_scene(20, 2, ViewId(0), ViewId(1), ViewId(2));
         let query = MultiSpaceQuery {
             lines: vec!["abcd".to_string()],
             selections: HashMap::from([
@@ -633,8 +608,7 @@ mod tests {
 
     #[test]
     fn renders_editor_lines_and_status() {
-        let mut builder = SceneBuilder::new();
-        let (scene, ed) = build_editor_scene(&mut builder, 40, 5, ViewId(0), ViewId(1)).unwrap();
+        let (scene, ed) = editor_scene(40, 5, ViewId(0), ViewId(1));
         let query = StubQuery {
             editor_cid: ContentId(0),
             lines: vec!["hello".to_string(), "world".to_string()],
@@ -651,8 +625,7 @@ mod tests {
 
     #[test]
     fn viewport_follows_cursor_below() {
-        let mut builder = SceneBuilder::new();
-        let (scene, ed) = build_editor_scene(&mut builder, 40, 5, ViewId(0), ViewId(1)).unwrap();
+        let (scene, ed) = editor_scene(40, 5, ViewId(0), ViewId(1));
         let lines: Vec<String> = (0..30).map(|i| format!("line{i}")).collect();
         let row_25_offset = lines
             .iter()
@@ -677,8 +650,7 @@ mod tests {
 
     #[test]
     fn renders_non_empty_selection_with_reverse() {
-        let mut builder = SceneBuilder::new();
-        let (scene, ed) = build_editor_scene(&mut builder, 40, 5, ViewId(0), ViewId(1)).unwrap();
+        let (scene, ed) = editor_scene(40, 5, ViewId(0), ViewId(1));
         let query = StubQuery {
             editor_cid: ContentId(0),
             lines: vec!["hello".to_string()],
@@ -698,8 +670,7 @@ mod tests {
 
     #[test]
     fn renders_collapsed_selection_without_reverse() {
-        let mut builder = SceneBuilder::new();
-        let (scene, ed) = build_editor_scene(&mut builder, 40, 5, ViewId(0), ViewId(1)).unwrap();
+        let (scene, ed) = editor_scene(40, 5, ViewId(0), ViewId(1));
         let query = StubQuery {
             editor_cid: ContentId(0),
             lines: vec!["hello".to_string()],
@@ -715,8 +686,7 @@ mod tests {
 
     #[test]
     fn renders_multiline_selection_reverse_spans_lines() {
-        let mut builder = SceneBuilder::new();
-        let (scene, ed) = build_editor_scene(&mut builder, 40, 5, ViewId(0), ViewId(1)).unwrap();
+        let (scene, ed) = editor_scene(40, 5, ViewId(0), ViewId(1));
         // "hello\nworld"：row0 col2 = idx2；row1 col2 = idx8
         let query = StubQuery {
             editor_cid: ContentId(0),
@@ -740,8 +710,7 @@ mod tests {
 
     #[test]
     fn selection_clipped_to_viewport_does_not_draw_invisible_rows() {
-        let mut builder = SceneBuilder::new();
-        let (scene, ed) = build_editor_scene(&mut builder, 40, 5, ViewId(0), ViewId(1)).unwrap();
+        let (scene, ed) = editor_scene(40, 5, ViewId(0), ViewId(1));
         let lines: Vec<String> = (0..30).map(|i| format!("line{i}")).collect();
         // 第一次：cursor row 25 → viewport top_row=21
         let q1 = StubQuery {
@@ -779,8 +748,7 @@ mod tests {
 
     #[test]
     fn viewport_follows_cursor_right_and_clips_long_line() {
-        let mut builder = SceneBuilder::new();
-        let (scene, editor) = build_editor_scene(&mut builder, 5, 2, ViewId(0), ViewId(1)).unwrap();
+        let (scene, editor) = editor_scene(5, 2, ViewId(0), ViewId(1));
         let query = StubQuery {
             editor_cid: ContentId(0),
             lines: vec!["abcdefgh".to_string()],
@@ -804,8 +772,7 @@ mod tests {
 
     #[test]
     fn horizontal_viewport_moves_back_when_cursor_returns_left() {
-        let mut builder = SceneBuilder::new();
-        let (scene, editor) = build_editor_scene(&mut builder, 5, 2, ViewId(0), ViewId(1)).unwrap();
+        let (scene, editor) = editor_scene(5, 2, ViewId(0), ViewId(1));
         let mut renderer = SceneRenderer::new();
         let right_query = StubQuery {
             editor_cid: ContentId(0),
@@ -838,8 +805,7 @@ mod tests {
 
     #[test]
     fn long_row_is_clipped_without_emitting_its_newline() {
-        let mut builder = SceneBuilder::new();
-        let (scene, editor) = build_editor_scene(&mut builder, 5, 2, ViewId(0), ViewId(1)).unwrap();
+        let (scene, editor) = editor_scene(5, 2, ViewId(0), ViewId(1));
         let query = StubQuery {
             editor_cid: ContentId(0),
             lines: vec!["abcdefgh\n".to_string()],
@@ -860,8 +826,7 @@ mod tests {
 
     #[test]
     fn selection_highlight_is_clipped_to_horizontal_viewport() {
-        let mut builder = SceneBuilder::new();
-        let (scene, editor) = build_editor_scene(&mut builder, 5, 2, ViewId(0), ViewId(1)).unwrap();
+        let (scene, editor) = editor_scene(5, 2, ViewId(0), ViewId(1));
         let query = StubQuery {
             editor_cid: ContentId(0),
             lines: vec!["abcdefgh".to_string()],

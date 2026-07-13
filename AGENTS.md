@@ -40,7 +40,7 @@
 - `src/frontend/`：纯抽象层，只放 `Frontend` trait，`app` 与 `tui` 共同依赖。
 - `src/tui/`：前端布局与渲染层，拥有 Taffy 布局、viewport 跟随逻辑和
   `TuiFrontend<W>`。
-- `src/app/`：主循环、事件分发、操作执行、内容表、View 归属和后台保存。
+- `src/app/`：主循环、事件分发、Scene 模型、操作执行、内容表、View 归属和后台保存。
 - `docs/roadmap/`：用户维护的长期改进方向和后续计划，不使用 Superpowers
   执行计划格式。
 - `docs/superpowers/specs/`：设计规格。
@@ -72,17 +72,19 @@ protocol -> std
   `tokio` 或前端渲染概念。
 - `protocol` 是中立层，适合放 ID、几何、selection、scene、
   viewport、key event、status 和 `ContentQuery` 等共享契约。
+- `protocol::scene` 只保存 Scene 快照数据和只读访问；`SceneBuilder`、split、
+  close、树修复和模型错误属于 `app::scene_model`。
 - 布局所有权在 `tui` 层。不要把状态栏预留高度、viewport 高度等
   布局知识塞回 `core` 或 `protocol::Viewport`。
 - 渲染是 pull 模型：前端通过 `ContentQuery` 查询内容、状态栏数据和
   selections；后端不要主动 push frame 或渲染数据。
-- `App` 持有唯一 `SceneBuilder`。新增 space 必须通过该 builder 分配。
+- `ClientSession` 持有唯一 `SceneBuilder`。新增 space 必须通过该 builder 分配。
 - `build_editor_scene` 只负责在传入的 `SceneBuilder` 上创建标准布局并
   snapshot，不得内部新建 builder 或消耗 builder。
 - 按键协议使用 `KeyEvent { code, modifiers }`，通过 `KeyModifiers`
   表达 Ctrl/Alt/Shift；不要重新引入 `CtrlKey`、`KeyEvent::Ctrl` 或把
   修饰键特化进 `KeyCode` 的旧枚举。
-- `View` 是 `app` 层编辑会话实体，按 `SpaceId` 归属 selections。
+- `View` 是 `app` 层编辑会话实体，按 `ViewId` 归属 selections。
   不要把 View 迁到 `core` 或 `protocol`，除非设计文档明确要求。
 - selection 模型使用 `anchor/head`，方向由二者相对位置隐含；不要新增
   `direction` 字段。

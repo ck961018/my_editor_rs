@@ -170,8 +170,7 @@ fn style_for(node: &SpaceNode, parent_axis: Option<Axis>, root_size: Option<Scen
 mod tests {
     use super::*;
     use crate::protocol::ids::ViewId;
-    use crate::protocol::scene::{SceneBuilder, build_editor_scene};
-    use crate::protocol::space::SplitDirection;
+    use crate::tui::test_scene::{editor_scene, split_editor_scene};
 
     fn item_for(scene: &ResolvedScene, content: ViewId) -> &RenderItem {
         scene.items.iter().find(|i| i.view_id == content).unwrap()
@@ -179,8 +178,7 @@ mod tests {
 
     #[test]
     fn editor_grows_and_status_fixed() {
-        let mut builder = SceneBuilder::new();
-        let (scene, _) = build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
+        let (scene, _) = editor_scene(80, 24, ViewId(0), ViewId(1));
         let mut engine = TaffyEngine::new();
         let resolved = engine.layout(&scene);
         assert_eq!(
@@ -205,8 +203,7 @@ mod tests {
 
     #[test]
     fn items_in_dfs_order() {
-        let mut builder = SceneBuilder::new();
-        let (scene, _) = build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
+        let (scene, _) = editor_scene(80, 24, ViewId(0), ViewId(1));
         let mut engine = TaffyEngine::new();
         let resolved = engine.layout(&scene);
         assert_eq!(resolved.items.len(), 2); // 仅 Content 进 items（container 不进）
@@ -216,10 +213,9 @@ mod tests {
 
     #[test]
     fn resize_changes_geometry() {
-        let mut builder = SceneBuilder::new();
-        let (mut scene, _) =
-            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
-        scene.resize(100, 40);
+        let (mut scene, _) = editor_scene(80, 24, ViewId(0), ViewId(1));
+        scene.size.width = 100;
+        scene.size.height = 40;
         let mut engine = TaffyEngine::new();
         let resolved = engine.layout(&scene);
         assert_eq!(item_for(&resolved, ViewId(0)).rect.height, 39);
@@ -228,13 +224,7 @@ mod tests {
 
     #[test]
     fn distinct_view_items_keep_their_source_space_ids() {
-        let mut builder = SceneBuilder::new();
-        let (mut scene, left) =
-            build_editor_scene(&mut builder, 20, 2, ViewId(0), ViewId(1)).unwrap();
-        let right = builder
-            .split(&mut scene, left, ViewId(2), true, SplitDirection::Right)
-            .unwrap()
-            .new_space;
+        let (scene, left, right) = split_editor_scene(20, 2, ViewId(0), ViewId(1), ViewId(2));
 
         let mut engine = TaffyEngine::new();
         let resolved = engine.layout(&scene);
