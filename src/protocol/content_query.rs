@@ -25,6 +25,7 @@ pub type StatusBarData = DocumentStatus;
 pub enum CursorStyle {
     Default,
     Block,
+    Bar,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

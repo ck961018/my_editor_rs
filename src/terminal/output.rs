@@ -70,6 +70,7 @@ impl<W: Write> Output<W> {
         let style = match style {
             CursorStyle::Default => cursor::SetCursorStyle::DefaultUserShape,
             CursorStyle::Block => cursor::SetCursorStyle::SteadyBlock,
+            CursorStyle::Bar => cursor::SetCursorStyle::SteadyBar,
         };
         queue!(self.out, style)
     }
@@ -195,6 +196,14 @@ mod tests {
         out.set_cursor_style(CursorStyle::Default).unwrap();
         let s = String::from_utf8(out.into_inner()).unwrap();
         assert!(s.contains("\x1b[0 q"), "got: {s}");
+    }
+
+    #[test]
+    fn set_cursor_style_bar_emits_decsusrps() {
+        let mut out = Output::new(Vec::new());
+        out.set_cursor_style(CursorStyle::Bar).unwrap();
+        let s = String::from_utf8(out.into_inner()).unwrap();
+        assert!(s.contains("\x1b[6 q"), "got: {s}");
     }
 
     #[test]

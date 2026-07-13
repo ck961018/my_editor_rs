@@ -170,7 +170,7 @@ mod tests {
                 runtime: &mut runtime,
             },
         );
-        assert_eq!(store.cursor_style(id, &runtime), CursorStyle::Default);
+        assert_eq!(store.cursor_style(id, &runtime), CursorStyle::Bar);
     }
 
     #[test]
