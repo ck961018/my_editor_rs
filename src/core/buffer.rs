@@ -883,7 +883,7 @@ fn is_word_char(ch: char) -> bool {
 mod tests {
     use super::*;
     use crate::core::command::{Command, ContentCommand, EditCommand};
-    use crate::core::mode::{ModeActionId, ModeId, ModeSet};
+    use crate::core::mode::{ModeActionName, ModeName, ModeSet};
     use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
     use crate::protocol::selection::{Selection, Selections};
     use tempfile::tempdir;
@@ -1638,8 +1638,8 @@ mod tests {
         let mut runtime = modes.create_runtime();
         modes.execute(
             &mut runtime,
-            ModeId::new("vim"),
-            ModeActionId::new("enter-insert"),
+            ModeName::new("vim"),
+            ModeActionName::new("enter-insert"),
         );
         assert_eq!(
             modes.resolve_key(&runtime, KeyEvent::shift_arrow(ArrowKey::Left)),

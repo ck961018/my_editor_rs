@@ -235,7 +235,7 @@ mod tests {
     use crate::core::command::{AppCommand, ContentCommand, EditCommand};
     use crate::core::content::Content;
     use crate::core::content_store::ContentStore;
-    use crate::core::mode::{ModeActionId, ModeId, ModeInstance, ModeRegistry};
+    use crate::core::mode::{ModeActionName, ModeInstance, ModeName, ModeRegistry};
     use crate::core::status_bar::StatusBar;
     use crate::protocol::ids::ContentId;
     use crate::protocol::key_event::{ArrowKey, KeyCode};
@@ -267,10 +267,14 @@ mod tests {
         contents.insert(editor, Content::Buffer(buffer));
         contents.insert(status, Content::StatusBar(StatusBar::new(editor)));
         let runtime = ModeRegistry::builtin()
-            .instantiate(ModeId::new("vim"))
+            .instantiate(&ModeName::new("vim"))
             .expect("vim mode exists");
         let d = Dispatcher::new(default_global_keymap());
         (d, scene, ed_space, contents, runtime)
+    }
+
+    fn enter_insert(runtime: &mut ModeInstance) {
+        runtime.execute_action_named(&ModeActionName::new("enter-insert"));
     }
 
     #[test]
@@ -337,8 +341,8 @@ mod tests {
                 .unwrap(),
             DispatchCommand::ViewContent {
                 command: ContentCommand::Mode {
-                    mode: ModeId::new("vim"),
-                    action: ModeActionId::new("append"),
+                    mode: ModeName::new("vim"),
+                    action: ModeActionName::new("append"),
                 },
                 space: focused,
                 content: ContentId(0),
@@ -363,8 +367,8 @@ mod tests {
             command,
             DispatchCommand::ViewContent {
                 command: ContentCommand::Mode {
-                    mode: ModeId::new("vim"),
-                    action: ModeActionId::new("enter-insert"),
+                    mode: ModeName::new("vim"),
+                    action: ModeActionName::new("enter-insert"),
                 },
                 space: focused,
                 content: ContentId(0),
@@ -447,7 +451,7 @@ mod tests {
     #[test]
     fn vim_insert_char_after_enter_insert_resolves_to_view_content() {
         let (mut dispatcher, scene, focused, contents, mut runtime) = fixture();
-        runtime.execute(ModeId::new("vim"), ModeActionId::new("enter-insert"));
+        enter_insert(&mut runtime);
 
         let command = dispatcher
             .dispatch(KeyEvent::char('a'), focused, &scene, &contents, &runtime)
@@ -466,7 +470,7 @@ mod tests {
     #[test]
     fn buffer_keymap_enter_inserts_newline_when_insert_mode() {
         let (mut dispatcher, scene, focused, contents, mut runtime) = fixture();
-        runtime.execute(ModeId::new("vim"), ModeActionId::new("enter-insert"));
+        enter_insert(&mut runtime);
 
         let command = dispatcher
             .dispatch(
@@ -491,7 +495,7 @@ mod tests {
     #[test]
     fn buffer_keymap_arrow_left_when_insert_mode() {
         let (mut dispatcher, scene, focused, contents, mut runtime) = fixture();
-        runtime.execute(ModeId::new("vim"), ModeActionId::new("enter-insert"));
+        enter_insert(&mut runtime);
 
         let command = dispatcher
             .dispatch(
@@ -524,7 +528,7 @@ mod tests {
         contents.insert(editor, Content::Buffer(Buffer::new()));
         contents.insert(status, Content::StatusBar(StatusBar::new(editor)));
         let runtime = ModeRegistry::builtin()
-            .instantiate(ModeId::new("vim"))
+            .instantiate(&ModeName::new("vim"))
             .expect("vim mode exists");
 
         let mut global = Keymap::new();

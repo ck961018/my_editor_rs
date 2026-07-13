@@ -26,9 +26,10 @@ App
             └── StatusBar
 ```
 
-`ModeRegistry` 使用稳定 `ModeId` 查找共享定义并创建实例。`ModeInstance` 保存共享定义引用
-和由定义创建的不透明 state；按键解析、cursor style 和 mode action 均从实例进入同一个
-`Mode` trait。未来脚本 Mode 只需提供该 trait 的 adapter，不向 View 或协议暴露脚本对象。
+`ModeRegistry` 将 owned `ModeName` 解析为稳定的运行时 `ModeId`，再查找共享定义并创建实例。
+`ModeInstance` 保存共享定义引用、运行时 ID 和由定义创建的不透明 state；按键解析、cursor
+style 和 mode action 均从实例进入同一个 `Mode` trait。未来脚本 Mode 只需提供该 trait 的
+adapter，不向 View 或协议暴露脚本对象。
 
 按键和命令路径为：
 
@@ -37,7 +38,7 @@ KeyEvent -> focused View.ModeInstance -> Command
 Mode action -> View.ModeInstance -> ContentCommand -> Content + ContentViewState
 ```
 
-Content 负责创建匹配的 `ContentViewState` 并声明默认 `ModeId`，App 不识别 Buffer、
+Content 负责创建匹配的 `ContentViewState` 并声明默认 `ModeName`，App 不识别 Buffer、
 StatusBar 等具体变体。Content/state 不匹配继续作为内部不变量失败。
 
 ## 前端数据
@@ -48,7 +49,7 @@ selection 时执行文本 viewport 跟随、高亮和物理文本光标定位。
 
 ## 非目标
 
-- 不实现 mode stack、脚本 runtime、热重载或动态 `ModeId`。
+- 不实现 mode stack、脚本 runtime 或热重载；动态名称与运行时 ID 映射由后续设计完成。
 - 语义命令边界由后续的“语义 Content 命令与适配结果设计”完成；本设计不增加 capability。
 - 不引入独立 `ViewId` 或远程协议。
 - 不把静态 `ContentViewState` 改成 `Any` 或插件对象。

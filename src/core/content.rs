@@ -5,7 +5,7 @@ use crate::core::command::ContentCommand;
 use crate::core::content_view_state::ContentViewState;
 use crate::core::edit::apply_edit;
 use crate::core::keymap::Keymap;
-use crate::core::mode::ModeId;
+use crate::core::mode::ModeName;
 use crate::core::status_bar::StatusBar;
 use crate::protocol::status::StatusMessage;
 
@@ -72,9 +72,9 @@ impl Content {
         }
     }
 
-    pub fn default_mode(&self) -> Option<ModeId> {
+    pub fn default_mode(&self) -> Option<ModeName> {
         match self {
-            Self::Buffer(_) => Some(ModeId::new("vim")),
+            Self::Buffer(_) => Some(ModeName::new("vim")),
             Self::StatusBar(_) => None,
         }
     }
@@ -191,7 +191,7 @@ mod tests {
             content.create_view_state(),
             ContentViewState::Buffer(_)
         ));
-        assert_eq!(content.default_mode(), Some(ModeId::new("vim")));
+        assert_eq!(content.default_mode(), Some(ModeName::new("vim")));
     }
 
     #[test]

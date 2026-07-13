@@ -170,6 +170,7 @@ Backend -> Frontend
 - 只有一个 Frontend 和一份客户端会话状态。
 - View 暂时以 SpaceId 为身份。
 - App 持有共享 ModeRegistry，View 从中创建独立 ModeInstance。
+- Mode/Action 在命令边界使用 owned 名称，Registry 将其解析为进程内稳定的数值 ID。
 - 原生 Mode 暂时使用 Rust trait object 和 `Any` 保存类型状态。
 - `RenderQuery` 暂时是同步同进程调用。
 - Content 集合暂时是静态枚举。

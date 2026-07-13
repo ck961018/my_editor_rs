@@ -223,6 +223,10 @@ impl<F: Frontend> App<F> {
                 assert_eq!(view.content(), content, "view/content target mismatch");
                 let command = match command {
                     crate::core::command::ContentCommand::Mode { mode, action } => {
+                        let Some((mode, action)) = self.modes.resolve_command(&mode, &action)
+                        else {
+                            return Ok(());
+                        };
                         match view
                             .mode_mut()
                             .expect("mode command requires a view mode")
@@ -439,9 +443,9 @@ fn reconcile_views(
                     let state = contents
                         .create_view_state(content)
                         .expect("validated content exists");
-                    let mode = contents.default_mode(content).map(|id| {
+                    let mode = contents.default_mode(content).map(|name| {
                         modes
-                            .instantiate(id)
+                            .instantiate(&name)
                             .expect("content default mode must be registered")
                     });
                     View::new(content, state, mode)

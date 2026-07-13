@@ -55,16 +55,16 @@ Terminal、WebPage 等 Content。
 ## 优先级 4：运行时 Mode 标识
 
 **触发条件：** 脚本可以注册 Mode 或 Mode action。  
-**状态：** 待触发。
+**状态：** 已完成（2026-07-13）。
 
-当前 `ModeId(&'static str)` 和 `ModeActionId(&'static str)` 只适合编译期定义。脚本接入时：
+改进前，`ModeId(&'static str)` 和 `ModeActionId(&'static str)` 只适合编译期定义。现已实现：
 
-- 协议和脚本边界使用拥有所有权的名称；
-- registry 将名称映射为稳定的运行时 ID；
-- Rust `Any` 只作为原生 Mode 的内部实现；
-- 脚本 Mode 状态由脚本 runtime 以 opaque handle 管理。
+- Content 默认值与命令边界使用 owned `ModeName`/`ModeActionName`；
+- registry 注册时分配数值 `ModeId`，并为每个 Mode 的 action 分配 `ModeActionId`；
+- 同一 registry 生命周期内，名称稳定解析为同一运行时 ID；
+- Rust `Any` 只作为原生 Mode 的内部实现。
 
-脚本语言、沙箱、热重载和 ABI 在选择 runtime 时另行设计。
+脚本 Mode 的 opaque state handle、脚本语言、沙箱、热重载和 ABI 仍在选择 runtime 时另行设计。
 
 ## 优先级 5：View 与 Space 身份分离
 

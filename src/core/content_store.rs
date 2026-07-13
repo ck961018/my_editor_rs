@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::core::content::Content;
 use crate::core::content_view_state::ContentViewState;
 use crate::core::keymap::Keymap;
-use crate::core::mode::ModeId;
+use crate::core::mode::ModeName;
 use crate::protocol::content_query::{
     ContentData, ContentQuery, DocumentStatus, RowRange, StatusBarData,
 };
@@ -32,7 +32,7 @@ impl ContentStore {
         self.contents.get(&id).map(Content::create_view_state)
     }
 
-    pub fn default_mode(&self, id: ContentId) -> Option<ModeId> {
+    pub fn default_mode(&self, id: ContentId) -> Option<ModeName> {
         self.contents.get(&id).and_then(Content::default_mode)
     }
 

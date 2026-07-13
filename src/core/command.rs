@@ -1,4 +1,4 @@
-use crate::core::mode::{ModeActionId, ModeId};
+use crate::core::mode::{ModeActionName, ModeName};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -20,7 +20,10 @@ pub enum AppCommand {
 pub enum ContentCommand {
     Edit(EditCommand),
     Save,
-    Mode { mode: ModeId, action: ModeActionId },
+    Mode {
+        mode: ModeName,
+        action: ModeActionName,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,16 +105,16 @@ mod tests {
     }
 
     #[test]
-    fn mode_command_carries_mode_action_ids() {
+    fn mode_command_carries_owned_mode_action_names() {
         let command = Command::Content(ContentCommand::Mode {
-            mode: ModeId::new("vim"),
-            action: ModeActionId::new("enter-insert"),
+            mode: ModeName::new("vim"),
+            action: ModeActionName::new("enter-insert"),
         });
         assert_eq!(
             command,
             Command::Content(ContentCommand::Mode {
-                mode: ModeId::new("vim"),
-                action: ModeActionId::new("enter-insert"),
+                mode: ModeName::new("vim"),
+                action: ModeActionName::new("enter-insert"),
             })
         );
     }
