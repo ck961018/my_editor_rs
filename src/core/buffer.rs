@@ -247,6 +247,24 @@ impl Buffer {
         self.move_cursor_down(&mut sel.head, n);
     }
 
+    pub fn move_head_word_forward(&self, sel: &mut Selection) {
+        let target = forward_word_start(&self.rope, sel.head.char_index);
+        sel.head.char_index = target;
+        self.recompute_cursor(&mut sel.head);
+    }
+
+    pub fn move_head_word_backward(&self, sel: &mut Selection) {
+        let target = backward_word_start(&self.rope, sel.head.char_index);
+        sel.head.char_index = target;
+        self.recompute_cursor(&mut sel.head);
+    }
+
+    pub fn move_head_word_end(&self, sel: &mut Selection) {
+        let target = forward_word_end(&self.rope, sel.head.char_index);
+        sel.head.char_index = target;
+        self.recompute_cursor(&mut sel.head);
+    }
+
     /// 设 head，不碰 anchor。
     pub fn set_head(&self, sel: &mut Selection, char_idx: usize, line_idx: usize) {
         self.set_cursor(&mut sel.head, char_idx, line_idx);
@@ -434,6 +452,71 @@ fn backward_word_start(rope: &Rope, char_index: usize) -> usize {
         start -= 1;
     }
     start
+}
+
+fn forward_word_start(rope: &Rope, char_index: usize) -> usize {
+    let len = rope.len_chars();
+    let mut pos = char_index.min(len);
+    if pos >= len {
+        return len;
+    }
+    // Skip current word/punct unit (same class as char at pos)
+    let start_class = char_class(rope.char(pos));
+    while pos < len && char_class(rope.char(pos)) == start_class {
+        pos += 1;
+    }
+    // Skip whitespace
+    while pos < len && rope.char(pos).is_whitespace() {
+        pos += 1;
+    }
+    pos
+}
+
+fn forward_word_end(rope: &Rope, char_index: usize) -> usize {
+    let len = rope.len_chars();
+    let mut pos = char_index.min(len);
+    if pos >= len {
+        return len;
+    }
+    // If on whitespace or at end of current unit, skip whitespace first
+    if rope.char(pos).is_whitespace() {
+        while pos < len && rope.char(pos).is_whitespace() {
+            pos += 1;
+        }
+        if pos >= len {
+            return len;
+        }
+    } else {
+        // If not at end of current unit, the loop below advances to end.
+        // If already at end of current unit, skip to next.
+        let start_class = char_class(rope.char(pos));
+        if pos + 1 < len && char_class(rope.char(pos + 1)) != start_class {
+            // Already at end of unit; step past it, then skip whitespace to next word
+            pos += 1;
+            while pos < len && rope.char(pos).is_whitespace() {
+                pos += 1;
+            }
+            if pos >= len {
+                return len;
+            }
+        }
+    }
+    // Advance to end of current word/punct unit
+    let end_class = char_class(rope.char(pos));
+    while pos + 1 < len && char_class(rope.char(pos + 1)) == end_class {
+        pos += 1;
+    }
+    pos
+}
+
+fn char_class(ch: char) -> u8 {
+    if ch.is_whitespace() {
+        0
+    } else if is_word_char(ch) {
+        1
+    } else {
+        2
+    }
 }
 
 fn is_word_char(ch: char) -> bool {
@@ -662,6 +745,105 @@ mod tests {
                 .all()
                 .all(|selection| selection.anchor == selection.head)
         );
+    }
+
+    #[test]
+    fn forward_word_start_skips_word_then_whitespace() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo bar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let rope = buffer.slice();
+        assert_eq!(forward_word_start(rope, 0), 4); // f -> b
+        assert_eq!(forward_word_start(rope, 4), 7); // b -> end
+    }
+
+    #[test]
+    fn forward_word_start_treats_punctuation_as_unit() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo.bar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let rope = buffer.slice();
+        assert_eq!(forward_word_start(rope, 0), 3); // f -> .
+        assert_eq!(forward_word_start(rope, 3), 4); // . -> b
+        assert_eq!(forward_word_start(rope, 4), 7); // b -> end
+    }
+
+    #[test]
+    fn forward_word_end_lands_on_last_char_of_word() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo.bar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let rope = buffer.slice();
+        assert_eq!(forward_word_end(rope, 0), 2); // f -> o (foo end)
+        assert_eq!(forward_word_end(rope, 2), 3); // o -> . (punct end)
+        assert_eq!(forward_word_end(rope, 3), 6); // . -> r (bar end)
+    }
+
+    #[test]
+    fn forward_word_end_skips_whitespace_to_next_word() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo  bar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let rope = buffer.slice();
+        assert_eq!(forward_word_end(rope, 0), 2); // f -> o
+        assert_eq!(forward_word_end(rope, 2), 7); // o -> r (skips spaces)
+    }
+
+    #[test]
+    fn forward_word_start_at_end_stays_at_end() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let rope = buffer.slice();
+        assert_eq!(forward_word_start(rope, 3), 3);
+    }
+
+    #[test]
+    fn forward_word_end_at_end_stays_at_end() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let rope = buffer.slice();
+        assert_eq!(forward_word_end(rope, 3), 3);
+    }
+
+    #[test]
+    fn move_head_word_forward_advances_to_next_word() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo bar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 0);
+        buffer.move_head_word_forward(s.primary_mut());
+        assert_eq!(s.primary().head().char_index, 4);
+    }
+
+    #[test]
+    fn move_head_word_backward_advances_to_prev_word() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo bar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 7);
+        buffer.move_head_word_backward(s.primary_mut());
+        assert_eq!(s.primary().head().char_index, 4);
+    }
+
+    #[test]
+    fn move_head_word_end_advances_to_word_end() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo.bar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 0);
+        buffer.move_head_word_end(s.primary_mut());
+        assert_eq!(s.primary().head().char_index, 2);
     }
 
     #[test]
