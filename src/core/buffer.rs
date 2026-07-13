@@ -468,6 +468,82 @@ impl Buffer {
             Self::collapse_to_head(selection);
         }
     }
+
+    pub fn delete_to_line_start_at_selections(&mut self, selections: &mut Selections) {
+        let ranges: Vec<(usize, usize)> = selections
+            .all()
+            .map(|s| {
+                if s.anchor != s.head {
+                    let (a, b) = (s.anchor.char_index, s.head.char_index);
+                    (a.min(b), a.max(b))
+                } else {
+                    let row = self
+                        .rope
+                        .char_to_line(s.head.char_index.min(self.rope.len_chars()));
+                    let line_start = self.rope.line_to_char(row);
+                    (line_start, s.head.char_index)
+                }
+            })
+            .collect();
+        let mut sorted = ranges.clone();
+        sorted.sort_unstable_by_key(|b| std::cmp::Reverse(b.0));
+        sorted.dedup();
+        for (start, end) in &sorted {
+            if end > start {
+                self.rope.remove(*start..*end);
+            }
+        }
+        self.modified = true;
+        for (sel, (start, _)) in selections.all_mut().zip(ranges.iter()) {
+            let mut deleted_before = 0;
+            for &(r_start, r_end) in &sorted {
+                if r_end <= *start {
+                    deleted_before += r_end - r_start;
+                }
+            }
+            sel.head.char_index = start - deleted_before;
+            self.recompute_cursor(&mut sel.head);
+            Self::collapse_to_head(sel);
+        }
+    }
+
+    pub fn delete_to_line_end_at_selections(&mut self, selections: &mut Selections) {
+        let ranges: Vec<(usize, usize)> = selections
+            .all()
+            .map(|s| {
+                if s.anchor != s.head {
+                    let (a, b) = (s.anchor.char_index, s.head.char_index);
+                    (a.min(b), a.max(b))
+                } else {
+                    let row = self
+                        .rope
+                        .char_to_line(s.head.char_index.min(self.rope.len_chars()));
+                    let end = line_end_insert(&self.rope, row);
+                    (s.head.char_index.min(end), end)
+                }
+            })
+            .collect();
+        let mut sorted = ranges.clone();
+        sorted.sort_unstable_by_key(|b| std::cmp::Reverse(b.0));
+        sorted.dedup();
+        for (start, end) in &sorted {
+            if end > start {
+                self.rope.remove(*start..*end);
+            }
+        }
+        self.modified = true;
+        for (sel, (start, _end)) in selections.all_mut().zip(ranges.iter()) {
+            let mut deleted_before = 0;
+            for &(r_start, r_end) in &sorted {
+                if r_end <= *start {
+                    deleted_before += r_end - r_start;
+                }
+            }
+            sel.head.char_index = start - deleted_before;
+            self.recompute_cursor(&mut sel.head);
+            Self::collapse_to_head(sel);
+        }
+    }
 }
 
 impl Default for Buffer {
@@ -855,6 +931,80 @@ mod tests {
                 .all()
                 .all(|selection| selection.anchor == selection.head)
         );
+    }
+
+    #[test]
+    fn delete_to_line_start_removes_from_line_start_to_cursor() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\nbar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 5); // on 'a' of line 2
+        buffer.delete_to_line_start_at_selections(&mut s);
+        assert_eq!(buffer.slice().to_string(), "foo\nar");
+        assert_eq!(s.primary().head().char_index, 4); // line 2 start
+    }
+
+    #[test]
+    fn delete_to_line_start_at_line_start_is_noop() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 0);
+        buffer.delete_to_line_start_at_selections(&mut s);
+        assert_eq!(buffer.slice().to_string(), "foo");
+        assert_eq!(s.primary().head().char_index, 0);
+    }
+
+    #[test]
+    fn delete_to_line_start_non_empty_selection_deletes_range() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "abcdef".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 2);
+        s.primary_mut().head = selection_at(&buffer, 5).primary().head;
+        buffer.delete_to_line_start_at_selections(&mut s);
+        assert_eq!(buffer.slice().to_string(), "abf");
+        assert_eq!(s.primary().head().char_index, 2);
+    }
+
+    #[test]
+    fn delete_to_line_end_removes_from_cursor_to_line_end() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\nbar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 1); // on first 'o'
+        buffer.delete_to_line_end_at_selections(&mut s);
+        assert_eq!(buffer.slice().to_string(), "f\nbar");
+        assert_eq!(s.primary().head().char_index, 1);
+    }
+
+    #[test]
+    fn delete_to_line_end_at_line_end_is_noop() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 3); // past end
+        buffer.delete_to_line_end_at_selections(&mut s);
+        assert_eq!(buffer.slice().to_string(), "foo");
+        assert_eq!(s.primary().head().char_index, 3);
+    }
+
+    #[test]
+    fn delete_to_line_end_non_empty_selection_deletes_range() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "abcdef".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 2);
+        s.primary_mut().head = selection_at(&buffer, 4).primary().head;
+        buffer.delete_to_line_end_at_selections(&mut s);
+        assert_eq!(buffer.slice().to_string(), "abef");
+        assert_eq!(s.primary().head().char_index, 2);
     }
 
     #[test]
