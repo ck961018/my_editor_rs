@@ -237,6 +237,34 @@ impl Mode for VimMode {
                 self.state_mut(state).state = VimState::Insert;
                 Some(EditCommand::MoveRightBy(1))
             }
+            "open-below" => {
+                self.state_mut(state).state = VimState::Insert;
+                Some(EditCommand::InsertNewLineBelow)
+            }
+            "open-above" => {
+                self.state_mut(state).state = VimState::Insert;
+                Some(EditCommand::InsertNewLineAbove)
+            }
+            "insert-at-first-non-blank" => {
+                self.state_mut(state).state = VimState::Insert;
+                Some(EditCommand::MoveToFirstNonBlank)
+            }
+            "append-at-line-end" => {
+                self.state_mut(state).state = VimState::Insert;
+                Some(EditCommand::MoveAfterLineEnd)
+            }
+            "substitute-char" => {
+                self.state_mut(state).state = VimState::Insert;
+                Some(EditCommand::Delete(1))
+            }
+            "change-to-line-end" => {
+                self.state_mut(state).state = VimState::Insert;
+                Some(EditCommand::DeleteToLineEnd)
+            }
+            "substitute-line" => {
+                self.state_mut(state).state = VimState::Insert;
+                Some(EditCommand::DeleteLineContent)
+            }
             _ => None,
         }
     }
@@ -333,6 +361,55 @@ fn vim_normal_keymap() -> Keymap {
     km.bind_edit(KeyEvent::char('J'), EditCommand::JoinLines);
     km.bind_edit(KeyEvent::char('D'), EditCommand::DeleteToLineEnd);
     km.bind_edit(KeyEvent::char('~'), EditCommand::ToggleCase);
+    km.bind(
+        KeyEvent::char('o'),
+        Command::Content(ContentCommand::Mode {
+            mode: ModeId::new("vim"),
+            action: ModeActionId::new("open-below"),
+        }),
+    );
+    km.bind(
+        KeyEvent::char('O'),
+        Command::Content(ContentCommand::Mode {
+            mode: ModeId::new("vim"),
+            action: ModeActionId::new("open-above"),
+        }),
+    );
+    km.bind(
+        KeyEvent::char('I'),
+        Command::Content(ContentCommand::Mode {
+            mode: ModeId::new("vim"),
+            action: ModeActionId::new("insert-at-first-non-blank"),
+        }),
+    );
+    km.bind(
+        KeyEvent::char('A'),
+        Command::Content(ContentCommand::Mode {
+            mode: ModeId::new("vim"),
+            action: ModeActionId::new("append-at-line-end"),
+        }),
+    );
+    km.bind(
+        KeyEvent::char('s'),
+        Command::Content(ContentCommand::Mode {
+            mode: ModeId::new("vim"),
+            action: ModeActionId::new("substitute-char"),
+        }),
+    );
+    km.bind(
+        KeyEvent::char('C'),
+        Command::Content(ContentCommand::Mode {
+            mode: ModeId::new("vim"),
+            action: ModeActionId::new("change-to-line-end"),
+        }),
+    );
+    km.bind(
+        KeyEvent::char('S'),
+        Command::Content(ContentCommand::Mode {
+            mode: ModeId::new("vim"),
+            action: ModeActionId::new("substitute-line"),
+        }),
+    );
     km.bind(
         KeyEvent::char('i'),
         Command::Content(ContentCommand::Mode {
@@ -682,6 +759,199 @@ mod tests {
         assert_eq!(
             modes.resolve_key(&runtime, KeyEvent::char('~')),
             Some(EditCommand::ToggleCase.into()),
+        );
+    }
+
+    #[test]
+    fn vim_open_below_enters_insert_and_returns_new_line_below() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+        assert_eq!(
+            modes.execute(
+                &mut runtime,
+                ModeId::new("vim"),
+                ModeActionId::new("open-below"),
+            ),
+            Some(EditCommand::InsertNewLineBelow),
+        );
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('x')),
+            Some(EditCommand::InsertText("x".to_string()).into()),
+        );
+    }
+
+    #[test]
+    fn vim_open_above_enters_insert_and_returns_new_line_above() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+        assert_eq!(
+            modes.execute(
+                &mut runtime,
+                ModeId::new("vim"),
+                ModeActionId::new("open-above"),
+            ),
+            Some(EditCommand::InsertNewLineAbove),
+        );
+    }
+
+    #[test]
+    fn vim_insert_at_first_non_blank_enters_insert_and_returns_move() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+        assert_eq!(
+            modes.execute(
+                &mut runtime,
+                ModeId::new("vim"),
+                ModeActionId::new("insert-at-first-non-blank"),
+            ),
+            Some(EditCommand::MoveToFirstNonBlank),
+        );
+    }
+
+    #[test]
+    fn vim_append_at_line_end_enters_insert_and_returns_move_after_line_end() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+        assert_eq!(
+            modes.execute(
+                &mut runtime,
+                ModeId::new("vim"),
+                ModeActionId::new("append-at-line-end"),
+            ),
+            Some(EditCommand::MoveAfterLineEnd),
+        );
+    }
+
+    #[test]
+    fn vim_substitute_char_enters_insert_and_returns_delete_forward() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+        assert_eq!(
+            modes.execute(
+                &mut runtime,
+                ModeId::new("vim"),
+                ModeActionId::new("substitute-char"),
+            ),
+            Some(EditCommand::Delete(1)),
+        );
+    }
+
+    #[test]
+    fn vim_change_to_line_end_enters_insert_and_returns_delete_to_line_end() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+        assert_eq!(
+            modes.execute(
+                &mut runtime,
+                ModeId::new("vim"),
+                ModeActionId::new("change-to-line-end"),
+            ),
+            Some(EditCommand::DeleteToLineEnd),
+        );
+    }
+
+    #[test]
+    fn vim_substitute_line_enters_insert_and_returns_delete_line_content() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+        assert_eq!(
+            modes.execute(
+                &mut runtime,
+                ModeId::new("vim"),
+                ModeActionId::new("substitute-line"),
+            ),
+            Some(EditCommand::DeleteLineContent),
+        );
+    }
+
+    #[test]
+    fn vim_normal_o_resolves_to_open_below_mode_command() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('o')),
+            Some(Command::Content(ContentCommand::Mode {
+                mode: ModeId::new("vim"),
+                action: ModeActionId::new("open-below"),
+            })),
+        );
+    }
+
+    #[test]
+    fn vim_normal_capital_o_resolves_to_open_above_mode_command() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('O')),
+            Some(Command::Content(ContentCommand::Mode {
+                mode: ModeId::new("vim"),
+                action: ModeActionId::new("open-above"),
+            })),
+        );
+    }
+
+    #[test]
+    fn vim_normal_capital_i_resolves_to_insert_at_first_non_blank() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('I')),
+            Some(Command::Content(ContentCommand::Mode {
+                mode: ModeId::new("vim"),
+                action: ModeActionId::new("insert-at-first-non-blank"),
+            })),
+        );
+    }
+
+    #[test]
+    fn vim_normal_capital_a_resolves_to_append_at_line_end() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('A')),
+            Some(Command::Content(ContentCommand::Mode {
+                mode: ModeId::new("vim"),
+                action: ModeActionId::new("append-at-line-end"),
+            })),
+        );
+    }
+
+    #[test]
+    fn vim_normal_s_resolves_to_substitute_char() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('s')),
+            Some(Command::Content(ContentCommand::Mode {
+                mode: ModeId::new("vim"),
+                action: ModeActionId::new("substitute-char"),
+            })),
+        );
+    }
+
+    #[test]
+    fn vim_normal_capital_c_resolves_to_change_to_line_end() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('C')),
+            Some(Command::Content(ContentCommand::Mode {
+                mode: ModeId::new("vim"),
+                action: ModeActionId::new("change-to-line-end"),
+            })),
+        );
+    }
+
+    #[test]
+    fn vim_normal_capital_s_resolves_to_substitute_line() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('S')),
+            Some(Command::Content(ContentCommand::Mode {
+                mode: ModeId::new("vim"),
+                action: ModeActionId::new("substitute-line"),
+            })),
         );
     }
 }
