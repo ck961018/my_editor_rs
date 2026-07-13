@@ -253,6 +253,16 @@ fn vim_insert_keymap() -> Keymap {
     km.bind_edit(KeyEvent::ctrl('f'), EditCommand::MoveRightBy(1));
     km.bind_edit(KeyEvent::ctrl('h'), EditCommand::Delete(-1));
     km.bind_edit(KeyEvent::ctrl('w'), EditCommand::DeleteWordBackward);
+    km.bind_edit(KeyEvent::ctrl('u'), EditCommand::DeleteToLineStart);
+    km.bind_edit(KeyEvent::ctrl('k'), EditCommand::DeleteToLineEnd);
+    km.bind_edit(
+        KeyEvent::ctrl('j'),
+        EditCommand::InsertText("\n".to_string()),
+    );
+    km.bind_edit(
+        KeyEvent::ctrl('m'),
+        EditCommand::InsertText("\n".to_string()),
+    );
     km
 }
 
@@ -431,6 +441,66 @@ mod tests {
         assert_eq!(
             modes.resolve_key(&runtime, KeyEvent::ctrl('w')),
             Some(EditCommand::DeleteWordBackward.into()),
+        );
+    }
+
+    #[test]
+    fn vim_insert_ctrl_u_resolves_to_delete_to_line_start() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+        modes.execute(
+            &mut runtime,
+            ModeId::new("vim"),
+            ModeActionId::new("enter-insert"),
+        );
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::ctrl('u')),
+            Some(EditCommand::DeleteToLineStart.into()),
+        );
+    }
+
+    #[test]
+    fn vim_insert_ctrl_k_resolves_to_delete_to_line_end() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+        modes.execute(
+            &mut runtime,
+            ModeId::new("vim"),
+            ModeActionId::new("enter-insert"),
+        );
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::ctrl('k')),
+            Some(EditCommand::DeleteToLineEnd.into()),
+        );
+    }
+
+    #[test]
+    fn vim_insert_ctrl_j_resolves_to_insert_newline() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+        modes.execute(
+            &mut runtime,
+            ModeId::new("vim"),
+            ModeActionId::new("enter-insert"),
+        );
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::ctrl('j')),
+            Some(EditCommand::InsertText("\n".to_string()).into()),
+        );
+    }
+
+    #[test]
+    fn vim_insert_ctrl_m_resolves_to_insert_newline() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+        modes.execute(
+            &mut runtime,
+            ModeId::new("vim"),
+            ModeActionId::new("enter-insert"),
+        );
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::ctrl('m')),
+            Some(EditCommand::InsertText("\n".to_string()).into()),
         );
     }
 
