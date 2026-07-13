@@ -265,6 +265,54 @@ impl Buffer {
         self.recompute_cursor(&mut sel.head);
     }
 
+    pub fn move_head_to_line_start(&self, sel: &mut Selection) {
+        let row = self
+            .rope
+            .char_to_line(sel.head.char_index.min(self.rope.len_chars()));
+        sel.head.char_index = self.rope.line_to_char(row);
+        self.recompute_cursor(&mut sel.head);
+    }
+
+    pub fn move_head_to_first_non_blank(&self, sel: &mut Selection) {
+        let row = self
+            .rope
+            .char_to_line(sel.head.char_index.min(self.rope.len_chars()));
+        sel.head.char_index = first_non_blank_in_line(&self.rope, row);
+        self.recompute_cursor(&mut sel.head);
+    }
+
+    pub fn move_head_to_line_end(&self, sel: &mut Selection) {
+        let row = self
+            .rope
+            .char_to_line(sel.head.char_index.min(self.rope.len_chars()));
+        sel.head.char_index = line_end_char(&self.rope, row);
+        self.recompute_cursor(&mut sel.head);
+    }
+
+    pub fn move_head_after_line_end(&self, sel: &mut Selection) {
+        let row = self
+            .rope
+            .char_to_line(sel.head.char_index.min(self.rope.len_chars()));
+        sel.head.char_index = line_end_insert(&self.rope, row);
+        self.recompute_cursor(&mut sel.head);
+    }
+
+    pub fn move_head_to_last_line(&self, sel: &mut Selection) {
+        let max_row = self.rope.len_lines().saturating_sub(1);
+        sel.head.char_index = self.rope.line_to_char(max_row);
+        self.recompute_cursor(&mut sel.head);
+    }
+
+    pub fn move_head_to_prev_paragraph(&self, sel: &mut Selection) {
+        sel.head.char_index = prev_paragraph(&self.rope, sel.head.char_index);
+        self.recompute_cursor(&mut sel.head);
+    }
+
+    pub fn move_head_to_next_paragraph(&self, sel: &mut Selection) {
+        sel.head.char_index = next_paragraph(&self.rope, sel.head.char_index);
+        self.recompute_cursor(&mut sel.head);
+    }
+
     /// 设 head，不碰 anchor。
     pub fn set_head(&self, sel: &mut Selection, char_idx: usize, line_idx: usize) {
         self.set_cursor(&mut sel.head, char_idx, line_idx);
@@ -517,6 +565,68 @@ fn char_class(ch: char) -> u8 {
     } else {
         2
     }
+}
+
+fn first_non_blank_in_line(rope: &Rope, row: usize) -> usize {
+    let line_start = rope.line_to_char(row);
+    let line = rope.line(row);
+    for (i, ch) in line.chars().enumerate() {
+        if ch == '\n' {
+            break;
+        }
+        if !ch.is_whitespace() {
+            return line_start + i;
+        }
+    }
+    line_start
+}
+
+fn line_end_char(rope: &Rope, row: usize) -> usize {
+    let line_start = rope.line_to_char(row);
+    let content_len = line_content_len(rope, row);
+    if content_len == 0 {
+        line_start
+    } else {
+        line_start + content_len - 1
+    }
+}
+
+fn line_end_insert(rope: &Rope, row: usize) -> usize {
+    let line_start = rope.line_to_char(row);
+    line_start + line_content_len(rope, row)
+}
+
+fn is_empty_line(rope: &Rope, row: usize) -> bool {
+    line_content_len(rope, row) == 0
+}
+
+fn prev_paragraph(rope: &Rope, char_index: usize) -> usize {
+    let cur_row = rope.char_to_line(char_index.min(rope.len_chars()));
+    if cur_row == 0 {
+        return 0;
+    }
+    let mut row = cur_row - 1;
+    loop {
+        if is_empty_line(rope, row) {
+            return rope.line_to_char(row);
+        }
+        if row == 0 {
+            break;
+        }
+        row -= 1;
+    }
+    0
+}
+
+fn next_paragraph(rope: &Rope, char_index: usize) -> usize {
+    let cur_row = rope.char_to_line(char_index.min(rope.len_chars()));
+    let max_row = rope.len_lines().saturating_sub(1);
+    for row in (cur_row + 1)..=max_row {
+        if is_empty_line(rope, row) {
+            return rope.line_to_char(row);
+        }
+    }
+    rope.line_to_char(max_row)
 }
 
 fn is_word_char(ch: char) -> bool {
@@ -844,6 +954,177 @@ mod tests {
         let mut s = selection_at(&buffer, 0);
         buffer.move_head_word_end(s.primary_mut());
         assert_eq!(s.primary().head().char_index, 2);
+    }
+
+    #[test]
+    fn first_non_blank_finds_first_non_whitespace() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "  foo".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let rope = buffer.slice();
+        assert_eq!(first_non_blank_in_line(rope, 0), 2);
+    }
+
+    #[test]
+    fn first_non_blank_all_blank_returns_line_start() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "   \n".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let rope = buffer.slice();
+        assert_eq!(first_non_blank_in_line(rope, 0), 0);
+    }
+
+    #[test]
+    fn line_end_char_returns_last_non_newline_index() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\nbar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let rope = buffer.slice();
+        assert_eq!(line_end_char(rope, 0), 2); // 'o' of "foo"
+        assert_eq!(line_end_char(rope, 1), 6); // 'r' of "bar"
+    }
+
+    #[test]
+    fn line_end_char_empty_line_returns_line_start() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "\n".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let rope = buffer.slice();
+        assert_eq!(line_end_char(rope, 0), 0);
+    }
+
+    #[test]
+    fn line_end_insert_returns_position_after_last_char() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\n".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let rope = buffer.slice();
+        assert_eq!(line_end_insert(rope, 0), 3); // after 'o', before '\n'
+    }
+
+    #[test]
+    fn prev_paragraph_finds_previous_empty_line() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\n\nbar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let rope = buffer.slice();
+        // char_index 5 is 'b' in "bar" on line 2; prev empty line is line 1 (char 4)
+        assert_eq!(prev_paragraph(rope, 5), 4);
+    }
+
+    #[test]
+    fn next_paragraph_finds_next_empty_line() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\n\nbar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let rope = buffer.slice();
+        // char_index 0 is 'f' on line 0; next empty line is line 1 (char 4)
+        assert_eq!(next_paragraph(rope, 0), 4);
+    }
+
+    #[test]
+    fn prev_paragraph_no_empty_line_stays_at_first_line() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\nbar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let rope = buffer.slice();
+        assert_eq!(prev_paragraph(rope, 5), 0);
+    }
+
+    #[test]
+    fn next_paragraph_no_empty_line_stays_at_last_line() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\nbar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let rope = buffer.slice();
+        // No empty line; last line starts at char 4
+        assert_eq!(next_paragraph(rope, 0), 4);
+    }
+
+    #[test]
+    fn move_head_to_line_start_goes_to_column_zero() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "  foo\n  bar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 7); // on 'b' of line 2
+        buffer.move_head_to_line_start(s.primary_mut());
+        assert_eq!(s.primary().head().char_index, 6); // line 2 start
+    }
+
+    #[test]
+    fn move_head_to_first_non_blank_skips_leading_ws() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "  foo".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 0);
+        buffer.move_head_to_first_non_blank(s.primary_mut());
+        assert_eq!(s.primary().head().char_index, 2);
+    }
+
+    #[test]
+    fn move_head_to_line_end_lands_on_last_char() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\nbar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 0);
+        buffer.move_head_to_line_end(s.primary_mut());
+        assert_eq!(s.primary().head().char_index, 2); // last 'o'
+    }
+
+    #[test]
+    fn move_head_after_line_end_lands_after_last_char() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\n".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 0);
+        buffer.move_head_after_line_end(s.primary_mut());
+        assert_eq!(s.primary().head().char_index, 3); // after 'o', before '\n'
+    }
+
+    #[test]
+    fn move_head_to_last_line_goes_to_last_line_start() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\nbar\nbaz".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 0);
+        buffer.move_head_to_last_line(s.primary_mut());
+        assert_eq!(s.primary().head().char_index, 8); // start of "baz"
+    }
+
+    #[test]
+    fn move_head_to_prev_paragraph_jumps_to_empty_line() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\n\nbar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 5); // 'b' of "bar"
+        buffer.move_head_to_prev_paragraph(s.primary_mut());
+        assert_eq!(s.primary().head().char_index, 4); // empty line
+    }
+
+    #[test]
+    fn move_head_to_next_paragraph_jumps_to_empty_line() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\n\nbar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 0); // 'f' of "foo"
+        buffer.move_head_to_next_paragraph(s.primary_mut());
+        assert_eq!(s.primary().head().char_index, 4); // empty line
     }
 
     #[test]
