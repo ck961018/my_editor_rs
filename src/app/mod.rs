@@ -7,8 +7,9 @@ mod message;
 mod tasks;
 mod view;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
+use std::path::Path;
 
 use tokio::sync::mpsc;
 
@@ -18,11 +19,14 @@ use crate::app::tasks::AppTasks;
 use crate::app::view::View;
 use crate::core::buffer::Buffer;
 use crate::core::command::AppCommand;
-use crate::core::content::{Content, ContentEffect, ContentEvent, ContentInput};
+use crate::core::content::{Content, ContentEffect, ContentEvent, ContentInput, SaveSnapshot};
 use crate::core::content_store::ContentStore;
+use crate::core::mode::ModeRegistry;
 use crate::core::status_bar::StatusBar;
 use crate::frontend::Frontend;
-use crate::protocol::content_query::{ContentData, ContentQuery, RenderQuery, ViewData};
+use crate::protocol::content_query::{
+    ContentData, ContentQuery, CursorStyle, RenderQuery, ViewData,
+};
 use crate::protocol::frontend_event::FrontendEvent;
 use crate::protocol::ids::{ContentId, SpaceId};
 use crate::protocol::scene::{
@@ -36,6 +40,7 @@ pub struct App<F: Frontend> {
     // 预留：动态 space 分配（split/panel/overlay/minibuffer）经此 builder，避免重置 SpaceId。
     #[allow(dead_code)] // 后续布局命令通过此 builder 进入 Scene。
     scene_builder: SceneBuilder,
+    modes: ModeRegistry,
     views: HashMap<SpaceId, View>,
     focused: SpaceId,
     dispatcher: Dispatcher,
@@ -43,7 +48,38 @@ pub struct App<F: Frontend> {
     message_tx: mpsc::UnboundedSender<AppMessage>,
     message_rx: mpsc::UnboundedReceiver<AppMessage>,
     tasks: AppTasks,
-    pending_saves: HashSet<ContentId>,
+    pending_saves: HashMap<ContentId, PendingSave>,
+}
+
+struct PendingSave {
+    revision: u64,
+    queued: Option<SaveSnapshot>,
+}
+
+async fn atomic_write(snapshot: SaveSnapshot) -> io::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+
+        let parent = snapshot
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        temporary.write_all(snapshot.bytes.as_bytes())?;
+        if let Ok(metadata) = std::fs::metadata(&snapshot.path) {
+            temporary
+                .as_file()
+                .set_permissions(metadata.permissions())?;
+        }
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist(&snapshot.path)
+            .map_err(|error| error.error)?;
+        Ok(())
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
 impl<F: Frontend> App<F> {
@@ -67,13 +103,15 @@ impl<F: Frontend> App<F> {
             status_content,
         )
         .expect("valid editor scene");
-        let views = reconcile_views(&scene, &contents, HashMap::new());
+        let modes = ModeRegistry::builtin();
+        let views = reconcile_views(&scene, &contents, &modes, HashMap::new());
         let focused = resolve_focus(&scene, editor_space, Some(editor_space))
             .expect("initial scene has a focusable content space");
         let dispatcher = Dispatcher::new(default_global_keymap());
         let (message_tx, message_rx) = mpsc::unbounded_channel::<AppMessage>();
         Ok(Self {
             contents,
+            modes,
             views,
             scene,
             scene_builder,
@@ -83,7 +121,7 @@ impl<F: Frontend> App<F> {
             message_tx,
             message_rx,
             tasks: AppTasks::new(),
-            pending_saves: HashSet::new(),
+            pending_saves: HashMap::new(),
         })
     }
 
@@ -121,6 +159,14 @@ impl<F: Frontend> App<F> {
     async fn shutdown_tasks(&mut self) -> io::Result<()> {
         self.tasks.cancel();
         self.tasks.close_detached();
+        while !self.pending_saves.is_empty() {
+            let message = self
+                .message_rx
+                .recv()
+                .await
+                .expect("pending save task must report completion");
+            self.handle_app_message(message)?;
+        }
         self.tasks.close_critical();
         self.tasks.wait_critical().await;
         while let Ok(message) = self.message_rx.try_recv() {
@@ -136,13 +182,14 @@ impl<F: Frontend> App<F> {
             }
             FrontendEvent::Key(k) => {
                 let command = {
-                    let runtime = self
+                    let mode = self
                         .views
                         .get(&self.focused)
                         .expect("focused view exists")
-                        .runtime();
+                        .mode()
+                        .expect("focused view has a mode");
                     self.dispatcher
-                        .dispatch(k, self.focused, &self.scene, &self.contents, runtime)
+                        .dispatch(k, self.focused, &self.scene, &self.contents, mode)
                 };
                 if let Some(command) = command {
                     self.execute_command(command)?;
@@ -172,13 +219,24 @@ impl<F: Frontend> App<F> {
             } => {
                 let view = self.views.get_mut(&space).expect("target view exists");
                 assert_eq!(view.content(), content, "view/content target mismatch");
-                let (selections, runtime) = view.selections_and_runtime_mut();
+                let command = match command {
+                    crate::core::command::ContentCommand::Mode { mode, action } => {
+                        match view
+                            .mode_mut()
+                            .expect("mode command requires a view mode")
+                            .execute(mode, action)
+                        {
+                            Some(edit) => crate::core::command::ContentCommand::Edit(edit),
+                            None => return Ok(()),
+                        }
+                    }
+                    command => command,
+                };
                 let effect = self.contents.execute(
                     content,
                     ContentInput::View {
                         command,
-                        selections,
-                        runtime,
+                        state: view.state_mut(),
                     },
                 );
                 self.handle_content_effect(content, effect);
@@ -190,13 +248,24 @@ impl<F: Frontend> App<F> {
 
     fn handle_app_message(&mut self, message: AppMessage) -> io::Result<()> {
         match message {
-            AppMessage::SaveCompleted { content, result } => {
-                self.pending_saves.remove(&content);
+            AppMessage::SaveCompleted {
+                content,
+                revision,
+                result,
+            } => {
+                let pending = self
+                    .pending_saves
+                    .remove(&content)
+                    .expect("save completion must match a pending save");
+                assert_eq!(pending.revision, revision, "save revision mismatch");
                 let effect = self.contents.execute(
                     content,
-                    ContentInput::Event(ContentEvent::SaveFinished(result)),
+                    ContentInput::Event(ContentEvent::SaveFinished { revision, result }),
                 );
                 self.handle_content_effect(content, effect);
+                if let Some(snapshot) = pending.queued {
+                    self.spawn_save(content, snapshot);
+                }
             }
         }
         Ok(())
@@ -208,17 +277,32 @@ impl<F: Frontend> App<F> {
         }
     }
 
-    /// 发起异步保存。返回是否真正发起（同一 content 已在保存时忽略）。
-    fn spawn_save(&mut self, id: ContentId, snapshot: crate::core::content::SaveSnapshot) -> bool {
-        if self.pending_saves.contains(&id) {
+    /// 发起异步保存；同一 content 已在保存时，仅保留最新的后续快照。
+    fn spawn_save(&mut self, id: ContentId, snapshot: SaveSnapshot) -> bool {
+        if let Some(pending) = self.pending_saves.get_mut(&id) {
+            let queued_revision = pending
+                .queued
+                .as_ref()
+                .map_or(pending.revision, |queued| queued.revision);
+            if snapshot.revision > queued_revision {
+                pending.queued = Some(snapshot);
+            }
             return false;
         }
         let tx = self.message_tx.clone();
-        self.pending_saves.insert(id);
+        let revision = snapshot.revision;
+        self.pending_saves.insert(
+            id,
+            PendingSave {
+                revision,
+                queued: None,
+            },
+        );
         self.tasks.spawn_critical(async move {
-            let result = tokio::fs::write(snapshot.path, snapshot.bytes).await;
+            let result = atomic_write(snapshot).await;
             let _ = tx.send(AppMessage::SaveCompleted {
                 content: id,
+                revision,
                 result,
             });
         });
@@ -305,7 +389,12 @@ impl<F: Frontend> App<F> {
     #[allow(dead_code)] // 由预留布局入口统一调用。
     fn reconcile_layout(&mut self, preferred: Option<SpaceId>) {
         let previous = self.focused;
-        self.views = reconcile_views(&self.scene, &self.contents, std::mem::take(&mut self.views));
+        self.views = reconcile_views(
+            &self.scene,
+            &self.contents,
+            &self.modes,
+            std::mem::take(&mut self.views),
+        );
         self.focused = resolve_focus(&self.scene, previous, preferred)
             .expect("App rejects layouts without focusable content spaces");
     }
@@ -330,6 +419,7 @@ impl From<SceneError> for LayoutError {
 fn reconcile_views(
     scene: &Scene,
     contents: &ContentStore,
+    modes: &ModeRegistry,
     mut old_views: HashMap<SpaceId, View>,
 ) -> HashMap<SpaceId, View> {
     let mut bindings = Vec::new();
@@ -343,12 +433,17 @@ fn reconcile_views(
             );
             let view = match old_views.remove(&space) {
                 Some(view) if view.content() == content => view,
-                Some(_) | None => View::new(
-                    content,
-                    contents
-                        .create_runtime(content)
-                        .expect("validated content exists"),
-                ),
+                Some(_) | None => {
+                    let state = contents
+                        .create_view_state(content)
+                        .expect("validated content exists");
+                    let mode = contents.default_mode(content).map(|id| {
+                        modes
+                            .instantiate(id)
+                            .expect("content default mode must be registered")
+                    });
+                    View::new(content, state, mode)
+                }
             };
             (space, view)
         })
@@ -418,8 +513,10 @@ impl RenderQuery for AppQuery<'_> {
     fn view(&self, sid: SpaceId) -> ViewData {
         let view = self.views.get(&sid).expect("scene content space has view");
         ViewData {
-            selections: view.selections().clone(),
-            cursor_style: self.contents.cursor_style(view.content(), view.runtime()),
+            selections: view.selections().cloned(),
+            cursor_style: view
+                .mode()
+                .map_or(CursorStyle::Default, |mode| mode.cursor_style()),
         }
     }
 }
@@ -482,12 +579,12 @@ mod tests {
     fn production_content_paths_have_no_dynamic_type_probes() {
         let app = include_str!("mod.rs");
         let content = include_str!("../core/content.rs");
-        let content_runtime = include_str!("../core/content_runtime.rs");
+        let content_view_state = include_str!("../core/content_view_state.rs");
         let dynamic_handler = concat!("Box<dyn ", "Content", "Handler>");
         let buffer_probe = concat!("buffer", "_mut(");
         let buffer_read_probe = concat!("as_", "buffer(");
         let forbidden = [
-            ["Box<dyn ", "ContentRuntime>"].concat(),
+            ["Box<dyn ", "ContentViewState>"].concat(),
             ["Box<dyn ", "Content>"].concat(),
         ];
 
@@ -495,7 +592,7 @@ mod tests {
         assert!(!app.contains(buffer_probe));
         assert!(!content.contains(buffer_read_probe));
         for fragment in forbidden {
-            assert!(!content_runtime.contains(&fragment), "{fragment}");
+            assert!(!content_view_state.contains(&fragment), "{fragment}");
         }
     }
 
@@ -541,12 +638,38 @@ mod tests {
             ContentData::TextLineCount(1)
         );
         let view = query.view(app.focused);
-        assert_eq!(view.selections.primary().head().char_index, 2);
+        assert_eq!(
+            view.selections
+                .as_ref()
+                .unwrap()
+                .primary()
+                .head()
+                .char_index,
+            2
+        );
         assert_eq!(view.cursor_style, CursorStyle::Block);
     }
 
+    #[test]
+    fn status_bar_view_data_has_no_text_selection_or_mode_cursor() {
+        let app = make_app(vec![], None);
+        let status_space = app
+            .views
+            .iter()
+            .find_map(|(space, view)| (view.content() == ContentId(1)).then_some(*space))
+            .expect("status bar view exists");
+        let query = AppQuery {
+            contents: &app.contents,
+            views: &app.views,
+        };
+
+        let view = query.view(status_space);
+        assert!(view.selections.is_none());
+        assert_eq!(view.cursor_style, CursorStyle::Default);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
-    async fn two_views_of_one_buffer_keep_independent_mode_runtime() {
+    async fn two_views_of_one_buffer_keep_independent_mode_instances() {
         let mut app = make_app(vec![], None);
         let left = app.focused;
         app.handle_event(FrontendEvent::Key(KeyEvent::char('i')))
@@ -570,10 +693,25 @@ mod tests {
 
         assert_eq!(left_view.cursor_style, CursorStyle::Bar);
         assert_eq!(right_view.cursor_style, CursorStyle::Block);
-        assert_eq!(left_view.selections, *app.views[&left].selections());
-        assert_eq!(right_view.selections, *app.views[&right].selections());
-        assert_eq!(left_view.selections.primary().head().char_index, 1);
-        assert_eq!(right_view.selections.primary().head(), CursorPos::origin());
+        assert_eq!(left_view.selections.as_ref(), app.views[&left].selections());
+        assert_eq!(
+            right_view.selections.as_ref(),
+            app.views[&right].selections()
+        );
+        assert_eq!(
+            left_view
+                .selections
+                .as_ref()
+                .unwrap()
+                .primary()
+                .head()
+                .char_index,
+            1
+        );
+        assert_eq!(
+            right_view.selections.as_ref().unwrap().primary().head(),
+            CursorPos::origin()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -593,6 +731,7 @@ mod tests {
                 .get(&app.focused)
                 .unwrap()
                 .selections()
+                .unwrap()
                 .primary()
                 .head
                 .char_index,
@@ -615,7 +754,10 @@ mod tests {
 
         let view = app.views.get(&app.focused).unwrap();
         assert_eq!(view.content(), other);
-        assert_eq!(view.selections().primary().head(), CursorPos::origin());
+        assert_eq!(
+            view.selections().unwrap().primary().head(),
+            CursorPos::origin()
+        );
         app.handle_event(FrontendEvent::Key(KeyEvent::char('a')))
             .await
             .unwrap();
@@ -979,6 +1121,7 @@ mod tests {
             .get(&app.focused)
             .expect("view exists")
             .selections()
+            .unwrap()
             .primary()
             .head();
         assert_eq!(cursor.col, 0);
@@ -1021,6 +1164,7 @@ mod tests {
                 .get(&other_sid)
                 .unwrap()
                 .selections()
+                .unwrap()
                 .primary()
                 .head()
                 .char_index,
@@ -1129,15 +1273,22 @@ mod tests {
         })
         .unwrap();
         assert!(document_status(&app, editor_cid()).modified);
-        app.pending_saves.insert(editor_cid());
+        app.pending_saves.insert(
+            editor_cid(),
+            PendingSave {
+                revision: 1,
+                queued: None,
+            },
+        );
 
         app.handle_app_message(AppMessage::SaveCompleted {
             content: editor_cid(),
+            revision: 1,
             result: Ok(()),
         })
         .unwrap();
 
-        assert!(!app.pending_saves.contains(&editor_cid()));
+        assert!(!app.pending_saves.contains_key(&editor_cid()));
         let status = document_status(&app, editor_cid());
         assert!(!status.modified);
         assert_eq!(status.message, StatusMessage::Saved);
@@ -1146,15 +1297,22 @@ mod tests {
     #[test]
     fn save_completed_err_marks_buffer_save_failed() {
         let mut app = make_app(vec![], None);
-        app.pending_saves.insert(editor_cid());
+        app.pending_saves.insert(
+            editor_cid(),
+            PendingSave {
+                revision: 0,
+                queued: None,
+            },
+        );
 
         app.handle_app_message(AppMessage::SaveCompleted {
             content: editor_cid(),
+            revision: 0,
             result: Err(io::Error::other("boom")),
         })
         .unwrap();
 
-        assert!(!app.pending_saves.contains(&editor_cid()));
+        assert!(!app.pending_saves.contains_key(&editor_cid()));
         assert_eq!(
             document_status(&app, editor_cid()).message,
             StatusMessage::SaveFailed
@@ -1162,9 +1320,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn spawn_save_ignores_duplicate_pending_save_for_same_content() {
+    async fn stale_save_completion_keeps_newer_edits_modified() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dedupe.txt");
+        let path = dir.path().join("stale-save.txt");
         std::fs::write(&path, "hello").unwrap();
         let path_str = path.to_str().unwrap().to_owned();
         let mut app = make_app(vec![], Some(&path_str));
@@ -1174,21 +1332,58 @@ mod tests {
             content: editor_cid(),
         })
         .unwrap();
+        app.execute_command(DispatchCommand::ViewContent {
+            command: ContentCommand::Edit(EditCommand::InsertText("X".to_string())),
+            space: app.focused,
+            content: editor_cid(),
+        })
+        .unwrap();
+
+        app.shutdown_tasks().await.unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+        assert!(document_status(&app, editor_cid()).modified);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn save_during_pending_write_queues_latest_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queued-save.txt");
+        std::fs::write(&path, "hello").unwrap();
+        let path_str = path.to_str().unwrap().to_owned();
+        let mut app = make_app(vec![], Some(&path_str));
+
+        app.execute_command(DispatchCommand::ViewContent {
+            command: ContentCommand::Edit(EditCommand::InsertText("A".to_string())),
+            space: app.focused,
+            content: editor_cid(),
+        })
+        .unwrap();
         app.execute_command(DispatchCommand::Content {
             command: ContentCommand::Save,
             content: editor_cid(),
         })
         .unwrap();
-        assert!(app.pending_saves.contains(&editor_cid()));
+        app.execute_command(DispatchCommand::ViewContent {
+            command: ContentCommand::Edit(EditCommand::InsertText("B".to_string())),
+            space: app.focused,
+            content: editor_cid(),
+        })
+        .unwrap();
+        app.execute_command(DispatchCommand::Content {
+            command: ContentCommand::Save,
+            content: editor_cid(),
+        })
+        .unwrap();
+        assert!(app.pending_saves.contains_key(&editor_cid()));
 
         app.shutdown_tasks().await.unwrap();
 
-        assert!(!app.pending_saves.contains(&editor_cid()));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
-        assert_eq!(
-            document_status(&app, editor_cid()).message,
-            StatusMessage::Saved
-        );
+        assert!(!app.pending_saves.contains_key(&editor_cid()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ABhello");
+        let status = document_status(&app, editor_cid());
+        assert!(!status.modified);
+        assert_eq!(status.message, StatusMessage::Saved);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1241,7 +1436,7 @@ mod tests {
         result.unwrap().unwrap();
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "Xhi");
-        assert!(!app.pending_saves.contains(&editor_cid()));
+        assert!(!app.pending_saves.contains_key(&editor_cid()));
         assert_eq!(
             document_status(&app, editor_cid()).message,
             StatusMessage::Saved
@@ -1270,6 +1465,7 @@ mod tests {
             .get(&app.focused)
             .unwrap()
             .selections()
+            .unwrap()
             .primary()
             .head();
         assert_eq!(head.char_index, 3);
@@ -1278,6 +1474,7 @@ mod tests {
                 .get(&app.focused)
                 .unwrap()
                 .selections()
+                .unwrap()
                 .primary()
                 .anchor,
             head
@@ -1309,6 +1506,7 @@ mod tests {
             .get(&app.focused)
             .unwrap()
             .selections()
+            .unwrap()
             .primary()
             .head();
         assert_eq!(head.col, 1);
@@ -1317,6 +1515,7 @@ mod tests {
                 .get(&app.focused)
                 .unwrap()
                 .selections()
+                .unwrap()
                 .primary()
                 .anchor,
             head
@@ -1345,6 +1544,7 @@ mod tests {
             .get(&app.focused)
             .unwrap()
             .selections()
+            .unwrap()
             .primary()
             .head();
         assert_eq!(head.char_index, 1);

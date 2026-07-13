@@ -1,7 +1,7 @@
 use crate::core::command::{AppCommand, Command, ContentCommand};
-use crate::core::content_runtime::ContentRuntime;
 use crate::core::content_store::ContentStore;
 use crate::core::keymap::{KeyBinding, Keymap};
+use crate::core::mode::ModeInstance;
 use crate::protocol::ids::{ContentId, SpaceId};
 use crate::protocol::key_event::KeyEvent;
 use crate::protocol::scene::Scene;
@@ -68,7 +68,7 @@ impl Dispatcher {
         focused: SpaceId,
         scene: &Scene,
         contents: &ContentStore,
-        runtime: &ContentRuntime,
+        mode: &ModeInstance,
     ) -> Option<DispatchCommand> {
         if let Some(pending) = self.pending.take() {
             return match lookup_in(&pending.keymap, &key) {
@@ -102,9 +102,9 @@ impl Dispatcher {
             }
         }
 
-        // 兜底：focused content 使用 View runtime 解析 mode keymap 与 typing。
+        // 兜底：focused view 使用自己的 mode instance 解析 mode keymap 与 typing。
         let cid = focused_content_id(scene, focused)?;
-        let command = contents.resolve_key(cid, runtime, key)?;
+        let command = mode.resolve_key(key)?;
         resolve_command(
             command,
             CommandSource {
@@ -233,21 +233,19 @@ mod tests {
     use super::*;
     use crate::core::buffer::Buffer;
     use crate::core::command::{AppCommand, ContentCommand, EditCommand};
-    use crate::core::content::{Content, ContentInput};
-    use crate::core::content_runtime::ContentRuntime;
+    use crate::core::content::Content;
     use crate::core::content_store::ContentStore;
-    use crate::core::mode::{ModeActionId, ModeId};
+    use crate::core::mode::{ModeActionId, ModeId, ModeInstance, ModeRegistry};
     use crate::core::status_bar::StatusBar;
     use crate::protocol::ids::ContentId;
     use crate::protocol::key_event::{ArrowKey, KeyCode};
     use crate::protocol::scene::{SceneBuilder, build_editor_scene};
-    use crate::protocol::selection::{CursorPos, Selection, Selections};
     fn fixture() -> (
         Dispatcher,
         crate::protocol::scene::Scene,
         SpaceId,
         ContentStore,
-        ContentRuntime,
+        ModeInstance,
     ) {
         fixture_with_buffer(Buffer::new())
     }
@@ -259,7 +257,7 @@ mod tests {
         crate::protocol::scene::Scene,
         SpaceId,
         ContentStore,
-        ContentRuntime,
+        ModeInstance,
     ) {
         let editor = ContentId(0);
         let status = ContentId(1);
@@ -268,9 +266,9 @@ mod tests {
         let mut contents = ContentStore::default();
         contents.insert(editor, Content::Buffer(buffer));
         contents.insert(status, Content::StatusBar(StatusBar::new(editor)));
-        let runtime = contents
-            .create_runtime(editor)
-            .expect("editor content exists");
+        let runtime = ModeRegistry::builtin()
+            .instantiate(ModeId::new("vim"))
+            .expect("vim mode exists");
         let d = Dispatcher::new(default_global_keymap());
         (d, scene, ed_space, contents, runtime)
     }
@@ -448,19 +446,8 @@ mod tests {
 
     #[test]
     fn vim_insert_char_after_enter_insert_resolves_to_view_content() {
-        let (mut dispatcher, scene, focused, mut contents, mut runtime) = fixture();
-        let mut selections = Selections::single(Selection::collapsed(CursorPos::origin()));
-        contents.execute(
-            ContentId(0),
-            ContentInput::View {
-                command: ContentCommand::Mode {
-                    mode: ModeId::new("vim"),
-                    action: ModeActionId::new("enter-insert"),
-                },
-                selections: &mut selections,
-                runtime: &mut runtime,
-            },
-        );
+        let (mut dispatcher, scene, focused, contents, mut runtime) = fixture();
+        runtime.execute(ModeId::new("vim"), ModeActionId::new("enter-insert"));
 
         let command = dispatcher
             .dispatch(KeyEvent::char('a'), focused, &scene, &contents, &runtime)
@@ -478,19 +465,8 @@ mod tests {
 
     #[test]
     fn buffer_keymap_enter_inserts_newline_when_insert_mode() {
-        let (mut dispatcher, scene, focused, mut contents, mut runtime) = fixture();
-        let mut selections = Selections::single(Selection::collapsed(CursorPos::origin()));
-        contents.execute(
-            ContentId(0),
-            ContentInput::View {
-                command: ContentCommand::Mode {
-                    mode: ModeId::new("vim"),
-                    action: ModeActionId::new("enter-insert"),
-                },
-                selections: &mut selections,
-                runtime: &mut runtime,
-            },
-        );
+        let (mut dispatcher, scene, focused, contents, mut runtime) = fixture();
+        runtime.execute(ModeId::new("vim"), ModeActionId::new("enter-insert"));
 
         let command = dispatcher
             .dispatch(
@@ -514,19 +490,8 @@ mod tests {
 
     #[test]
     fn buffer_keymap_arrow_left_when_insert_mode() {
-        let (mut dispatcher, scene, focused, mut contents, mut runtime) = fixture();
-        let mut selections = Selections::single(Selection::collapsed(CursorPos::origin()));
-        contents.execute(
-            ContentId(0),
-            ContentInput::View {
-                command: ContentCommand::Mode {
-                    mode: ModeId::new("vim"),
-                    action: ModeActionId::new("enter-insert"),
-                },
-                selections: &mut selections,
-                runtime: &mut runtime,
-            },
-        );
+        let (mut dispatcher, scene, focused, contents, mut runtime) = fixture();
+        runtime.execute(ModeId::new("vim"), ModeActionId::new("enter-insert"));
 
         let command = dispatcher
             .dispatch(
@@ -558,9 +523,9 @@ mod tests {
         let mut contents = ContentStore::default();
         contents.insert(editor, Content::Buffer(Buffer::new()));
         contents.insert(status, Content::StatusBar(StatusBar::new(editor)));
-        let runtime = contents
-            .create_runtime(editor)
-            .expect("editor content exists");
+        let runtime = ModeRegistry::builtin()
+            .instantiate(ModeId::new("vim"))
+            .expect("vim mode exists");
 
         let mut global = Keymap::new();
         global.bind(

@@ -1,34 +1,35 @@
 use std::path::PathBuf;
 
 use crate::core::buffer::Buffer;
-use crate::core::command::{Command, ContentCommand};
-use crate::core::content_runtime::{ContentRuntime, StatusBarRuntime};
+use crate::core::command::ContentCommand;
+use crate::core::content_view_state::ContentViewState;
 use crate::core::edit::apply_edit;
-use crate::core::keymap::{KeyBinding, Keymap};
+use crate::core::keymap::Keymap;
+use crate::core::mode::ModeId;
 use crate::core::status_bar::StatusBar;
-use crate::protocol::content_query::CursorStyle;
-use crate::protocol::key_event::KeyEvent;
-use crate::protocol::selection::Selections;
 use crate::protocol::status::StatusMessage;
 
 pub enum ContentInput<'a> {
     Command(ContentCommand),
     View {
         command: ContentCommand,
-        selections: &'a mut Selections,
-        runtime: &'a mut ContentRuntime,
+        state: &'a mut ContentViewState,
     },
     Event(ContentEvent),
 }
 
 pub enum ContentEvent {
-    SaveFinished(std::io::Result<()>),
+    SaveFinished {
+        revision: u64,
+        result: std::io::Result<()>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct SaveSnapshot {
     pub path: PathBuf,
     pub bytes: String,
+    pub revision: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -58,31 +59,17 @@ impl Content {
         }
     }
 
-    pub fn create_runtime(&self) -> ContentRuntime {
+    pub fn create_view_state(&self) -> ContentViewState {
         match self {
-            Self::Buffer(buffer) => ContentRuntime::Buffer(buffer.create_runtime()),
-            Self::StatusBar(_) => ContentRuntime::StatusBar(StatusBarRuntime),
+            Self::Buffer(_) => ContentViewState::buffer(),
+            Self::StatusBar(_) => ContentViewState::StatusBar,
         }
     }
 
-    pub fn resolve_key(&self, runtime: &ContentRuntime, key: KeyEvent) -> Option<Command> {
-        match (self, runtime) {
-            (Self::Buffer(buffer), ContentRuntime::Buffer(runtime)) => {
-                buffer.resolve_key(runtime, key)
-            }
-            (Self::StatusBar(_), ContentRuntime::StatusBar(_)) => match self.keymap().lookup(key) {
-                Some(KeyBinding::Command(command)) => Some(command.clone()),
-                Some(KeyBinding::Prefix(_)) | None => None,
-            },
-            _ => panic!("content/runtime mismatch"),
-        }
-    }
-
-    pub fn cursor_style(&self, runtime: &ContentRuntime) -> CursorStyle {
-        match (self, runtime) {
-            (Self::Buffer(buffer), ContentRuntime::Buffer(runtime)) => buffer.cursor_style(runtime),
-            (Self::StatusBar(_), ContentRuntime::StatusBar(_)) => CursorStyle::Default,
-            _ => panic!("content/runtime mismatch"),
+    pub fn default_mode(&self) -> Option<ModeId> {
+        match self {
+            Self::Buffer(_) => Some(ModeId::new("vim")),
+            Self::StatusBar(_) => None,
         }
     }
 
@@ -92,46 +79,39 @@ impl Content {
                 Self::Buffer(buffer),
                 ContentInput::View {
                     command: ContentCommand::Edit(command),
-                    selections,
-                    runtime: ContentRuntime::Buffer(_),
+                    state: ContentViewState::Buffer(state),
                 },
             ) => {
-                apply_edit(command, buffer, selections);
-                ContentEffect::None
-            }
-            (
-                Self::Buffer(buffer),
-                ContentInput::View {
-                    command: ContentCommand::Mode { mode, action },
-                    selections,
-                    runtime: ContentRuntime::Buffer(runtime),
-                },
-            ) => {
-                if let Some(edit) = buffer.execute_mode(runtime, mode, action) {
-                    apply_edit(edit, buffer, selections);
-                }
+                apply_edit(command, buffer, state.selections_mut());
                 ContentEffect::None
             }
             (
                 Self::Buffer(_),
                 ContentInput::View {
-                    runtime: ContentRuntime::StatusBar(_),
+                    command: ContentCommand::Mode { .. },
+                    state: ContentViewState::Buffer(_),
+                },
+            ) => panic!("mode commands must be executed by the view mode instance"),
+            (
+                Self::Buffer(_),
+                ContentInput::View {
+                    state: ContentViewState::StatusBar,
                     ..
                 },
             )
             | (
                 Self::StatusBar(_),
                 ContentInput::View {
-                    runtime: ContentRuntime::Buffer(_),
+                    state: ContentViewState::Buffer(_),
                     ..
                 },
             ) => {
-                panic!("content/runtime mismatch")
+                panic!("content/view state mismatch")
             }
             (
                 Self::StatusBar(_),
                 ContentInput::View {
-                    runtime: ContentRuntime::StatusBar(_),
+                    state: ContentViewState::StatusBar,
                     ..
                 },
             ) => ContentEffect::None,
@@ -140,6 +120,7 @@ impl Content {
                     Some(path) => ContentEffect::Save(SaveSnapshot {
                         path,
                         bytes: buffer.slice().to_string(),
+                        revision: buffer.revision(),
                     }),
                     None => {
                         buffer.set_status(StatusMessage::SaveFailed);
@@ -147,11 +128,15 @@ impl Content {
                     }
                 }
             }
-            (Self::Buffer(buffer), ContentInput::Event(ContentEvent::SaveFinished(result))) => {
+            (
+                Self::Buffer(buffer),
+                ContentInput::Event(ContentEvent::SaveFinished { revision, result }),
+            ) => {
                 match result {
                     Ok(()) => {
-                        buffer.mark_saved();
-                        buffer.set_status(StatusMessage::Saved);
+                        if buffer.mark_saved(revision) {
+                            buffer.set_status(StatusMessage::Saved);
+                        }
                     }
                     Err(_) => buffer.set_status(StatusMessage::SaveFailed),
                 }
@@ -160,7 +145,7 @@ impl Content {
             (
                 Self::Buffer(_),
                 ContentInput::View {
-                    runtime: ContentRuntime::Buffer(_),
+                    state: ContentViewState::Buffer(_),
                     ..
                 },
             )
@@ -174,12 +159,9 @@ impl Content {
 mod tests {
     use super::*;
     use crate::core::command::{Command, ContentCommand, EditCommand};
-    use crate::core::content_runtime::{ContentRuntime, StatusBarRuntime};
-    use crate::core::mode::{ModeActionId, ModeId};
-    use crate::protocol::content_query::CursorStyle;
+    use crate::core::keymap::KeyBinding;
     use crate::protocol::ids::ContentId;
     use crate::protocol::key_event::KeyEvent;
-    use crate::protocol::selection::{CursorPos, Selection, Selections};
 
     #[test]
     fn keymap_mut_updates_static_buffer_content_keymap() {
@@ -197,107 +179,34 @@ mod tests {
     }
 
     #[test]
-    fn buffer_creates_independent_content_runtimes() {
+    fn buffer_creates_text_view_state_with_vim_default() {
         let content = Content::Buffer(Buffer::new());
-        let mut first = content.create_runtime();
-        let second = content.create_runtime();
-        let mut selections = Selections::single(Selection::collapsed(CursorPos::origin()));
-        let mut content = content;
-
-        content.execute(ContentInput::View {
-            command: ContentCommand::Mode {
-                mode: ModeId::new("vim"),
-                action: ModeActionId::new("enter-insert"),
-            },
-            selections: &mut selections,
-            runtime: &mut first,
-        });
-
-        assert!(content.resolve_key(&first, KeyEvent::char('a')).is_some());
-        assert_eq!(
-            content.resolve_key(&second, KeyEvent::char('a')),
-            Some(Command::Content(ContentCommand::Mode {
-                mode: ModeId::new("vim"),
-                action: ModeActionId::new("append"),
-            }))
-        );
-        assert!(content.resolve_key(&second, KeyEvent::char('z')).is_none());
+        assert!(matches!(
+            content.create_view_state(),
+            ContentViewState::Buffer(_)
+        ));
+        assert_eq!(content.default_mode(), Some(ModeId::new("vim")));
     }
 
     #[test]
-    fn vim_append_collapses_selection_to_right_then_enters_insert() {
+    #[should_panic(expected = "content/view state mismatch")]
+    fn mismatched_view_state_is_an_internal_error() {
         let mut content = Content::Buffer(Buffer::new());
-        let mut selections = Selections::single(Selection::collapsed(CursorPos::origin()));
-        let mut runtime = content.create_runtime();
-        content.execute(ContentInput::View {
-            command: ContentCommand::Mode {
-                mode: ModeId::new("vim"),
-                action: ModeActionId::new("enter-insert"),
-            },
-            selections: &mut selections,
-            runtime: &mut runtime,
-        });
-        content.execute(ContentInput::View {
-            command: ContentCommand::Edit(EditCommand::InsertText("abc".to_string())),
-            selections: &mut selections,
-            runtime: &mut runtime,
-        });
-        content.execute(ContentInput::View {
-            command: ContentCommand::Mode {
-                mode: ModeId::new("vim"),
-                action: ModeActionId::new("enter-normal"),
-            },
-            selections: &mut selections,
-            runtime: &mut runtime,
-        });
-        selections.primary_mut().anchor.char_index = 1;
-        selections.primary_mut().head.char_index = 3;
-
-        content.execute(ContentInput::View {
-            command: ContentCommand::Mode {
-                mode: ModeId::new("vim"),
-                action: ModeActionId::new("append"),
-            },
-            selections: &mut selections,
-            runtime: &mut runtime,
-        });
-
-        assert_eq!(selections.primary().head().char_index, 3);
-        assert_eq!(selections.primary().anchor, selections.primary().head());
-        assert_eq!(
-            content.resolve_key(&runtime, KeyEvent::char('x')),
-            Some(EditCommand::InsertText("x".to_string()).into()),
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "content/runtime mismatch")]
-    fn mismatched_view_runtime_is_an_internal_error() {
-        let mut content = Content::Buffer(Buffer::new());
-        let mut runtime = ContentRuntime::StatusBar(StatusBarRuntime);
-        let mut selections = Selections::single(Selection::collapsed(CursorPos::origin()));
+        let mut state = ContentViewState::StatusBar;
 
         content.execute(ContentInput::View {
             command: ContentCommand::Edit(EditCommand::InsertText("x".to_string())),
-            selections: &mut selections,
-            runtime: &mut runtime,
+            state: &mut state,
         });
     }
 
     #[test]
-    fn status_bar_creates_a_status_bar_runtime() {
+    fn status_bar_creates_stateless_view_without_mode() {
         let content = Content::StatusBar(StatusBar::new(ContentId(0)));
         assert!(matches!(
-            content.create_runtime(),
-            ContentRuntime::StatusBar(_)
+            content.create_view_state(),
+            ContentViewState::StatusBar
         ));
-    }
-
-    #[test]
-    fn status_bar_runtime_has_default_cursor_style() {
-        let content = Content::StatusBar(StatusBar::new(ContentId(0)));
-        let runtime = content.create_runtime();
-
-        assert_eq!(content.cursor_style(&runtime), CursorStyle::Default);
+        assert_eq!(content.default_mode(), None);
     }
 }

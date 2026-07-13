@@ -30,7 +30,7 @@ pub enum CursorStyle {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewData {
-    pub selections: Selections,
+    pub selections: Option<Selections>,
     pub cursor_style: CursorStyle,
 }
 
@@ -95,10 +95,15 @@ mod tests {
     #[test]
     fn view_data_contains_selections_and_cursor_style() {
         let data = ViewData {
-            selections: Selections::single(Selection::collapsed(CursorPos::origin())),
+            selections: Some(Selections::single(
+                Selection::collapsed(CursorPos::origin()),
+            )),
             cursor_style: CursorStyle::Block,
         };
         assert_eq!(data.cursor_style, CursorStyle::Block);
-        assert_eq!(data.selections.primary().head(), CursorPos::origin());
+        assert_eq!(
+            data.selections.unwrap().primary().head(),
+            CursorPos::origin()
+        );
     }
 }

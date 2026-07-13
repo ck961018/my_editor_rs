@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
 use crate::core::content::Content;
-use crate::core::content_runtime::ContentRuntime;
+use crate::core::content_view_state::ContentViewState;
 use crate::core::keymap::Keymap;
+use crate::core::mode::ModeId;
 use crate::protocol::content_query::{
-    ContentData, ContentQuery, CursorStyle, DocumentStatus, RowRange, StatusBarData,
+    ContentData, ContentQuery, DocumentStatus, RowRange, StatusBarData,
 };
 use crate::protocol::ids::ContentId;
-use crate::protocol::key_event::KeyEvent;
 use crate::protocol::status::StatusMessage;
 
 #[derive(Default)]
@@ -28,26 +28,12 @@ impl ContentStore {
         self.contents.get(&id).map(Content::keymap)
     }
 
-    pub fn resolve_key(
-        &self,
-        id: ContentId,
-        runtime: &ContentRuntime,
-        key: KeyEvent,
-    ) -> Option<crate::core::command::Command> {
-        self.contents
-            .get(&id)
-            .and_then(|content| content.resolve_key(runtime, key))
+    pub fn create_view_state(&self, id: ContentId) -> Option<ContentViewState> {
+        self.contents.get(&id).map(Content::create_view_state)
     }
 
-    pub fn create_runtime(&self, id: ContentId) -> Option<ContentRuntime> {
-        self.contents.get(&id).map(Content::create_runtime)
-    }
-
-    pub fn cursor_style(&self, id: ContentId, runtime: &ContentRuntime) -> CursorStyle {
-        self.contents
-            .get(&id)
-            .expect("view content exists")
-            .cursor_style(runtime)
+    pub fn default_mode(&self, id: ContentId) -> Option<ModeId> {
+        self.contents.get(&id).and_then(Content::default_mode)
     }
 
     pub fn execute(
@@ -119,26 +105,22 @@ mod tests {
     use crate::core::buffer::Buffer;
     use crate::core::command::{ContentCommand, EditCommand};
     use crate::core::content::{Content, ContentEffect, ContentInput};
-    use crate::core::mode::{ModeActionId, ModeId};
     use crate::core::status_bar::StatusBar;
-    use crate::protocol::content_query::{ContentData, ContentQuery, CursorStyle, RowRange};
+    use crate::protocol::content_query::{ContentData, ContentQuery, RowRange};
     use crate::protocol::ids::ContentId;
-    use crate::protocol::selection::{CursorPos, Selection, Selections};
 
     #[test]
-    fn edit_with_view_runtime_updates_buffer_and_selection() {
+    fn edit_with_view_state_updates_buffer_and_selection() {
         let id = ContentId(0);
         let mut store = ContentStore::default();
         store.insert(id, Content::Buffer(Buffer::new()));
-        let mut selections = Selections::single(Selection::collapsed(CursorPos::origin()));
-        let mut runtime = store.create_runtime(id).expect("content exists");
+        let mut state = store.create_view_state(id).expect("content exists");
 
         let effect = store.execute(
             id,
             ContentInput::View {
                 command: ContentCommand::Edit(EditCommand::InsertText("x".to_string())),
-                selections: &mut selections,
-                runtime: &mut runtime,
+                state: &mut state,
             },
         );
 
@@ -147,30 +129,7 @@ mod tests {
             store.query(id, ContentQuery::TextRows(RowRange { start: 0, end: 1 })),
             ContentData::TextRows(vec!["x".to_string()])
         );
-        assert_eq!(selections.primary().head().char_index, 1);
-    }
-
-    #[test]
-    fn buffer_cursor_style_tracks_vim_runtime() {
-        let id = ContentId(0);
-        let mut store = ContentStore::default();
-        store.insert(id, Content::Buffer(Buffer::new()));
-        let mut selections = Selections::single(Selection::collapsed(CursorPos::origin()));
-        let mut runtime = store.create_runtime(id).expect("content exists");
-
-        assert_eq!(store.cursor_style(id, &runtime), CursorStyle::Block);
-        store.execute(
-            id,
-            ContentInput::View {
-                command: ContentCommand::Mode {
-                    mode: ModeId::new("vim"),
-                    action: ModeActionId::new("enter-insert"),
-                },
-                selections: &mut selections,
-                runtime: &mut runtime,
-            },
-        );
-        assert_eq!(store.cursor_style(id, &runtime), CursorStyle::Bar);
+        assert_eq!(state.selections().unwrap().primary().head().char_index, 1);
     }
 
     #[test]

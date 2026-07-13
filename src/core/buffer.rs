@@ -3,35 +3,29 @@ use std::borrow::Cow;
 use std::io;
 use std::path::PathBuf;
 
-use crate::core::command::{Command, EditCommand};
-use crate::core::content_runtime::BufferRuntime;
 use crate::core::keymap::Keymap;
-use crate::core::mode::{ModeActionId, ModeId, ModeSet};
-use crate::protocol::content_query::CursorStyle;
-use crate::protocol::key_event::KeyEvent;
 use crate::protocol::selection::{CursorPos, Selection, Selections};
 use crate::protocol::status::StatusMessage;
 
 pub struct Buffer {
     rope: Rope,
     path: Option<PathBuf>,
+    revision: u64,
     modified: bool,
     status: StatusMessage,
-    /// 静态 Content 分发使用的普通 keymap；模式化按键走 `modes`。
+    /// 静态 Content 捕获链使用的普通 keymap；模式化按键由 View 的 ModeInstance 处理。
     keymap: Keymap,
-    modes: ModeSet,
 }
 
 impl Buffer {
     pub fn new() -> Self {
-        let modes = ModeSet::vim();
         Self {
             rope: Rope::new(),
             path: None,
+            revision: 0,
             modified: false,
             status: StatusMessage::None,
             keymap: Keymap::new(),
-            modes,
         }
     }
 
@@ -44,37 +38,18 @@ impl Buffer {
         &mut self.keymap
     }
 
-    pub(crate) fn create_runtime(&self) -> BufferRuntime {
-        BufferRuntime::new(self.modes.create_runtime())
-    }
-
-    pub(crate) fn resolve_key(&self, runtime: &BufferRuntime, key: KeyEvent) -> Option<Command> {
-        self.modes.resolve_key(runtime.modes(), key)
-    }
-
-    pub(crate) fn cursor_style(&self, runtime: &BufferRuntime) -> CursorStyle {
-        self.modes.cursor_style(runtime.modes())
-    }
-
-    pub(crate) fn execute_mode(
-        &self,
-        runtime: &mut BufferRuntime,
-        mode: ModeId,
-        action: ModeActionId,
-    ) -> Option<EditCommand> {
-        self.modes.execute(runtime.modes_mut(), mode, action)
-    }
-
     pub fn load_from_file(&mut self, path: &str) -> io::Result<()> {
         self.path = Some(PathBuf::from(path));
         match std::fs::read_to_string(path) {
             Ok(text) => {
                 self.rope = Rope::from_str(&text);
+                self.advance_revision();
                 self.modified = false;
                 Ok(())
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 self.rope = Rope::new();
+                self.advance_revision();
                 self.modified = false;
                 Ok(())
             }
@@ -104,8 +79,28 @@ impl Buffer {
         result
     }
 
-    pub fn mark_saved(&mut self) {
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn mark_saved(&mut self, revision: u64) -> bool {
+        if self.revision != revision {
+            return false;
+        }
         self.modified = false;
+        true
+    }
+
+    fn advance_revision(&mut self) {
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .expect("buffer revision overflow");
+    }
+
+    fn mark_modified(&mut self) {
+        self.advance_revision();
+        self.modified = true;
     }
 
     pub fn set_status(&mut self, msg: StatusMessage) {
@@ -119,7 +114,7 @@ impl Buffer {
     #[allow(dead_code)] // 测试辅助：生产路径走 executor::execute→insert_at_selections
     pub fn insert_char(&mut self, char_idx: usize, ch: char) {
         self.rope.insert_char(char_idx, ch);
-        self.modified = true;
+        self.mark_modified();
     }
 
     #[allow(dead_code)] // v0.2 预留：生产路径走 delete_at_selections
@@ -128,7 +123,7 @@ impl Buffer {
             return false;
         }
         self.rope.remove(char_idx - 1..char_idx);
-        self.modified = true;
+        self.mark_modified();
         true
     }
 
@@ -356,7 +351,7 @@ impl Buffer {
         for idx in insert_indices {
             self.rope.insert(idx, text);
         }
-        self.modified = true;
+        self.mark_modified();
         // 3) 更新每个 selection：head = 插入点 + text_len，collapse（编辑后重置 anchor）
         for sel in selections.all_mut() {
             let insert_at = sel.anchor.char_index.min(sel.head.char_index);
@@ -397,7 +392,7 @@ impl Buffer {
                 self.rope.remove(start..end);
             }
         }
-        self.modified = true;
+        self.mark_modified();
         // 2) 更新每个 selection
         for sel in selections.all_mut() {
             if sel.anchor != sel.head {
@@ -450,7 +445,7 @@ impl Buffer {
                 self.rope.remove(start..end);
             }
         }
-        self.modified = true;
+        self.mark_modified();
         for (selection, start) in selections.all_mut().zip(starts) {
             let mut deleted_before = 0;
             selection.head.char_index = start;
@@ -493,7 +488,7 @@ impl Buffer {
                 self.rope.remove(*start..*end);
             }
         }
-        self.modified = true;
+        self.mark_modified();
         for (sel, (start, _)) in selections.all_mut().zip(ranges.iter()) {
             let mut deleted_before = 0;
             for &(r_start, r_end) in &sorted {
@@ -531,7 +526,7 @@ impl Buffer {
                 self.rope.remove(*start..*end);
             }
         }
-        self.modified = true;
+        self.mark_modified();
         for (sel, (start, _end)) in selections.all_mut().zip(ranges.iter()) {
             let mut deleted_before = 0;
             for &(r_start, r_end) in &sorted {
@@ -584,7 +579,7 @@ impl Buffer {
             self.rope.remove(*newline_pos..*strip_end);
             self.rope.insert(*newline_pos, " ");
         }
-        self.modified = true;
+        self.mark_modified();
         for (sel, (newline_pos, _, _)) in selections.all_mut().zip(joins.iter()) {
             sel.head.char_index = *newline_pos;
             self.recompute_cursor(&mut sel.head);
@@ -625,7 +620,7 @@ impl Buffer {
                 self.rope.insert(*start, &flipped);
             }
         }
-        self.modified = true;
+        self.mark_modified();
         for (sel, (_start, end)) in selections.all_mut().zip(ranges.iter()) {
             if sel.anchor == sel.head {
                 // Collapsed: advance head by 1 unless at/past line end
@@ -660,7 +655,7 @@ impl Buffer {
         for pos in &sorted {
             self.rope.insert(*pos, "\n");
         }
-        self.modified = true;
+        self.mark_modified();
         for (sel, pos) in selections.all_mut().zip(insert_points.iter()) {
             sel.head.char_index = *pos + 1;
             self.recompute_cursor(&mut sel.head);
@@ -684,7 +679,7 @@ impl Buffer {
         for pos in &sorted {
             self.rope.insert(*pos, "\n");
         }
-        self.modified = true;
+        self.mark_modified();
         for (sel, pos) in selections.all_mut().zip(insert_points.iter()) {
             sel.head.char_index = *pos;
             self.recompute_cursor(&mut sel.head);
@@ -712,7 +707,7 @@ impl Buffer {
                 self.rope.remove(*start..*end);
             }
         }
-        self.modified = true;
+        self.mark_modified();
         for (sel, (start, _)) in selections.all_mut().zip(ranges.iter()) {
             sel.head.char_index = *start;
             self.recompute_cursor(&mut sel.head);
@@ -887,8 +882,9 @@ fn is_word_char(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::command::{ContentCommand, EditCommand};
-    use crate::protocol::key_event::{ArrowKey, KeyCode};
+    use crate::core::command::{Command, ContentCommand, EditCommand};
+    use crate::core::mode::{ModeActionId, ModeId, ModeSet};
+    use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
     use crate::protocol::selection::{Selection, Selections};
     use tempfile::tempdir;
 
@@ -931,8 +927,19 @@ mod tests {
         let mut b = Buffer::new();
         b.insert_char(0, 'x');
         assert!(b.modified());
-        b.mark_saved();
+        b.mark_saved(b.revision());
         assert!(!b.modified());
+    }
+
+    #[test]
+    fn stale_revision_does_not_clear_modified() {
+        let mut b = Buffer::new();
+        b.insert_char(0, 'x');
+        let saved_revision = b.revision();
+        b.insert_char(1, 'y');
+
+        assert!(!b.mark_saved(saved_revision));
+        assert!(b.modified());
     }
 
     #[test]
@@ -1627,33 +1634,33 @@ mod tests {
     #[test]
     fn buffer_keymap_shift_arrow_binds_extend() {
         // 模式化后 shift+方向键绑在 vim Insert keymap；Normal 无此绑定。
-        let b = Buffer::new();
-        let mut runtime = b.create_runtime();
-        b.execute_mode(
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+        modes.execute(
             &mut runtime,
             ModeId::new("vim"),
             ModeActionId::new("enter-insert"),
         );
         assert_eq!(
-            b.resolve_key(&runtime, KeyEvent::shift_arrow(ArrowKey::Left)),
+            modes.resolve_key(&runtime, KeyEvent::shift_arrow(ArrowKey::Left)),
             Some(Command::Content(ContentCommand::Edit(
                 EditCommand::ExtendLeftBy(1)
             )))
         );
         assert_eq!(
-            b.resolve_key(&runtime, KeyEvent::shift_arrow(ArrowKey::Right)),
+            modes.resolve_key(&runtime, KeyEvent::shift_arrow(ArrowKey::Right)),
             Some(Command::Content(ContentCommand::Edit(
                 EditCommand::ExtendRightBy(1)
             )))
         );
         assert_eq!(
-            b.resolve_key(&runtime, KeyEvent::shift_arrow(ArrowKey::Up)),
+            modes.resolve_key(&runtime, KeyEvent::shift_arrow(ArrowKey::Up)),
             Some(Command::Content(ContentCommand::Edit(
                 EditCommand::ExtendUpBy(1)
             )))
         );
         assert_eq!(
-            b.resolve_key(&runtime, KeyEvent::shift_arrow(ArrowKey::Down)),
+            modes.resolve_key(&runtime, KeyEvent::shift_arrow(ArrowKey::Down)),
             Some(Command::Content(ContentCommand::Edit(
                 EditCommand::ExtendDownBy(1)
             )))
@@ -1779,74 +1786,5 @@ mod tests {
         assert_eq!(b.slice().to_string(), "aXb");
         assert_eq!(s.primary().head().char_index, 2);
         assert_eq!(s.primary().anchor, s.primary().head());
-    }
-
-    #[test]
-    fn default_buffer_uses_vim_normal_and_plain_char_is_not_insert() {
-        let b = Buffer::new();
-        let runtime = b.create_runtime();
-        assert_eq!(
-            b.resolve_key(&runtime, KeyEvent::char('a')),
-            Some(Command::Content(ContentCommand::Mode {
-                mode: ModeId::new("vim"),
-                action: ModeActionId::new("append"),
-            }))
-        );
-        assert!(b.resolve_key(&runtime, KeyEvent::char('z')).is_none());
-    }
-
-    #[test]
-    fn vim_i_enters_insert_and_plain_char_inserts() {
-        let b = Buffer::new();
-        let mut runtime = b.create_runtime();
-        assert_eq!(
-            b.resolve_key(&runtime, KeyEvent::char('i')),
-            Some(Command::Content(ContentCommand::Mode {
-                mode: ModeId::new("vim"),
-                action: ModeActionId::new("enter-insert"),
-            }))
-        );
-        b.execute_mode(
-            &mut runtime,
-            ModeId::new("vim"),
-            ModeActionId::new("enter-insert"),
-        );
-        assert_eq!(
-            b.resolve_key(&runtime, KeyEvent::char('a')),
-            Some(Command::Content(ContentCommand::Edit(
-                EditCommand::InsertText("a".to_string())
-            )))
-        );
-    }
-
-    #[test]
-    fn vim_escape_returns_to_normal() {
-        let b = Buffer::new();
-        let mut runtime = b.create_runtime();
-        b.execute_mode(
-            &mut runtime,
-            ModeId::new("vim"),
-            ModeActionId::new("enter-insert"),
-        );
-        assert_eq!(
-            b.resolve_key(&runtime, KeyEvent::plain(KeyCode::Escape)),
-            Some(Command::Content(ContentCommand::Mode {
-                mode: ModeId::new("vim"),
-                action: ModeActionId::new("enter-normal"),
-            }))
-        );
-        b.execute_mode(
-            &mut runtime,
-            ModeId::new("vim"),
-            ModeActionId::new("enter-normal"),
-        );
-        assert_eq!(
-            b.resolve_key(&runtime, KeyEvent::char('a')),
-            Some(Command::Content(ContentCommand::Mode {
-                mode: ModeId::new("vim"),
-                action: ModeActionId::new("append"),
-            }))
-        );
-        assert!(b.resolve_key(&runtime, KeyEvent::char('z')).is_none());
     }
 }

@@ -1,60 +1,53 @@
-//! 视图实例的编辑会话：绑定一个 content + 持选区。
+//! 视图实例的交互会话：绑定一个 content，并持有独立 mode 与 content view state。
 //! 按 SpaceId 索引（App.views），同 content 可被多个 View 绑定（多视图铺路）。
 
-use crate::core::content_runtime::ContentRuntime;
+use crate::core::content_view_state::ContentViewState;
+use crate::core::mode::ModeInstance;
 use crate::protocol::ids::ContentId;
-use crate::protocol::selection::{CursorPos, Selection, Selections};
+use crate::protocol::selection::Selections;
 
 pub struct View {
     /// 绑定的 content；当前仅 View::new 写入，预留给同 content 多视图解析（spec §10）。
     content: ContentId,
-    selections: Selections,
-    runtime: ContentRuntime,
+    state: ContentViewState,
+    mode: Option<ModeInstance>,
 }
 
 impl View {
-    pub fn new(content: ContentId, runtime: ContentRuntime) -> Self {
+    pub fn new(content: ContentId, state: ContentViewState, mode: Option<ModeInstance>) -> Self {
         Self {
             content,
-            selections: Selections::single(Selection::collapsed(CursorPos::origin())),
-            runtime,
+            state,
+            mode,
         }
     }
     pub fn content(&self) -> ContentId {
         self.content
     }
-    pub fn selections(&self) -> &Selections {
-        &self.selections
+    pub fn selections(&self) -> Option<&Selections> {
+        self.state.selections()
     }
-    pub fn runtime(&self) -> &ContentRuntime {
-        &self.runtime
+    pub fn state_mut(&mut self) -> &mut ContentViewState {
+        &mut self.state
     }
-    pub fn selections_and_runtime_mut(&mut self) -> (&mut Selections, &mut ContentRuntime) {
-        (&mut self.selections, &mut self.runtime)
+    pub fn mode(&self) -> Option<&ModeInstance> {
+        self.mode.as_ref()
+    }
+    pub fn mode_mut(&mut self) -> Option<&mut ModeInstance> {
+        self.mode.as_mut()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::content_runtime::{ContentRuntime, StatusBarRuntime};
+    use crate::core::content_view_state::ContentViewState;
 
     #[test]
-    fn new_view_has_collapsed_origin_selection() {
-        let v = View::new(ContentId(0), ContentRuntime::StatusBar(StatusBarRuntime));
+    fn status_bar_view_has_no_mode_or_selections() {
+        let v = View::new(ContentId(0), ContentViewState::StatusBar, None);
         assert_eq!(v.content(), ContentId(0));
-        let s = v.selections();
-        assert_eq!(s.all().count(), 1);
-        assert_eq!(s.primary().head(), CursorPos::origin());
-        assert_eq!(s.primary().anchor, s.primary().head());
-    }
-
-    #[test]
-    fn view_borrows_selections_and_runtime_together() {
-        let mut view = View::new(ContentId(0), ContentRuntime::StatusBar(StatusBarRuntime));
-        let (selections, runtime) = view.selections_and_runtime_mut();
-
-        selections.primary_mut().head.char_index = 3;
-        assert!(matches!(runtime, ContentRuntime::StatusBar(_)));
+        assert!(v.mode().is_none());
+        assert!(v.selections().is_none());
     }
 }

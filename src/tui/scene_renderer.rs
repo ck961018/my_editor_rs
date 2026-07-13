@@ -46,8 +46,11 @@ impl SceneRenderer {
         // 焦点 viewport 跟随
         let focused_item = resolved.items.iter().find(|item| item.space_id == focused);
         let focused_view = views.get(&focused).expect("focused view has render data");
-        let focused_head = focused_view.selections.primary().head();
-        if let Some(item) = focused_item {
+        let focused_head = focused_view
+            .selections
+            .as_ref()
+            .map(|selections| selections.primary().head());
+        if let (Some(item), Some(focused_head)) = (focused_item, focused_head) {
             let viewport = self
                 .viewports
                 .entry(focused)
@@ -72,8 +75,10 @@ impl SceneRenderer {
             )?;
         }
         // 焦点光标定位
-        if let Some(item) = focused_item.filter(|item| item.rect.width > 0 && item.rect.height > 0)
-        {
+        if let (Some(item), Some(focused_head)) = (
+            focused_item.filter(|item| item.rect.width > 0 && item.rect.height > 0),
+            focused_head,
+        ) {
             let vp = self
                 .viewports
                 .get(&focused)
@@ -138,38 +143,37 @@ fn paint_item(
             ContentData::Unsupported => Vec::new(),
             _ => Vec::new(),
         };
-        // 选区高亮：primary 非空时算 [start,end] 端点（按 char_index 排序）
-        let prim = view.selections.primary();
-        let non_empty = prim.anchor != prim.head;
-        let (sel_start, sel_end) = if non_empty {
-            if prim.anchor.char_index <= prim.head.char_index {
-                (prim.anchor, prim.head)
-            } else {
-                (prim.head, prim.anchor)
-            }
-        } else {
-            (prim.anchor, prim.head) // collapsed：不会触发高亮
-        };
+        // 选区高亮：仅文本 View 有 selections；primary 非空时按 char_index 排序端点。
+        let selection = view.selections.as_ref().and_then(|selections| {
+            let primary = selections.primary();
+            (primary.anchor != primary.head).then_some({
+                if primary.anchor.char_index <= primary.head.char_index {
+                    (primary.anchor, primary.head)
+                } else {
+                    (primary.head, primary.anchor)
+                }
+            })
+        });
         for (row, line) in lines.iter().enumerate() {
             let buf_row = start + row;
             let screen_row = (item.rect.y + row as i32) as usize;
             canvas.move_cursor(screen_row, item.rect.x as usize)?;
             canvas.clear_line()?;
-            let hi = if non_empty && buf_row >= sel_start.row && buf_row <= sel_end.row {
-                let hs = if buf_row == sel_start.row {
-                    sel_start.col
-                } else {
-                    0
-                };
-                let he = if buf_row == sel_end.row {
-                    sel_end.col
-                } else {
-                    usize::MAX
-                };
-                Some((hs, he))
-            } else {
-                None
-            };
+            let hi = selection.and_then(|(sel_start, sel_end)| {
+                (buf_row >= sel_start.row && buf_row <= sel_end.row).then(|| {
+                    let start = if buf_row == sel_start.row {
+                        sel_start.col
+                    } else {
+                        0
+                    };
+                    let end = if buf_row == sel_end.row {
+                        sel_end.col
+                    } else {
+                        usize::MAX
+                    };
+                    (start, end)
+                })
+            });
             paint_line_with_highlight(canvas, line, vp.left_col, width, hi)?;
         }
         for row in lines.len()..height {
@@ -316,7 +320,7 @@ mod tests {
         }
         fn view(&self, _sid: SpaceId) -> ViewData {
             ViewData {
-                selections: self.selections.clone(),
+                selections: Some(self.selections.clone()),
                 cursor_style: CursorStyle::Default,
             }
         }
@@ -360,7 +364,9 @@ mod tests {
                 .get(&sid)
                 .cloned()
                 .unwrap_or_else(|| ViewData {
-                    selections: Selections::single(Selection::collapsed(CursorPos::origin())),
+                    selections: Some(Selections::single(
+                        Selection::collapsed(CursorPos::origin()),
+                    )),
                     cursor_style: CursorStyle::Default,
                 })
         }
@@ -381,7 +387,7 @@ mod tests {
                 (
                     left,
                     ViewData {
-                        selections: Selections::single(Selection {
+                        selections: Some(Selections::single(Selection {
                             anchor: CursorPos {
                                 char_index: 0,
                                 row: 0,
@@ -392,14 +398,14 @@ mod tests {
                                 row: 0,
                                 col: 1,
                             },
-                        }),
+                        })),
                         cursor_style: CursorStyle::Default,
                     },
                 ),
                 (
                     right,
                     ViewData {
-                        selections: Selections::single(Selection {
+                        selections: Some(Selections::single(Selection {
                             anchor: CursorPos {
                                 char_index: 2,
                                 row: 0,
@@ -410,7 +416,7 @@ mod tests {
                                 row: 0,
                                 col: 3,
                             },
-                        }),
+                        })),
                         cursor_style: CursorStyle::Default,
                     },
                 ),
@@ -442,14 +448,18 @@ mod tests {
                 (
                     left,
                     ViewData {
-                        selections: Selections::single(Selection::collapsed(CursorPos::origin())),
+                        selections: Some(Selections::single(Selection::collapsed(
+                            CursorPos::origin(),
+                        ))),
                         cursor_style: CursorStyle::Default,
                     },
                 ),
                 (
                     right,
                     ViewData {
-                        selections: Selections::single(Selection::collapsed(CursorPos::origin())),
+                        selections: Some(Selections::single(Selection::collapsed(
+                            CursorPos::origin(),
+                        ))),
                         cursor_style: CursorStyle::Block,
                     },
                 ),

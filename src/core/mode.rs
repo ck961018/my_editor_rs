@@ -1,4 +1,6 @@
 use std::any::Any;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::core::command::{Command, ContentCommand, EditCommand};
 use crate::core::keymap::{KeyBinding, Keymap};
@@ -56,56 +58,117 @@ pub trait Mode {
     fn execute(&self, state: &mut dyn ModeState, action: ModeActionId) -> Option<EditCommand>;
 }
 
-pub(crate) struct ModeRuntime {
-    base: Box<dyn ModeState>,
+pub(crate) struct ModeRegistry {
+    definitions: HashMap<ModeId, Arc<dyn Mode>>,
 }
 
-pub(crate) struct ModeSet {
-    base: Box<dyn Mode>,
+pub(crate) struct ModeInstance {
+    definition: Arc<dyn Mode>,
+    state: Box<dyn ModeState>,
 }
 
-impl ModeSet {
-    pub(crate) fn vim() -> Self {
-        Self {
-            base: Box::new(VimMode::new()),
-        }
+impl ModeRegistry {
+    pub(crate) fn builtin() -> Self {
+        let mut registry = Self {
+            definitions: HashMap::new(),
+        };
+        registry.register(VimMode::new());
+        registry
     }
 
     #[cfg(test)]
     pub(crate) fn plain_edit() -> Self {
-        Self {
-            base: Box::new(PlainEditMode::new()),
-        }
+        let mut registry = Self {
+            definitions: HashMap::new(),
+        };
+        registry.register(PlainEditMode::new());
+        registry
     }
 
-    pub(crate) fn create_runtime(&self) -> ModeRuntime {
-        ModeRuntime {
-            base: self.base.new_state(),
-        }
+    pub(crate) fn register(&mut self, mode: impl Mode + 'static) {
+        let id = mode.id();
+        assert!(
+            self.definitions.insert(id, Arc::new(mode)).is_none(),
+            "mode id must be unique"
+        );
     }
 
+    pub(crate) fn instantiate(&self, id: ModeId) -> Option<ModeInstance> {
+        let definition = self.definitions.get(&id)?.clone();
+        Some(ModeInstance {
+            state: definition.new_state(),
+            definition,
+        })
+    }
+}
+
+impl ModeInstance {
     // Mode keymaps cannot use prefixes because the dispatcher tracks only the
     // static Content keymap; a mode prefix would otherwise fall through typing.
-    pub(crate) fn resolve_key(&self, runtime: &ModeRuntime, key: KeyEvent) -> Option<Command> {
-        match self.base.keymap(runtime.base.as_ref()).lookup(key) {
+    pub(crate) fn resolve_key(&self, key: KeyEvent) -> Option<Command> {
+        match self.definition.keymap(self.state.as_ref()).lookup(key) {
             Some(KeyBinding::Command(command)) => Some(command.clone()),
-            Some(KeyBinding::Prefix(_)) | None => self.base.typing(runtime.base.as_ref(), key),
+            Some(KeyBinding::Prefix(_)) | None => self.definition.typing(self.state.as_ref(), key),
         }
     }
 
-    pub(crate) fn cursor_style(&self, runtime: &ModeRuntime) -> CursorStyle {
-        self.base.cursor_style(runtime.base.as_ref())
+    pub(crate) fn cursor_style(&self) -> CursorStyle {
+        self.definition.cursor_style(self.state.as_ref())
+    }
+
+    pub(crate) fn execute(&mut self, mode: ModeId, action: ModeActionId) -> Option<EditCommand> {
+        assert_eq!(
+            self.definition.id(),
+            mode,
+            "mode command targets active mode"
+        );
+        self.definition.execute(self.state.as_mut(), action)
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct ModeSet {
+    registry: ModeRegistry,
+    mode: ModeId,
+}
+
+#[cfg(test)]
+impl ModeSet {
+    pub(crate) fn vim() -> Self {
+        Self {
+            registry: ModeRegistry::builtin(),
+            mode: ModeId::new("vim"),
+        }
+    }
+
+    pub(crate) fn plain_edit() -> Self {
+        Self {
+            registry: ModeRegistry::plain_edit(),
+            mode: ModeId::new("plain-edit"),
+        }
+    }
+
+    pub(crate) fn create_runtime(&self) -> ModeInstance {
+        self.registry
+            .instantiate(self.mode)
+            .expect("test mode exists")
+    }
+
+    pub(crate) fn resolve_key(&self, instance: &ModeInstance, key: KeyEvent) -> Option<Command> {
+        instance.resolve_key(key)
+    }
+
+    pub(crate) fn cursor_style(&self, instance: &ModeInstance) -> CursorStyle {
+        instance.cursor_style()
     }
 
     pub(crate) fn execute(
         &self,
-        runtime: &mut ModeRuntime,
+        instance: &mut ModeInstance,
         mode: ModeId,
         action: ModeActionId,
     ) -> Option<EditCommand> {
-        (self.base.id() == mode)
-            .then(|| self.base.execute(runtime.base.as_mut(), action))
-            .flatten()
+        instance.execute(mode, action)
     }
 }
 

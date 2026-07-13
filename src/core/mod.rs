@@ -1,8 +1,8 @@
 pub mod buffer;
 pub mod command;
 pub mod content;
-pub mod content_runtime;
 pub mod content_store;
+pub mod content_view_state;
 pub mod edit;
 pub mod keymap;
 pub mod mode;

@@ -1,7 +1,10 @@
 # Content Runtime 与 Mode 状态设计
 
 **日期：** 2026-07-11
-**状态：** 已确认，待实施
+**状态：** 已实施，后由 2026-07-13 Mode 与 ContentViewState 解耦设计取代
+
+> 2026-07-13 修订：`ContentRuntime`/`BufferRuntime` 已删除。共享 Mode 定义迁入
+> `ModeRegistry`，每个 View 直接持有 `ModeInstance` 和静态 `ContentViewState`。
 
 ## 背景
 

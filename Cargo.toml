@@ -11,6 +11,4 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["full"] }
 futures = "0.3"
 taffy = "0.11"
-
-[dev-dependencies]
 tempfile = "3"

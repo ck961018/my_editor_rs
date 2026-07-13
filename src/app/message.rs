@@ -6,6 +6,7 @@ use crate::protocol::ids::ContentId;
 pub(crate) enum AppMessage {
     SaveCompleted {
         content: ContentId,
+        revision: u64,
         result: io::Result<()>,
     },
 }

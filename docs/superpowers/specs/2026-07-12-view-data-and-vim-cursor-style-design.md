@@ -2,6 +2,9 @@
 
 **Date:** 2026-07-12
 
+> 2026-07-13 revision: `ViewData.selections` is now optional. Only text view state owns
+> selections; stateless content such as StatusBar no longer creates a synthetic selection.
+
 ## Goal
 
 Render a stable block cursor while a Vim buffer view is in Normal mode and a

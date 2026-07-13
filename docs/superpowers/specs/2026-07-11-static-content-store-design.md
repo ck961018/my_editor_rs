@@ -1,7 +1,10 @@
 # 静态 Content 与 ContentStore 设计
 
 **日期：** 2026-07-11  
-**状态：** 已确认，待实施
+**状态：** 已实施
+
+> 2026-07-13 修订：View 输入中的 `selections + ContentRuntime` 已由静态
+> `ContentViewState` 取代；Mode action 由 View 自己的 `ModeInstance` 执行。
 
 ## 目标
 
@@ -93,7 +96,10 @@ pub enum ContentInput<'a> {
 }
 
 pub enum ContentEvent {
-    SaveFinished(io::Result<()>),
+    SaveFinished {
+        revision: u64,
+        result: io::Result<()>,
+    },
 }
 ```
 
@@ -121,13 +127,14 @@ pub enum ContentEffect {
 
 ```text
 App -> Content::execute(Command(Save))
-Content -> ContentEffect::Save(snapshot)
-App -> tokio 写入文件并维护 pending_saves
-tokio -> AppMessage::SaveCompleted
-App -> Content::execute(Event(SaveFinished(result)))
+Content -> ContentEffect::Save(snapshot + revision)
+App -> 原子写入文件并维护在途/最新排队快照
+task -> AppMessage::SaveCompleted(revision, result)
+App -> Content::execute(Event(SaveFinished(revision, result)))
 ```
 
-Buffer 负责从保存结果更新 `Saved` 或 `SaveFailed` 状态。没有路径的 Buffer 保持现有
+Buffer 只在完成 revision 等于当前 revision 时清除 `modified` 并更新 `Saved`；失败时更新
+`SaveFailed`。没有路径的 Buffer 保持现有
 行为：更新失败状态且不产生 Save effect。其他内容对不适用输入返回 `ContentEffect::None`，
 不再因“目标必须是 Buffer”的假设而 panic。
 
