@@ -30,7 +30,7 @@ use crate::protocol::content_query::{
     ContentData, ContentQuery, CursorStyle, RenderQuery, ViewData,
 };
 use crate::protocol::frontend_event::FrontendEvent;
-use crate::protocol::ids::{ContentId, SpaceId};
+use crate::protocol::ids::{ContentId, SpaceId, ViewId};
 use crate::protocol::scene::{
     CloseResult, Scene, SceneBuilder, SceneError, SplitResult, build_editor_scene,
 };
@@ -43,7 +43,8 @@ pub struct App<F: Frontend> {
     #[allow(dead_code)] // 后续布局命令通过此 builder 进入 Scene。
     scene_builder: SceneBuilder,
     modes: ModeRegistry,
-    views: HashMap<SpaceId, View>,
+    views: HashMap<ViewId, View>,
+    next_view_id: u64,
     focused: SpaceId,
     dispatcher: Dispatcher,
     frontend: F,
@@ -96,17 +97,21 @@ impl<F: Frontend> App<F> {
         let mut contents = ContentStore::default();
         contents.insert(editor_content, Content::Buffer(buffer));
         contents.insert(status_content, Content::StatusBar(status_bar));
+        let modes = ModeRegistry::builtin();
+        let editor_view = ViewId(0);
+        let status_view = ViewId(1);
+        let mut views = HashMap::new();
+        views.insert(editor_view, create_view(editor_content, &contents, &modes));
+        views.insert(status_view, create_view(status_content, &contents, &modes));
         let mut scene_builder = SceneBuilder::new();
         let (scene, editor_space) = build_editor_scene(
             &mut scene_builder,
             width as i32,
             height as i32,
-            editor_content,
-            status_content,
+            editor_view,
+            status_view,
         )
         .expect("valid editor scene");
-        let modes = ModeRegistry::builtin();
-        let views = reconcile_views(&scene, &contents, &modes, HashMap::new());
         let focused = resolve_focus(&scene, editor_space, Some(editor_space))
             .expect("initial scene has a focusable content space");
         let dispatcher = Dispatcher::new(default_global_keymap());
@@ -115,6 +120,7 @@ impl<F: Frontend> App<F> {
             contents,
             modes,
             views,
+            next_view_id: 2,
             scene,
             scene_builder,
             focused,
@@ -184,14 +190,22 @@ impl<F: Frontend> App<F> {
             }
             FrontendEvent::Key(k) => {
                 let command = {
+                    let view_id = view_for_space(&self.scene, self.focused)
+                        .expect("focused space hosts a view");
                     let mode = self
                         .views
-                        .get(&self.focused)
+                        .get(&view_id)
                         .expect("focused view exists")
                         .mode()
                         .expect("focused view has a mode");
-                    self.dispatcher
-                        .dispatch(k, self.focused, &self.scene, &self.contents, mode)
+                    self.dispatcher.dispatch(
+                        k,
+                        self.focused,
+                        &self.scene,
+                        &self.contents,
+                        &self.views,
+                        mode,
+                    )
                 };
                 if let Some(command) = command {
                     self.execute_command(command)?;
@@ -216,10 +230,10 @@ impl<F: Frontend> App<F> {
             }
             DispatchCommand::ViewContent {
                 command,
-                space,
+                view,
                 content,
             } => {
-                let view = self.views.get_mut(&space).expect("target view exists");
+                let view = self.views.get_mut(&view).expect("target view exists");
                 assert_eq!(view.content(), content, "view/content target mismatch");
                 let command = match command {
                     crate::core::command::ContentCommand::Mode { mode, action } => {
@@ -324,6 +338,17 @@ impl<F: Frontend> App<F> {
             .render(&self.scene, &query as &dyn RenderQuery, self.focused)
     }
 
+    fn insert_view(&mut self, content: ContentId) -> ViewId {
+        let id = ViewId(self.next_view_id);
+        self.next_view_id = self.next_view_id.checked_add(1).expect("view id overflow");
+        let view = create_view(content, &self.contents, &self.modes);
+        assert!(
+            self.views.insert(id, view).is_none(),
+            "view id must be unique"
+        );
+        id
+    }
+
     #[allow(dead_code)] // 本轮只提供后端入口，不接入按键或 UI。
     fn split_space(
         &mut self,
@@ -338,9 +363,18 @@ impl<F: Frontend> App<F> {
         }
 
         let previous = self.focused;
+        let view = self.insert_view(content);
         let result =
-            self.scene_builder
-                .split(&mut self.scene, target, content, focusable, direction)?;
+            match self
+                .scene_builder
+                .split(&mut self.scene, target, view, focusable, direction)
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    self.views.remove(&view);
+                    return Err(error.into());
+                }
+            };
         self.reconcile_layout(if focus_new {
             Some(result.new_space)
         } else {
@@ -351,13 +385,16 @@ impl<F: Frontend> App<F> {
 
     #[allow(dead_code)] // 本轮只提供后端入口，不接入按键或 UI。
     fn close_space(&mut self, target: SpaceId) -> Result<CloseResult, LayoutError> {
-        if content_space_focusable(&self.scene, target) == Some(true)
-            && focusable_content_count(&self.scene) == 1
+        if view_space_focusable(&self.scene, target) == Some(true)
+            && focusable_view_count(&self.scene) == 1
         {
             return Err(LayoutError::WouldRemoveLastFocusable(target));
         }
 
+        let removed_view =
+            view_for_space(&self.scene, target).ok_or(SceneError::ExpectedContentLeaf(target))?;
         let result = self.scene_builder.close(&mut self.scene, target)?;
+        self.views.remove(&removed_view);
         self.reconcile_layout(result.surviving_neighbor);
         Ok(result)
     }
@@ -372,15 +409,24 @@ impl<F: Frontend> App<F> {
         if !self.contents.contains(content) {
             return Err(LayoutError::MissingContent(content));
         }
-        if content_space_focusable(&self.scene, target) == Some(true)
+        if view_space_focusable(&self.scene, target) == Some(true)
             && !focusable
-            && focusable_content_count(&self.scene) == 1
+            && focusable_view_count(&self.scene) == 1
         {
             return Err(LayoutError::NoFocusableSpace);
         }
 
-        self.scene_builder
-            .replace_content(&mut self.scene, target, content, focusable)?;
+        let old_view =
+            view_for_space(&self.scene, target).ok_or(SceneError::ExpectedContentLeaf(target))?;
+        let new_view = self.insert_view(content);
+        if let Err(error) =
+            self.scene_builder
+                .replace_view(&mut self.scene, target, new_view, focusable)
+        {
+            self.views.remove(&new_view);
+            return Err(error.into());
+        }
+        self.views.remove(&old_view);
         self.reconcile_layout(Some(target));
         Ok(())
     }
@@ -395,11 +441,10 @@ impl<F: Frontend> App<F> {
     #[allow(dead_code)] // 由预留布局入口统一调用。
     fn reconcile_layout(&mut self, preferred: Option<SpaceId>) {
         let previous = self.focused;
-        self.views = reconcile_views(
-            &self.scene,
-            &self.contents,
-            &self.modes,
-            std::mem::take(&mut self.views),
+        debug_assert!(
+            scene_views(&self.scene)
+                .into_iter()
+                .all(|(_, view)| self.views.contains_key(&view))
         );
         self.focused = resolve_focus(&self.scene, previous, preferred)
             .expect("App rejects layouts without focusable content spaces");
@@ -421,56 +466,49 @@ impl From<SceneError> for LayoutError {
     }
 }
 
-/// 遍历 scene 所有 Content space，为每个建 View（绑定其 content）。
-fn reconcile_views(
-    scene: &Scene,
-    contents: &ContentStore,
-    modes: &ModeRegistry,
-    mut old_views: HashMap<SpaceId, View>,
-) -> HashMap<SpaceId, View> {
-    let mut bindings = Vec::new();
-    collect_content_spaces(scene, scene.root(), &mut bindings);
-    bindings
-        .into_iter()
-        .map(|(space, content)| {
-            assert!(
-                contents.contains(content),
-                "scene content exists in content store"
-            );
-            let view = match old_views.remove(&space) {
-                Some(view) if view.content() == content => view,
-                Some(_) | None => {
-                    let state = contents
-                        .create_view_state(content)
-                        .expect("validated content exists");
-                    let mode = contents.default_mode(content).map(|name| {
-                        modes
-                            .instantiate(&name)
-                            .expect("content default mode must be registered")
-                    });
-                    View::new(content, state, mode)
-                }
-            };
-            (space, view)
-        })
-        .collect()
+fn create_view(content: ContentId, contents: &ContentStore, modes: &ModeRegistry) -> View {
+    let state = contents
+        .create_view_state(content)
+        .expect("view content exists");
+    let mode = contents.default_mode(content).map(|name| {
+        modes
+            .instantiate(&name)
+            .expect("content default mode must be registered")
+    });
+    View::new(content, state, mode)
 }
 
-fn collect_content_spaces(scene: &Scene, sid: SpaceId, out: &mut Vec<(SpaceId, ContentId)>) {
+fn collect_view_spaces(scene: &Scene, sid: SpaceId, out: &mut Vec<(SpaceId, ViewId)>) {
     let node = scene.node(sid);
     match &node.space.kind {
-        SpaceKind::Content { content, .. } => {
-            out.push((sid, *content));
+        SpaceKind::Content { view, .. } => {
+            out.push((sid, *view));
         }
         SpaceKind::Container { .. } => {
             for c in &node.children {
-                collect_content_spaces(scene, *c, out);
+                collect_view_spaces(scene, *c, out);
             }
         }
     }
 }
 
-fn content_space_focusable(scene: &Scene, space: SpaceId) -> Option<bool> {
+fn scene_views(scene: &Scene) -> Vec<(SpaceId, ViewId)> {
+    let mut views = Vec::new();
+    collect_view_spaces(scene, scene.root(), &mut views);
+    views
+}
+
+fn view_for_space(scene: &Scene, space: SpaceId) -> Option<ViewId> {
+    if !scene.contains(space) {
+        return None;
+    }
+    match &scene.node(space).space.kind {
+        SpaceKind::Content { view, .. } => Some(*view),
+        SpaceKind::Container { .. } => None,
+    }
+}
+
+fn view_space_focusable(scene: &Scene, space: SpaceId) -> Option<bool> {
     if !scene.contains(space) {
         return None;
     }
@@ -481,26 +519,22 @@ fn content_space_focusable(scene: &Scene, space: SpaceId) -> Option<bool> {
 }
 
 #[allow(dead_code)] // 由尚未接入 UI 的 close/replace 预检使用。
-fn focusable_content_count(scene: &Scene) -> usize {
-    let mut spaces = Vec::new();
-    collect_content_spaces(scene, scene.root(), &mut spaces);
-    spaces
+fn focusable_view_count(scene: &Scene) -> usize {
+    scene_views(scene)
         .into_iter()
-        .filter(|(space, _)| content_space_focusable(scene, *space) == Some(true))
+        .filter(|(space, _)| view_space_focusable(scene, *space) == Some(true))
         .count()
 }
 
 fn resolve_focus(scene: &Scene, previous: SpaceId, preferred: Option<SpaceId>) -> Option<SpaceId> {
     preferred
-        .filter(|space| content_space_focusable(scene, *space) == Some(true))
-        .or_else(|| (content_space_focusable(scene, previous) == Some(true)).then_some(previous))
+        .filter(|space| view_space_focusable(scene, *space) == Some(true))
+        .or_else(|| (view_space_focusable(scene, previous) == Some(true)).then_some(previous))
         .or_else(|| {
-            let mut spaces = Vec::new();
-            collect_content_spaces(scene, scene.root(), &mut spaces);
-            spaces
+            scene_views(scene)
                 .into_iter()
                 .map(|(space, _)| space)
-                .find(|space| content_space_focusable(scene, *space) == Some(true))
+                .find(|space| view_space_focusable(scene, *space) == Some(true))
         })
 }
 
@@ -508,7 +542,7 @@ fn resolve_focus(scene: &Scene, previous: SpaceId, preferred: Option<SpaceId>) -
 /// 与 `&mut self.frontend` 不冲突（字段级 split borrow）。
 struct AppQuery<'a> {
     contents: &'a ContentStore,
-    views: &'a HashMap<SpaceId, View>,
+    views: &'a HashMap<ViewId, View>,
 }
 
 impl RenderQuery for AppQuery<'_> {
@@ -516,9 +550,10 @@ impl RenderQuery for AppQuery<'_> {
         self.contents.query(cid, query)
     }
 
-    fn view(&self, sid: SpaceId) -> ViewData {
-        let view = self.views.get(&sid).expect("scene content space has view");
+    fn view(&self, id: ViewId) -> ViewData {
+        let view = self.views.get(&id).expect("scene references existing view");
         ViewData {
+            content: view.content(),
             selections: view.selections().cloned(),
             cursor_style: view
                 .mode()
@@ -581,6 +616,14 @@ mod tests {
         ContentId(0)
     }
 
+    fn view_id(app: &App<ScriptedFrontend>, space: SpaceId) -> ViewId {
+        view_for_space(&app.scene, space).expect("space hosts a view")
+    }
+
+    fn view_at(app: &App<ScriptedFrontend>, space: SpaceId) -> &View {
+        &app.views[&view_id(app, space)]
+    }
+
     #[test]
     fn production_content_paths_have_no_dynamic_type_probes() {
         let app = include_str!("mod.rs");
@@ -622,9 +665,10 @@ mod tests {
     #[test]
     fn content_query_reads_buffer_and_view() {
         let mut app = make_app(vec![], None);
+        let focused_view = view_id(&app, app.focused);
         app.execute_command(DispatchCommand::ViewContent {
             command: ContentCommand::Edit(EditCommand::InsertText("hi".to_string())),
-            space: app.focused,
+            view: focused_view,
             content: editor_cid(),
         })
         .unwrap();
@@ -643,7 +687,7 @@ mod tests {
             query.content(editor_cid(), ContentQuery::TextLineCount),
             ContentData::TextLineCount(1)
         );
-        let view = query.view(app.focused);
+        let view = query.view(focused_view);
         assert_eq!(
             view.selections
                 .as_ref()
@@ -659,17 +703,17 @@ mod tests {
     #[test]
     fn status_bar_view_data_has_no_text_selection_or_mode_cursor() {
         let app = make_app(vec![], None);
-        let status_space = app
+        let status_view = app
             .views
             .iter()
-            .find_map(|(space, view)| (view.content() == ContentId(1)).then_some(*space))
+            .find_map(|(id, view)| (view.content() == ContentId(1)).then_some(*id))
             .expect("status bar view exists");
         let query = AppQuery {
             contents: &app.contents,
             views: &app.views,
         };
 
-        let view = query.view(status_space);
+        let view = query.view(status_view);
         assert!(view.selections.is_none());
         assert_eq!(view.cursor_style, CursorStyle::Default);
     }
@@ -694,15 +738,21 @@ mod tests {
             contents: &app.contents,
             views: &app.views,
         };
-        let left_view = query.view(left);
-        let right_view = query.view(right);
+        let left_id = view_id(&app, left);
+        let right_id = view_id(&app, right);
+        let left_view = query.view(left_id);
+        let right_view = query.view(right_id);
 
         assert_eq!(left_view.cursor_style, CursorStyle::Bar);
         assert_eq!(right_view.cursor_style, CursorStyle::Block);
-        assert_eq!(left_view.selections.as_ref(), app.views[&left].selections());
+        assert_ne!(left_id, right_id);
+        assert_eq!(
+            left_view.selections.as_ref(),
+            app.views[&left_id].selections()
+        );
         assert_eq!(
             right_view.selections.as_ref(),
-            app.views[&right].selections()
+            app.views[&right_id].selections()
         );
         assert_eq!(
             left_view
@@ -733,9 +783,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            app.views
-                .get(&app.focused)
-                .unwrap()
+            view_at(&app, app.focused)
                 .selections()
                 .unwrap()
                 .primary()
@@ -758,7 +806,7 @@ mod tests {
 
         app.replace_space_content(app.focused, other, true).unwrap();
 
-        let view = app.views.get(&app.focused).unwrap();
+        let view = view_at(&app, app.focused);
         assert_eq!(view.content(), other);
         assert_eq!(
             view.selections().unwrap().primary().head(),
@@ -778,11 +826,12 @@ mod tests {
             .split_space(left, editor_cid(), true, SplitDirection::Right, true)
             .unwrap()
             .new_space;
+        let right_view = view_id(&app, right);
 
         app.close_space(right).unwrap();
 
         assert_eq!(app.focused, left);
-        assert!(!app.views.contains_key(&right));
+        assert!(!app.views.contains_key(&right_view));
     }
 
     #[test]
@@ -834,7 +883,8 @@ mod tests {
         assert_eq!(app.focused, focused);
         assert!(matches!(
             &app.scene.node(focused).space.kind,
-            SpaceKind::Content { content, .. } if *content == editor_cid()
+            SpaceKind::Content { view, .. }
+                if app.views[view].content() == editor_cid()
         ));
     }
 
@@ -1122,10 +1172,7 @@ mod tests {
         );
         app.run().await.unwrap();
         assert_eq!(text_rows(&app, editor_cid()), vec!["a"]);
-        let cursor = app
-            .views
-            .get(&app.focused)
-            .expect("view exists")
+        let cursor = view_at(&app, app.focused)
             .selections()
             .unwrap()
             .primary()
@@ -1143,10 +1190,11 @@ mod tests {
             .split_space(app.focused, other_cid, true, SplitDirection::Right, false)
             .unwrap()
             .new_space;
+        let other_view = view_id(&app, other_sid);
 
         app.execute_command(DispatchCommand::ViewContent {
             command: ContentCommand::Edit(EditCommand::InsertText("Z".to_string())),
-            space: other_sid,
+            view: other_view,
             content: other_cid,
         })
         .unwrap();
@@ -1167,7 +1215,7 @@ mod tests {
         );
         assert_eq!(
             app.views
-                .get(&other_sid)
+                .get(&other_view)
                 .unwrap()
                 .selections()
                 .unwrap()
@@ -1188,7 +1236,7 @@ mod tests {
 
         app.execute_command(DispatchCommand::ViewContent {
             command: ContentCommand::Edit(EditCommand::InsertText("Z".to_string())),
-            space: app.focused,
+            view: view_id(&app, app.focused),
             content: other_cid,
         })
         .unwrap();
@@ -1274,7 +1322,7 @@ mod tests {
         let mut app = make_app(vec![], None);
         app.execute_command(DispatchCommand::ViewContent {
             command: ContentCommand::Edit(EditCommand::InsertText("x".to_string())),
-            space: app.focused,
+            view: view_id(&app, app.focused),
             content: editor_cid(),
         })
         .unwrap();
@@ -1340,7 +1388,7 @@ mod tests {
         .unwrap();
         app.execute_command(DispatchCommand::ViewContent {
             command: ContentCommand::Edit(EditCommand::InsertText("X".to_string())),
-            space: app.focused,
+            view: view_id(&app, app.focused),
             content: editor_cid(),
         })
         .unwrap();
@@ -1361,7 +1409,7 @@ mod tests {
 
         app.execute_command(DispatchCommand::ViewContent {
             command: ContentCommand::Edit(EditCommand::InsertText("A".to_string())),
-            space: app.focused,
+            view: view_id(&app, app.focused),
             content: editor_cid(),
         })
         .unwrap();
@@ -1372,7 +1420,7 @@ mod tests {
         .unwrap();
         app.execute_command(DispatchCommand::ViewContent {
             command: ContentCommand::Edit(EditCommand::InsertText("B".to_string())),
-            space: app.focused,
+            view: view_id(&app, app.focused),
             content: editor_cid(),
         })
         .unwrap();
@@ -1466,19 +1514,14 @@ mod tests {
         );
         app.run().await.unwrap();
         assert_eq!(text_rows(&app, editor_cid()), vec!["abX"]);
-        let head = app
-            .views
-            .get(&app.focused)
-            .unwrap()
+        let head = view_at(&app, app.focused)
             .selections()
             .unwrap()
             .primary()
             .head();
         assert_eq!(head.char_index, 3);
         assert_eq!(
-            app.views
-                .get(&app.focused)
-                .unwrap()
+            view_at(&app, app.focused)
                 .selections()
                 .unwrap()
                 .primary()
@@ -1507,19 +1550,14 @@ mod tests {
         );
         app.run().await.unwrap();
         assert_eq!(text_rows(&app, editor_cid()), vec!["abc"]); // Escape/h 不改文本
-        let head = app
-            .views
-            .get(&app.focused)
-            .unwrap()
+        let head = view_at(&app, app.focused)
             .selections()
             .unwrap()
             .primary()
             .head();
         assert_eq!(head.col, 1);
         assert_eq!(
-            app.views
-                .get(&app.focused)
-                .unwrap()
+            view_at(&app, app.focused)
                 .selections()
                 .unwrap()
                 .primary()
@@ -1545,10 +1583,7 @@ mod tests {
         app.run().await.unwrap();
 
         assert_eq!(text_rows(&app, editor_cid()), vec!["ab"]);
-        let head = app
-            .views
-            .get(&app.focused)
-            .unwrap()
+        let head = view_at(&app, app.focused)
             .selections()
             .unwrap()
             .primary()

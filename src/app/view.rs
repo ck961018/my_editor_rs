@@ -1,5 +1,5 @@
 //! 视图实例的交互会话：绑定一个 content，并持有独立 mode 与 content view state。
-//! 按 SpaceId 索引（App.views），同 content 可被多个 View 绑定（多视图铺路）。
+//! 按 ViewId 索引（App.views），同一 Content 可被多个独立 View 绑定。
 
 use crate::core::content_view_state::ContentViewState;
 use crate::core::mode::ModeInstance;

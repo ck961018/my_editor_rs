@@ -90,8 +90,9 @@ Scene: SpaceId -> ViewId
 View:  ViewId  -> ContentId + ModeInstance + view state
 ```
 
-当前实现用 `SpaceId` 索引 View，并让 Space 直接引用 `ContentId`，这是单前端阶段的实现
-捷径。远程协议定型或需要移动 View 并保留状态之前，应引入独立 `ViewId`。
+当前实现已使用独立 `ViewId`：Scene leaf 只引用 View，App 的 ViewStore 按 ViewId 索引，
+View 再引用 ContentId。同一 View 同时只能被一个 Scene leaf 引用；同一 Content 可以创建
+多个拥有独立 Mode、selection 和 viewport 的 View。
 
 Scene 的协议表示应是可序列化的只读快照或变更消息。SceneBuilder、split、close 和焦点
 修复属于后端模型行为，不应成为远程 wire protocol 的一部分。
@@ -168,7 +169,7 @@ Backend -> Frontend
 ## 7. 当前阶段的有意简化
 
 - 只有一个 Frontend 和一份客户端会话状态。
-- View 暂时以 SpaceId 为身份。
+- App 直接持有一份 Scene、Focus 和 ViewStore，尚未拆出 ClientSession。
 - App 持有共享 ModeRegistry，View 从中创建独立 ModeInstance。
 - Mode/Action 在命令边界使用 owned 名称，Registry 将其解析为进程内稳定的数值 ID。
 - 原生 Mode 暂时使用 Rust trait object 和 `Any` 保存类型状态。

@@ -69,7 +69,7 @@ Terminal、WebPage 等 Content。
 ## 优先级 5：View 与 Space 身份分离
 
 **触发条件：** 远程协议定型、View 需要跨布局移动，或多个 session 共享 Content。  
-**状态：** 待触发。
+**状态：** 已完成（2026-07-13）。
 
 引入独立 ViewId：
 
@@ -81,6 +81,10 @@ ContentId 共享内容
 
 Scene host 引用 ViewId，View 再引用 ContentId。迁移时保证同一 Content 的多个 View 拥有
 独立 Mode、selection、viewport 和其他 ContentViewState。
+
+已引入独立 `ViewId`，Scene leaf 只引用 View；App、Dispatcher、RenderQuery 和 TUI viewport
+均按 ViewId 工作。Scene 显式拒绝一个 View 同时挂载到多个 Space；split/close/replace 同步
+创建或移除 View，移动 View 到其他 Space 时保留其会话身份与 viewport。
 
 ## 优先级 6：View presentation 泛化
 

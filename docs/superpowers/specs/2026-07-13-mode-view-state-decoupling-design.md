@@ -51,7 +51,7 @@ selection 时执行文本 viewport 跟随、高亮和物理文本光标定位。
 
 - 不实现 mode stack、脚本 runtime 或热重载；动态名称与运行时 ID 映射由后续设计完成。
 - 语义命令边界由后续的“语义 Content 命令与适配结果设计”完成；本设计不增加 capability。
-- 不引入独立 `ViewId` 或远程协议。
+- 本项不引入独立 `ViewId` 或远程协议；后续“View 与 Space 身份分离”已完成 ViewId。
 - 不把静态 `ContentViewState` 改成 `Any` 或插件对象。
 
 ## 验收

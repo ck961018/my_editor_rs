@@ -90,14 +90,14 @@ impl TaffyEngine {
             Some(p) => p.intersect(&rect),
             None => Some(rect),
         };
-        let content_id = match &node.space.kind {
-            SpaceKind::Content { content, .. } => Some(*content),
+        let view_id = match &node.space.kind {
+            SpaceKind::Content { view, .. } => Some(*view),
             SpaceKind::Container { .. } => None,
         };
-        if let Some(cid) = content_id {
+        if let Some(view_id) = view_id {
             out.items.push(RenderItem {
                 space_id: sid,
-                content_id: cid,
+                view_id,
                 rect,
                 clip,
                 layer: node.space.layer,
@@ -169,27 +169,22 @@ fn style_for(node: &SpaceNode, parent_axis: Option<Axis>, root_size: Option<Scen
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::ids::ContentId;
+    use crate::protocol::ids::ViewId;
     use crate::protocol::scene::{SceneBuilder, build_editor_scene};
     use crate::protocol::space::SplitDirection;
 
-    fn item_for(scene: &ResolvedScene, content: ContentId) -> &RenderItem {
-        scene
-            .items
-            .iter()
-            .find(|i| i.content_id == content)
-            .unwrap()
+    fn item_for(scene: &ResolvedScene, content: ViewId) -> &RenderItem {
+        scene.items.iter().find(|i| i.view_id == content).unwrap()
     }
 
     #[test]
     fn editor_grows_and_status_fixed() {
         let mut builder = SceneBuilder::new();
-        let (scene, _) =
-            build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
+        let (scene, _) = build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
         let mut engine = TaffyEngine::new();
         let resolved = engine.layout(&scene);
         assert_eq!(
-            item_for(&resolved, ContentId(0)).rect,
+            item_for(&resolved, ViewId(0)).rect,
             Rect {
                 x: 0,
                 y: 0,
@@ -198,7 +193,7 @@ mod tests {
             }
         );
         assert_eq!(
-            item_for(&resolved, ContentId(1)).rect,
+            item_for(&resolved, ViewId(1)).rect,
             Rect {
                 x: 0,
                 y: 23,
@@ -211,46 +206,45 @@ mod tests {
     #[test]
     fn items_in_dfs_order() {
         let mut builder = SceneBuilder::new();
-        let (scene, _) =
-            build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
+        let (scene, _) = build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
         let mut engine = TaffyEngine::new();
         let resolved = engine.layout(&scene);
         assert_eq!(resolved.items.len(), 2); // 仅 Content 进 items（container 不进）
-        assert_eq!(resolved.items[0].content_id, ContentId(0));
-        assert_eq!(resolved.items[1].content_id, ContentId(1));
+        assert_eq!(resolved.items[0].view_id, ViewId(0));
+        assert_eq!(resolved.items[1].view_id, ViewId(1));
     }
 
     #[test]
     fn resize_changes_geometry() {
         let mut builder = SceneBuilder::new();
         let (mut scene, _) =
-            build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
+            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
         scene.resize(100, 40);
         let mut engine = TaffyEngine::new();
         let resolved = engine.layout(&scene);
-        assert_eq!(item_for(&resolved, ContentId(0)).rect.height, 39);
-        assert_eq!(item_for(&resolved, ContentId(0)).rect.width, 100);
+        assert_eq!(item_for(&resolved, ViewId(0)).rect.height, 39);
+        assert_eq!(item_for(&resolved, ViewId(0)).rect.width, 100);
     }
 
     #[test]
-    fn shared_content_items_keep_their_source_space_ids() {
+    fn distinct_view_items_keep_their_source_space_ids() {
         let mut builder = SceneBuilder::new();
         let (mut scene, left) =
-            build_editor_scene(&mut builder, 20, 2, ContentId(0), ContentId(1)).unwrap();
+            build_editor_scene(&mut builder, 20, 2, ViewId(0), ViewId(1)).unwrap();
         let right = builder
-            .split(&mut scene, left, ContentId(0), true, SplitDirection::Right)
+            .split(&mut scene, left, ViewId(2), true, SplitDirection::Right)
             .unwrap()
             .new_space;
 
         let mut engine = TaffyEngine::new();
         let resolved = engine.layout(&scene);
 
-        let spaces: Vec<_> = resolved
+        let sources: Vec<_> = resolved
             .items
             .iter()
-            .filter(|item| item.content_id == ContentId(0))
-            .map(|item| item.space_id)
+            .filter(|item| item.view_id != ViewId(1))
+            .map(|item| (item.view_id, item.space_id))
             .collect();
-        assert_eq!(spaces, vec![left, right]);
+        assert_eq!(sources, vec![(ViewId(0), left), (ViewId(2), right)]);
     }
 }

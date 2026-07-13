@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::protocol::geometry::Size;
-use crate::protocol::ids::{ContentId, SpaceId};
+use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::space::{
     Align, Arrangement, Axis, Layer, Sizing, Space, SpaceKind, SplitDirection,
 };
@@ -38,6 +38,13 @@ impl Scene {
         self.size = Size { width, height };
     }
 
+    fn contains_view_except(&self, view: ViewId, excluded_space: Option<SpaceId>) -> bool {
+        self.nodes.iter().any(|(space, node)| {
+            Some(*space) != excluded_space
+                && matches!(&node.space.kind, SpaceKind::Content { view: current, .. } if *current == view)
+        })
+    }
+
     fn is_tree_valid(&self) -> bool {
         let Some(root) = self.nodes.get(&self.root) else {
             return false;
@@ -47,6 +54,7 @@ impl Scene {
         }
 
         let mut visited = HashSet::new();
+        let mut views = HashSet::new();
         let mut stack = vec![self.root];
         while let Some(space) = stack.pop() {
             if !visited.insert(space) {
@@ -71,6 +79,7 @@ impl Scene {
                     }
                 }
                 SpaceKind::Content { .. } if !node.children.is_empty() => return false,
+                SpaceKind::Content { view, .. } if !views.insert(*view) => return false,
                 SpaceKind::Content { .. } => {}
             }
         }
@@ -82,6 +91,7 @@ impl Scene {
 pub enum SceneError {
     UnknownSpace(SpaceId),
     ExpectedContentLeaf(SpaceId),
+    DuplicateView(ViewId),
     CannotCloseRoot(SpaceId),
     InvalidTree,
 }
@@ -112,14 +122,14 @@ impl SceneBuilder {
         id
     }
 
-    fn add_content(
+    fn add_view(
         &mut self,
         scene: &mut Scene,
-        content: ContentId,
+        view: ViewId,
         focusable: bool,
         sizing: Sizing,
     ) -> SpaceId {
-        self.add_node(scene, SpaceKind::Content { content, focusable }, sizing)
+        self.add_node(scene, SpaceKind::Content { view, focusable }, sizing)
     }
 
     fn add_container(
@@ -184,7 +194,7 @@ impl SceneBuilder {
         &mut self,
         scene: &mut Scene,
         target: SpaceId,
-        content: ContentId,
+        view: ViewId,
         focusable: bool,
         direction: SplitDirection,
     ) -> Result<SplitResult, SceneError> {
@@ -199,6 +209,9 @@ impl SceneBuilder {
             || !target_node.children.is_empty()
         {
             return Err(SceneError::ExpectedContentLeaf(target));
+        }
+        if scene.contains_view_except(view, None) {
+            return Err(SceneError::DuplicateView(view));
         }
 
         let target_parent = target_node.parent;
@@ -224,7 +237,7 @@ impl SceneBuilder {
             None => return Err(SceneError::InvalidTree),
         };
 
-        let new_space = self.add_content(scene, content, focusable, Sizing::Grow(1));
+        let new_space = self.add_view(scene, view, focusable, Sizing::Grow(1));
         if parent_axis == Some(direction.axis()) {
             let parent = target_parent.expect("matching axis has a parent");
             let index = target_index.expect("matching axis has an index")
@@ -356,11 +369,11 @@ impl SceneBuilder {
         })
     }
 
-    pub fn replace_content(
+    pub fn replace_view(
         &mut self,
         scene: &mut Scene,
         target: SpaceId,
-        content: ContentId,
+        view: ViewId,
         focusable: bool,
     ) -> Result<(), SceneError> {
         if !scene.is_tree_valid() {
@@ -369,21 +382,27 @@ impl SceneBuilder {
 
         let node = scene
             .nodes
-            .get_mut(&target)
+            .get(&target)
             .ok_or(SceneError::UnknownSpace(target))?;
-        if node.children.is_empty() {
-            if let SpaceKind::Content {
-                content: current_content,
-                focusable: current_focusable,
-            } = &mut node.space.kind
-            {
-                *current_content = content;
-                *current_focusable = focusable;
-                debug_assert!(scene.is_tree_valid());
-                return Ok(());
-            }
+        if !node.children.is_empty() || !matches!(&node.space.kind, SpaceKind::Content { .. }) {
+            return Err(SceneError::ExpectedContentLeaf(target));
         }
-        Err(SceneError::ExpectedContentLeaf(target))
+        if scene.contains_view_except(view, Some(target)) {
+            return Err(SceneError::DuplicateView(view));
+        }
+
+        let node = scene.nodes.get_mut(&target).expect("validated node exists");
+        let SpaceKind::Content {
+            view: current_view,
+            focusable: current_focusable,
+        } = &mut node.space.kind
+        else {
+            unreachable!("validated content leaf")
+        };
+        *current_view = view;
+        *current_focusable = focusable;
+        debug_assert!(scene.is_tree_valid());
+        Ok(())
     }
 
     pub fn set_sizing(
@@ -417,16 +436,19 @@ pub fn build_editor_scene(
     builder: &mut SceneBuilder,
     width: i32,
     height: i32,
-    editor: ContentId,
-    status: ContentId,
+    editor: ViewId,
+    status: ViewId,
 ) -> Result<(Scene, SpaceId), SceneError> {
+    if editor == status {
+        return Err(SceneError::DuplicateView(editor));
+    }
     let mut scene = Scene {
         root: SpaceId(u64::MAX),
         size: Size { width, height },
         nodes: HashMap::new(),
     };
-    let editor_space = builder.add_content(&mut scene, editor, true, Sizing::Grow(1));
-    let status_space = builder.add_content(&mut scene, status, false, Sizing::Fixed(1));
+    let editor_space = builder.add_view(&mut scene, editor, true, Sizing::Grow(1));
+    let status_space = builder.add_view(&mut scene, status, false, Sizing::Fixed(1));
     let root = builder.add_container(
         &mut scene,
         Arrangement::Flex {
@@ -450,7 +472,7 @@ mod tests {
     fn standard_scene_marks_editor_focusable_and_status_inert() {
         let mut builder = SceneBuilder::new();
         let (scene, editor) =
-            build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
+            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
 
         assert!(content_focusable(&scene, editor));
         let status = scene.node(scene.root()).children[1];
@@ -458,20 +480,44 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_view_is_rejected_without_mutating_the_scene() {
+        let mut builder = SceneBuilder::new();
+        let (mut scene, editor) =
+            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
+        let root_children = scene.node(scene.root()).children.clone();
+
+        assert_eq!(
+            builder.split(&mut scene, editor, ViewId(1), true, SplitDirection::Right,),
+            Err(SceneError::DuplicateView(ViewId(1)))
+        );
+        assert_eq!(scene.node(scene.root()).children, root_children);
+        assert_tree_valid(&scene);
+    }
+
+    #[test]
+    fn standard_scene_rejects_duplicate_view_ids_before_allocating_spaces() {
+        let mut builder = SceneBuilder::new();
+
+        assert!(matches!(
+            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(0)),
+            Err(SceneError::DuplicateView(ViewId(0)))
+        ));
+        let (scene, editor) =
+            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
+
+        assert_eq!(editor, SpaceId(0));
+        assert_tree_valid(&scene);
+    }
+
+    #[test]
     fn split_on_matching_axis_inserts_a_sibling_and_advances_id() {
         let mut builder = SceneBuilder::new();
         let (mut scene, _) =
-            build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
+            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
         let status = scene.node(scene.root()).children[1];
 
         let result = builder
-            .split(
-                &mut scene,
-                status,
-                ContentId(1),
-                false,
-                SplitDirection::Down,
-            )
+            .split(&mut scene, status, ViewId(2), false, SplitDirection::Down)
             .unwrap();
 
         assert_eq!(result.new_space, SpaceId(3));
@@ -486,16 +532,10 @@ mod tests {
     fn split_on_different_axis_wraps_target_in_a_new_container() {
         let mut builder = SceneBuilder::new();
         let (mut scene, editor) =
-            build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
+            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
 
         let result = builder
-            .split(
-                &mut scene,
-                editor,
-                ContentId(0),
-                true,
-                SplitDirection::Right,
-            )
+            .split(&mut scene, editor, ViewId(2), true, SplitDirection::Right)
             .unwrap();
 
         let parent = scene.node(editor).parent.expect("split parent exists");
@@ -516,7 +556,7 @@ mod tests {
     fn close_collapses_single_child_container_and_updates_root() {
         let mut builder = SceneBuilder::new();
         let (mut scene, editor) =
-            build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
+            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
         let status = scene.node(scene.root()).children[1];
 
         let closed = builder.close(&mut scene, status).unwrap();
@@ -528,19 +568,19 @@ mod tests {
     }
 
     #[test]
-    fn replace_content_keeps_space_id_and_changes_focusability() {
+    fn replace_view_keeps_space_id_and_changes_focusability() {
         let mut builder = SceneBuilder::new();
         let (mut scene, editor) =
-            build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
+            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
 
         builder
-            .replace_content(&mut scene, editor, ContentId(9), false)
+            .replace_view(&mut scene, editor, ViewId(9), false)
             .unwrap();
 
         assert!(matches!(
             &scene.node(editor).space.kind,
             SpaceKind::Content {
-                content: ContentId(9),
+                view: ViewId(9),
                 focusable: false,
             }
         ));
@@ -550,7 +590,7 @@ mod tests {
     fn set_sizing_changes_only_the_requested_space() {
         let mut builder = SceneBuilder::new();
         let (mut scene, editor) =
-            build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
+            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
         let status = scene.node(scene.root()).children[1];
 
         builder
@@ -565,13 +605,13 @@ mod tests {
     fn failed_split_leaves_tree_and_next_id_unchanged() {
         let mut builder = SceneBuilder::new();
         let (mut scene, editor) =
-            build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
+            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
 
         assert_eq!(
             builder.split(
                 &mut scene,
                 SpaceId(999),
-                ContentId(0),
+                ViewId(2),
                 true,
                 SplitDirection::Right,
             ),
@@ -579,13 +619,7 @@ mod tests {
         );
 
         let split = builder
-            .split(
-                &mut scene,
-                editor,
-                ContentId(0),
-                true,
-                SplitDirection::Right,
-            )
+            .split(&mut scene, editor, ViewId(2), true, SplitDirection::Right)
             .unwrap();
         assert_eq!(split.new_space, SpaceId(3));
     }
@@ -594,26 +628,14 @@ mod tests {
     fn deleted_space_ids_are_not_reused() {
         let mut builder = SceneBuilder::new();
         let (mut scene, editor) =
-            build_editor_scene(&mut builder, 80, 24, ContentId(0), ContentId(1)).unwrap();
+            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
         let first = builder
-            .split(
-                &mut scene,
-                editor,
-                ContentId(0),
-                true,
-                SplitDirection::Right,
-            )
+            .split(&mut scene, editor, ViewId(2), true, SplitDirection::Right)
             .unwrap();
         builder.close(&mut scene, first.new_space).unwrap();
 
         let second = builder
-            .split(
-                &mut scene,
-                editor,
-                ContentId(0),
-                true,
-                SplitDirection::Right,
-            )
+            .split(&mut scene, editor, ViewId(3), true, SplitDirection::Right)
             .unwrap();
         assert_eq!(second.new_space, SpaceId(5));
     }

@@ -1,6 +1,6 @@
 //! 空间节点：布局意图。纯数据，前后端共享。不含 viewport/cursor（前端持）。
 
-use crate::protocol::ids::{ContentId, SpaceId};
+use crate::protocol::ids::{SpaceId, ViewId};
 
 #[derive(Clone)]
 pub struct Space {
@@ -14,7 +14,7 @@ pub struct Space {
 #[derive(Clone)]
 pub enum SpaceKind {
     Container { arrangement: Arrangement },
-    Content { content: ContentId, focusable: bool },
+    Content { view: ViewId, focusable: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -7,7 +7,7 @@ use std::io;
 use crate::protocol::content_query::{
     ContentData, ContentQuery, RenderQuery, RowRange, StatusBarData, ViewData,
 };
-use crate::protocol::ids::SpaceId;
+use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::scene::Scene;
 use crate::protocol::selection::CursorPos;
 use crate::protocol::status::StatusMessage;
@@ -18,7 +18,7 @@ use crate::tui::taffy_engine::TaffyEngine;
 
 pub struct SceneRenderer {
     engine: TaffyEngine,
-    viewports: HashMap<SpaceId, Viewport>,
+    viewports: HashMap<ViewId, Viewport>,
 }
 
 impl SceneRenderer {
@@ -37,15 +37,17 @@ impl SceneRenderer {
         canvas: &mut dyn Canvas,
     ) -> io::Result<()> {
         let resolved: ResolvedScene = self.engine.layout(scene);
-        let views: HashMap<SpaceId, ViewData> = resolved
+        let views: HashMap<ViewId, ViewData> = resolved
             .items
             .iter()
-            .map(|item| (item.space_id, query.view(item.space_id)))
+            .map(|item| (item.view_id, query.view(item.view_id)))
             .collect();
         canvas.hide_cursor()?;
         // 焦点 viewport 跟随
         let focused_item = resolved.items.iter().find(|item| item.space_id == focused);
-        let focused_view = views.get(&focused).expect("focused view has render data");
+        let focused_view = views
+            .get(&focused_item.expect("focused item exists").view_id)
+            .expect("focused view has render data");
         let focused_head = focused_view
             .selections
             .as_ref()
@@ -53,7 +55,7 @@ impl SceneRenderer {
         if let (Some(item), Some(focused_head)) = (focused_item, focused_head) {
             let viewport = self
                 .viewports
-                .entry(focused)
+                .entry(item.view_id)
                 .or_insert_with(Viewport::origin);
             follow_viewport(
                 viewport,
@@ -68,7 +70,7 @@ impl SceneRenderer {
                 item,
                 query,
                 views
-                    .get(&item.space_id)
+                    .get(&item.view_id)
                     .expect("resolved item has view data"),
                 &self.viewports,
                 canvas,
@@ -81,7 +83,7 @@ impl SceneRenderer {
         ) {
             let vp = self
                 .viewports
-                .get(&focused)
+                .get(&item.view_id)
                 .copied()
                 .unwrap_or_else(Viewport::origin);
             let screen_row = focused_head.row.saturating_sub(vp.top_row) + item.rect.y as usize;
@@ -114,15 +116,15 @@ fn paint_item(
     item: &RenderItem,
     query: &dyn RenderQuery,
     view: &ViewData,
-    viewports: &HashMap<SpaceId, Viewport>,
+    viewports: &HashMap<ViewId, Viewport>,
     canvas: &mut dyn Canvas,
 ) -> io::Result<()> {
-    let sid = item.space_id;
+    let vid = item.view_id;
     let vp = viewports
-        .get(&sid)
+        .get(&vid)
         .copied()
         .unwrap_or_else(Viewport::origin);
-    let line_count = match query.content(item.content_id, ContentQuery::TextLineCount) {
+    let line_count = match query.content(view.content, ContentQuery::TextLineCount) {
         ContentData::TextLineCount(line_count) => line_count,
         ContentData::Unsupported => 0,
         _ => 0,
@@ -133,7 +135,7 @@ fn paint_item(
         let width = item.rect.width as usize;
         let start = vp.top_row;
         let lines = match query.content(
-            item.content_id,
+            view.content,
             ContentQuery::TextRows(RowRange {
                 start,
                 end: start + height,
@@ -183,7 +185,7 @@ fn paint_item(
         }
     } else {
         // status_bar
-        let data = match query.content(item.content_id, ContentQuery::StatusBarData) {
+        let data = match query.content(view.content, ContentQuery::StatusBarData) {
             ContentData::StatusBarData(data) => data,
             ContentData::Unsupported => StatusBarData {
                 file_name: None,
@@ -278,7 +280,7 @@ mod tests {
     use crate::protocol::content_query::{
         ContentData, ContentQuery, CursorStyle, RenderQuery, StatusBarData, ViewData,
     };
-    use crate::protocol::ids::{ContentId, SpaceId};
+    use crate::protocol::ids::{ContentId, ViewId};
     use crate::protocol::scene::{SceneBuilder, build_editor_scene};
     use crate::protocol::selection::{CursorPos, Selection, Selections};
     use crate::protocol::space::SplitDirection;
@@ -318,9 +320,14 @@ mod tests {
                 _ => ContentData::Unsupported,
             }
         }
-        fn view(&self, _sid: SpaceId) -> ViewData {
+        fn view(&self, view: ViewId) -> ViewData {
             ViewData {
-                selections: Some(self.selections.clone()),
+                content: if view == ViewId(1) {
+                    ContentId(1)
+                } else {
+                    self.editor_cid
+                },
+                selections: (view != ViewId(1)).then(|| self.selections.clone()),
                 cursor_style: CursorStyle::Default,
             }
         }
@@ -328,7 +335,7 @@ mod tests {
 
     struct MultiSpaceQuery {
         lines: Vec<String>,
-        selections: HashMap<SpaceId, ViewData>,
+        selections: HashMap<ViewId, ViewData>,
     }
 
     impl RenderQuery for MultiSpaceQuery {
@@ -359,16 +366,12 @@ mod tests {
             }
         }
 
-        fn view(&self, sid: SpaceId) -> ViewData {
-            self.selections
-                .get(&sid)
-                .cloned()
-                .unwrap_or_else(|| ViewData {
-                    selections: Some(Selections::single(
-                        Selection::collapsed(CursorPos::origin()),
-                    )),
-                    cursor_style: CursorStyle::Default,
-                })
+        fn view(&self, view: ViewId) -> ViewData {
+            self.selections.get(&view).cloned().unwrap_or(ViewData {
+                content: ContentId(1),
+                selections: None,
+                cursor_style: CursorStyle::Default,
+            })
         }
     }
 
@@ -376,17 +379,18 @@ mod tests {
     fn shared_content_spaces_use_their_own_selections() {
         let mut builder = SceneBuilder::new();
         let (mut scene, left) =
-            build_editor_scene(&mut builder, 20, 2, ContentId(0), ContentId(1)).unwrap();
-        let right = builder
-            .split(&mut scene, left, ContentId(0), true, SplitDirection::Right)
+            build_editor_scene(&mut builder, 20, 2, ViewId(0), ViewId(1)).unwrap();
+        let _right = builder
+            .split(&mut scene, left, ViewId(2), true, SplitDirection::Right)
             .unwrap()
             .new_space;
         let query = MultiSpaceQuery {
             lines: vec!["abcd".to_string()],
             selections: HashMap::from([
                 (
-                    left,
+                    ViewId(0),
                     ViewData {
+                        content: ContentId(0),
                         selections: Some(Selections::single(Selection {
                             anchor: CursorPos {
                                 char_index: 0,
@@ -403,8 +407,9 @@ mod tests {
                     },
                 ),
                 (
-                    right,
+                    ViewId(2),
                     ViewData {
+                        content: ContentId(0),
                         selections: Some(Selections::single(Selection {
                             anchor: CursorPos {
                                 char_index: 2,
@@ -434,20 +439,78 @@ mod tests {
     }
 
     #[test]
+    fn moving_a_view_to_another_space_preserves_its_viewport() {
+        let mut builder = SceneBuilder::new();
+        let (mut scene, left) =
+            build_editor_scene(&mut builder, 20, 2, ViewId(0), ViewId(1)).unwrap();
+        let right = builder
+            .split(&mut scene, left, ViewId(2), true, SplitDirection::Right)
+            .unwrap()
+            .new_space;
+        let saved_viewport = Viewport {
+            top_row: 1,
+            left_col: 0,
+        };
+        let mut renderer = SceneRenderer::new();
+        renderer.viewports.insert(ViewId(0), saved_viewport);
+
+        builder
+            .replace_view(&mut scene, left, ViewId(3), true)
+            .unwrap();
+        builder
+            .replace_view(&mut scene, right, ViewId(0), true)
+            .unwrap();
+        let query = MultiSpaceQuery {
+            lines: vec!["line0".to_string(), "line1".to_string()],
+            selections: HashMap::from([
+                (
+                    ViewId(0),
+                    ViewData {
+                        content: ContentId(0),
+                        selections: None,
+                        cursor_style: CursorStyle::Default,
+                    },
+                ),
+                (
+                    ViewId(3),
+                    ViewData {
+                        content: ContentId(0),
+                        selections: None,
+                        cursor_style: CursorStyle::Default,
+                    },
+                ),
+            ]),
+        };
+        let mut out = Output::new(Vec::new());
+
+        renderer
+            .render(&scene, &query, right, &mut out as &mut dyn Canvas)
+            .unwrap();
+
+        assert_eq!(renderer.viewports.get(&ViewId(0)), Some(&saved_viewport));
+        assert!(
+            String::from_utf8(out.into_inner())
+                .unwrap()
+                .contains("line1")
+        );
+    }
+
+    #[test]
     fn focused_view_controls_terminal_cursor_style() {
         let mut builder = SceneBuilder::new();
         let (mut scene, left) =
-            build_editor_scene(&mut builder, 20, 2, ContentId(0), ContentId(1)).unwrap();
+            build_editor_scene(&mut builder, 20, 2, ViewId(0), ViewId(1)).unwrap();
         let right = builder
-            .split(&mut scene, left, ContentId(0), true, SplitDirection::Right)
+            .split(&mut scene, left, ViewId(2), true, SplitDirection::Right)
             .unwrap()
             .new_space;
         let query = MultiSpaceQuery {
             lines: vec!["abcd".to_string()],
             selections: HashMap::from([
                 (
-                    left,
+                    ViewId(0),
                     ViewData {
+                        content: ContentId(0),
                         selections: Some(Selections::single(Selection::collapsed(
                             CursorPos::origin(),
                         ))),
@@ -455,8 +518,9 @@ mod tests {
                     },
                 ),
                 (
-                    right,
+                    ViewId(2),
                     ViewData {
+                        content: ContentId(0),
                         selections: Some(Selections::single(Selection::collapsed(
                             CursorPos::origin(),
                         ))),
@@ -486,8 +550,7 @@ mod tests {
     #[test]
     fn renders_editor_lines_and_status() {
         let mut builder = SceneBuilder::new();
-        let (scene, ed) =
-            build_editor_scene(&mut builder, 40, 5, ContentId(0), ContentId(1)).unwrap();
+        let (scene, ed) = build_editor_scene(&mut builder, 40, 5, ViewId(0), ViewId(1)).unwrap();
         let query = StubQuery {
             editor_cid: ContentId(0),
             lines: vec!["hello".to_string(), "world".to_string()],
@@ -505,8 +568,7 @@ mod tests {
     #[test]
     fn viewport_follows_cursor_below() {
         let mut builder = SceneBuilder::new();
-        let (scene, ed) =
-            build_editor_scene(&mut builder, 40, 5, ContentId(0), ContentId(1)).unwrap();
+        let (scene, ed) = build_editor_scene(&mut builder, 40, 5, ViewId(0), ViewId(1)).unwrap();
         let lines: Vec<String> = (0..30).map(|i| format!("line{i}")).collect();
         let query = StubQuery {
             editor_cid: ContentId(0),
@@ -529,8 +591,7 @@ mod tests {
     #[test]
     fn renders_non_empty_selection_with_reverse() {
         let mut builder = SceneBuilder::new();
-        let (scene, ed) =
-            build_editor_scene(&mut builder, 40, 5, ContentId(0), ContentId(1)).unwrap();
+        let (scene, ed) = build_editor_scene(&mut builder, 40, 5, ViewId(0), ViewId(1)).unwrap();
         let query = StubQuery {
             editor_cid: ContentId(0),
             lines: vec!["hello".to_string()],
@@ -559,8 +620,7 @@ mod tests {
     #[test]
     fn renders_collapsed_selection_without_reverse() {
         let mut builder = SceneBuilder::new();
-        let (scene, ed) =
-            build_editor_scene(&mut builder, 40, 5, ContentId(0), ContentId(1)).unwrap();
+        let (scene, ed) = build_editor_scene(&mut builder, 40, 5, ViewId(0), ViewId(1)).unwrap();
         let query = StubQuery {
             editor_cid: ContentId(0),
             lines: vec!["hello".to_string()],
@@ -577,8 +637,7 @@ mod tests {
     #[test]
     fn renders_multiline_selection_reverse_spans_lines() {
         let mut builder = SceneBuilder::new();
-        let (scene, ed) =
-            build_editor_scene(&mut builder, 40, 5, ContentId(0), ContentId(1)).unwrap();
+        let (scene, ed) = build_editor_scene(&mut builder, 40, 5, ViewId(0), ViewId(1)).unwrap();
         // "hello\nworld"：row0 col2 = idx2；row1 col2 = idx8
         let query = StubQuery {
             editor_cid: ContentId(0),
@@ -611,8 +670,7 @@ mod tests {
     #[test]
     fn selection_clipped_to_viewport_does_not_draw_invisible_rows() {
         let mut builder = SceneBuilder::new();
-        let (scene, ed) =
-            build_editor_scene(&mut builder, 40, 5, ContentId(0), ContentId(1)).unwrap();
+        let (scene, ed) = build_editor_scene(&mut builder, 40, 5, ViewId(0), ViewId(1)).unwrap();
         let lines: Vec<String> = (0..30).map(|i| format!("line{i}")).collect();
         // 第一次：cursor row 25 → viewport top_row=21
         let q1 = StubQuery {
@@ -663,8 +721,7 @@ mod tests {
     #[test]
     fn viewport_follows_cursor_right_and_clips_long_line() {
         let mut builder = SceneBuilder::new();
-        let (scene, editor) =
-            build_editor_scene(&mut builder, 5, 2, ContentId(0), ContentId(1)).unwrap();
+        let (scene, editor) = build_editor_scene(&mut builder, 5, 2, ViewId(0), ViewId(1)).unwrap();
         let query = StubQuery {
             editor_cid: ContentId(0),
             lines: vec!["abcdefgh".to_string()],
@@ -693,8 +750,7 @@ mod tests {
     #[test]
     fn horizontal_viewport_moves_back_when_cursor_returns_left() {
         let mut builder = SceneBuilder::new();
-        let (scene, editor) =
-            build_editor_scene(&mut builder, 5, 2, ContentId(0), ContentId(1)).unwrap();
+        let (scene, editor) = build_editor_scene(&mut builder, 5, 2, ViewId(0), ViewId(1)).unwrap();
         let mut renderer = SceneRenderer::new();
         let right_query = StubQuery {
             editor_cid: ContentId(0),
@@ -736,8 +792,7 @@ mod tests {
     #[test]
     fn long_row_is_clipped_without_emitting_its_newline() {
         let mut builder = SceneBuilder::new();
-        let (scene, editor) =
-            build_editor_scene(&mut builder, 5, 2, ContentId(0), ContentId(1)).unwrap();
+        let (scene, editor) = build_editor_scene(&mut builder, 5, 2, ViewId(0), ViewId(1)).unwrap();
         let query = StubQuery {
             editor_cid: ContentId(0),
             lines: vec!["abcdefgh\n".to_string()],
@@ -759,8 +814,7 @@ mod tests {
     #[test]
     fn selection_highlight_is_clipped_to_horizontal_viewport() {
         let mut builder = SceneBuilder::new();
-        let (scene, editor) =
-            build_editor_scene(&mut builder, 5, 2, ContentId(0), ContentId(1)).unwrap();
+        let (scene, editor) = build_editor_scene(&mut builder, 5, 2, ViewId(0), ViewId(1)).unwrap();
         let query = StubQuery {
             editor_cid: ContentId(0),
             lines: vec!["abcdefgh".to_string()],

@@ -1,6 +1,6 @@
 //! 前端 pull 后端内容的契约。同进程同步调用，返回 owned 数据。
 
-use crate::protocol::ids::{ContentId, SpaceId};
+use crate::protocol::ids::{ContentId, ViewId};
 use crate::protocol::selection::Selections;
 use crate::protocol::status::StatusMessage;
 
@@ -30,6 +30,7 @@ pub enum CursorStyle {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewData {
+    pub content: ContentId,
     pub selections: Option<Selections>,
     pub cursor_style: CursorStyle,
 }
@@ -56,7 +57,7 @@ pub enum ContentData {
 /// 前端通过消息拉取后端内容的只读契约。
 pub trait RenderQuery {
     fn content(&self, id: ContentId, query: ContentQuery) -> ContentData;
-    fn view(&self, id: SpaceId) -> ViewData;
+    fn view(&self, id: ViewId) -> ViewData;
 }
 
 #[cfg(test)]
@@ -95,11 +96,13 @@ mod tests {
     #[test]
     fn view_data_contains_selections_and_cursor_style() {
         let data = ViewData {
+            content: ContentId(7),
             selections: Some(Selections::single(
                 Selection::collapsed(CursorPos::origin()),
             )),
             cursor_style: CursorStyle::Block,
         };
+        assert_eq!(data.content, ContentId(7));
         assert_eq!(data.cursor_style, CursorStyle::Block);
         assert_eq!(
             data.selections.unwrap().primary().head(),
