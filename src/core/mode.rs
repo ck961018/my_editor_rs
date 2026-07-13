@@ -219,7 +219,7 @@ impl Mode for VimMode {
     fn cursor_style(&self, state: &dyn ModeState) -> CursorStyle {
         match self.state(state).state {
             VimState::Normal => CursorStyle::Block,
-            VimState::Insert => CursorStyle::Default,
+            VimState::Insert => CursorStyle::Bar,
         }
     }
 
@@ -319,6 +319,15 @@ fn vim_normal_keymap() -> Keymap {
     km.bind_edit(KeyEvent::char('j'), EditCommand::MoveDownBy(1));
     km.bind_edit(KeyEvent::char('k'), EditCommand::MoveUpBy(1));
     km.bind_edit(KeyEvent::char('l'), EditCommand::MoveRightBy(1));
+    km.bind_edit(KeyEvent::char('w'), EditCommand::MoveWordForward);
+    km.bind_edit(KeyEvent::char('b'), EditCommand::MoveWordBackward);
+    km.bind_edit(KeyEvent::char('e'), EditCommand::MoveWordEnd);
+    km.bind_edit(KeyEvent::char('0'), EditCommand::MoveToLineStart);
+    km.bind_edit(KeyEvent::char('^'), EditCommand::MoveToFirstNonBlank);
+    km.bind_edit(KeyEvent::char('$'), EditCommand::MoveToLineEnd);
+    km.bind_edit(KeyEvent::char('G'), EditCommand::MoveToLastLine);
+    km.bind_edit(KeyEvent::char('{'), EditCommand::MoveToPrevParagraph);
+    km.bind_edit(KeyEvent::char('}'), EditCommand::MoveToNextParagraph);
     km.bind(
         KeyEvent::char('i'),
         Command::Content(ContentCommand::Mode {
@@ -395,7 +404,7 @@ mod tests {
             ModeId::new("vim"),
             ModeActionId::new("enter-insert"),
         );
-        assert_eq!(modes.cursor_style(&runtime), CursorStyle::Default);
+        assert_eq!(modes.cursor_style(&runtime), CursorStyle::Bar);
     }
 
     #[test]
@@ -529,5 +538,95 @@ mod tests {
         let runtime = modes.create_runtime();
 
         assert_eq!(modes.resolve_key(&runtime, KeyEvent::char('c')), None);
+    }
+
+    #[test]
+    fn vim_normal_w_resolves_to_move_word_forward() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('w')),
+            Some(EditCommand::MoveWordForward.into()),
+        );
+    }
+
+    #[test]
+    fn vim_normal_b_resolves_to_move_word_backward() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('b')),
+            Some(EditCommand::MoveWordBackward.into()),
+        );
+    }
+
+    #[test]
+    fn vim_normal_e_resolves_to_move_word_end() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('e')),
+            Some(EditCommand::MoveWordEnd.into()),
+        );
+    }
+
+    #[test]
+    fn vim_normal_zero_resolves_to_move_to_line_start() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('0')),
+            Some(EditCommand::MoveToLineStart.into()),
+        );
+    }
+
+    #[test]
+    fn vim_normal_caret_resolves_to_move_to_first_non_blank() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('^')),
+            Some(EditCommand::MoveToFirstNonBlank.into()),
+        );
+    }
+
+    #[test]
+    fn vim_normal_dollar_resolves_to_move_to_line_end() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('$')),
+            Some(EditCommand::MoveToLineEnd.into()),
+        );
+    }
+
+    #[test]
+    fn vim_normal_capital_g_resolves_to_move_to_last_line() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('G')),
+            Some(EditCommand::MoveToLastLine.into()),
+        );
+    }
+
+    #[test]
+    fn vim_normal_open_brace_resolves_to_prev_paragraph() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('{')),
+            Some(EditCommand::MoveToPrevParagraph.into()),
+        );
+    }
+
+    #[test]
+    fn vim_normal_close_brace_resolves_to_next_paragraph() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('}')),
+            Some(EditCommand::MoveToNextParagraph.into()),
+        );
     }
 }
