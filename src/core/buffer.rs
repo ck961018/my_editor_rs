@@ -643,6 +643,82 @@ impl Buffer {
             Self::collapse_to_head(sel);
         }
     }
+
+    pub fn insert_new_line_below_at_selections(&mut self, selections: &mut Selections) {
+        let insert_points: Vec<usize> = selections
+            .all()
+            .map(|s| {
+                let row = self
+                    .rope
+                    .char_to_line(s.head.char_index.min(self.rope.len_chars()));
+                self.rope.line_to_char(row) + line_content_len(&self.rope, row)
+            })
+            .collect();
+        let mut sorted = insert_points.clone();
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        sorted.dedup();
+        for pos in &sorted {
+            self.rope.insert(*pos, "\n");
+        }
+        self.modified = true;
+        for (sel, pos) in selections.all_mut().zip(insert_points.iter()) {
+            sel.head.char_index = *pos + 1;
+            self.recompute_cursor(&mut sel.head);
+            Self::collapse_to_head(sel);
+        }
+    }
+
+    pub fn insert_new_line_above_at_selections(&mut self, selections: &mut Selections) {
+        let insert_points: Vec<usize> = selections
+            .all()
+            .map(|s| {
+                let row = self
+                    .rope
+                    .char_to_line(s.head.char_index.min(self.rope.len_chars()));
+                self.rope.line_to_char(row)
+            })
+            .collect();
+        let mut sorted = insert_points.clone();
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        sorted.dedup();
+        for pos in &sorted {
+            self.rope.insert(*pos, "\n");
+        }
+        self.modified = true;
+        for (sel, pos) in selections.all_mut().zip(insert_points.iter()) {
+            sel.head.char_index = *pos;
+            self.recompute_cursor(&mut sel.head);
+            Self::collapse_to_head(sel);
+        }
+    }
+
+    pub fn delete_line_content_at_selections(&mut self, selections: &mut Selections) {
+        let ranges: Vec<(usize, usize)> = selections
+            .all()
+            .map(|s| {
+                let row = self
+                    .rope
+                    .char_to_line(s.head.char_index.min(self.rope.len_chars()));
+                let line_start = self.rope.line_to_char(row);
+                let content_end = line_start + line_content_len(&self.rope, row);
+                (line_start, content_end)
+            })
+            .collect();
+        let mut sorted = ranges.clone();
+        sorted.sort_unstable_by_key(|b| std::cmp::Reverse(b.0));
+        sorted.dedup();
+        for (start, end) in &sorted {
+            if end > start {
+                self.rope.remove(*start..*end);
+            }
+        }
+        self.modified = true;
+        for (sel, (start, _)) in selections.all_mut().zip(ranges.iter()) {
+            sel.head.char_index = *start;
+            self.recompute_cursor(&mut sel.head);
+            Self::collapse_to_head(sel);
+        }
+    }
 }
 
 impl Default for Buffer {
@@ -1176,6 +1252,78 @@ mod tests {
         buffer.toggle_case_at_selections(&mut s);
         assert_eq!(buffer.slice().to_string(), "ABC");
         assert_eq!(s.primary().head().char_index, 3);
+    }
+
+    #[test]
+    fn insert_new_line_below_adds_line_and_moves_cursor() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 1);
+        buffer.insert_new_line_below_at_selections(&mut s);
+        assert_eq!(buffer.slice().to_string(), "foo\n");
+        assert_eq!(s.primary().head().char_index, 4); // start of new line
+    }
+
+    #[test]
+    fn insert_new_line_below_multiline() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\nbar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 1); // on 'o' of line 1
+        buffer.insert_new_line_below_at_selections(&mut s);
+        assert_eq!(buffer.slice().to_string(), "foo\n\nbar");
+        assert_eq!(s.primary().head().char_index, 4); // new empty line
+    }
+
+    #[test]
+    fn insert_new_line_above_adds_line_and_keeps_cursor() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 1);
+        buffer.insert_new_line_above_at_selections(&mut s);
+        assert_eq!(buffer.slice().to_string(), "\nfoo");
+        assert_eq!(s.primary().head().char_index, 0); // start of new line
+    }
+
+    #[test]
+    fn insert_new_line_above_multiline() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\nbar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 5); // on 'a' of line 2
+        buffer.insert_new_line_above_at_selections(&mut s);
+        assert_eq!(buffer.slice().to_string(), "foo\n\nbar");
+        assert_eq!(s.primary().head().char_index, 4); // new empty line start
+    }
+
+    #[test]
+    fn delete_line_content_clears_line_keeps_newline() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\nbar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 1); // on 'o' of line 1
+        buffer.delete_line_content_at_selections(&mut s);
+        assert_eq!(buffer.slice().to_string(), "\nbar");
+        assert_eq!(s.primary().head().char_index, 0);
+    }
+
+    #[test]
+    fn delete_line_content_last_line_no_newline() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\nbar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 5); // on 'a' of line 2
+        buffer.delete_line_content_at_selections(&mut s);
+        assert_eq!(buffer.slice().to_string(), "foo\n");
+        assert_eq!(s.primary().head().char_index, 4);
     }
 
     #[test]
