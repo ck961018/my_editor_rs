@@ -104,23 +104,25 @@ Scene 的协议表示应是可序列化的只读快照或变更消息。SceneBui
 
 ## 3. 所有权
 
-目标所有权关系如下：
+当前所有权关系如下：
 
 ```text
-Kernel / App
-├── ContentStore          共享 Content
-├── ModeRegistry          原生与脚本 Mode 定义
-├── TaskManager           保存等后台任务
-└── ClientSession
-    ├── Scene
-    ├── Focus
-    └── ViewStore
-        └── View          Mode 实例 + ContentViewState
+App<F>
+├── Kernel
+│   ├── ContentStore      共享 Content
+│   ├── ModeRegistry      原生与脚本 Mode 定义
+│   └── TaskManager       保存等后台任务
+├── ClientSession
+│   ├── Scene + SceneBuilder + revision
+│   ├── Focus + Dispatcher
+│   └── ViewStore
+│       └── View          Mode 实例 + ContentViewState
+└── Frontend              viewport 与具体 presentation 状态
 ```
 
-当前只有一个 Frontend，因此 App 可以直接持有一份 Scene、Focus 和 ViewStore。如果未来
-允许多个前端同时连接，共享 Content 留在 Kernel，每个客户端的布局、焦点、View 和
-viewport 下沉到独立 `ClientSession`。
+当前 App 只有一个 ClientSession 和一个 Frontend，但共享 Kernel 与客户端会话已经分层。
+如果未来允许多个前端同时连接，每个客户端创建独立 ClientSession 与 Frontend；共享
+Content、Mode 定义和后台服务仍留在 Kernel。Viewport 属于具体前端，不进入后端 session。
 
 ## 4. 前后端边界
 
@@ -179,8 +181,8 @@ Backend -> Frontend
 ## 7. 当前阶段的有意简化
 
 - 只有一个 Frontend 和一份客户端会话状态。
-- App 直接持有一份 Scene、Focus 和 ViewStore，尚未拆出 ClientSession。
-- App 持有共享 ModeRegistry，View 从中创建独立 ModeInstance。
+- 尚未实现 session registry、多客户端调度、认证或并发共享；Kernel 暂不需要 Arc/Mutex。
+- Kernel 持有共享 ModeRegistry，View 从中创建独立 ModeInstance。
 - Mode/Action 在命令边界使用 owned 名称，Registry 将其解析为进程内稳定的数值 ID。
 - 原生 Mode 暂时使用 Rust trait object 和 `Any` 保存类型状态。
 - TUI 继续同步调用 `RenderQuery`；远程语义协议尚未绑定 transport 或序列化格式。

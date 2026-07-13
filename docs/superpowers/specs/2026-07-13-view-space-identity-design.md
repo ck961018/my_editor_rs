@@ -34,7 +34,7 @@ ContentId 执行共享内容命令。
 
 ## 非目标
 
-- 不引入多客户端 Session；仍只有一个 App 和一份 Scene/Focus/View 集合。
+- 本项不引入多客户端 Session；后续已提取 Kernel/ClientSession 所有权，当前仍是单客户端。
 - 本项不泛化 presentation；后续“View presentation 泛化”已完成 Text/StatusBar 显式分派。
 - 不改变 ContentId 或 SpaceId 的分配策略，不实现 View 跨 Scene 共享。
 
