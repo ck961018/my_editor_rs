@@ -47,6 +47,146 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
                 Buffer::collapse_to_head(sel);
             }
         }
+        EditCommand::MoveWordForward => {
+            for sel in selections.all_mut() {
+                if sel.anchor != sel.head {
+                    sel.head = if sel.anchor.char_index < sel.head.char_index {
+                        sel.anchor
+                    } else {
+                        sel.head
+                    };
+                } else {
+                    buffer.move_head_word_forward(sel);
+                }
+                Buffer::collapse_to_head(sel);
+            }
+        }
+        EditCommand::MoveWordBackward => {
+            for sel in selections.all_mut() {
+                if sel.anchor != sel.head {
+                    sel.head = if sel.anchor.char_index > sel.head.char_index {
+                        sel.anchor
+                    } else {
+                        sel.head
+                    };
+                } else {
+                    buffer.move_head_word_backward(sel);
+                }
+                Buffer::collapse_to_head(sel);
+            }
+        }
+        EditCommand::MoveWordEnd => {
+            for sel in selections.all_mut() {
+                if sel.anchor != sel.head {
+                    sel.head = if sel.anchor.char_index < sel.head.char_index {
+                        sel.anchor
+                    } else {
+                        sel.head
+                    };
+                } else {
+                    buffer.move_head_word_end(sel);
+                }
+                Buffer::collapse_to_head(sel);
+            }
+        }
+        EditCommand::MoveToLineStart => {
+            for sel in selections.all_mut() {
+                if sel.anchor != sel.head {
+                    sel.head = if sel.anchor.char_index < sel.head.char_index {
+                        sel.anchor
+                    } else {
+                        sel.head
+                    };
+                } else {
+                    buffer.move_head_to_line_start(sel);
+                }
+                Buffer::collapse_to_head(sel);
+            }
+        }
+        EditCommand::MoveToFirstNonBlank => {
+            for sel in selections.all_mut() {
+                if sel.anchor != sel.head {
+                    sel.head = if sel.anchor.char_index < sel.head.char_index {
+                        sel.anchor
+                    } else {
+                        sel.head
+                    };
+                } else {
+                    buffer.move_head_to_first_non_blank(sel);
+                }
+                Buffer::collapse_to_head(sel);
+            }
+        }
+        EditCommand::MoveToLineEnd => {
+            for sel in selections.all_mut() {
+                if sel.anchor != sel.head {
+                    sel.head = if sel.anchor.char_index > sel.head.char_index {
+                        sel.anchor
+                    } else {
+                        sel.head
+                    };
+                } else {
+                    buffer.move_head_to_line_end(sel);
+                }
+                Buffer::collapse_to_head(sel);
+            }
+        }
+        EditCommand::MoveAfterLineEnd => {
+            for sel in selections.all_mut() {
+                if sel.anchor != sel.head {
+                    sel.head = if sel.anchor.char_index > sel.head.char_index {
+                        sel.anchor
+                    } else {
+                        sel.head
+                    };
+                } else {
+                    buffer.move_head_after_line_end(sel);
+                }
+                Buffer::collapse_to_head(sel);
+            }
+        }
+        EditCommand::MoveToLastLine => {
+            for sel in selections.all_mut() {
+                if sel.anchor != sel.head {
+                    sel.head = if sel.anchor.char_index > sel.head.char_index {
+                        sel.anchor
+                    } else {
+                        sel.head
+                    };
+                } else {
+                    buffer.move_head_to_last_line(sel);
+                }
+                Buffer::collapse_to_head(sel);
+            }
+        }
+        EditCommand::MoveToPrevParagraph => {
+            for sel in selections.all_mut() {
+                if sel.anchor != sel.head {
+                    sel.head = if sel.anchor.char_index < sel.head.char_index {
+                        sel.anchor
+                    } else {
+                        sel.head
+                    };
+                } else {
+                    buffer.move_head_to_prev_paragraph(sel);
+                }
+                Buffer::collapse_to_head(sel);
+            }
+        }
+        EditCommand::MoveToNextParagraph => {
+            for sel in selections.all_mut() {
+                if sel.anchor != sel.head {
+                    sel.head = if sel.anchor.char_index > sel.head.char_index {
+                        sel.anchor
+                    } else {
+                        sel.head
+                    };
+                } else {
+                    buffer.move_head_to_next_paragraph(sel);
+                }
+                Buffer::collapse_to_head(sel);
+            }
+        }
         EditCommand::MoveBy { chars, lines } => {
             for sel in selections.all_mut() {
                 buffer.move_head_by(sel, chars, lines);
@@ -89,23 +229,13 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
         EditCommand::InsertText(text) => buffer.insert_at_selections(selections, &text),
         EditCommand::Delete(n) => buffer.delete_at_selections(selections, n),
         EditCommand::DeleteWordBackward => buffer.delete_word_backward_at_selections(selections),
-        // 占位：vim 基础操作变体由后续 Task 接入具体分支，此处先 noop 保证编译。
+        // 占位：vim 基础操作编辑变体由 Task 8 接入具体分支，此处先 noop 保证编译。
         EditCommand::DeleteToLineStart
         | EditCommand::DeleteToLineEnd
-        | EditCommand::MoveWordForward
-        | EditCommand::MoveWordBackward
-        | EditCommand::MoveWordEnd
-        | EditCommand::MoveToLineStart
-        | EditCommand::MoveToFirstNonBlank
-        | EditCommand::MoveToLineEnd
-        | EditCommand::MoveToLastLine
-        | EditCommand::MoveToPrevParagraph
-        | EditCommand::MoveToNextParagraph
         | EditCommand::JoinLines
         | EditCommand::ToggleCase
         | EditCommand::InsertNewLineBelow
         | EditCommand::InsertNewLineAbove
-        | EditCommand::MoveAfterLineEnd
         | EditCommand::DeleteLineContent => {}
     }
 }
@@ -296,5 +426,123 @@ mod tests {
         assert_eq!(buf.slice().to_string(), "hXYo");
         assert_eq!(s.primary().head().char_index, 3);
         assert_eq!(s.primary().anchor, s.primary().head());
+    }
+
+    #[test]
+    fn move_word_forward_advances_head() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo bar");
+        let mut s = single_sel({
+            let mut c = CursorPos::origin();
+            c.char_index = 0;
+            buf.recompute_cursor(&mut c);
+            c
+        });
+        apply_edit(EditCommand::MoveWordForward, &mut buf, &mut s);
+        assert_eq!(s.primary().head().char_index, 4);
+        assert_eq!(s.primary().anchor, s.primary().head());
+    }
+
+    #[test]
+    fn move_word_backward_advances_head() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo bar");
+        let mut s = single_sel({
+            let mut c = CursorPos::origin();
+            c.char_index = 7;
+            buf.recompute_cursor(&mut c);
+            c
+        });
+        apply_edit(EditCommand::MoveWordBackward, &mut buf, &mut s);
+        assert_eq!(s.primary().head().char_index, 4);
+        assert_eq!(s.primary().anchor, s.primary().head());
+    }
+
+    #[test]
+    fn move_word_end_advances_head() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo.bar");
+        let mut s = single_sel({
+            let mut c = CursorPos::origin();
+            c.char_index = 0;
+            buf.recompute_cursor(&mut c);
+            c
+        });
+        apply_edit(EditCommand::MoveWordEnd, &mut buf, &mut s);
+        assert_eq!(s.primary().head().char_index, 2);
+        assert_eq!(s.primary().anchor, s.primary().head());
+    }
+
+    #[test]
+    fn move_to_line_start_goes_to_column_zero() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "  foo\n  bar");
+        let mut s = single_sel({
+            let mut c = CursorPos::origin();
+            c.char_index = 7;
+            buf.recompute_cursor(&mut c);
+            c
+        });
+        apply_edit(EditCommand::MoveToLineStart, &mut buf, &mut s);
+        assert_eq!(s.primary().head().char_index, 6);
+    }
+
+    #[test]
+    fn move_to_first_non_blank_skips_whitespace() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "  foo");
+        let mut s = single_sel(CursorPos::origin());
+        apply_edit(EditCommand::MoveToFirstNonBlank, &mut buf, &mut s);
+        assert_eq!(s.primary().head().char_index, 2);
+    }
+
+    #[test]
+    fn move_to_line_end_lands_on_last_char() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo\nbar");
+        let mut s = single_sel(CursorPos::origin());
+        apply_edit(EditCommand::MoveToLineEnd, &mut buf, &mut s);
+        assert_eq!(s.primary().head().char_index, 2);
+    }
+
+    #[test]
+    fn move_to_last_line_goes_to_last_line() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo\nbar\nbaz");
+        let mut s = single_sel(CursorPos::origin());
+        apply_edit(EditCommand::MoveToLastLine, &mut buf, &mut s);
+        assert_eq!(s.primary().head().char_index, 8);
+    }
+
+    #[test]
+    fn move_to_prev_paragraph_jumps_to_empty_line() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo\n\nbar");
+        let mut s = single_sel({
+            let mut c = CursorPos::origin();
+            c.char_index = 5;
+            buf.recompute_cursor(&mut c);
+            c
+        });
+        apply_edit(EditCommand::MoveToPrevParagraph, &mut buf, &mut s);
+        assert_eq!(s.primary().head().char_index, 4);
+    }
+
+    #[test]
+    fn move_to_next_paragraph_jumps_to_empty_line() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo\n\nbar");
+        let mut s = single_sel(CursorPos::origin());
+        apply_edit(EditCommand::MoveToNextParagraph, &mut buf, &mut s);
+        assert_eq!(s.primary().head().char_index, 4);
+    }
+
+    #[test]
+    fn move_after_line_end_lands_after_last_char() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo\n");
+        let mut s = single_sel(CursorPos::origin());
+        apply_edit(EditCommand::MoveAfterLineEnd, &mut buf, &mut s);
+        assert_eq!(s.primary().head().char_index, 3);
     }
 }
