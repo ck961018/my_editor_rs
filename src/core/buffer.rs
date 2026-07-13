@@ -4,7 +4,7 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::core::keymap::Keymap;
-use crate::protocol::selection::{CursorPos, Selection, Selections};
+use crate::protocol::selection::{Selection, Selections, TextOffset, TextPoint};
 use crate::protocol::status::StatusMessage;
 
 pub struct Buffer {
@@ -157,68 +157,77 @@ impl Buffer {
 
     // ——编辑原语：底层点操作（pub(crate)，操作 head）——
 
-    pub fn recompute_cursor(&self, cur: &mut CursorPos) {
-        let clamped = cur.char_index.min(self.rope.len_chars());
-        cur.row = self.rope.char_to_line(clamped);
-        let line_start = self.rope.line_to_char(cur.row);
-        cur.col = clamped - line_start;
+    pub fn clamp_offset(&self, cur: &mut TextOffset) {
+        cur.char_index = cur.char_index.min(self.rope.len_chars());
     }
 
-    pub(crate) fn move_cursor_by(&self, cur: &mut CursorPos, chars: isize, lines: isize) {
+    pub fn text_point(&self, offset: TextOffset) -> TextPoint {
+        let clamped = offset.char_index.min(self.rope.len_chars());
+        let row = self.rope.char_to_line(clamped);
+        TextPoint {
+            row,
+            col: clamped - self.rope.line_to_char(row),
+        }
+    }
+
+    pub(crate) fn move_cursor_by(&self, cur: &mut TextOffset, chars: isize, lines: isize) {
         if chars != 0 {
             let len = self.rope.len_chars() as isize;
             let target = (cur.char_index as isize + chars).clamp(0, len) as usize;
             cur.char_index = target;
         }
         if lines != 0 {
+            let point = self.text_point(*cur);
             let max_row = self.rope.len_lines().saturating_sub(1);
-            let target_row = (cur.row as isize + lines).clamp(0, max_row as isize) as usize;
+            let target_row = (point.row as isize + lines).clamp(0, max_row as isize) as usize;
             let line_len = line_content_len(&self.rope, target_row);
-            let new_col = cur.col.min(line_len);
+            let new_col = point.col.min(line_len);
             cur.char_index = self.rope.line_to_char(target_row) + new_col;
         }
-        self.recompute_cursor(cur);
+        self.clamp_offset(cur);
     }
 
-    pub(crate) fn move_cursor_left(&self, cur: &mut CursorPos, n: usize) {
+    pub(crate) fn move_cursor_left(&self, cur: &mut TextOffset, n: usize) {
         cur.char_index = cur.char_index.saturating_sub(n);
-        self.recompute_cursor(cur);
+        self.clamp_offset(cur);
     }
 
-    pub(crate) fn move_cursor_right(&self, cur: &mut CursorPos, n: usize) {
+    pub(crate) fn move_cursor_right(&self, cur: &mut TextOffset, n: usize) {
         cur.char_index = (cur.char_index + n).min(self.rope.len_chars());
-        self.recompute_cursor(cur);
+        self.clamp_offset(cur);
     }
 
-    pub(crate) fn move_cursor_up(&self, cur: &mut CursorPos, n: usize) {
-        let target_row = cur.row.saturating_sub(n);
+    pub(crate) fn move_cursor_up(&self, cur: &mut TextOffset, n: usize) {
+        let point = self.text_point(*cur);
+        let target_row = point.row.saturating_sub(n);
         let line_len = line_content_len(&self.rope, target_row);
-        let new_col = cur.col.min(line_len);
+        let new_col = point.col.min(line_len);
         cur.char_index = self.rope.line_to_char(target_row) + new_col;
-        self.recompute_cursor(cur);
+        self.clamp_offset(cur);
     }
 
-    pub(crate) fn move_cursor_down(&self, cur: &mut CursorPos, n: usize) {
+    pub(crate) fn move_cursor_down(&self, cur: &mut TextOffset, n: usize) {
+        let point = self.text_point(*cur);
         let max_row = self.rope.len_lines().saturating_sub(1);
-        let target_row = (cur.row + n).min(max_row);
+        let target_row = (point.row + n).min(max_row);
         let line_len = line_content_len(&self.rope, target_row);
-        let new_col = cur.col.min(line_len);
+        let new_col = point.col.min(line_len);
         cur.char_index = self.rope.line_to_char(target_row) + new_col;
-        self.recompute_cursor(cur);
+        self.clamp_offset(cur);
     }
 
-    pub(crate) fn set_cursor(&self, cur: &mut CursorPos, char_idx: usize, _line_idx: usize) {
+    pub(crate) fn set_cursor(&self, cur: &mut TextOffset, char_idx: usize, _line_idx: usize) {
         cur.char_index = char_idx.min(self.rope.len_chars());
-        self.recompute_cursor(cur);
+        self.clamp_offset(cur);
     }
 
     // ——编辑原语：selection 层（pub，head/anchor 独立，守恒由调用方决定）——
 
-    /// recompute head + anchor 的 row/col（独立 recompute，v0.3 真选区启用）。
-    #[allow(dead_code)] // v0.3：生产路径用 move_head_*/shrink 直接维护 row/col；测试与未来多 selection 用
-    pub fn recompute_selection(&self, sel: &mut Selection) {
-        self.recompute_cursor(&mut sel.head);
-        self.recompute_cursor(&mut sel.anchor);
+    /// 将 head 与 anchor 钳制到当前文档范围，不缓存逻辑行列。
+    #[allow(dead_code)] // 多 selection 批量校验入口；当前编辑路径逐点钳制。
+    pub fn clamp_selection(&self, sel: &mut Selection) {
+        self.clamp_offset(&mut sel.head);
+        self.clamp_offset(&mut sel.anchor);
     }
 
     /// 移动 head，不碰 anchor（extend 语义：selection 变非空）。
@@ -245,19 +254,19 @@ impl Buffer {
     pub fn move_head_word_forward(&self, sel: &mut Selection) {
         let target = forward_word_start(&self.rope, sel.head.char_index);
         sel.head.char_index = target;
-        self.recompute_cursor(&mut sel.head);
+        self.clamp_offset(&mut sel.head);
     }
 
     pub fn move_head_word_backward(&self, sel: &mut Selection) {
         let target = backward_word_start(&self.rope, sel.head.char_index);
         sel.head.char_index = target;
-        self.recompute_cursor(&mut sel.head);
+        self.clamp_offset(&mut sel.head);
     }
 
     pub fn move_head_word_end(&self, sel: &mut Selection) {
         let target = forward_word_end(&self.rope, sel.head.char_index);
         sel.head.char_index = target;
-        self.recompute_cursor(&mut sel.head);
+        self.clamp_offset(&mut sel.head);
     }
 
     pub fn move_head_to_line_start(&self, sel: &mut Selection) {
@@ -265,7 +274,7 @@ impl Buffer {
             .rope
             .char_to_line(sel.head.char_index.min(self.rope.len_chars()));
         sel.head.char_index = self.rope.line_to_char(row);
-        self.recompute_cursor(&mut sel.head);
+        self.clamp_offset(&mut sel.head);
     }
 
     pub fn move_head_to_first_non_blank(&self, sel: &mut Selection) {
@@ -273,7 +282,7 @@ impl Buffer {
             .rope
             .char_to_line(sel.head.char_index.min(self.rope.len_chars()));
         sel.head.char_index = first_non_blank_in_line(&self.rope, row);
-        self.recompute_cursor(&mut sel.head);
+        self.clamp_offset(&mut sel.head);
     }
 
     pub fn move_head_to_line_end(&self, sel: &mut Selection) {
@@ -281,7 +290,7 @@ impl Buffer {
             .rope
             .char_to_line(sel.head.char_index.min(self.rope.len_chars()));
         sel.head.char_index = line_end_char(&self.rope, row);
-        self.recompute_cursor(&mut sel.head);
+        self.clamp_offset(&mut sel.head);
     }
 
     pub fn move_head_after_line_end(&self, sel: &mut Selection) {
@@ -289,23 +298,23 @@ impl Buffer {
             .rope
             .char_to_line(sel.head.char_index.min(self.rope.len_chars()));
         sel.head.char_index = line_end_insert(&self.rope, row);
-        self.recompute_cursor(&mut sel.head);
+        self.clamp_offset(&mut sel.head);
     }
 
     pub fn move_head_to_last_line(&self, sel: &mut Selection) {
         let max_row = self.rope.len_lines().saturating_sub(1);
         sel.head.char_index = self.rope.line_to_char(max_row);
-        self.recompute_cursor(&mut sel.head);
+        self.clamp_offset(&mut sel.head);
     }
 
     pub fn move_head_to_prev_paragraph(&self, sel: &mut Selection) {
         sel.head.char_index = prev_paragraph(&self.rope, sel.head.char_index);
-        self.recompute_cursor(&mut sel.head);
+        self.clamp_offset(&mut sel.head);
     }
 
     pub fn move_head_to_next_paragraph(&self, sel: &mut Selection) {
         sel.head.char_index = next_paragraph(&self.rope, sel.head.char_index);
-        self.recompute_cursor(&mut sel.head);
+        self.clamp_offset(&mut sel.head);
     }
 
     /// 设 head，不碰 anchor。
@@ -356,7 +365,7 @@ impl Buffer {
         for sel in selections.all_mut() {
             let insert_at = sel.anchor.char_index.min(sel.head.char_index);
             sel.head.char_index = insert_at + text_len;
-            self.recompute_cursor(&mut sel.head);
+            self.clamp_offset(&mut sel.head);
             Self::collapse_to_head(sel);
         }
     }
@@ -403,7 +412,7 @@ impl Buffer {
                 sel.head.char_index = sel.head.char_index.saturating_sub((-n) as usize);
             }
             // 空 forward：head 不动（删除在 head 之后）
-            self.recompute_cursor(&mut sel.head);
+            self.clamp_offset(&mut sel.head);
             Self::collapse_to_head(sel);
         }
     }
@@ -459,7 +468,7 @@ impl Buffer {
                     selection.head.char_index = start - deleted_before;
                 }
             }
-            self.recompute_cursor(&mut selection.head);
+            self.clamp_offset(&mut selection.head);
             Self::collapse_to_head(selection);
         }
     }
@@ -497,7 +506,7 @@ impl Buffer {
                 }
             }
             sel.head.char_index = start - deleted_before;
-            self.recompute_cursor(&mut sel.head);
+            self.clamp_offset(&mut sel.head);
             Self::collapse_to_head(sel);
         }
     }
@@ -535,7 +544,7 @@ impl Buffer {
                 }
             }
             sel.head.char_index = start - deleted_before;
-            self.recompute_cursor(&mut sel.head);
+            self.clamp_offset(&mut sel.head);
             Self::collapse_to_head(sel);
         }
     }
@@ -582,7 +591,7 @@ impl Buffer {
         self.mark_modified();
         for (sel, (newline_pos, _, _)) in selections.all_mut().zip(joins.iter()) {
             sel.head.char_index = *newline_pos;
-            self.recompute_cursor(&mut sel.head);
+            self.clamp_offset(&mut sel.head);
             Self::collapse_to_head(sel);
         }
     }
@@ -634,7 +643,7 @@ impl Buffer {
             } else {
                 sel.head.char_index = *end;
             }
-            self.recompute_cursor(&mut sel.head);
+            self.clamp_offset(&mut sel.head);
             Self::collapse_to_head(sel);
         }
     }
@@ -658,7 +667,7 @@ impl Buffer {
         self.mark_modified();
         for (sel, pos) in selections.all_mut().zip(insert_points.iter()) {
             sel.head.char_index = *pos + 1;
-            self.recompute_cursor(&mut sel.head);
+            self.clamp_offset(&mut sel.head);
             Self::collapse_to_head(sel);
         }
     }
@@ -682,7 +691,7 @@ impl Buffer {
         self.mark_modified();
         for (sel, pos) in selections.all_mut().zip(insert_points.iter()) {
             sel.head.char_index = *pos;
-            self.recompute_cursor(&mut sel.head);
+            self.clamp_offset(&mut sel.head);
             Self::collapse_to_head(sel);
         }
     }
@@ -710,7 +719,7 @@ impl Buffer {
         self.mark_modified();
         for (sel, (start, _)) in selections.all_mut().zip(ranges.iter()) {
             sel.head.char_index = *start;
-            self.recompute_cursor(&mut sel.head);
+            self.clamp_offset(&mut sel.head);
             Self::collapse_to_head(sel);
         }
     }
@@ -888,21 +897,18 @@ mod tests {
     use crate::protocol::selection::{Selection, Selections};
     use tempfile::tempdir;
 
-    fn cur(idx: usize) -> CursorPos {
-        let mut c = CursorPos::origin();
-        c.char_index = idx;
-        Buffer::new().recompute_cursor(&mut c);
-        c
+    fn cur(idx: usize) -> TextOffset {
+        TextOffset { char_index: idx }
     }
 
-    fn single_sel(at: CursorPos) -> Selections {
+    fn single_sel(at: TextOffset) -> Selections {
         Selections::single(Selection::collapsed(at))
     }
 
     fn selection_at(buffer: &Buffer, char_index: usize) -> Selections {
-        let mut cursor = CursorPos::origin();
+        let mut cursor = TextOffset::origin();
         cursor.char_index = char_index;
-        buffer.recompute_cursor(&mut cursor);
+        buffer.clamp_offset(&mut cursor);
         Selections::single(Selection::collapsed(cursor))
     }
 
@@ -913,6 +919,21 @@ mod tests {
         assert!(!b.modified());
         assert!(b.path().is_none());
         assert_eq!(b.status(), StatusMessage::None);
+    }
+
+    #[test]
+    fn text_point_is_derived_and_clamps_out_of_range_offsets() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "hello\nab");
+
+        assert_eq!(
+            buffer.text_point(TextOffset { char_index: 8 }),
+            TextPoint { row: 1, col: 2 }
+        );
+        assert_eq!(
+            buffer.text_point(TextOffset { char_index: 999 }),
+            TextPoint { row: 1, col: 2 }
+        );
     }
 
     #[test]
@@ -945,11 +966,14 @@ mod tests {
     #[test]
     fn insert_at_selections_single() {
         let mut b = Buffer::new();
-        let mut s = single_sel(CursorPos::origin());
+        let mut s = single_sel(TextOffset::origin());
         b.insert_at_selections(&mut s, "hi");
         assert_eq!(b.slice().to_string(), "hi");
         assert_eq!(s.primary().head().char_index, 2);
-        assert_eq!((s.primary().head().row, s.primary().head().col), (0, 2));
+        assert_eq!(
+            b.text_point(s.primary().head()),
+            TextPoint { row: 0, col: 2 }
+        );
         assert_eq!(s.primary().anchor, s.primary().head()); // collapsed 守恒
     }
 
@@ -1608,7 +1632,7 @@ mod tests {
         let mut b = Buffer::new();
         b.insert_char(0, 'a');
         b.insert_char(1, 'b');
-        let mut s = single_sel(CursorPos::origin());
+        let mut s = single_sel(TextOffset::origin());
         b.move_head_right(s.primary_mut(), 5);
         Buffer::collapse_to_head(s.primary_mut());
         assert_eq!(s.primary().head().char_index, 2);
@@ -1618,15 +1642,14 @@ mod tests {
     #[test]
     fn move_head_down_clamps_col_then_collapse() {
         let mut b = Buffer::new();
-        b.insert_at_selections(&mut single_sel(CursorPos::origin()), "hello\nab\nworld");
-        let mut s = single_sel(CursorPos {
-            char_index: 4,
-            row: 0,
-            col: 0,
-        });
-        b.recompute_selection(s.primary_mut());
+        b.insert_at_selections(&mut single_sel(TextOffset::origin()), "hello\nab\nworld");
+        let mut s = single_sel(TextOffset { char_index: 4 });
+        b.clamp_selection(s.primary_mut());
         b.move_head_down(s.primary_mut(), 1);
-        assert_eq!((s.primary().head().row, s.primary().head().col), (1, 2));
+        assert_eq!(
+            b.text_point(s.primary().head()),
+            TextPoint { row: 1, col: 2 }
+        );
         Buffer::collapse_to_head(s.primary_mut());
         assert_eq!(s.primary().anchor, s.primary().head());
     }
@@ -1737,11 +1760,11 @@ mod tests {
     #[test]
     fn move_head_up_down_keeps_anchor() {
         let mut b = Buffer::new();
-        b.insert_at_selections(&mut single_sel(CursorPos::origin()), "hello\nab\nworld");
+        b.insert_at_selections(&mut single_sel(TextOffset::origin()), "hello\nab\nworld");
         let mut s = single_sel(cur(4));
         let anchor_before = s.primary().anchor;
         b.move_head_down(s.primary_mut(), 1);
-        assert_eq!(s.primary().head().row, 1);
+        assert_eq!(b.text_point(s.primary().head()).row, 1);
         assert_eq!(s.primary().anchor, anchor_before);
         assert!(s.primary().anchor != s.primary().head());
     }
@@ -1749,7 +1772,7 @@ mod tests {
     #[test]
     fn insert_at_non_empty_selection_replaces_range() {
         let mut b = Buffer::new();
-        b.insert_at_selections(&mut single_sel(CursorPos::origin()), "hello");
+        b.insert_at_selections(&mut single_sel(TextOffset::origin()), "hello");
         let mut s = {
             let mut sel = Selection::collapsed(cur(1));
             sel.head = cur(4);
@@ -1764,7 +1787,7 @@ mod tests {
     #[test]
     fn delete_at_non_empty_selection_removes_range() {
         let mut b = Buffer::new();
-        b.insert_at_selections(&mut single_sel(CursorPos::origin()), "hello");
+        b.insert_at_selections(&mut single_sel(TextOffset::origin()), "hello");
         let mut s = {
             let mut sel = Selection::collapsed(cur(1));
             sel.head = cur(4);

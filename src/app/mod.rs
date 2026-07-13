@@ -605,7 +605,7 @@ mod tests {
     use crate::protocol::frontend_event::ResizeEvent;
     use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
     use crate::protocol::remote::Revision;
-    use crate::protocol::selection::CursorPos;
+    use crate::protocol::selection::TextOffset;
     use crate::protocol::space::{Sizing, SplitDirection};
     use crate::protocol::status::StatusMessage;
     use std::collections::VecDeque;
@@ -697,7 +697,7 @@ mod tests {
                 .unwrap()
                 .primary()
                 .head(),
-            CursorPos::origin()
+            TextOffset::origin()
         );
     }
 
@@ -729,6 +729,21 @@ mod tests {
         ) {
             ContentData::TextRows(rows) => rows,
             data => panic!("expected text rows, got {data:?}"),
+        }
+    }
+
+    fn text_point(
+        app: &App<ScriptedFrontend>,
+        content: ContentId,
+        offset: TextOffset,
+    ) -> crate::protocol::selection::TextPoint {
+        match app
+            .kernel
+            .contents
+            .query(content, ContentQuery::TextPoints(vec![offset]))
+        {
+            ContentData::TextPoints(mut points) => points.remove(0),
+            _ => panic!("expected text point"),
         }
     }
 
@@ -827,7 +842,7 @@ mod tests {
             app.session.views[&right_id].selections()
         );
         assert_eq!(left_text.selections.primary().head().char_index, 1);
-        assert_eq!(right_text.selections.primary().head(), CursorPos::origin());
+        assert_eq!(right_text.selections.primary().head(), TextOffset::origin());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -873,7 +888,7 @@ mod tests {
         assert_eq!(view.content(), other);
         assert_eq!(
             view.selections().unwrap().primary().head(),
-            CursorPos::origin()
+            TextOffset::origin()
         );
         app.handle_event(FrontendEvent::Key(KeyEvent::char('a')))
             .await
@@ -1270,7 +1285,7 @@ mod tests {
             .unwrap()
             .primary()
             .head();
-        assert_eq!(cursor.col, 0);
+        assert_eq!(text_point(&app, editor_cid(), cursor).col, 0);
     }
 
     #[test]
@@ -1663,7 +1678,7 @@ mod tests {
             .unwrap()
             .primary()
             .head();
-        assert_eq!(head.col, 1);
+        assert_eq!(text_point(&app, editor_cid(), head).col, 1);
         assert_eq!(
             view_at(&app, app.session.focused)
                 .selections()

@@ -9,7 +9,7 @@ use crate::protocol::content_query::{
 };
 use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::scene::Scene;
-use crate::protocol::selection::CursorPos;
+use crate::protocol::selection::{TextOffset, TextPoint};
 use crate::protocol::status::StatusMessage;
 use crate::protocol::viewport::Viewport;
 use crate::terminal::output::Canvas;
@@ -19,6 +19,12 @@ use crate::tui::taffy_engine::TaffyEngine;
 pub struct SceneRenderer {
     engine: TaffyEngine,
     viewports: HashMap<ViewId, Viewport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DisplayPoint {
+    row: usize,
+    col: usize,
 }
 
 impl SceneRenderer {
@@ -52,7 +58,13 @@ impl SceneRenderer {
             ViewPresentation::Text(text) => Some(text),
             ViewPresentation::StatusBar => None,
         };
-        let focused_head = focused_text.map(|text| text.selections.primary().head());
+        let focused_head = focused_text.map(|text| {
+            text_point(
+                query,
+                focused_view.content,
+                text.selections.primary().head(),
+            )
+        });
         if let (Some(item), Some(focused_head)) = (focused_item, focused_head) {
             let viewport = self
                 .viewports
@@ -87,9 +99,8 @@ impl SceneRenderer {
                 .get(&item.view_id)
                 .copied()
                 .unwrap_or_else(Viewport::origin);
-            let screen_row = focused_head.row.saturating_sub(vp.top_row) + item.rect.y as usize;
-            let screen_col = focused_head.col.saturating_sub(vp.left_col) + item.rect.x as usize;
-            canvas.move_cursor(screen_row, screen_col)?;
+            let display = display_point(focused_head, item, vp);
+            canvas.move_cursor(display.row, display.col)?;
             canvas.set_cursor_style(
                 focused_text
                     .expect("text cursor has text presentation")
@@ -107,13 +118,34 @@ impl Default for SceneRenderer {
     }
 }
 
-fn follow_viewport(viewport: &mut Viewport, head: CursorPos, width: usize, height: usize) {
+fn text_point(
+    query: &dyn RenderQuery,
+    content: crate::protocol::ids::ContentId,
+    offset: TextOffset,
+) -> TextPoint {
+    let ContentData::TextPoints(mut points) =
+        query.content(content, ContentQuery::TextPoints(vec![offset]))
+    else {
+        panic!("text presentation must answer TextPoints")
+    };
+    assert_eq!(points.len(), 1, "one offset must produce one text point");
+    points.remove(0)
+}
+
+fn follow_viewport(viewport: &mut Viewport, head: TextPoint, width: usize, height: usize) {
     viewport.ensure_cursor_visible(head.row, height);
 
     if width == 0 || head.col < viewport.left_col {
         viewport.left_col = head.col;
     } else if head.col >= viewport.left_col.saturating_add(width) {
         viewport.left_col = head.col - width + 1;
+    }
+}
+
+fn display_point(point: TextPoint, item: &RenderItem, viewport: Viewport) -> DisplayPoint {
+    DisplayPoint {
+        row: point.row.saturating_sub(viewport.top_row) + item.rect.y as usize,
+        col: point.col.saturating_sub(viewport.left_col) + item.rect.x as usize,
     }
 }
 
@@ -158,12 +190,21 @@ fn paint_text_item(
         panic!("text presentation must answer TextRows")
     };
     let primary = text.selections.primary();
-    let selection = (primary.anchor != primary.head).then_some({
+    let selection_offsets = (primary.anchor != primary.head).then_some({
         if primary.anchor.char_index <= primary.head.char_index {
             (primary.anchor, primary.head)
         } else {
             (primary.head, primary.anchor)
         }
+    });
+    let selection = selection_offsets.map(|(start, end)| {
+        let ContentData::TextPoints(points) =
+            query.content(content, ContentQuery::TextPoints(vec![start, end]))
+        else {
+            panic!("text presentation must answer TextPoints")
+        };
+        assert_eq!(points.len(), 2, "two offsets must produce two text points");
+        (points[0], points[1])
     });
     for (row, line) in lines.iter().enumerate() {
         let buf_row = start + row;
@@ -287,11 +328,35 @@ mod tests {
     };
     use crate::protocol::ids::{ContentId, ViewId};
     use crate::protocol::scene::{SceneBuilder, build_editor_scene};
-    use crate::protocol::selection::{CursorPos, Selection, Selections};
+    use crate::protocol::selection::{Selection, Selections, TextOffset};
     use crate::protocol::space::SplitDirection;
     use crate::protocol::status::StatusMessage;
     use crate::terminal::output::Output;
     use std::collections::HashMap;
+
+    fn points_for_lines(lines: &[String], offsets: Vec<TextOffset>) -> Vec<TextPoint> {
+        let text = lines
+            .iter()
+            .map(|line| line.strip_suffix('\n').unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let len = text.chars().count();
+        offsets
+            .into_iter()
+            .map(|offset| {
+                let mut point = TextPoint { row: 0, col: 0 };
+                for ch in text.chars().take(offset.char_index.min(len)) {
+                    if ch == '\n' {
+                        point.row += 1;
+                        point.col = 0;
+                    } else {
+                        point.col += 1;
+                    }
+                }
+                point
+            })
+            .collect()
+    }
 
     fn text_view(
         content: ContentId,
@@ -337,6 +402,10 @@ mod tests {
                             .cloned()
                             .collect(),
                     )
+                }
+                ContentQuery::TextPoints(offsets) => {
+                    assert_eq!(cid, self.editor_cid, "only text content maps offsets");
+                    ContentData::TextPoints(points_for_lines(&self.lines, offsets))
                 }
                 ContentQuery::DocumentStatus => ContentData::DocumentStatus(status),
                 ContentQuery::StatusBarData => {
@@ -386,6 +455,10 @@ mod tests {
                             .collect(),
                     )
                 }
+                ContentQuery::TextPoints(offsets) => {
+                    assert_eq!(cid, ContentId(0), "only text content maps offsets");
+                    ContentData::TextPoints(points_for_lines(&self.lines, offsets))
+                }
                 ContentQuery::DocumentStatus => ContentData::DocumentStatus(status),
                 ContentQuery::StatusBarData => {
                     assert_eq!(
@@ -423,16 +496,8 @@ mod tests {
                     text_view(
                         ContentId(0),
                         Selections::single(Selection {
-                            anchor: CursorPos {
-                                char_index: 0,
-                                row: 0,
-                                col: 0,
-                            },
-                            head: CursorPos {
-                                char_index: 1,
-                                row: 0,
-                                col: 1,
-                            },
+                            anchor: TextOffset { char_index: 0 },
+                            head: TextOffset { char_index: 1 },
                         }),
                         CursorStyle::Default,
                     ),
@@ -442,16 +507,8 @@ mod tests {
                     text_view(
                         ContentId(0),
                         Selections::single(Selection {
-                            anchor: CursorPos {
-                                char_index: 2,
-                                row: 0,
-                                col: 2,
-                            },
-                            head: CursorPos {
-                                char_index: 3,
-                                row: 0,
-                                col: 3,
-                            },
+                            anchor: TextOffset { char_index: 2 },
+                            head: TextOffset { char_index: 3 },
                         }),
                         CursorStyle::Default,
                     ),
@@ -498,11 +555,7 @@ mod tests {
                     ViewId(0),
                     text_view(
                         ContentId(0),
-                        Selections::single(Selection::collapsed(CursorPos {
-                            char_index: 6,
-                            row: 1,
-                            col: 0,
-                        })),
+                        Selections::single(Selection::collapsed(TextOffset { char_index: 6 })),
                         CursorStyle::Default,
                     ),
                 ),
@@ -510,7 +563,7 @@ mod tests {
                     ViewId(3),
                     text_view(
                         ContentId(0),
-                        Selections::single(Selection::collapsed(CursorPos::origin())),
+                        Selections::single(Selection::collapsed(TextOffset::origin())),
                         CursorStyle::Default,
                     ),
                 ),
@@ -546,7 +599,7 @@ mod tests {
                     ViewId(0),
                     text_view(
                         ContentId(0),
-                        Selections::single(Selection::collapsed(CursorPos::origin())),
+                        Selections::single(Selection::collapsed(TextOffset::origin())),
                         CursorStyle::Default,
                     ),
                 ),
@@ -554,7 +607,7 @@ mod tests {
                     ViewId(2),
                     text_view(
                         ContentId(0),
-                        Selections::single(Selection::collapsed(CursorPos::origin())),
+                        Selections::single(Selection::collapsed(TextOffset::origin())),
                         CursorStyle::Block,
                     ),
                 ),
@@ -585,7 +638,7 @@ mod tests {
         let query = StubQuery {
             editor_cid: ContentId(0),
             lines: vec!["hello".to_string(), "world".to_string()],
-            selections: Selections::single(Selection::collapsed(CursorPos::origin())),
+            selections: Selections::single(Selection::collapsed(TextOffset::origin())),
         };
         let mut r = SceneRenderer::new();
         let mut out = Output::new(Vec::new());
@@ -601,13 +654,16 @@ mod tests {
         let mut builder = SceneBuilder::new();
         let (scene, ed) = build_editor_scene(&mut builder, 40, 5, ViewId(0), ViewId(1)).unwrap();
         let lines: Vec<String> = (0..30).map(|i| format!("line{i}")).collect();
+        let row_25_offset = lines
+            .iter()
+            .take(25)
+            .map(|line| line.chars().count() + 1)
+            .sum();
         let query = StubQuery {
             editor_cid: ContentId(0),
             lines,
-            selections: Selections::single(Selection::collapsed(CursorPos {
-                char_index: 0,
-                row: 25,
-                col: 0,
+            selections: Selections::single(Selection::collapsed(TextOffset {
+                char_index: row_25_offset,
             })),
         };
         let mut r = SceneRenderer::new();
@@ -627,16 +683,8 @@ mod tests {
             editor_cid: ContentId(0),
             lines: vec!["hello".to_string()],
             selections: Selections::single(Selection {
-                anchor: CursorPos {
-                    char_index: 1,
-                    row: 0,
-                    col: 1,
-                },
-                head: CursorPos {
-                    char_index: 4,
-                    row: 0,
-                    col: 4,
-                },
+                anchor: TextOffset { char_index: 1 },
+                head: TextOffset { char_index: 4 },
             }),
         };
         let mut r = SceneRenderer::new();
@@ -655,7 +703,7 @@ mod tests {
         let query = StubQuery {
             editor_cid: ContentId(0),
             lines: vec!["hello".to_string()],
-            selections: Selections::single(Selection::collapsed(CursorPos::origin())),
+            selections: Selections::single(Selection::collapsed(TextOffset::origin())),
         };
         let mut r = SceneRenderer::new();
         let mut out = Output::new(Vec::new());
@@ -674,16 +722,8 @@ mod tests {
             editor_cid: ContentId(0),
             lines: vec!["hello".to_string(), "world".to_string()],
             selections: Selections::single(Selection {
-                anchor: CursorPos {
-                    char_index: 2,
-                    row: 0,
-                    col: 2,
-                },
-                head: CursorPos {
-                    char_index: 8,
-                    row: 1,
-                    col: 2,
-                },
+                anchor: TextOffset { char_index: 2 },
+                head: TextOffset { char_index: 8 },
             }),
         };
         let mut r = SceneRenderer::new();
@@ -707,11 +747,7 @@ mod tests {
         let q1 = StubQuery {
             editor_cid: ContentId(0),
             lines: lines.clone(),
-            selections: Selections::single(Selection::collapsed(CursorPos {
-                char_index: 0,
-                row: 25,
-                col: 0,
-            })),
+            selections: Selections::single(Selection::collapsed(TextOffset { char_index: 0 })),
         };
         let mut r = SceneRenderer::new();
         let mut out = Output::new(Vec::new());
@@ -723,16 +759,8 @@ mod tests {
             editor_cid: ContentId(0),
             lines,
             selections: Selections::single(Selection {
-                anchor: CursorPos {
-                    char_index: 1,
-                    row: 0,
-                    col: 1,
-                },
-                head: CursorPos {
-                    char_index: 150,
-                    row: 25,
-                    col: 0,
-                },
+                anchor: TextOffset { char_index: 1 },
+                head: TextOffset { char_index: 150 },
             }),
         };
         let mut out2 = Output::new(Vec::new());
@@ -756,11 +784,7 @@ mod tests {
         let query = StubQuery {
             editor_cid: ContentId(0),
             lines: vec!["abcdefgh".to_string()],
-            selections: Selections::single(Selection::collapsed(CursorPos {
-                char_index: 7,
-                row: 0,
-                col: 7,
-            })),
+            selections: Selections::single(Selection::collapsed(TextOffset { char_index: 7 })),
         };
         let mut renderer = SceneRenderer::new();
         let mut out = Output::new(Vec::new());
@@ -786,11 +810,7 @@ mod tests {
         let right_query = StubQuery {
             editor_cid: ContentId(0),
             lines: vec!["abcdefgh".to_string()],
-            selections: Selections::single(Selection::collapsed(CursorPos {
-                char_index: 7,
-                row: 0,
-                col: 7,
-            })),
+            selections: Selections::single(Selection::collapsed(TextOffset { char_index: 7 })),
         };
         let mut first = Output::new(Vec::new());
         renderer
@@ -800,11 +820,7 @@ mod tests {
         let left_query = StubQuery {
             editor_cid: ContentId(0),
             lines: vec!["abcdefgh".to_string()],
-            selections: Selections::single(Selection::collapsed(CursorPos {
-                char_index: 1,
-                row: 0,
-                col: 1,
-            })),
+            selections: Selections::single(Selection::collapsed(TextOffset { char_index: 1 })),
         };
         let mut second = Output::new(Vec::new());
         renderer
@@ -827,7 +843,7 @@ mod tests {
         let query = StubQuery {
             editor_cid: ContentId(0),
             lines: vec!["abcdefgh\n".to_string()],
-            selections: Selections::single(Selection::collapsed(CursorPos::origin())),
+            selections: Selections::single(Selection::collapsed(TextOffset::origin())),
         };
         let mut renderer = SceneRenderer::new();
         let mut out = Output::new(Vec::new());
@@ -850,16 +866,8 @@ mod tests {
             editor_cid: ContentId(0),
             lines: vec!["abcdefgh".to_string()],
             selections: Selections::single(Selection {
-                anchor: CursorPos {
-                    char_index: 1,
-                    row: 0,
-                    col: 1,
-                },
-                head: CursorPos {
-                    char_index: 7,
-                    row: 0,
-                    col: 7,
-                },
+                anchor: TextOffset { char_index: 1 },
+                head: TextOffset { char_index: 7 },
             }),
         };
         let mut renderer = SceneRenderer::new();

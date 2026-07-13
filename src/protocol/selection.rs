@@ -1,34 +1,35 @@
 //! Selection 数据模型：cursor 是 selection 的退化形态（collapsed，anchor==head）。
-//! Helix 风集合：ranges + primary_index。v0.2 恒 collapsed、ranges.len()==1。
+//! Helix 风集合：ranges + primary_index；逻辑行列由 Buffer 按需派生。
 
-/// 光标位置值类型。char_index 为权威字段，row/col 为派生缓存（由 core::buffer 维护）。
+/// 文档 char offset。Selection 长期只保存这一种位置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CursorPos {
+pub struct TextOffset {
     pub char_index: usize,
-    pub row: usize,
-    pub col: usize,
 }
 
-impl CursorPos {
+impl TextOffset {
     pub const fn origin() -> Self {
-        Self {
-            char_index: 0,
-            row: 0,
-            col: 0,
-        }
+        Self { char_index: 0 }
     }
+}
+
+/// 从当前 Buffer 内容派生的逻辑行列，不写回 Selection。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextPoint {
+    pub row: usize,
+    pub col: usize,
 }
 
 /// 选区：anchor 选择起点，head 光标位置（驱动编辑/渲染）。空 selection：anchor==head。
 /// 方向隐含：head>anchor=forward。不加 direction 字段。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
-    pub anchor: CursorPos,
-    pub head: CursorPos,
+    pub anchor: TextOffset,
+    pub head: TextOffset,
 }
 
 impl Selection {
-    pub fn collapsed(at: CursorPos) -> Self {
+    pub fn collapsed(at: TextOffset) -> Self {
         Self {
             anchor: at,
             head: at,
@@ -38,13 +39,12 @@ impl Selection {
     pub fn is_empty(&self) -> bool {
         self.anchor == self.head
     }
-    pub fn head(&self) -> CursorPos {
+    pub fn head(&self) -> TextOffset {
         self.head
     }
 }
 
-/// 多选区容器（Helix 风）。ranges 恒按 head.char_index 升序（v0.2 单元素，约定在）。
-/// v0.2 不变量：ranges.len()==1、primary_index==0、所有 Selection collapsed。
+/// 多选区容器（Helix 风）。ranges 按 head.char_index 升序，primary_index 指向主选区。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Selections {
     ranges: Vec<Selection>,
@@ -96,57 +96,45 @@ mod tests {
 
     #[test]
     fn origin_is_zero() {
-        let c = CursorPos::origin();
-        assert_eq!((c.char_index, c.row, c.col), (0, 0, 0));
+        let c = TextOffset::origin();
+        assert_eq!(c.char_index, 0);
     }
 
     #[test]
     fn copy_and_eq() {
-        let a = CursorPos {
-            char_index: 3,
-            row: 1,
-            col: 2,
-        };
+        let a = TextOffset { char_index: 3 };
         let b = a;
         assert_eq!(a, b);
     }
 
     #[test]
     fn collapsed_is_empty() {
-        let s = Selection::collapsed(CursorPos::origin());
+        let s = Selection::collapsed(TextOffset::origin());
         assert!(s.is_empty());
-        assert_eq!(s.head(), CursorPos::origin());
+        assert_eq!(s.head(), TextOffset::origin());
     }
 
     #[test]
     fn non_empty_selection() {
         let s = Selection {
-            anchor: CursorPos::origin(),
-            head: CursorPos {
-                char_index: 3,
-                row: 0,
-                col: 3,
-            },
+            anchor: TextOffset::origin(),
+            head: TextOffset { char_index: 3 },
         };
         assert!(!s.is_empty());
     }
 
     #[test]
     fn single_has_one_range_primary_index_zero() {
-        let s = Selections::single(Selection::collapsed(CursorPos::origin()));
-        assert_eq!(s.primary(), &Selection::collapsed(CursorPos::origin()));
+        let s = Selections::single(Selection::collapsed(TextOffset::origin()));
+        assert_eq!(s.primary(), &Selection::collapsed(TextOffset::origin()));
         let count = s.all().count();
         assert_eq!(count, 1);
     }
 
     #[test]
     fn primary_mut_updates_head() {
-        let mut s = Selections::single(Selection::collapsed(CursorPos::origin()));
-        s.primary_mut().head = CursorPos {
-            char_index: 5,
-            row: 0,
-            col: 5,
-        };
+        let mut s = Selections::single(Selection::collapsed(TextOffset::origin()));
+        s.primary_mut().head = TextOffset { char_index: 5 };
         assert_eq!(s.primary().head().char_index, 5);
     }
 
@@ -154,21 +142,13 @@ mod tests {
     fn all_mut_updates_all_ranges() {
         let mut s = Selections::from_parts(
             vec![
-                Selection::collapsed(CursorPos::origin()),
-                Selection::collapsed(CursorPos {
-                    char_index: 3,
-                    row: 0,
-                    col: 3,
-                }),
+                Selection::collapsed(TextOffset::origin()),
+                Selection::collapsed(TextOffset { char_index: 3 }),
             ],
             0,
         );
         for sel in s.all_mut() {
-            sel.head = CursorPos {
-                char_index: 9,
-                row: 0,
-                col: 9,
-            };
+            sel.head = TextOffset { char_index: 9 };
         }
         assert_eq!(s.all().count(), 2);
         assert!(s.all().all(|sel| sel.head.char_index == 9));
@@ -178,23 +158,19 @@ mod tests {
     fn retain_primary_drops_secondaries() {
         let mut s = Selections::from_parts(
             vec![
-                Selection::collapsed(CursorPos::origin()),
-                Selection::collapsed(CursorPos {
-                    char_index: 3,
-                    row: 0,
-                    col: 3,
-                }),
+                Selection::collapsed(TextOffset::origin()),
+                Selection::collapsed(TextOffset { char_index: 3 }),
             ],
             0,
         );
         s.retain_primary();
         assert_eq!(s.all().count(), 1);
-        assert_eq!(s.primary(), &Selection::collapsed(CursorPos::origin()));
+        assert_eq!(s.primary(), &Selection::collapsed(TextOffset::origin()));
     }
 
     #[test]
     fn retain_primary_on_single_is_noop() {
-        let mut s = Selections::single(Selection::collapsed(CursorPos::origin()));
+        let mut s = Selections::single(Selection::collapsed(TextOffset::origin()));
         s.retain_primary();
         assert_eq!(s.all().count(), 1);
     }

@@ -77,6 +77,14 @@ impl ContentStore {
             (Some(Content::Buffer(buffer)), ContentQuery::TextRows(range)) => {
                 ContentData::TextRows(text_rows(buffer, range))
             }
+            (Some(Content::Buffer(buffer)), ContentQuery::TextPoints(offsets)) => {
+                ContentData::TextPoints(
+                    offsets
+                        .into_iter()
+                        .map(|offset| buffer.text_point(offset))
+                        .collect(),
+                )
+            }
             (Some(Content::Buffer(buffer)), ContentQuery::DocumentStatus) => {
                 ContentData::DocumentStatus(document_status(buffer))
             }
@@ -85,6 +93,7 @@ impl ContentStore {
                     match self.query(status_bar.target_content_id(), ContentQuery::DocumentStatus) {
                         ContentData::DocumentStatus(status) => status,
                         ContentData::TextRows(_)
+                        | ContentData::TextPoints(_)
                         | ContentData::StatusBarData(_)
                         | ContentData::Unsupported => default_status_bar_data(),
                     },

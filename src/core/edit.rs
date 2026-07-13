@@ -258,16 +258,16 @@ mod tests {
     use super::*;
     use crate::core::buffer::Buffer;
     use crate::core::command::EditCommand;
-    use crate::protocol::selection::{CursorPos, Selection, Selections};
+    use crate::protocol::selection::{Selection, Selections, TextOffset};
 
-    fn single_sel(at: CursorPos) -> Selections {
+    fn single_sel(at: TextOffset) -> Selections {
         Selections::single(Selection::collapsed(at))
     }
 
     #[test]
     fn insert_text_changes_buffer_and_selection() {
         let mut buf = Buffer::new();
-        let mut s = single_sel(CursorPos::origin());
+        let mut s = single_sel(TextOffset::origin());
         apply_edit(EditCommand::InsertText("hi".to_string()), &mut buf, &mut s);
         assert_eq!(buf.slice().to_string(), "hi");
         assert_eq!(s.primary().head().char_index, 2);
@@ -280,9 +280,9 @@ mod tests {
         buf.insert_char(0, 'a');
         buf.insert_char(1, 'b');
         let mut s = {
-            let mut c = CursorPos::origin();
+            let mut c = TextOffset::origin();
             c.char_index = 2;
-            buf.recompute_cursor(&mut c);
+            buf.clamp_offset(&mut c);
             single_sel(c)
         };
         apply_edit(EditCommand::Delete(-1), &mut buf, &mut s);
@@ -294,11 +294,11 @@ mod tests {
     #[test]
     fn delete_word_backward_dispatches_to_buffer() {
         let mut buffer = Buffer::new();
-        buffer.insert_at_selections(&mut single_sel(CursorPos::origin()), "alpha beta");
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "alpha beta");
         let mut selections = single_sel({
-            let mut cursor = CursorPos::origin();
+            let mut cursor = TextOffset::origin();
             cursor.char_index = 10;
-            buffer.recompute_cursor(&mut cursor);
+            buffer.clamp_offset(&mut cursor);
             cursor
         });
 
@@ -316,7 +316,7 @@ mod tests {
     fn move_right_advances_head() {
         let mut buf = Buffer::new();
         buf.insert_char(0, 'a');
-        let mut s = single_sel(CursorPos::origin());
+        let mut s = single_sel(TextOffset::origin());
         apply_edit(EditCommand::MoveRightBy(1), &mut buf, &mut s);
         assert_eq!(s.primary().head().char_index, 1);
         assert_eq!(s.primary().anchor, s.primary().head());
@@ -328,8 +328,8 @@ mod tests {
         buf.insert_char(0, 'a');
         let mut s = Selections::from_parts(
             vec![
-                Selection::collapsed(CursorPos::origin()),
-                Selection::collapsed(CursorPos::origin()),
+                Selection::collapsed(TextOffset::origin()),
+                Selection::collapsed(TextOffset::origin()),
             ],
             0,
         );
@@ -346,12 +346,12 @@ mod tests {
     }
 
     fn non_empty_sel(anchor_idx: usize, head_idx: usize, buf: &Buffer) -> Selections {
-        let mut a = CursorPos::origin();
+        let mut a = TextOffset::origin();
         a.char_index = anchor_idx;
-        buf.recompute_cursor(&mut a);
+        buf.clamp_offset(&mut a);
         let mut h = a;
         h.char_index = head_idx;
-        buf.recompute_cursor(&mut h);
+        buf.clamp_offset(&mut h);
         let sel = Selection { anchor: a, head: h };
         Selections::single(sel)
     }
@@ -431,7 +431,7 @@ mod tests {
     fn insert_on_non_empty_replaces_range() {
         let mut buf = Buffer::new();
         buf.insert_at_selections(
-            &mut Selections::single(Selection::collapsed(CursorPos::origin())),
+            &mut Selections::single(Selection::collapsed(TextOffset::origin())),
             "hello",
         );
         let mut s = non_empty_sel(1, 4, &buf);
@@ -444,11 +444,11 @@ mod tests {
     #[test]
     fn move_word_forward_advances_head() {
         let mut buf = Buffer::new();
-        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo bar");
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "foo bar");
         let mut s = single_sel({
-            let mut c = CursorPos::origin();
+            let mut c = TextOffset::origin();
             c.char_index = 0;
-            buf.recompute_cursor(&mut c);
+            buf.clamp_offset(&mut c);
             c
         });
         apply_edit(EditCommand::MoveWordForward, &mut buf, &mut s);
@@ -459,11 +459,11 @@ mod tests {
     #[test]
     fn move_word_backward_advances_head() {
         let mut buf = Buffer::new();
-        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo bar");
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "foo bar");
         let mut s = single_sel({
-            let mut c = CursorPos::origin();
+            let mut c = TextOffset::origin();
             c.char_index = 7;
-            buf.recompute_cursor(&mut c);
+            buf.clamp_offset(&mut c);
             c
         });
         apply_edit(EditCommand::MoveWordBackward, &mut buf, &mut s);
@@ -474,11 +474,11 @@ mod tests {
     #[test]
     fn move_word_end_advances_head() {
         let mut buf = Buffer::new();
-        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo.bar");
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "foo.bar");
         let mut s = single_sel({
-            let mut c = CursorPos::origin();
+            let mut c = TextOffset::origin();
             c.char_index = 0;
-            buf.recompute_cursor(&mut c);
+            buf.clamp_offset(&mut c);
             c
         });
         apply_edit(EditCommand::MoveWordEnd, &mut buf, &mut s);
@@ -489,11 +489,11 @@ mod tests {
     #[test]
     fn move_to_line_start_goes_to_column_zero() {
         let mut buf = Buffer::new();
-        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "  foo\n  bar");
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "  foo\n  bar");
         let mut s = single_sel({
-            let mut c = CursorPos::origin();
+            let mut c = TextOffset::origin();
             c.char_index = 7;
-            buf.recompute_cursor(&mut c);
+            buf.clamp_offset(&mut c);
             c
         });
         apply_edit(EditCommand::MoveToLineStart, &mut buf, &mut s);
@@ -503,8 +503,8 @@ mod tests {
     #[test]
     fn move_to_first_non_blank_skips_whitespace() {
         let mut buf = Buffer::new();
-        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "  foo");
-        let mut s = single_sel(CursorPos::origin());
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "  foo");
+        let mut s = single_sel(TextOffset::origin());
         apply_edit(EditCommand::MoveToFirstNonBlank, &mut buf, &mut s);
         assert_eq!(s.primary().head().char_index, 2);
     }
@@ -512,8 +512,8 @@ mod tests {
     #[test]
     fn move_to_line_end_lands_on_last_char() {
         let mut buf = Buffer::new();
-        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo\nbar");
-        let mut s = single_sel(CursorPos::origin());
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "foo\nbar");
+        let mut s = single_sel(TextOffset::origin());
         apply_edit(EditCommand::MoveToLineEnd, &mut buf, &mut s);
         assert_eq!(s.primary().head().char_index, 2);
     }
@@ -521,8 +521,8 @@ mod tests {
     #[test]
     fn move_to_last_line_goes_to_last_line() {
         let mut buf = Buffer::new();
-        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo\nbar\nbaz");
-        let mut s = single_sel(CursorPos::origin());
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "foo\nbar\nbaz");
+        let mut s = single_sel(TextOffset::origin());
         apply_edit(EditCommand::MoveToLastLine, &mut buf, &mut s);
         assert_eq!(s.primary().head().char_index, 8);
     }
@@ -530,11 +530,11 @@ mod tests {
     #[test]
     fn move_to_prev_paragraph_jumps_to_empty_line() {
         let mut buf = Buffer::new();
-        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo\n\nbar");
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "foo\n\nbar");
         let mut s = single_sel({
-            let mut c = CursorPos::origin();
+            let mut c = TextOffset::origin();
             c.char_index = 5;
-            buf.recompute_cursor(&mut c);
+            buf.clamp_offset(&mut c);
             c
         });
         apply_edit(EditCommand::MoveToPrevParagraph, &mut buf, &mut s);
@@ -544,8 +544,8 @@ mod tests {
     #[test]
     fn move_to_next_paragraph_jumps_to_empty_line() {
         let mut buf = Buffer::new();
-        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo\n\nbar");
-        let mut s = single_sel(CursorPos::origin());
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "foo\n\nbar");
+        let mut s = single_sel(TextOffset::origin());
         apply_edit(EditCommand::MoveToNextParagraph, &mut buf, &mut s);
         assert_eq!(s.primary().head().char_index, 4);
     }
@@ -553,8 +553,8 @@ mod tests {
     #[test]
     fn move_after_line_end_lands_after_last_char() {
         let mut buf = Buffer::new();
-        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo\n");
-        let mut s = single_sel(CursorPos::origin());
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "foo\n");
+        let mut s = single_sel(TextOffset::origin());
         apply_edit(EditCommand::MoveAfterLineEnd, &mut buf, &mut s);
         assert_eq!(s.primary().head().char_index, 3);
     }
@@ -562,11 +562,11 @@ mod tests {
     #[test]
     fn delete_to_line_start_removes_text() {
         let mut buf = Buffer::new();
-        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo\nbar");
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "foo\nbar");
         let mut s = single_sel({
-            let mut c = CursorPos::origin();
+            let mut c = TextOffset::origin();
             c.char_index = 5;
-            buf.recompute_cursor(&mut c);
+            buf.clamp_offset(&mut c);
             c
         });
         apply_edit(EditCommand::DeleteToLineStart, &mut buf, &mut s);
@@ -577,11 +577,11 @@ mod tests {
     #[test]
     fn delete_to_line_end_removes_text() {
         let mut buf = Buffer::new();
-        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo\nbar");
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "foo\nbar");
         let mut s = single_sel({
-            let mut c = CursorPos::origin();
+            let mut c = TextOffset::origin();
             c.char_index = 1;
-            buf.recompute_cursor(&mut c);
+            buf.clamp_offset(&mut c);
             c
         });
         apply_edit(EditCommand::DeleteToLineEnd, &mut buf, &mut s);
@@ -592,8 +592,8 @@ mod tests {
     #[test]
     fn join_lines_merges_lines() {
         let mut buf = Buffer::new();
-        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo\nbar");
-        let mut s = single_sel(CursorPos::origin());
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "foo\nbar");
+        let mut s = single_sel(TextOffset::origin());
         apply_edit(EditCommand::JoinLines, &mut buf, &mut s);
         assert_eq!(buf.slice().to_string(), "foo bar");
     }
@@ -601,8 +601,8 @@ mod tests {
     #[test]
     fn toggle_case_flips_char() {
         let mut buf = Buffer::new();
-        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "aBc");
-        let mut s = single_sel(CursorPos::origin());
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "aBc");
+        let mut s = single_sel(TextOffset::origin());
         apply_edit(EditCommand::ToggleCase, &mut buf, &mut s);
         assert_eq!(buf.slice().to_string(), "ABc");
         assert_eq!(s.primary().head().char_index, 1);
@@ -611,8 +611,8 @@ mod tests {
     #[test]
     fn insert_new_line_below_adds_line() {
         let mut buf = Buffer::new();
-        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo");
-        let mut s = single_sel(CursorPos::origin());
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "foo");
+        let mut s = single_sel(TextOffset::origin());
         apply_edit(EditCommand::InsertNewLineBelow, &mut buf, &mut s);
         assert_eq!(buf.slice().to_string(), "foo\n");
         assert_eq!(s.primary().head().char_index, 4);
@@ -621,8 +621,8 @@ mod tests {
     #[test]
     fn insert_new_line_above_adds_line() {
         let mut buf = Buffer::new();
-        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo");
-        let mut s = single_sel(CursorPos::origin());
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "foo");
+        let mut s = single_sel(TextOffset::origin());
         apply_edit(EditCommand::InsertNewLineAbove, &mut buf, &mut s);
         assert_eq!(buf.slice().to_string(), "\nfoo");
         assert_eq!(s.primary().head().char_index, 0);
@@ -631,11 +631,11 @@ mod tests {
     #[test]
     fn delete_line_content_clears_line() {
         let mut buf = Buffer::new();
-        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo\nbar");
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "foo\nbar");
         let mut s = single_sel({
-            let mut c = CursorPos::origin();
+            let mut c = TextOffset::origin();
             c.char_index = 1;
-            buf.recompute_cursor(&mut c);
+            buf.clamp_offset(&mut c);
             c
         });
         apply_edit(EditCommand::DeleteLineContent, &mut buf, &mut s);

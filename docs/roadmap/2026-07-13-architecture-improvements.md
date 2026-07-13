@@ -147,7 +147,7 @@ selection 独立。
 ## 优先级 9：文本位置与显示位置
 
 **触发条件：** 支持 tab 宽度、全角字符、组合字符、emoji 或软换行。  
-**状态：** 待触发。
+**状态：** 已完成基础边界分离。
 
 分离：
 
@@ -159,6 +159,10 @@ DisplayPoint  前端计算的显示 cell/pixel 位置
 
 避免长期同时缓存公开的 char_index、row 和 col。只有性能测量证明需要时，才增加带 revision
 校验的位置缓存或完整 DisplayMap。
+
+当前 Selection 只持有 `TextOffset`；`Buffer` 通过 `ContentQuery::TextPoints` 派生
+`TextPoint`；TUI 再结合 viewport 与布局计算私有 `DisplayPoint`。逻辑列到终端 cell 目前仍按
+一对一映射，tab、Unicode width、grapheme 与软换行留到真正触发时扩展显示适配器。
 
 ## 优先级 10：Scene 模型与 wire data 分离
 

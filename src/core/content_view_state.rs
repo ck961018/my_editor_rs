@@ -1,4 +1,4 @@
-use crate::protocol::selection::{CursorPos, Selection, Selections};
+use crate::protocol::selection::{Selection, Selections, TextOffset};
 
 pub struct BufferViewState {
     selections: Selections,
@@ -7,7 +7,7 @@ pub struct BufferViewState {
 impl BufferViewState {
     fn new() -> Self {
         Self {
-            selections: Selections::single(Selection::collapsed(CursorPos::origin())),
+            selections: Selections::single(Selection::collapsed(TextOffset::origin())),
         }
     }
 

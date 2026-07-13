@@ -1,7 +1,7 @@
 //! 前端 pull 后端内容的契约。同进程同步调用，返回 owned 数据。
 
 use crate::protocol::ids::{ContentId, ViewId};
-use crate::protocol::selection::Selections;
+use crate::protocol::selection::{Selections, TextOffset, TextPoint};
 use crate::protocol::status::StatusMessage;
 
 /// 行范围 [start, end)，前端按可见行拉取。
@@ -46,9 +46,10 @@ pub struct ViewData {
     pub presentation: ViewPresentation,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContentQuery {
     TextRows(RowRange),
+    TextPoints(Vec<TextOffset>),
     #[allow(dead_code)]
     DocumentStatus,
     StatusBarData,
@@ -57,6 +58,7 @@ pub enum ContentQuery {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContentData {
     TextRows(Vec<String>),
+    TextPoints(Vec<TextPoint>),
     DocumentStatus(DocumentStatus),
     StatusBarData(StatusBarData),
     #[allow(dead_code)]
@@ -72,7 +74,7 @@ pub trait RenderQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::selection::{CursorPos, Selection};
+    use crate::protocol::selection::{Selection, TextOffset};
     #[test]
     fn row_range_constructs() {
         let r = RowRange { start: 1, end: 5 };
@@ -103,8 +105,22 @@ mod tests {
     }
 
     #[test]
+    fn text_points_query_owns_offsets_and_points() {
+        let offsets = vec![TextOffset::origin(), TextOffset { char_index: 3 }];
+
+        assert_eq!(
+            ContentQuery::TextPoints(offsets),
+            ContentQuery::TextPoints(vec![TextOffset::origin(), TextOffset { char_index: 3 }])
+        );
+        assert_eq!(
+            ContentData::TextPoints(vec![TextPoint { row: 1, col: 2 }]),
+            ContentData::TextPoints(vec![TextPoint { row: 1, col: 2 }])
+        );
+    }
+
+    #[test]
     fn view_data_has_explicit_text_presentation() {
-        let selections = Selections::single(Selection::collapsed(CursorPos::origin()));
+        let selections = Selections::single(Selection::collapsed(TextOffset::origin()));
         let data = ViewData {
             content: ContentId(7),
             presentation: ViewPresentation::Text(TextPresentation {
