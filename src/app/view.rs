@@ -4,6 +4,7 @@
 use crate::core::content_view_state::ContentViewState;
 use crate::core::mode::ModeInstance;
 use crate::protocol::ids::ContentId;
+use crate::protocol::remote::Revision;
 use crate::protocol::selection::Selections;
 
 pub struct View {
@@ -11,6 +12,7 @@ pub struct View {
     content: ContentId,
     state: ContentViewState,
     mode: Option<ModeInstance>,
+    revision: Revision,
 }
 
 impl View {
@@ -19,6 +21,7 @@ impl View {
             content,
             state,
             mode,
+            revision: Revision::default(),
         }
     }
     pub fn content(&self) -> ContentId {
@@ -36,6 +39,12 @@ impl View {
     pub fn mode_mut(&mut self) -> Option<&mut ModeInstance> {
         self.mode.as_mut()
     }
+    pub fn revision(&self) -> Revision {
+        self.revision
+    }
+    pub fn touch(&mut self) {
+        self.revision.next();
+    }
 }
 
 #[cfg(test)]
@@ -49,5 +58,14 @@ mod tests {
         assert_eq!(v.content(), ContentId(0));
         assert!(v.mode().is_none());
         assert!(v.selections().is_none());
+    }
+
+    #[test]
+    fn touch_advances_view_revision() {
+        let mut view = View::new(ContentId(0), ContentViewState::StatusBar, None);
+
+        view.touch();
+
+        assert_eq!(view.revision(), Revision(1));
     }
 }

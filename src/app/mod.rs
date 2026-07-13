@@ -4,6 +4,7 @@
 
 mod dispatcher;
 mod message;
+mod remote;
 mod tasks;
 mod view;
 
@@ -32,6 +33,7 @@ use crate::protocol::content_query::{
 };
 use crate::protocol::frontend_event::FrontendEvent;
 use crate::protocol::ids::{ContentId, SpaceId, ViewId};
+use crate::protocol::remote::Revision;
 use crate::protocol::scene::{
     CloseResult, Scene, SceneBuilder, SceneError, SplitResult, build_editor_scene,
 };
@@ -40,6 +42,7 @@ use crate::protocol::space::{Sizing, SpaceKind, SplitDirection};
 pub struct App<F: Frontend> {
     contents: ContentStore,
     scene: Scene,
+    scene_revision: Revision,
     // 预留：动态 space 分配（split/panel/overlay/minibuffer）经此 builder，避免重置 SpaceId。
     #[allow(dead_code)] // 后续布局命令通过此 builder 进入 Scene。
     scene_builder: SceneBuilder,
@@ -123,6 +126,7 @@ impl<F: Frontend> App<F> {
             views,
             next_view_id: 2,
             scene,
+            scene_revision: Revision::default(),
             scene_builder,
             focused,
             dispatcher,
@@ -188,6 +192,7 @@ impl<F: Frontend> App<F> {
         match event {
             FrontendEvent::Resize(r) => {
                 self.scene.resize(r.width as i32, r.height as i32);
+                self.scene_revision.next();
             }
             FrontendEvent::Key(k) => {
                 let command = {
@@ -248,7 +253,10 @@ impl<F: Frontend> App<F> {
                             .execute(mode, action)
                         {
                             Some(command) => command,
-                            None => return Ok(()),
+                            None => {
+                                view.touch();
+                                return Ok(());
+                            }
                         }
                     }
                     command => command,
@@ -260,6 +268,7 @@ impl<F: Frontend> App<F> {
                         state: view.state_mut(),
                     },
                 );
+                view.touch();
                 self.handle_content_result(content, result);
             }
             DispatchCommand::Noop => {}
@@ -381,6 +390,7 @@ impl<F: Frontend> App<F> {
         } else {
             Some(previous)
         });
+        self.scene_revision.next();
         Ok(result)
     }
 
@@ -397,6 +407,7 @@ impl<F: Frontend> App<F> {
         let result = self.scene_builder.close(&mut self.scene, target)?;
         self.views.remove(&removed_view);
         self.reconcile_layout(result.surviving_neighbor);
+        self.scene_revision.next();
         Ok(result)
     }
 
@@ -429,6 +440,7 @@ impl<F: Frontend> App<F> {
         }
         self.views.remove(&old_view);
         self.reconcile_layout(Some(target));
+        self.scene_revision.next();
         Ok(())
     }
 
@@ -436,6 +448,7 @@ impl<F: Frontend> App<F> {
     fn set_space_sizing(&mut self, target: SpaceId, sizing: Sizing) -> Result<(), LayoutError> {
         self.scene_builder
             .set_sizing(&mut self.scene, target, sizing)?;
+        self.scene_revision.next();
         Ok(())
     }
 
@@ -830,12 +843,40 @@ mod tests {
     fn missing_content_is_rejected_before_scene_mutation() {
         let mut app = make_app(vec![], None);
         let root = app.scene.root();
+        let revision = app.scene_revision;
 
         assert!(matches!(
             app.split_space(root, ContentId(999), true, SplitDirection::Right, true),
             Err(LayoutError::MissingContent(ContentId(999)))
         ));
         assert_eq!(app.scene.root(), root);
+        assert_eq!(app.scene_revision, revision);
+    }
+
+    #[test]
+    fn successful_layout_mutation_advances_scene_revision() {
+        let mut app = make_app(vec![], None);
+
+        app.set_space_sizing(app.focused, Sizing::Fixed(12))
+            .unwrap();
+
+        assert_eq!(app.scene_revision, Revision(1));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn edit_commands_advance_view_and_content_revisions() {
+        let mut app = make_app(vec![], None);
+        let view = view_id(&app, app.focused);
+
+        app.handle_event(FrontendEvent::Key(KeyEvent::char('i')))
+            .await
+            .unwrap();
+        app.handle_event(FrontendEvent::Key(KeyEvent::char('x')))
+            .await
+            .unwrap();
+
+        assert!(app.views[&view].revision() > Revision(0));
+        assert!(app.contents.revision(editor_cid()).unwrap() > Revision(0));
     }
 
     #[test]
@@ -1249,6 +1290,7 @@ mod tests {
         app.run().await.unwrap();
         assert_eq!(app.scene.size.width, 100);
         assert_eq!(app.scene.size.height, 40);
+        assert_eq!(app.scene_revision, Revision(1));
     }
 
     #[tokio::test(flavor = "multi_thread")]

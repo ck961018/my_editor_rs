@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::core::content::Content;
+use crate::core::content::{Content, ContentResult};
 use crate::core::content_view_state::ContentViewState;
 use crate::core::keymap::Keymap;
 use crate::core::mode::ModeName;
@@ -8,16 +8,19 @@ use crate::protocol::content_query::{
     ContentData, ContentQuery, DocumentStatus, RowRange, StatusBarData,
 };
 use crate::protocol::ids::ContentId;
+use crate::protocol::remote::Revision;
 use crate::protocol::status::StatusMessage;
 
 #[derive(Default)]
 pub struct ContentStore {
     contents: HashMap<ContentId, Content>,
+    revisions: HashMap<ContentId, Revision>,
 }
 
 impl ContentStore {
     pub fn insert(&mut self, id: ContentId, content: Content) {
         self.contents.insert(id, content);
+        self.revisions.insert(id, Revision::default());
     }
 
     pub fn contains(&self, id: ContentId) -> bool {
@@ -41,10 +44,32 @@ impl ContentStore {
         id: ContentId,
         input: crate::core::content::ContentInput<'_>,
     ) -> crate::core::content::ContentResult {
-        self.contents
+        let result = self
+            .contents
             .get_mut(&id)
             .map(|content| content.execute(input))
-            .unwrap_or(crate::core::content::ContentResult::NotHandled)
+            .unwrap_or(ContentResult::NotHandled);
+        if matches!(&result, ContentResult::Handled(_)) {
+            self.revisions
+                .get_mut(&id)
+                .expect("inserted content has a revision")
+                .next();
+        }
+        result
+    }
+
+    pub fn revision(&self, id: ContentId) -> Option<Revision> {
+        let own = self.revisions.get(&id).copied()?;
+        match self.contents.get(&id) {
+            Some(Content::StatusBar(status_bar)) => Some(
+                self.revisions
+                    .get(&status_bar.target_content_id())
+                    .copied()
+                    .map_or(own, |target| own.max(target)),
+            ),
+            Some(Content::Buffer(_)) => Some(own),
+            None => None,
+        }
     }
 
     pub fn query(&self, id: ContentId, query: ContentQuery) -> ContentData {
@@ -149,5 +174,44 @@ mod tests {
 
         assert!(store.contains(ContentId(4)));
         assert!(!store.contains(ContentId(5)));
+    }
+
+    #[test]
+    fn handled_inputs_advance_content_revision() {
+        let id = ContentId(0);
+        let mut store = ContentStore::default();
+        store.insert(id, Content::Buffer(Buffer::new()));
+        let mut state = store.create_view_state(id).unwrap();
+
+        assert_eq!(store.revision(id), Some(Revision(0)));
+        store.execute(
+            id,
+            ContentInput::View {
+                command: ContentCommand::Edit(EditCommand::InsertText("x".to_string())),
+                state: &mut state,
+            },
+        );
+
+        assert_eq!(store.revision(id), Some(Revision(1)));
+    }
+
+    #[test]
+    fn status_bar_revision_tracks_its_target_document() {
+        let buffer = ContentId(0);
+        let status = ContentId(1);
+        let mut store = ContentStore::default();
+        store.insert(buffer, Content::Buffer(Buffer::new()));
+        store.insert(status, Content::StatusBar(StatusBar::new(buffer)));
+        let mut state = store.create_view_state(buffer).unwrap();
+
+        store.execute(
+            buffer,
+            ContentInput::View {
+                command: ContentCommand::Edit(EditCommand::InsertText("x".to_string())),
+                state: &mut state,
+            },
+        );
+
+        assert_eq!(store.revision(status), Some(Revision(1)));
     }
 }

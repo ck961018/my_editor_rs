@@ -106,7 +106,7 @@ Scene host 引用 ViewId，View 再引用 ContentId。迁移时保证同一 Cont
 ## 优先级 7：远程 request/response 协议
 
 **触发条件：** 开始实现第一个进程外 Frontend。  
-**状态：** 待触发。
+**状态：** 语义协议已完成（2026-07-13），transport 待首个远程 Frontend。
 
 将当前同步 RenderQuery 映射为异步消息：
 
@@ -118,6 +118,11 @@ Scene host 引用 ViewId，View 再引用 ContentId。迁移时保证同一 Cont
 - 可序列化的 owned 数据。
 
 同进程 TUI 可以继续使用直接调用适配器。先实现语义协议，再选择序列化和 transport。
+
+已新增 owned 的 Hello/Welcome、View/Content request/response 与三类失效通知，所有响应回显
+RequestId 并携带对象 revision；未知对象、Unsupported query、版本不兼容和缺失 capability
+均为显式错误。AppQuery 已有纯消息适配器，Scene/View/Content revision 接入真实变更路径。
+当前未引入网络或 serde；SceneChanged 的 wire snapshot/delta 留给优先级 10。
 
 ## 优先级 8：Session 层
 

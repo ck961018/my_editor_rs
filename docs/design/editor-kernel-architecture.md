@@ -138,12 +138,13 @@ viewport 下沉到独立 `ClientSession`。
 - 持有与具体呈现相关的状态；
 - 不借出或识别 Buffer、StatusBar 等后端具体类型。
 
-当前 `Frontend::render(&Scene, &dyn RenderQuery, ...)` 是同进程适配器，不是最终远程协议。
-它保留了 pull 模型和 owned query result，为以后迁移到异步 request/response 提供接缝。
+当前 `Frontend::render(&Scene, &dyn RenderQuery, ...)` 仍是同进程 TUI 的直接适配器。远程
+边界已有 owned request/response 语义协议和 AppQuery 适配器，两条路径共享同一 ViewData、
+ContentQuery 与 ContentData 契约。
 
 ## 5. 远程协议方向
 
-远程前端仍可使用 pull 模型，但同步借用必须改成消息：
+远程前端仍使用 pull 模型，跨进程边界表达为消息：
 
 ```text
 Backend -> Frontend
@@ -152,14 +153,18 @@ Backend -> Frontend
   ContentInvalidated
 
 Frontend -> Backend
+  Hello { version, capabilities }
+  ViewRequest { request_id, view_id }
   ContentRequest { request_id, content_id, query }
 
 Backend -> Frontend
-  ContentResponse { request_id, revision, data }
+  Welcome { version, capabilities }
+  Response { request_id, revision, data | error }
 ```
 
-协议定型时需要 request ID、对象 revision、显式错误和 capability negotiation。传输格式、
-序列化库、增量帧算法和断线恢复在真正实现远程前端前保持未定。
+语义协议已定义 request ID、scene/view/content revision、结构化错误和 capability negotiation，
+且消息负载均为 owned 数据。传输格式、序列化库、Scene snapshot/delta、增量帧算法和断线
+恢复在真正实现远程前端前保持未定。
 
 ## 6. 不变量
 
@@ -178,7 +183,7 @@ Backend -> Frontend
 - App 持有共享 ModeRegistry，View 从中创建独立 ModeInstance。
 - Mode/Action 在命令边界使用 owned 名称，Registry 将其解析为进程内稳定的数值 ID。
 - 原生 Mode 暂时使用 Rust trait object 和 `Any` 保存类型状态。
-- `RenderQuery` 暂时是同步同进程调用。
+- TUI 继续同步调用 `RenderQuery`；远程语义协议尚未绑定 transport 或序列化格式。
 - Content 集合暂时是静态枚举。
 
 这些简化有明确升级触发条件，不因远期设想而提前引入脚本 runtime、网络 transport、
