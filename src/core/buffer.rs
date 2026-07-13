@@ -544,6 +544,105 @@ impl Buffer {
             Self::collapse_to_head(sel);
         }
     }
+
+    pub fn join_lines_at_selections(&mut self, selections: &mut Selections) {
+        let max_row = self.rope.len_lines().saturating_sub(1);
+        let mut joins: Vec<Option<(usize, usize, usize)>> = selections
+            .all()
+            .map(|s| {
+                let row = self
+                    .rope
+                    .char_to_line(s.head.char_index.min(self.rope.len_chars()));
+                if row >= max_row {
+                    return None;
+                }
+                let newline_pos = self.rope.line_to_char(row) + line_content_len(&self.rope, row);
+                let next_line_start = newline_pos + 1;
+                let next_row = row + 1;
+                let next_content_len = line_content_len(&self.rope, next_row);
+                let next_content_start = next_line_start;
+                // Count leading whitespace on next line
+                let mut ws_len = 0;
+                for i in 0..next_content_len {
+                    if self.rope.char(next_content_start + i).is_whitespace() {
+                        ws_len += 1;
+                    } else {
+                        break;
+                    }
+                }
+                Some((newline_pos, next_content_start + ws_len, next_line_start))
+            })
+            .collect::<Vec<_>>();
+        joins.retain(|j| j.is_some());
+        let joins: Vec<(usize, usize, usize)> = joins.into_iter().map(|j| j.unwrap()).collect();
+        // Remove in reverse: delete [next_content_start, next_line_start) (leading ws) then remove newline
+        // Simpler: remove range [newline_pos, next_content_start + ws_len) and insert " " at newline_pos
+        // Actually: remove range [newline_pos, next_line_start + ws_len) then insert " " at newline_pos
+        let mut sorted_joins = joins.clone();
+        sorted_joins.sort_unstable_by_key(|j| std::cmp::Reverse(j.0));
+        for (newline_pos, strip_end, _) in &sorted_joins {
+            self.rope.remove(*newline_pos..*strip_end);
+            self.rope.insert(*newline_pos, " ");
+        }
+        self.modified = true;
+        for (sel, (newline_pos, _, _)) in selections.all_mut().zip(joins.iter()) {
+            sel.head.char_index = *newline_pos;
+            self.recompute_cursor(&mut sel.head);
+            Self::collapse_to_head(sel);
+        }
+    }
+
+    pub fn toggle_case_at_selections(&mut self, selections: &mut Selections) {
+        let len = self.rope.len_chars();
+        let ranges: Vec<(usize, usize)> = selections
+            .all()
+            .map(|s| {
+                if s.anchor != s.head {
+                    let (a, b) = (s.anchor.char_index, s.head.char_index);
+                    (a.min(b), a.max(b))
+                } else {
+                    let ci = s.head.char_index.min(len);
+                    if ci < len { (ci, ci + 1) } else { (ci, ci) }
+                }
+            })
+            .collect();
+        for (start, end) in &ranges {
+            if end > start {
+                let slice = self.rope.slice(*start..*end);
+                let flipped: String = slice
+                    .chars()
+                    .map(|c| {
+                        if c.is_uppercase() {
+                            c.to_lowercase().next().unwrap_or(c)
+                        } else if c.is_lowercase() {
+                            c.to_uppercase().next().unwrap_or(c)
+                        } else {
+                            c
+                        }
+                    })
+                    .collect();
+                self.rope.remove(*start..*end);
+                self.rope.insert(*start, &flipped);
+            }
+        }
+        self.modified = true;
+        for (sel, (_start, end)) in selections.all_mut().zip(ranges.iter()) {
+            if sel.anchor == sel.head {
+                // Collapsed: advance head by 1 unless at/past line end
+                let row = self
+                    .rope
+                    .char_to_line(sel.head.char_index.min(self.rope.len_chars()));
+                let line_end = line_end_char(&self.rope, row);
+                if sel.head.char_index < line_end {
+                    sel.head.char_index += 1;
+                }
+            } else {
+                sel.head.char_index = *end;
+            }
+            self.recompute_cursor(&mut sel.head);
+            Self::collapse_to_head(sel);
+        }
+    }
 }
 
 impl Default for Buffer {
@@ -1005,6 +1104,78 @@ mod tests {
         buffer.delete_to_line_end_at_selections(&mut s);
         assert_eq!(buffer.slice().to_string(), "abef");
         assert_eq!(s.primary().head().char_index, 2);
+    }
+
+    #[test]
+    fn join_lines_merges_two_lines_with_space() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\nbar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 0);
+        buffer.join_lines_at_selections(&mut s);
+        assert_eq!(buffer.slice().to_string(), "foo bar");
+        assert_eq!(s.primary().head().char_index, 3); // at the space
+    }
+
+    #[test]
+    fn join_lines_strips_next_line_leading_whitespace() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\n  bar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 0);
+        buffer.join_lines_at_selections(&mut s);
+        assert_eq!(buffer.slice().to_string(), "foo bar");
+        assert_eq!(s.primary().head().char_index, 3);
+    }
+
+    #[test]
+    fn join_lines_on_last_line_is_noop() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "foo\nbar".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 4); // on 'b' of last line
+        buffer.join_lines_at_selections(&mut s);
+        assert_eq!(buffer.slice().to_string(), "foo\nbar");
+    }
+
+    #[test]
+    fn toggle_case_flips_char_and_advances() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "aBc".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 0);
+        buffer.toggle_case_at_selections(&mut s);
+        assert_eq!(buffer.slice().to_string(), "ABc");
+        assert_eq!(s.primary().head().char_index, 1);
+    }
+
+    #[test]
+    fn toggle_case_at_line_end_does_not_advance() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "ab".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 1);
+        buffer.toggle_case_at_selections(&mut s);
+        assert_eq!(buffer.slice().to_string(), "aB");
+        assert_eq!(s.primary().head().char_index, 1);
+    }
+
+    #[test]
+    fn toggle_case_non_empty_selection_flips_all_in_range() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "abc".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 0);
+        s.primary_mut().head = selection_at(&buffer, 3).primary().head;
+        buffer.toggle_case_at_selections(&mut s);
+        assert_eq!(buffer.slice().to_string(), "ABC");
+        assert_eq!(s.primary().head().char_index, 3);
     }
 
     #[test]
