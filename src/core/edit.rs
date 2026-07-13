@@ -229,14 +229,27 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
         EditCommand::InsertText(text) => buffer.insert_at_selections(selections, &text),
         EditCommand::Delete(n) => buffer.delete_at_selections(selections, n),
         EditCommand::DeleteWordBackward => buffer.delete_word_backward_at_selections(selections),
-        // 占位：vim 基础操作编辑变体由 Task 8 接入具体分支，此处先 noop 保证编译。
-        EditCommand::DeleteToLineStart
-        | EditCommand::DeleteToLineEnd
-        | EditCommand::JoinLines
-        | EditCommand::ToggleCase
-        | EditCommand::InsertNewLineBelow
-        | EditCommand::InsertNewLineAbove
-        | EditCommand::DeleteLineContent => {}
+        EditCommand::DeleteToLineStart => {
+            buffer.delete_to_line_start_at_selections(selections);
+        }
+        EditCommand::DeleteToLineEnd => {
+            buffer.delete_to_line_end_at_selections(selections);
+        }
+        EditCommand::JoinLines => {
+            buffer.join_lines_at_selections(selections);
+        }
+        EditCommand::ToggleCase => {
+            buffer.toggle_case_at_selections(selections);
+        }
+        EditCommand::InsertNewLineBelow => {
+            buffer.insert_new_line_below_at_selections(selections);
+        }
+        EditCommand::InsertNewLineAbove => {
+            buffer.insert_new_line_above_at_selections(selections);
+        }
+        EditCommand::DeleteLineContent => {
+            buffer.delete_line_content_at_selections(selections);
+        }
     }
 }
 
@@ -544,5 +557,89 @@ mod tests {
         let mut s = single_sel(CursorPos::origin());
         apply_edit(EditCommand::MoveAfterLineEnd, &mut buf, &mut s);
         assert_eq!(s.primary().head().char_index, 3);
+    }
+
+    #[test]
+    fn delete_to_line_start_removes_text() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo\nbar");
+        let mut s = single_sel({
+            let mut c = CursorPos::origin();
+            c.char_index = 5;
+            buf.recompute_cursor(&mut c);
+            c
+        });
+        apply_edit(EditCommand::DeleteToLineStart, &mut buf, &mut s);
+        assert_eq!(buf.slice().to_string(), "foo\nar");
+        assert_eq!(s.primary().head().char_index, 4);
+    }
+
+    #[test]
+    fn delete_to_line_end_removes_text() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo\nbar");
+        let mut s = single_sel({
+            let mut c = CursorPos::origin();
+            c.char_index = 1;
+            buf.recompute_cursor(&mut c);
+            c
+        });
+        apply_edit(EditCommand::DeleteToLineEnd, &mut buf, &mut s);
+        assert_eq!(buf.slice().to_string(), "f\nbar");
+        assert_eq!(s.primary().head().char_index, 1);
+    }
+
+    #[test]
+    fn join_lines_merges_lines() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo\nbar");
+        let mut s = single_sel(CursorPos::origin());
+        apply_edit(EditCommand::JoinLines, &mut buf, &mut s);
+        assert_eq!(buf.slice().to_string(), "foo bar");
+    }
+
+    #[test]
+    fn toggle_case_flips_char() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "aBc");
+        let mut s = single_sel(CursorPos::origin());
+        apply_edit(EditCommand::ToggleCase, &mut buf, &mut s);
+        assert_eq!(buf.slice().to_string(), "ABc");
+        assert_eq!(s.primary().head().char_index, 1);
+    }
+
+    #[test]
+    fn insert_new_line_below_adds_line() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo");
+        let mut s = single_sel(CursorPos::origin());
+        apply_edit(EditCommand::InsertNewLineBelow, &mut buf, &mut s);
+        assert_eq!(buf.slice().to_string(), "foo\n");
+        assert_eq!(s.primary().head().char_index, 4);
+    }
+
+    #[test]
+    fn insert_new_line_above_adds_line() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo");
+        let mut s = single_sel(CursorPos::origin());
+        apply_edit(EditCommand::InsertNewLineAbove, &mut buf, &mut s);
+        assert_eq!(buf.slice().to_string(), "\nfoo");
+        assert_eq!(s.primary().head().char_index, 0);
+    }
+
+    #[test]
+    fn delete_line_content_clears_line() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(CursorPos::origin()), "foo\nbar");
+        let mut s = single_sel({
+            let mut c = CursorPos::origin();
+            c.char_index = 1;
+            buf.recompute_cursor(&mut c);
+            c
+        });
+        apply_edit(EditCommand::DeleteLineContent, &mut buf, &mut s);
+        assert_eq!(buf.slice().to_string(), "\nbar");
+        assert_eq!(s.primary().head().char_index, 0);
     }
 }
