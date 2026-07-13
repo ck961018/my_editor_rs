@@ -89,6 +89,24 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
         EditCommand::InsertText(text) => buffer.insert_at_selections(selections, &text),
         EditCommand::Delete(n) => buffer.delete_at_selections(selections, n),
         EditCommand::DeleteWordBackward => buffer.delete_word_backward_at_selections(selections),
+        // 占位：vim 基础操作变体由后续 Task 接入具体分支，此处先 noop 保证编译。
+        EditCommand::DeleteToLineStart
+        | EditCommand::DeleteToLineEnd
+        | EditCommand::MoveWordForward
+        | EditCommand::MoveWordBackward
+        | EditCommand::MoveWordEnd
+        | EditCommand::MoveToLineStart
+        | EditCommand::MoveToFirstNonBlank
+        | EditCommand::MoveToLineEnd
+        | EditCommand::MoveToLastLine
+        | EditCommand::MoveToPrevParagraph
+        | EditCommand::MoveToNextParagraph
+        | EditCommand::JoinLines
+        | EditCommand::ToggleCase
+        | EditCommand::InsertNewLineBelow
+        | EditCommand::InsertNewLineAbove
+        | EditCommand::MoveAfterLineEnd
+        | EditCommand::DeleteLineContent => {}
     }
 }
 

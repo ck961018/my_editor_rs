@@ -49,6 +49,24 @@ pub enum EditCommand {
     Delete(isize),
     DeleteWordBackward,
     CollapseSelections,
+    // 以下变体预留：vim 基础操作，后续任务接入 apply_edit / keymap / mode action。
+    DeleteToLineStart,
+    DeleteToLineEnd,
+    MoveWordForward,
+    MoveWordBackward,
+    MoveWordEnd,
+    MoveToLineStart,
+    MoveToFirstNonBlank,
+    MoveToLineEnd,
+    MoveToLastLine,
+    MoveToPrevParagraph,
+    MoveToNextParagraph,
+    JoinLines,
+    ToggleCase,
+    InsertNewLineBelow,
+    InsertNewLineAbove,
+    MoveAfterLineEnd,
+    DeleteLineContent,
 }
 
 impl From<EditCommand> for Command {
