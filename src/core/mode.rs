@@ -328,6 +328,11 @@ fn vim_normal_keymap() -> Keymap {
     km.bind_edit(KeyEvent::char('G'), EditCommand::MoveToLastLine);
     km.bind_edit(KeyEvent::char('{'), EditCommand::MoveToPrevParagraph);
     km.bind_edit(KeyEvent::char('}'), EditCommand::MoveToNextParagraph);
+    km.bind_edit(KeyEvent::char('x'), EditCommand::Delete(1));
+    km.bind_edit(KeyEvent::char('X'), EditCommand::Delete(-1));
+    km.bind_edit(KeyEvent::char('J'), EditCommand::JoinLines);
+    km.bind_edit(KeyEvent::char('D'), EditCommand::DeleteToLineEnd);
+    km.bind_edit(KeyEvent::char('~'), EditCommand::ToggleCase);
     km.bind(
         KeyEvent::char('i'),
         Command::Content(ContentCommand::Mode {
@@ -627,6 +632,56 @@ mod tests {
         assert_eq!(
             modes.resolve_key(&runtime, KeyEvent::char('}')),
             Some(EditCommand::MoveToNextParagraph.into()),
+        );
+    }
+
+    #[test]
+    fn vim_normal_x_resolves_to_delete_forward() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('x')),
+            Some(EditCommand::Delete(1).into()),
+        );
+    }
+
+    #[test]
+    fn vim_normal_capital_x_resolves_to_delete_backward() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('X')),
+            Some(EditCommand::Delete(-1).into()),
+        );
+    }
+
+    #[test]
+    fn vim_normal_capital_j_resolves_to_join_lines() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('J')),
+            Some(EditCommand::JoinLines.into()),
+        );
+    }
+
+    #[test]
+    fn vim_normal_capital_d_resolves_to_delete_to_line_end() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('D')),
+            Some(EditCommand::DeleteToLineEnd.into()),
+        );
+    }
+
+    #[test]
+    fn vim_normal_tilde_resolves_to_toggle_case() {
+        let modes = ModeSet::vim();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('~')),
+            Some(EditCommand::ToggleCase.into()),
         );
     }
 }
