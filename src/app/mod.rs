@@ -568,7 +568,7 @@ mod tests {
         let left_view = query.view(left);
         let right_view = query.view(right);
 
-        assert_eq!(left_view.cursor_style, CursorStyle::Default);
+        assert_eq!(left_view.cursor_style, CursorStyle::Bar);
         assert_eq!(right_view.cursor_style, CursorStyle::Block);
         assert_eq!(left_view.selections, *app.views[&left].selections());
         assert_eq!(right_view.selections, *app.views[&right].selections());
@@ -747,6 +747,215 @@ mod tests {
         app.run().await.unwrap();
 
         assert_eq!(text_rows(&app, editor_cid()), vec!["ab "]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vim_normal_w_moves_to_next_word() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('f')),
+                FrontendEvent::Key(KeyEvent::char('o')),
+                FrontendEvent::Key(KeyEvent::char('o')),
+                FrontendEvent::Key(KeyEvent::char(' ')),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('r')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('0')),
+                FrontendEvent::Key(KeyEvent::char('w')),
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('X')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+        app.run().await.unwrap();
+        assert_eq!(text_rows(&app, editor_cid()), vec!["foo Xbar"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vim_normal_dollar_moves_to_line_end() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::char('c')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('0')),
+                FrontendEvent::Key(KeyEvent::char('$')),
+                FrontendEvent::Key(KeyEvent::char('x')),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+        app.run().await.unwrap();
+        assert_eq!(text_rows(&app, editor_cid()), vec!["ab"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vim_normal_x_deletes_char() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::char('c')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('0')),
+                FrontendEvent::Key(KeyEvent::char('x')),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+        app.run().await.unwrap();
+        assert_eq!(text_rows(&app, editor_cid()), vec!["bc"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vim_normal_o_opens_line_below_and_inserts() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('f')),
+                FrontendEvent::Key(KeyEvent::char('o')),
+                FrontendEvent::Key(KeyEvent::char('o')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('o')),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('r')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+        app.run().await.unwrap();
+        assert_eq!(text_rows(&app, editor_cid()), vec!["foo", "bar"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vim_normal_capital_a_appends_at_line_end() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('f')),
+                FrontendEvent::Key(KeyEvent::char('o')),
+                FrontendEvent::Key(KeyEvent::char('o')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('0')),
+                FrontendEvent::Key(KeyEvent::char('A')),
+                FrontendEvent::Key(KeyEvent::char('!')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+        app.run().await.unwrap();
+        assert_eq!(text_rows(&app, editor_cid()), vec!["foo!"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vim_normal_capital_d_deletes_to_line_end() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::char('c')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('0')),
+                FrontendEvent::Key(KeyEvent::char('l')),
+                FrontendEvent::Key(KeyEvent::char('D')),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+        app.run().await.unwrap();
+        assert_eq!(text_rows(&app, editor_cid()), vec!["a"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vim_normal_capital_j_joins_lines() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('f')),
+                FrontendEvent::Key(KeyEvent::char('o')),
+                FrontendEvent::Key(KeyEvent::char('o')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Enter)),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('r')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('k')),
+                FrontendEvent::Key(KeyEvent::char('J')),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+        app.run().await.unwrap();
+        assert_eq!(text_rows(&app, editor_cid()), vec!["foo bar"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vim_normal_tilde_toggles_case() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('0')),
+                FrontendEvent::Key(KeyEvent::char('~')),
+                FrontendEvent::Key(KeyEvent::char('~')),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+        app.run().await.unwrap();
+        assert_eq!(text_rows(&app, editor_cid()), vec!["AB"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vim_insert_ctrl_u_deletes_to_line_start() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::char('c')),
+                FrontendEvent::Key(KeyEvent::ctrl('u')),
+                FrontendEvent::Key(KeyEvent::char('x')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+        app.run().await.unwrap();
+        assert_eq!(text_rows(&app, editor_cid()), vec!["x"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vim_normal_s_substitutes_char() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('0')),
+                FrontendEvent::Key(KeyEvent::char('s')),
+                FrontendEvent::Key(KeyEvent::char('X')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+        app.run().await.unwrap();
+        assert_eq!(text_rows(&app, editor_cid()), vec!["Xb"]);
     }
 
     #[tokio::test(flavor = "multi_thread")]
