@@ -52,9 +52,6 @@ impl ContentStore {
             (Some(Content::Buffer(buffer)), ContentQuery::TextRows(range)) => {
                 ContentData::TextRows(text_rows(buffer, range))
             }
-            (Some(Content::Buffer(buffer)), ContentQuery::TextLineCount) => {
-                ContentData::TextLineCount(buffer.len_lines())
-            }
             (Some(Content::Buffer(buffer)), ContentQuery::DocumentStatus) => {
                 ContentData::DocumentStatus(document_status(buffer))
             }
@@ -63,7 +60,6 @@ impl ContentStore {
                     match self.query(status_bar.target_content_id(), ContentQuery::DocumentStatus) {
                         ContentData::DocumentStatus(status) => status,
                         ContentData::TextRows(_)
-                        | ContentData::TextLineCount(_)
                         | ContentData::StatusBarData(_)
                         | ContentData::Unsupported => default_status_bar_data(),
                     },

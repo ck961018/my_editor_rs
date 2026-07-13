@@ -54,6 +54,11 @@ View
 可以有 selections，StatusBar 可以没有局部状态，Terminal 和 Web View 可以定义各自的
 会话状态。
 
+前端读取的 `ViewData` 使用显式 `ViewPresentation`。当前 `Text` presentation 携带 selections
+与 cursor style，`StatusBar` 没有文本字段；前端只按该枚举发送对应的 Content query，
+不通过 `Unsupported` 响应或 `TextLineCount` 探测 Content 类型。Terminal/Web 在实际加入时
+扩展自己的 presentation 数据。
+
 ### 2.3 Mode
 
 Mode 是可复用的输入和交互策略。Vim Mode 是当前实现，但不是内核中的唯一固定模式。

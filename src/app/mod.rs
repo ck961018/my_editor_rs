@@ -27,7 +27,8 @@ use crate::core::mode::ModeRegistry;
 use crate::core::status_bar::StatusBar;
 use crate::frontend::Frontend;
 use crate::protocol::content_query::{
-    ContentData, ContentQuery, CursorStyle, RenderQuery, ViewData,
+    ContentData, ContentQuery, CursorStyle, RenderQuery, TextPresentation, ViewData,
+    ViewPresentation,
 };
 use crate::protocol::frontend_event::FrontendEvent;
 use crate::protocol::ids::{ContentId, SpaceId, ViewId};
@@ -552,12 +553,18 @@ impl RenderQuery for AppQuery<'_> {
 
     fn view(&self, id: ViewId) -> ViewData {
         let view = self.views.get(&id).expect("scene references existing view");
+        let presentation = match view.selections() {
+            Some(selections) => ViewPresentation::Text(TextPresentation {
+                selections: selections.clone(),
+                cursor_style: view
+                    .mode()
+                    .map_or(CursorStyle::Default, |mode| mode.cursor_style()),
+            }),
+            None => ViewPresentation::StatusBar,
+        };
         ViewData {
             content: view.content(),
-            selections: view.selections().cloned(),
-            cursor_style: view
-                .mode()
-                .map_or(CursorStyle::Default, |mode| mode.cursor_style()),
+            presentation,
         }
     }
 }
@@ -624,6 +631,13 @@ mod tests {
         &app.views[&view_id(app, space)]
     }
 
+    fn text_presentation(view: &ViewData) -> &TextPresentation {
+        match &view.presentation {
+            ViewPresentation::Text(text) => text,
+            ViewPresentation::StatusBar => panic!("expected text presentation"),
+        }
+    }
+
     #[test]
     fn production_content_paths_have_no_dynamic_type_probes() {
         let app = include_str!("mod.rs");
@@ -683,21 +697,10 @@ mod tests {
             ),
             ContentData::TextRows(vec!["hi".to_string()])
         );
-        assert_eq!(
-            query.content(editor_cid(), ContentQuery::TextLineCount),
-            ContentData::TextLineCount(1)
-        );
         let view = query.view(focused_view);
-        assert_eq!(
-            view.selections
-                .as_ref()
-                .unwrap()
-                .primary()
-                .head()
-                .char_index,
-            2
-        );
-        assert_eq!(view.cursor_style, CursorStyle::Block);
+        let text = text_presentation(&view);
+        assert_eq!(text.selections.primary().head().char_index, 2);
+        assert_eq!(text.cursor_style, CursorStyle::Block);
     }
 
     #[test]
@@ -714,8 +717,7 @@ mod tests {
         };
 
         let view = query.view(status_view);
-        assert!(view.selections.is_none());
-        assert_eq!(view.cursor_style, CursorStyle::Default);
+        assert_eq!(view.presentation, ViewPresentation::StatusBar);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -742,32 +744,22 @@ mod tests {
         let right_id = view_id(&app, right);
         let left_view = query.view(left_id);
         let right_view = query.view(right_id);
+        let left_text = text_presentation(&left_view);
+        let right_text = text_presentation(&right_view);
 
-        assert_eq!(left_view.cursor_style, CursorStyle::Bar);
-        assert_eq!(right_view.cursor_style, CursorStyle::Block);
+        assert_eq!(left_text.cursor_style, CursorStyle::Bar);
+        assert_eq!(right_text.cursor_style, CursorStyle::Block);
         assert_ne!(left_id, right_id);
         assert_eq!(
-            left_view.selections.as_ref(),
+            Some(&left_text.selections),
             app.views[&left_id].selections()
         );
         assert_eq!(
-            right_view.selections.as_ref(),
+            Some(&right_text.selections),
             app.views[&right_id].selections()
         );
-        assert_eq!(
-            left_view
-                .selections
-                .as_ref()
-                .unwrap()
-                .primary()
-                .head()
-                .char_index,
-            1
-        );
-        assert_eq!(
-            right_view.selections.as_ref().unwrap().primary().head(),
-            CursorPos::origin()
-        );
+        assert_eq!(left_text.selections.primary().head().char_index, 1);
+        assert_eq!(right_text.selections.primary().head(), CursorPos::origin());
     }
 
     #[tokio::test(flavor = "multi_thread")]

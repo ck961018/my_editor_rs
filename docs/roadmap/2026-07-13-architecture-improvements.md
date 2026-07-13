@@ -89,7 +89,7 @@ Scene host 引用 ViewId，View 再引用 ContentId。迁移时保证同一 Cont
 ## 优先级 6：View presentation 泛化
 
 **触发条件：** 增加第一个非文本、非状态栏 Content。  
-**状态：** 待触发。
+**状态：** 已完成（2026-07-13）。
 
 当前 ViewData 仍固定为可选 selections 加 cursor style，渲染器通过试探 TextLineCount 区分
 文本与状态栏。后续需要：
@@ -97,6 +97,11 @@ Scene host 引用 ViewId，View 再引用 ContentId。迁移时保证同一 Cont
 - 使用显式 presentation kind 或 presentation enum；
 - 为 Text、Terminal、Web、Status 等定义各自最小数据；
 - 消除通过 Unsupported query 猜测 Content 类型的逻辑。
+
+已将 `ViewData` 改为显式 `ViewPresentation`。当前存在的 Text presentation 携带 selections
+与 cursor style，StatusBar presentation 不携带文本状态；TUI 直接按 presentation 分派，
+不再请求 `TextLineCount` 或依赖 `Unsupported` 判断类型。Terminal/Web 变体在对应 Content
+出现时按实际数据契约添加，避免先定义无法验证的空壳协议。
 
 ## 优先级 7：远程 request/response 协议
 

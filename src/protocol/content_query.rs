@@ -29,16 +29,26 @@ pub enum CursorStyle {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextPresentation {
+    pub selections: Selections,
+    pub cursor_style: CursorStyle,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ViewPresentation {
+    Text(TextPresentation),
+    StatusBar,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewData {
     pub content: ContentId,
-    pub selections: Option<Selections>,
-    pub cursor_style: CursorStyle,
+    pub presentation: ViewPresentation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContentQuery {
     TextRows(RowRange),
-    TextLineCount,
     #[allow(dead_code)]
     DocumentStatus,
     StatusBarData,
@@ -47,7 +57,6 @@ pub enum ContentQuery {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContentData {
     TextRows(Vec<String>),
-    TextLineCount(usize),
     DocumentStatus(DocumentStatus),
     StatusBarData(StatusBarData),
     #[allow(dead_code)]
@@ -94,19 +103,32 @@ mod tests {
     }
 
     #[test]
-    fn view_data_contains_selections_and_cursor_style() {
+    fn view_data_has_explicit_text_presentation() {
+        let selections = Selections::single(Selection::collapsed(CursorPos::origin()));
         let data = ViewData {
             content: ContentId(7),
-            selections: Some(Selections::single(
-                Selection::collapsed(CursorPos::origin()),
-            )),
-            cursor_style: CursorStyle::Block,
+            presentation: ViewPresentation::Text(TextPresentation {
+                selections: selections.clone(),
+                cursor_style: CursorStyle::Block,
+            }),
         };
         assert_eq!(data.content, ContentId(7));
-        assert_eq!(data.cursor_style, CursorStyle::Block);
         assert_eq!(
-            data.selections.unwrap().primary().head(),
-            CursorPos::origin()
+            data.presentation,
+            ViewPresentation::Text(TextPresentation {
+                selections,
+                cursor_style: CursorStyle::Block,
+            })
         );
+    }
+
+    #[test]
+    fn status_bar_presentation_has_no_text_state() {
+        let data = ViewData {
+            content: ContentId(8),
+            presentation: ViewPresentation::StatusBar,
+        };
+
+        assert_eq!(data.presentation, ViewPresentation::StatusBar);
     }
 }

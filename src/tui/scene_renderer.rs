@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::io;
 
 use crate::protocol::content_query::{
-    ContentData, ContentQuery, RenderQuery, RowRange, StatusBarData, ViewData,
+    ContentData, ContentQuery, RenderQuery, RowRange, TextPresentation, ViewData, ViewPresentation,
 };
 use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::scene::Scene;
@@ -48,10 +48,11 @@ impl SceneRenderer {
         let focused_view = views
             .get(&focused_item.expect("focused item exists").view_id)
             .expect("focused view has render data");
-        let focused_head = focused_view
-            .selections
-            .as_ref()
-            .map(|selections| selections.primary().head());
+        let focused_text = match &focused_view.presentation {
+            ViewPresentation::Text(text) => Some(text),
+            ViewPresentation::StatusBar => None,
+        };
+        let focused_head = focused_text.map(|text| text.selections.primary().head());
         if let (Some(item), Some(focused_head)) = (focused_item, focused_head) {
             let viewport = self
                 .viewports
@@ -89,7 +90,11 @@ impl SceneRenderer {
             let screen_row = focused_head.row.saturating_sub(vp.top_row) + item.rect.y as usize;
             let screen_col = focused_head.col.saturating_sub(vp.left_col) + item.rect.x as usize;
             canvas.move_cursor(screen_row, screen_col)?;
-            canvas.set_cursor_style(focused_view.cursor_style)?;
+            canvas.set_cursor_style(
+                focused_text
+                    .expect("text cursor has text presentation")
+                    .cursor_style,
+            )?;
             canvas.show_cursor()?;
         }
         canvas.flush()
@@ -119,95 +124,94 @@ fn paint_item(
     viewports: &HashMap<ViewId, Viewport>,
     canvas: &mut dyn Canvas,
 ) -> io::Result<()> {
+    match &view.presentation {
+        ViewPresentation::Text(text) => {
+            paint_text_item(item, query, view.content, text, viewports, canvas)
+        }
+        ViewPresentation::StatusBar => paint_status_bar(item, query, view.content, canvas),
+    }
+}
+
+fn paint_text_item(
+    item: &RenderItem,
+    query: &dyn RenderQuery,
+    content: crate::protocol::ids::ContentId,
+    text: &TextPresentation,
+    viewports: &HashMap<ViewId, Viewport>,
+    canvas: &mut dyn Canvas,
+) -> io::Result<()> {
     let vid = item.view_id;
     let vp = viewports
         .get(&vid)
         .copied()
         .unwrap_or_else(Viewport::origin);
-    let line_count = match query.content(view.content, ContentQuery::TextLineCount) {
-        ContentData::TextLineCount(line_count) => line_count,
-        ContentData::Unsupported => 0,
-        _ => 0,
+    let height = item.rect.height as usize;
+    let width = item.rect.width as usize;
+    let start = vp.top_row;
+    let ContentData::TextRows(lines) = query.content(
+        content,
+        ContentQuery::TextRows(RowRange {
+            start,
+            end: start + height,
+        }),
+    ) else {
+        panic!("text presentation must answer TextRows")
     };
-    if line_count > 0 {
-        // editor：拉可见行
-        let height = item.rect.height as usize;
-        let width = item.rect.width as usize;
-        let start = vp.top_row;
-        let lines = match query.content(
-            view.content,
-            ContentQuery::TextRows(RowRange {
-                start,
-                end: start + height,
-            }),
-        ) {
-            ContentData::TextRows(lines) => lines,
-            ContentData::Unsupported => Vec::new(),
-            _ => Vec::new(),
-        };
-        // 选区高亮：仅文本 View 有 selections；primary 非空时按 char_index 排序端点。
-        let selection = view.selections.as_ref().and_then(|selections| {
-            let primary = selections.primary();
-            (primary.anchor != primary.head).then_some({
-                if primary.anchor.char_index <= primary.head.char_index {
-                    (primary.anchor, primary.head)
-                } else {
-                    (primary.head, primary.anchor)
-                }
-            })
-        });
-        for (row, line) in lines.iter().enumerate() {
-            let buf_row = start + row;
-            let screen_row = (item.rect.y + row as i32) as usize;
-            canvas.move_cursor(screen_row, item.rect.x as usize)?;
-            canvas.clear_line()?;
-            let hi = selection.and_then(|(sel_start, sel_end)| {
-                (buf_row >= sel_start.row && buf_row <= sel_end.row).then(|| {
-                    let start = if buf_row == sel_start.row {
-                        sel_start.col
-                    } else {
-                        0
-                    };
-                    let end = if buf_row == sel_end.row {
-                        sel_end.col
-                    } else {
-                        usize::MAX
-                    };
-                    (start, end)
-                })
-            });
-            paint_line_with_highlight(canvas, line, vp.left_col, width, hi)?;
+    let primary = text.selections.primary();
+    let selection = (primary.anchor != primary.head).then_some({
+        if primary.anchor.char_index <= primary.head.char_index {
+            (primary.anchor, primary.head)
+        } else {
+            (primary.head, primary.anchor)
         }
-        for row in lines.len()..height {
-            let screen_row = (item.rect.y + row as i32) as usize;
-            canvas.move_cursor(screen_row, item.rect.x as usize)?;
-            canvas.clear_line()?;
-        }
-    } else {
-        // status_bar
-        let data = match query.content(view.content, ContentQuery::StatusBarData) {
-            ContentData::StatusBarData(data) => data,
-            ContentData::Unsupported => StatusBarData {
-                file_name: None,
-                modified: false,
-                message: StatusMessage::None,
-            },
-            _ => StatusBarData {
-                file_name: None,
-                modified: false,
-                message: StatusMessage::None,
-            },
-        };
-        let screen_row = item.rect.y as usize;
+    });
+    for (row, line) in lines.iter().enumerate() {
+        let buf_row = start + row;
+        let screen_row = (item.rect.y + row as i32) as usize;
         canvas.move_cursor(screen_row, item.rect.x as usize)?;
         canvas.clear_line()?;
-        canvas.write_str(&status_line(
-            data.file_name.as_deref(),
-            data.modified,
-            &data.message,
-        ))?;
+        let hi = selection.and_then(|(sel_start, sel_end)| {
+            (buf_row >= sel_start.row && buf_row <= sel_end.row).then(|| {
+                let start = if buf_row == sel_start.row {
+                    sel_start.col
+                } else {
+                    0
+                };
+                let end = if buf_row == sel_end.row {
+                    sel_end.col
+                } else {
+                    usize::MAX
+                };
+                (start, end)
+            })
+        });
+        paint_line_with_highlight(canvas, line, vp.left_col, width, hi)?;
+    }
+    for row in lines.len()..height {
+        let screen_row = (item.rect.y + row as i32) as usize;
+        canvas.move_cursor(screen_row, item.rect.x as usize)?;
+        canvas.clear_line()?;
     }
     Ok(())
+}
+
+fn paint_status_bar(
+    item: &RenderItem,
+    query: &dyn RenderQuery,
+    content: crate::protocol::ids::ContentId,
+    canvas: &mut dyn Canvas,
+) -> io::Result<()> {
+    let ContentData::StatusBarData(data) = query.content(content, ContentQuery::StatusBarData)
+    else {
+        panic!("status bar presentation must answer StatusBarData")
+    };
+    canvas.move_cursor(item.rect.y as usize, item.rect.x as usize)?;
+    canvas.clear_line()?;
+    canvas.write_str(&status_line(
+        data.file_name.as_deref(),
+        data.modified,
+        &data.message,
+    ))
 }
 
 /// Paint the visible character interval `[left_col, left_col + width)` of one logical row.
@@ -278,7 +282,8 @@ fn status_line(file_name: Option<&str>, modified: bool, message: &StatusMessage)
 mod tests {
     use super::*;
     use crate::protocol::content_query::{
-        ContentData, ContentQuery, CursorStyle, RenderQuery, StatusBarData, ViewData,
+        ContentData, ContentQuery, CursorStyle, RenderQuery, StatusBarData, TextPresentation,
+        ViewData, ViewPresentation,
     };
     use crate::protocol::ids::{ContentId, ViewId};
     use crate::protocol::scene::{SceneBuilder, build_editor_scene};
@@ -287,6 +292,27 @@ mod tests {
     use crate::protocol::status::StatusMessage;
     use crate::terminal::output::Output;
     use std::collections::HashMap;
+
+    fn text_view(
+        content: ContentId,
+        selections: Selections,
+        cursor_style: CursorStyle,
+    ) -> ViewData {
+        ViewData {
+            content,
+            presentation: ViewPresentation::Text(TextPresentation {
+                selections,
+                cursor_style,
+            }),
+        }
+    }
+
+    fn status_view(content: ContentId) -> ViewData {
+        ViewData {
+            content,
+            presentation: ViewPresentation::StatusBar,
+        }
+    }
 
     struct StubQuery {
         editor_cid: ContentId,
@@ -312,23 +338,26 @@ mod tests {
                             .collect(),
                     )
                 }
-                ContentQuery::TextLineCount if cid == self.editor_cid => {
-                    ContentData::TextLineCount(self.lines.len())
-                }
                 ContentQuery::DocumentStatus => ContentData::DocumentStatus(status),
-                ContentQuery::StatusBarData => ContentData::StatusBarData(status),
-                _ => ContentData::Unsupported,
+                ContentQuery::StatusBarData => {
+                    assert_eq!(
+                        cid,
+                        ContentId(1),
+                        "only status presentation asks status data"
+                    );
+                    ContentData::StatusBarData(status)
+                }
             }
         }
         fn view(&self, view: ViewId) -> ViewData {
-            ViewData {
-                content: if view == ViewId(1) {
-                    ContentId(1)
-                } else {
-                    self.editor_cid
-                },
-                selections: (view != ViewId(1)).then(|| self.selections.clone()),
-                cursor_style: CursorStyle::Default,
+            if view == ViewId(1) {
+                status_view(ContentId(1))
+            } else {
+                text_view(
+                    self.editor_cid,
+                    self.selections.clone(),
+                    CursorStyle::Default,
+                )
             }
         }
     }
@@ -357,21 +386,23 @@ mod tests {
                             .collect(),
                     )
                 }
-                ContentQuery::TextLineCount if cid == ContentId(0) => {
-                    ContentData::TextLineCount(self.lines.len())
-                }
                 ContentQuery::DocumentStatus => ContentData::DocumentStatus(status),
-                ContentQuery::StatusBarData => ContentData::StatusBarData(status),
-                _ => ContentData::Unsupported,
+                ContentQuery::StatusBarData => {
+                    assert_eq!(
+                        cid,
+                        ContentId(1),
+                        "only status presentation asks status data"
+                    );
+                    ContentData::StatusBarData(status)
+                }
             }
         }
 
         fn view(&self, view: ViewId) -> ViewData {
-            self.selections.get(&view).cloned().unwrap_or(ViewData {
-                content: ContentId(1),
-                selections: None,
-                cursor_style: CursorStyle::Default,
-            })
+            self.selections
+                .get(&view)
+                .cloned()
+                .unwrap_or_else(|| status_view(ContentId(1)))
         }
     }
 
@@ -389,9 +420,9 @@ mod tests {
             selections: HashMap::from([
                 (
                     ViewId(0),
-                    ViewData {
-                        content: ContentId(0),
-                        selections: Some(Selections::single(Selection {
+                    text_view(
+                        ContentId(0),
+                        Selections::single(Selection {
                             anchor: CursorPos {
                                 char_index: 0,
                                 row: 0,
@@ -402,15 +433,15 @@ mod tests {
                                 row: 0,
                                 col: 1,
                             },
-                        })),
-                        cursor_style: CursorStyle::Default,
-                    },
+                        }),
+                        CursorStyle::Default,
+                    ),
                 ),
                 (
                     ViewId(2),
-                    ViewData {
-                        content: ContentId(0),
-                        selections: Some(Selections::single(Selection {
+                    text_view(
+                        ContentId(0),
+                        Selections::single(Selection {
                             anchor: CursorPos {
                                 char_index: 2,
                                 row: 0,
@@ -421,9 +452,9 @@ mod tests {
                                 row: 0,
                                 col: 3,
                             },
-                        })),
-                        cursor_style: CursorStyle::Default,
-                    },
+                        }),
+                        CursorStyle::Default,
+                    ),
                 ),
             ]),
         };
@@ -465,19 +496,23 @@ mod tests {
             selections: HashMap::from([
                 (
                     ViewId(0),
-                    ViewData {
-                        content: ContentId(0),
-                        selections: None,
-                        cursor_style: CursorStyle::Default,
-                    },
+                    text_view(
+                        ContentId(0),
+                        Selections::single(Selection::collapsed(CursorPos {
+                            char_index: 6,
+                            row: 1,
+                            col: 0,
+                        })),
+                        CursorStyle::Default,
+                    ),
                 ),
                 (
                     ViewId(3),
-                    ViewData {
-                        content: ContentId(0),
-                        selections: None,
-                        cursor_style: CursorStyle::Default,
-                    },
+                    text_view(
+                        ContentId(0),
+                        Selections::single(Selection::collapsed(CursorPos::origin())),
+                        CursorStyle::Default,
+                    ),
                 ),
             ]),
         };
@@ -509,23 +544,19 @@ mod tests {
             selections: HashMap::from([
                 (
                     ViewId(0),
-                    ViewData {
-                        content: ContentId(0),
-                        selections: Some(Selections::single(Selection::collapsed(
-                            CursorPos::origin(),
-                        ))),
-                        cursor_style: CursorStyle::Default,
-                    },
+                    text_view(
+                        ContentId(0),
+                        Selections::single(Selection::collapsed(CursorPos::origin())),
+                        CursorStyle::Default,
+                    ),
                 ),
                 (
                     ViewId(2),
-                    ViewData {
-                        content: ContentId(0),
-                        selections: Some(Selections::single(Selection::collapsed(
-                            CursorPos::origin(),
-                        ))),
-                        cursor_style: CursorStyle::Block,
-                    },
+                    text_view(
+                        ContentId(0),
+                        Selections::single(Selection::collapsed(CursorPos::origin())),
+                        CursorStyle::Block,
+                    ),
                 ),
             ]),
         };
