@@ -43,13 +43,14 @@ Terminal、WebPage 等 Content。
 ## 优先级 3：语义命令与适配能力
 
 **触发条件：** 一个 Mode 需要服务两种行为不同的 Content。  
-**状态：** 待触发。
+**状态：** 已完成（2026-07-13）。
 
-当前 Mode action 最终返回 Buffer 专属 EditCommand。后续应让 Mode 产生可由不同 Content
-解释的语义命令，并让 Content 明确返回 `Handled` 或 `NotHandled`。
+改进前，Mode action 最终返回 Buffer 专属 EditCommand。现已让 Mode 返回中立的
+`ContentCommand`，由目标 Content 结合自己的 `ContentViewState` 解释，并明确返回
+`Handled(ContentEffect)` 或 `NotHandled`。
 
-只有在需要提前展示“某 Content 可选哪些 Mode”时，才增加 capability 元数据。优先根据
-实际支持的命令或能力匹配，不维护易失真的具体 Content 类型 allowlist。
+当前不增加 capability 元数据，也不维护具体 Content 类型 allowlist。只有需要提前展示
+“某 Content 可选哪些 Mode”时，再基于实际命令支持能力增加查询契约。
 
 ## 优先级 4：运行时 Mode 标识
 

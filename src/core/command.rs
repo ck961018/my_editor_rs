@@ -71,7 +71,13 @@ pub enum EditCommand {
 
 impl From<EditCommand> for Command {
     fn from(command: EditCommand) -> Self {
-        Command::Content(ContentCommand::Edit(command))
+        Command::Content(command.into())
+    }
+}
+
+impl From<EditCommand> for ContentCommand {
+    fn from(command: EditCommand) -> Self {
+        Self::Edit(command)
     }
 }
 

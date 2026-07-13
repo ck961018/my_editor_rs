@@ -19,7 +19,9 @@ use crate::app::tasks::AppTasks;
 use crate::app::view::View;
 use crate::core::buffer::Buffer;
 use crate::core::command::AppCommand;
-use crate::core::content::{Content, ContentEffect, ContentEvent, ContentInput, SaveSnapshot};
+use crate::core::content::{
+    Content, ContentEffect, ContentEvent, ContentInput, ContentResult, SaveSnapshot,
+};
 use crate::core::content_store::ContentStore;
 use crate::core::mode::ModeRegistry;
 use crate::core::status_bar::StatusBar;
@@ -207,10 +209,10 @@ impl<F: Frontend> App<F> {
                 AppCommand::FocusNext | AppCommand::FocusPrev => {}
             },
             DispatchCommand::Content { command, content } => {
-                let effect = self
+                let result = self
                     .contents
                     .execute(content, ContentInput::Command(command));
-                self.handle_content_effect(content, effect);
+                self.handle_content_result(content, result);
             }
             DispatchCommand::ViewContent {
                 command,
@@ -226,20 +228,20 @@ impl<F: Frontend> App<F> {
                             .expect("mode command requires a view mode")
                             .execute(mode, action)
                         {
-                            Some(edit) => crate::core::command::ContentCommand::Edit(edit),
+                            Some(command) => command,
                             None => return Ok(()),
                         }
                     }
                     command => command,
                 };
-                let effect = self.contents.execute(
+                let result = self.contents.execute(
                     content,
                     ContentInput::View {
                         command,
                         state: view.state_mut(),
                     },
                 );
-                self.handle_content_effect(content, effect);
+                self.handle_content_result(content, result);
             }
             DispatchCommand::Noop => {}
         }
@@ -258,11 +260,11 @@ impl<F: Frontend> App<F> {
                     .remove(&content)
                     .expect("save completion must match a pending save");
                 assert_eq!(pending.revision, revision, "save revision mismatch");
-                let effect = self.contents.execute(
+                let result = self.contents.execute(
                     content,
                     ContentInput::Event(ContentEvent::SaveFinished { revision, result }),
                 );
-                self.handle_content_effect(content, effect);
+                self.handle_content_result(content, result);
                 if let Some(snapshot) = pending.queued {
                     self.spawn_save(content, snapshot);
                 }
@@ -271,8 +273,8 @@ impl<F: Frontend> App<F> {
         Ok(())
     }
 
-    fn handle_content_effect(&mut self, id: ContentId, effect: ContentEffect) {
-        if let ContentEffect::Save(snapshot) = effect {
+    fn handle_content_result(&mut self, id: ContentId, result: ContentResult) {
+        if let ContentResult::Handled(ContentEffect::Save(snapshot)) = result {
             self.spawn_save(id, snapshot);
         }
     }

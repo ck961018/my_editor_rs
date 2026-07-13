@@ -55,7 +55,7 @@ pub trait Mode {
     fn keymap(&self, state: &dyn ModeState) -> &Keymap;
     fn typing(&self, state: &dyn ModeState, key: KeyEvent) -> Option<Command>;
     fn cursor_style(&self, state: &dyn ModeState) -> CursorStyle;
-    fn execute(&self, state: &mut dyn ModeState, action: ModeActionId) -> Option<EditCommand>;
+    fn execute(&self, state: &mut dyn ModeState, action: ModeActionId) -> Option<ContentCommand>;
 }
 
 pub(crate) struct ModeRegistry {
@@ -116,7 +116,7 @@ impl ModeInstance {
         self.definition.cursor_style(self.state.as_ref())
     }
 
-    pub(crate) fn execute(&mut self, mode: ModeId, action: ModeActionId) -> Option<EditCommand> {
+    pub(crate) fn execute(&mut self, mode: ModeId, action: ModeActionId) -> Option<ContentCommand> {
         assert_eq!(
             self.definition.id(),
             mode,
@@ -168,7 +168,11 @@ impl ModeSet {
         mode: ModeId,
         action: ModeActionId,
     ) -> Option<EditCommand> {
-        instance.execute(mode, action)
+        match instance.execute(mode, action) {
+            Some(ContentCommand::Edit(edit)) => Some(edit),
+            None => None,
+            Some(command) => panic!("test helper expected edit command, got {command:?}"),
+        }
     }
 }
 
@@ -209,7 +213,7 @@ impl Mode for PlainEditMode {
         CursorStyle::Default
     }
 
-    fn execute(&self, _state: &mut dyn ModeState, _action: ModeActionId) -> Option<EditCommand> {
+    fn execute(&self, _state: &mut dyn ModeState, _action: ModeActionId) -> Option<ContentCommand> {
         None
     }
 }
@@ -286,7 +290,7 @@ impl Mode for VimMode {
         }
     }
 
-    fn execute(&self, state: &mut dyn ModeState, action: ModeActionId) -> Option<EditCommand> {
+    fn execute(&self, state: &mut dyn ModeState, action: ModeActionId) -> Option<ContentCommand> {
         match action.as_str() {
             "enter-insert" => {
                 self.state_mut(state).state = VimState::Insert;
@@ -298,35 +302,35 @@ impl Mode for VimMode {
             }
             "append" => {
                 self.state_mut(state).state = VimState::Insert;
-                Some(EditCommand::MoveRightBy(1))
+                Some(EditCommand::MoveRightBy(1).into())
             }
             "open-below" => {
                 self.state_mut(state).state = VimState::Insert;
-                Some(EditCommand::InsertNewLineBelow)
+                Some(EditCommand::InsertNewLineBelow.into())
             }
             "open-above" => {
                 self.state_mut(state).state = VimState::Insert;
-                Some(EditCommand::InsertNewLineAbove)
+                Some(EditCommand::InsertNewLineAbove.into())
             }
             "insert-at-first-non-blank" => {
                 self.state_mut(state).state = VimState::Insert;
-                Some(EditCommand::MoveToFirstNonBlank)
+                Some(EditCommand::MoveToFirstNonBlank.into())
             }
             "append-at-line-end" => {
                 self.state_mut(state).state = VimState::Insert;
-                Some(EditCommand::MoveAfterLineEnd)
+                Some(EditCommand::MoveAfterLineEnd.into())
             }
             "substitute-char" => {
                 self.state_mut(state).state = VimState::Insert;
-                Some(EditCommand::Delete(1))
+                Some(EditCommand::Delete(1).into())
             }
             "change-to-line-end" => {
                 self.state_mut(state).state = VimState::Insert;
-                Some(EditCommand::DeleteToLineEnd)
+                Some(EditCommand::DeleteToLineEnd.into())
             }
             "substitute-line" => {
                 self.state_mut(state).state = VimState::Insert;
-                Some(EditCommand::DeleteLineContent)
+                Some(EditCommand::DeleteLineContent.into())
             }
             _ => None,
         }
@@ -674,6 +678,17 @@ mod tests {
         assert_eq!(
             modes.resolve_key(&runtime, KeyEvent::char('x')),
             Some(EditCommand::InsertText("x".to_string()).into()),
+        );
+    }
+
+    #[test]
+    fn mode_action_returns_a_content_command() {
+        let registry = ModeRegistry::builtin();
+        let mut instance = registry.instantiate(ModeId::new("vim")).unwrap();
+
+        assert_eq!(
+            instance.execute(ModeId::new("vim"), ModeActionId::new("append")),
+            Some(ContentCommand::Edit(EditCommand::MoveRightBy(1)))
         );
     }
 

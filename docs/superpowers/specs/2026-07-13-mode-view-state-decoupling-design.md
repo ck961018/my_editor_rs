@@ -34,7 +34,7 @@ App
 
 ```text
 KeyEvent -> focused View.ModeInstance -> Command
-Mode action -> View.ModeInstance -> EditCommand -> Content + ContentViewState
+Mode action -> View.ModeInstance -> ContentCommand -> Content + ContentViewState
 ```
 
 Content 负责创建匹配的 `ContentViewState` 并声明默认 `ModeId`，App 不识别 Buffer、
@@ -49,7 +49,7 @@ selection 时执行文本 viewport 跟随、高亮和物理文本光标定位。
 ## 非目标
 
 - 不实现 mode stack、脚本 runtime、热重载或动态 `ModeId`。
-- 不改变 Mode 当前返回 `EditCommand` 的限制；语义命令和 capability 属于 roadmap 第三条。
+- 语义命令边界由后续的“语义 Content 命令与适配结果设计”完成；本设计不增加 capability。
 - 不引入独立 `ViewId` 或远程协议。
 - 不把静态 `ContentViewState` 改成 `Any` 或插件对象。
 

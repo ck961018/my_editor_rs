@@ -38,6 +38,12 @@ pub enum ContentEffect {
     Save(SaveSnapshot),
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum ContentResult {
+    Handled(ContentEffect),
+    NotHandled,
+}
+
 pub enum Content {
     Buffer(Buffer),
     StatusBar(StatusBar),
@@ -73,7 +79,7 @@ impl Content {
         }
     }
 
-    pub fn execute(&mut self, input: ContentInput<'_>) -> ContentEffect {
+    pub fn execute(&mut self, input: ContentInput<'_>) -> ContentResult {
         match (self, input) {
             (
                 Self::Buffer(buffer),
@@ -83,7 +89,7 @@ impl Content {
                 },
             ) => {
                 apply_edit(command, buffer, state.selections_mut());
-                ContentEffect::None
+                ContentResult::Handled(ContentEffect::None)
             }
             (
                 Self::Buffer(_),
@@ -114,17 +120,17 @@ impl Content {
                     state: ContentViewState::StatusBar,
                     ..
                 },
-            ) => ContentEffect::None,
+            ) => ContentResult::NotHandled,
             (Self::Buffer(buffer), ContentInput::Command(ContentCommand::Save)) => {
                 match buffer.path().cloned() {
-                    Some(path) => ContentEffect::Save(SaveSnapshot {
+                    Some(path) => ContentResult::Handled(ContentEffect::Save(SaveSnapshot {
                         path,
                         bytes: buffer.slice().to_string(),
                         revision: buffer.revision(),
-                    }),
+                    })),
                     None => {
                         buffer.set_status(StatusMessage::SaveFailed);
-                        ContentEffect::None
+                        ContentResult::Handled(ContentEffect::None)
                     }
                 }
             }
@@ -140,7 +146,7 @@ impl Content {
                     }
                     Err(_) => buffer.set_status(StatusMessage::SaveFailed),
                 }
-                ContentEffect::None
+                ContentResult::Handled(ContentEffect::None)
             }
             (
                 Self::Buffer(_),
@@ -150,7 +156,7 @@ impl Content {
                 },
             )
             | (Self::Buffer(_), ContentInput::Command(_))
-            | (Self::StatusBar(_), _) => ContentEffect::None,
+            | (Self::StatusBar(_), _) => ContentResult::NotHandled,
         }
     }
 }
@@ -208,5 +214,29 @@ mod tests {
             ContentViewState::StatusBar
         ));
         assert_eq!(content.default_mode(), None);
+    }
+
+    #[test]
+    fn contents_explicitly_report_command_support() {
+        let command = ContentCommand::Edit(EditCommand::MoveLeftBy(1));
+        let mut buffer = Content::Buffer(Buffer::new());
+        let mut buffer_state = buffer.create_view_state();
+        assert_eq!(
+            buffer.execute(ContentInput::View {
+                command: command.clone(),
+                state: &mut buffer_state,
+            }),
+            ContentResult::Handled(ContentEffect::None)
+        );
+
+        let mut status = Content::StatusBar(StatusBar::new(ContentId(0)));
+        let mut status_state = status.create_view_state();
+        assert_eq!(
+            status.execute(ContentInput::View {
+                command,
+                state: &mut status_state,
+            }),
+            ContentResult::NotHandled
+        );
     }
 }

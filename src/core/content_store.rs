@@ -40,11 +40,11 @@ impl ContentStore {
         &mut self,
         id: ContentId,
         input: crate::core::content::ContentInput<'_>,
-    ) -> crate::core::content::ContentEffect {
+    ) -> crate::core::content::ContentResult {
         self.contents
             .get_mut(&id)
             .map(|content| content.execute(input))
-            .unwrap_or(crate::core::content::ContentEffect::None)
+            .unwrap_or(crate::core::content::ContentResult::NotHandled)
     }
 
     pub fn query(&self, id: ContentId, query: ContentQuery) -> ContentData {
@@ -104,7 +104,7 @@ mod tests {
     use super::*;
     use crate::core::buffer::Buffer;
     use crate::core::command::{ContentCommand, EditCommand};
-    use crate::core::content::{Content, ContentEffect, ContentInput};
+    use crate::core::content::{Content, ContentEffect, ContentInput, ContentResult};
     use crate::core::status_bar::StatusBar;
     use crate::protocol::content_query::{ContentData, ContentQuery, RowRange};
     use crate::protocol::ids::ContentId;
@@ -124,7 +124,7 @@ mod tests {
             },
         );
 
-        assert_eq!(effect, ContentEffect::None);
+        assert_eq!(effect, ContentResult::Handled(ContentEffect::None));
         assert_eq!(
             store.query(id, ContentQuery::TextRows(RowRange { start: 0, end: 1 })),
             ContentData::TextRows(vec!["x".to_string()])
