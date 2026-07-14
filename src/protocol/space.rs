@@ -17,6 +17,7 @@ pub enum SpaceKind {
     Content { view: ViewId, focusable: bool },
 }
 
+#[allow(dead_code)] // 完整方向契约；当前接线尚未暴露所有 split 操作
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitDirection {
     Left,
