@@ -13,7 +13,7 @@ fn translate_modifiers(modifiers: CrosstermModifiers) -> KeyModifiers {
 }
 
 pub(crate) fn translate_key(key: CrosstermKey) -> KeyEvent {
-    let modifiers = translate_modifiers(key.modifiers);
+    let mut modifiers = translate_modifiers(key.modifiers);
     let code = match key.code {
         CrosstermCode::Char(character) if character.is_ascii_graphic() || character == ' ' => {
             let character = if modifiers.ctrl {
@@ -21,6 +21,9 @@ pub(crate) fn translate_key(key: CrosstermKey) -> KeyEvent {
             } else {
                 character
             };
+            // shift 的语义已编码在字符本身（大写字母或 shifted 符号），
+            // 剥离 shift 使其与 keymap 中无修饰键的 KeyEvent 绑定匹配。
+            modifiers.shift = false;
             KeyCode::Char(character)
         }
         CrosstermCode::Backspace => KeyCode::Backspace,
