@@ -180,14 +180,49 @@ mod tests {
     }
 
     #[test]
-    fn shift_char_and_enter_keep_shift_modifier() {
+    fn shift_char_strips_shift_modifier() {
         assert_eq!(
             super::translate_key(key(CrosstermCode::Char('a'), CrosstermModifiers::SHIFT)),
-            KeyEvent::modified(KeyCode::Char('a'), KeyModifiers::shift())
+            KeyEvent::char('a')
         );
+    }
+
+    #[test]
+    fn shift_enter_keeps_shift_modifier() {
         assert_eq!(
             super::translate_key(key(CrosstermCode::Enter, CrosstermModifiers::SHIFT)),
             KeyEvent::modified(KeyCode::Enter, KeyModifiers::shift())
+        );
+    }
+
+    #[test]
+    fn shift_uppercase_letter_strips_shift_modifier() {
+        assert_eq!(
+            super::translate_key(key(CrosstermCode::Char('A'), CrosstermModifiers::SHIFT)),
+            KeyEvent::char('A')
+        );
+    }
+
+    #[test]
+    fn shift_symbol_strips_shift_modifier() {
+        assert_eq!(
+            super::translate_key(key(CrosstermCode::Char('!'), CrosstermModifiers::SHIFT)),
+            KeyEvent::char('!')
+        );
+        assert_eq!(
+            super::translate_key(key(CrosstermCode::Char('~'), CrosstermModifiers::SHIFT)),
+            KeyEvent::char('~')
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_letter_keeps_ctrl_strips_shift() {
+        assert_eq!(
+            super::translate_key(key(
+                CrosstermCode::Char('S'),
+                CrosstermModifiers::CONTROL | CrosstermModifiers::SHIFT,
+            )),
+            KeyEvent::ctrl('s')
         );
     }
 
