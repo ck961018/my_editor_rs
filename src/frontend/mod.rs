@@ -5,6 +5,7 @@ use std::io;
 use crate::protocol::content_query::RenderQuery;
 use crate::protocol::frontend_event::FrontendEvent;
 use crate::protocol::ids::SpaceId;
+use crate::protocol::revision::Revision;
 use crate::protocol::scene::Scene;
 
 pub trait Frontend {
@@ -13,6 +14,7 @@ pub trait Frontend {
     fn render(
         &mut self,
         scene: &Scene,
+        scene_revision: Revision,
         query: &dyn RenderQuery,
         focused: SpaceId,
     ) -> io::Result<()>;

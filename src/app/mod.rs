@@ -313,6 +313,7 @@ impl<F: Frontend> App<F> {
         };
         self.frontend.render(
             &self.session.scene,
+            self.session.scene_revision,
             &query as &dyn RenderQuery,
             self.session.focused,
         )
@@ -607,7 +608,7 @@ mod tests {
     };
     use crate::protocol::frontend_event::ResizeEvent;
     use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
-    use crate::protocol::remote::Revision;
+    use crate::protocol::revision::Revision;
     use crate::protocol::selection::TextOffset;
     use crate::protocol::space::{Sizing, SplitDirection};
     use crate::protocol::status::StatusMessage;
@@ -616,6 +617,7 @@ mod tests {
     struct ScriptedFrontend {
         events: VecDeque<FrontendEvent>,
         renders: usize,
+        scene_revisions: Vec<Revision>,
     }
 
     impl ScriptedFrontend {
@@ -623,6 +625,7 @@ mod tests {
             Self {
                 events: events.into(),
                 renders: 0,
+                scene_revisions: Vec::new(),
             }
         }
     }
@@ -635,10 +638,12 @@ mod tests {
         fn render(
             &mut self,
             _scene: &Scene,
+            scene_revision: Revision,
             _query: &dyn RenderQuery,
             _focused: SpaceId,
         ) -> io::Result<()> {
             self.renders += 1;
+            self.scene_revisions.push(scene_revision);
             Ok(())
         }
     }
@@ -940,6 +945,17 @@ mod tests {
         assert_eq!(app.session.scene_revision, Revision(1));
     }
 
+    #[test]
+    fn render_passes_current_scene_revision_to_frontend() {
+        let mut app = make_app(vec![], None);
+        app.set_space_sizing(app.session.focused, Sizing::Fixed(12))
+            .unwrap();
+
+        app.render().unwrap();
+
+        assert_eq!(app.frontend.scene_revisions, vec![Revision(1)]);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn edit_commands_advance_view_and_content_revisions() {
         let mut app = make_app(vec![], None);
@@ -954,6 +970,7 @@ mod tests {
 
         assert!(app.session.views[&view].revision() > Revision(0));
         assert!(app.kernel.contents.revision(editor_cid()).unwrap() > Revision(0));
+        assert_eq!(app.session.scene_revision, Revision(0));
     }
 
     #[test]

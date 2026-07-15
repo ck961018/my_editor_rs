@@ -2,18 +2,10 @@
 
 use crate::protocol::content_query::{ContentData, ContentQuery, ViewData};
 use crate::protocol::ids::{ContentId, ViewId};
+use crate::protocol::revision::Revision;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RequestId(pub u64);
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Revision(pub u64);
-
-impl Revision {
-    pub fn next(&mut self) {
-        self.0 = self.0.checked_add(1).expect("revision overflow");
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProtocolVersion {
@@ -218,14 +210,6 @@ mod tests {
         let error = require_capability(&welcome, Capability::ContentQuery).unwrap_err();
 
         assert_eq!(error.code, ProtocolErrorCode::MissingCapability);
-    }
-
-    #[test]
-    fn revision_is_monotonic() {
-        let mut revision = Revision::default();
-        revision.next();
-        revision.next();
-        assert_eq!(revision, Revision(2));
     }
 
     #[test]

@@ -4,12 +4,15 @@ use taffy::prelude::*;
 
 use crate::protocol::geometry::{Rect, Size as SceneSize};
 use crate::protocol::ids::SpaceId;
+use crate::protocol::revision::Revision;
 use crate::protocol::scene::{Scene, SpaceNode};
 use crate::protocol::space::{Align, Arrangement, Axis, Sizing, SpaceKind};
 use crate::tui::resolved::{RenderItem, ResolvedScene};
 
 pub struct TaffyEngine {
     tree: TaffyTree,
+    cached_revision: Option<Revision>,
+    cached_scene: Option<ResolvedScene>,
 }
 
 struct CollectOut {
@@ -21,24 +24,35 @@ impl TaffyEngine {
     pub fn new() -> Self {
         Self {
             tree: TaffyTree::new(),
+            cached_revision: None,
+            cached_scene: None,
         }
     }
 
-    pub fn layout(&mut self, scene: &Scene) -> ResolvedScene {
-        self.tree = TaffyTree::new();
-        let mut map: HashMap<SpaceId, NodeId> = HashMap::new();
-        let root_node = self.build_node(scene, scene.root(), None, Some(scene.size), &mut map);
-        let available = Size {
-            width: AvailableSpace::Definite(scene.size.width as f32),
-            height: AvailableSpace::Definite(scene.size.height as f32),
-        };
-        let _ = self.tree.compute_layout(root_node, available);
-        let mut out = CollectOut {
-            items: Vec::new(),
-            order: 0,
-        };
-        self.collect(scene, scene.root(), None, &map, &mut out);
-        ResolvedScene { items: out.items }
+    pub fn layout(&mut self, scene: &Scene, revision: Revision) -> &ResolvedScene {
+        if self.cached_revision != Some(revision) {
+            self.tree = TaffyTree::new();
+            let mut map: HashMap<SpaceId, NodeId> = HashMap::new();
+            let root_node = self.build_node(scene, scene.root(), None, Some(scene.size), &mut map);
+            let available = Size {
+                width: AvailableSpace::Definite(scene.size.width as f32),
+                height: AvailableSpace::Definite(scene.size.height as f32),
+            };
+            self.tree
+                .compute_layout(root_node, available)
+                .expect("taffy layout computation failed");
+            let mut out = CollectOut {
+                items: Vec::new(),
+                order: 0,
+            };
+            self.collect(scene, scene.root(), None, &map, &mut out);
+            self.cached_scene = Some(ResolvedScene { items: out.items });
+            self.cached_revision = Some(revision);
+        }
+
+        self.cached_scene
+            .as_ref()
+            .expect("layout cache initialized for revision")
     }
 
     fn build_node(
@@ -180,9 +194,9 @@ mod tests {
     fn editor_grows_and_status_fixed() {
         let (scene, _) = editor_scene(80, 24, ViewId(0), ViewId(1));
         let mut engine = TaffyEngine::new();
-        let resolved = engine.layout(&scene);
+        let resolved = engine.layout(&scene, Revision(0));
         assert_eq!(
-            item_for(&resolved, ViewId(0)).rect,
+            item_for(resolved, ViewId(0)).rect,
             Rect {
                 x: 0,
                 y: 0,
@@ -191,7 +205,7 @@ mod tests {
             }
         );
         assert_eq!(
-            item_for(&resolved, ViewId(1)).rect,
+            item_for(resolved, ViewId(1)).rect,
             Rect {
                 x: 0,
                 y: 23,
@@ -205,7 +219,7 @@ mod tests {
     fn items_in_dfs_order() {
         let (scene, _) = editor_scene(80, 24, ViewId(0), ViewId(1));
         let mut engine = TaffyEngine::new();
-        let resolved = engine.layout(&scene);
+        let resolved = engine.layout(&scene, Revision(0));
         assert_eq!(resolved.items.len(), 2); // 仅 Content 进 items（container 不进）
         assert_eq!(resolved.items[0].view_id, ViewId(0));
         assert_eq!(resolved.items[1].view_id, ViewId(1));
@@ -217,9 +231,9 @@ mod tests {
         scene.size.width = 100;
         scene.size.height = 40;
         let mut engine = TaffyEngine::new();
-        let resolved = engine.layout(&scene);
-        assert_eq!(item_for(&resolved, ViewId(0)).rect.height, 39);
-        assert_eq!(item_for(&resolved, ViewId(0)).rect.width, 100);
+        let resolved = engine.layout(&scene, Revision(0));
+        assert_eq!(item_for(resolved, ViewId(0)).rect.height, 39);
+        assert_eq!(item_for(resolved, ViewId(0)).rect.width, 100);
     }
 
     #[test]
@@ -227,7 +241,7 @@ mod tests {
         let (scene, left, right) = split_editor_scene(20, 2, ViewId(0), ViewId(1), ViewId(2));
 
         let mut engine = TaffyEngine::new();
-        let resolved = engine.layout(&scene);
+        let resolved = engine.layout(&scene, Revision(0));
 
         let sources: Vec<_> = resolved
             .items
@@ -236,5 +250,32 @@ mod tests {
             .map(|item| (item.view_id, item.space_id))
             .collect();
         assert_eq!(sources, vec![(ViewId(0), left), (ViewId(2), right)]);
+    }
+
+    #[test]
+    fn scene_revision_is_the_only_layout_invalidation_key() {
+        let (mut scene, _) = editor_scene(80, 24, ViewId(0), ViewId(1));
+        let mut engine = TaffyEngine::new();
+
+        assert_eq!(
+            item_for(engine.layout(&scene, Revision(0)), ViewId(0))
+                .rect
+                .width,
+            80
+        );
+
+        scene.size.width = 100;
+        assert_eq!(
+            item_for(engine.layout(&scene, Revision(0)), ViewId(0))
+                .rect
+                .width,
+            80
+        );
+        assert_eq!(
+            item_for(engine.layout(&scene, Revision(1)), ViewId(0))
+                .rect
+                .width,
+            100
+        );
     }
 }

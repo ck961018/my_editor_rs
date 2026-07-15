@@ -4,7 +4,7 @@
 use crate::core::content_view_state::ContentViewState;
 use crate::core::mode::ModeInstance;
 use crate::protocol::ids::ContentId;
-use crate::protocol::remote::Revision;
+use crate::protocol::revision::Revision;
 use crate::protocol::selection::Selections;
 
 pub struct View {

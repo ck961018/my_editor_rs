@@ -4,7 +4,7 @@ use crate::app::dispatcher::Dispatcher;
 use crate::app::scene_model::SceneBuilder;
 use crate::app::view::View;
 use crate::protocol::ids::{SpaceId, ViewId};
-use crate::protocol::remote::Revision;
+use crate::protocol::revision::Revision;
 use crate::protocol::scene::Scene;
 
 pub(super) struct ClientSession {

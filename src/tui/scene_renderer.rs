@@ -8,6 +8,7 @@ use crate::protocol::content_query::{
     ContentData, ContentQuery, RenderQuery, RowRange, TextPresentation, ViewData, ViewPresentation,
 };
 use crate::protocol::ids::{SpaceId, ViewId};
+use crate::protocol::revision::Revision;
 use crate::protocol::scene::Scene;
 use crate::protocol::selection::{TextOffset, TextPoint};
 use crate::protocol::status::StatusMessage;
@@ -38,11 +39,12 @@ impl SceneRenderer {
     pub fn render(
         &mut self,
         scene: &Scene,
+        scene_revision: Revision,
         query: &dyn RenderQuery,
         focused: SpaceId,
         canvas: &mut dyn Canvas,
     ) -> io::Result<()> {
-        let resolved: ResolvedScene = self.engine.layout(scene);
+        let resolved: &ResolvedScene = self.engine.layout(scene, scene_revision);
         let views: HashMap<ViewId, ViewData> = resolved
             .items
             .iter()
@@ -511,7 +513,13 @@ mod tests {
         let mut renderer = SceneRenderer::new();
         let mut out = Output::new(Vec::new());
         renderer
-            .render(&scene, &query, left, &mut out as &mut dyn Canvas)
+            .render(
+                &scene,
+                Revision(0),
+                &query,
+                left,
+                &mut out as &mut dyn Canvas,
+            )
             .unwrap();
         let output = String::from_utf8(out.into_inner()).unwrap();
 
@@ -553,7 +561,13 @@ mod tests {
         let mut out = Output::new(Vec::new());
 
         renderer
-            .render(&scene, &query, right, &mut out as &mut dyn Canvas)
+            .render(
+                &scene,
+                Revision(0),
+                &query,
+                right,
+                &mut out as &mut dyn Canvas,
+            )
             .unwrap();
 
         assert_eq!(renderer.viewports.get(&ViewId(0)), Some(&saved_viewport));
@@ -592,14 +606,26 @@ mod tests {
 
         let mut right_out = Output::new(Vec::new());
         renderer
-            .render(&scene, &query, right, &mut right_out as &mut dyn Canvas)
+            .render(
+                &scene,
+                Revision(0),
+                &query,
+                right,
+                &mut right_out as &mut dyn Canvas,
+            )
             .unwrap();
         let right_output = String::from_utf8(right_out.into_inner()).unwrap();
         assert!(right_output.contains("\x1b[2 q"), "right: {right_output}");
 
         let mut left_out = Output::new(Vec::new());
         renderer
-            .render(&scene, &query, left, &mut left_out as &mut dyn Canvas)
+            .render(
+                &scene,
+                Revision(0),
+                &query,
+                left,
+                &mut left_out as &mut dyn Canvas,
+            )
             .unwrap();
         let left_output = String::from_utf8(left_out.into_inner()).unwrap();
         assert!(left_output.contains("\x1b[0 q"), "left: {left_output}");
@@ -616,7 +642,7 @@ mod tests {
         };
         let mut r = SceneRenderer::new();
         let mut out = Output::new(Vec::new());
-        r.render(&scene, &query, ed, &mut out as &mut dyn Canvas)
+        r.render(&scene, Revision(0), &query, ed, &mut out as &mut dyn Canvas)
             .unwrap();
         let s = String::from_utf8(out.into_inner()).unwrap();
         assert!(s.contains("hello"), "{s}");
@@ -641,7 +667,7 @@ mod tests {
         };
         let mut r = SceneRenderer::new();
         let mut out = Output::new(Vec::new());
-        r.render(&scene, &query, ed, &mut out as &mut dyn Canvas)
+        r.render(&scene, Revision(0), &query, ed, &mut out as &mut dyn Canvas)
             .unwrap();
         let s = String::from_utf8(out.into_inner()).unwrap();
         assert!(s.contains("line25"), "{s}");
@@ -661,7 +687,7 @@ mod tests {
         };
         let mut r = SceneRenderer::new();
         let mut out = Output::new(Vec::new());
-        r.render(&scene, &query, ed, &mut out as &mut dyn Canvas)
+        r.render(&scene, Revision(0), &query, ed, &mut out as &mut dyn Canvas)
             .unwrap();
         let s = String::from_utf8(out.into_inner()).unwrap();
         assert!(s.contains("\x1b[7m"), "should contain reverse-on: {s}");
@@ -678,7 +704,7 @@ mod tests {
         };
         let mut r = SceneRenderer::new();
         let mut out = Output::new(Vec::new());
-        r.render(&scene, &query, ed, &mut out as &mut dyn Canvas)
+        r.render(&scene, Revision(0), &query, ed, &mut out as &mut dyn Canvas)
             .unwrap();
         let s = String::from_utf8(out.into_inner()).unwrap();
         assert!(!s.contains("\x1b[7m"), "collapsed should not reverse: {s}");
@@ -698,7 +724,7 @@ mod tests {
         };
         let mut r = SceneRenderer::new();
         let mut out = Output::new(Vec::new());
-        r.render(&scene, &query, ed, &mut out as &mut dyn Canvas)
+        r.render(&scene, Revision(0), &query, ed, &mut out as &mut dyn Canvas)
             .unwrap();
         let s = String::from_utf8(out.into_inner()).unwrap();
         let count = s.matches("\x1b[7m").count();
@@ -720,7 +746,7 @@ mod tests {
         };
         let mut r = SceneRenderer::new();
         let mut out = Output::new(Vec::new());
-        r.render(&scene, &q1, ed, &mut out as &mut dyn Canvas)
+        r.render(&scene, Revision(0), &q1, ed, &mut out as &mut dyn Canvas)
             .unwrap();
         // 第二次：selection 跨 row 0-25，head 在 row 25 维持 viewport（top_row=21）
         // line0..line29 每行 5 chars + \n = 6 chars；row25 col0 → char_index=150
@@ -733,7 +759,7 @@ mod tests {
             }),
         };
         let mut out2 = Output::new(Vec::new());
-        r.render(&scene, &q2, ed, &mut out2 as &mut dyn Canvas)
+        r.render(&scene, Revision(0), &q2, ed, &mut out2 as &mut dyn Canvas)
             .unwrap();
         let s = String::from_utf8(out2.into_inner()).unwrap();
         assert!(
@@ -758,7 +784,13 @@ mod tests {
         let mut out = Output::new(Vec::new());
 
         renderer
-            .render(&scene, &query, editor, &mut out as &mut dyn Canvas)
+            .render(
+                &scene,
+                Revision(0),
+                &query,
+                editor,
+                &mut out as &mut dyn Canvas,
+            )
             .unwrap();
 
         let output = String::from_utf8(out.into_inner()).unwrap();
@@ -781,7 +813,13 @@ mod tests {
         };
         let mut first = Output::new(Vec::new());
         renderer
-            .render(&scene, &right_query, editor, &mut first as &mut dyn Canvas)
+            .render(
+                &scene,
+                Revision(0),
+                &right_query,
+                editor,
+                &mut first as &mut dyn Canvas,
+            )
             .unwrap();
 
         let left_query = StubQuery {
@@ -791,7 +829,13 @@ mod tests {
         };
         let mut second = Output::new(Vec::new());
         renderer
-            .render(&scene, &left_query, editor, &mut second as &mut dyn Canvas)
+            .render(
+                &scene,
+                Revision(0),
+                &left_query,
+                editor,
+                &mut second as &mut dyn Canvas,
+            )
             .unwrap();
 
         let output = String::from_utf8(second.into_inner()).unwrap();
@@ -815,7 +859,13 @@ mod tests {
         let mut out = Output::new(Vec::new());
 
         renderer
-            .render(&scene, &query, editor, &mut out as &mut dyn Canvas)
+            .render(
+                &scene,
+                Revision(0),
+                &query,
+                editor,
+                &mut out as &mut dyn Canvas,
+            )
             .unwrap();
 
         let output = String::from_utf8(out.into_inner()).unwrap();
@@ -839,7 +889,13 @@ mod tests {
         let mut out = Output::new(Vec::new());
 
         renderer
-            .render(&scene, &query, editor, &mut out as &mut dyn Canvas)
+            .render(
+                &scene,
+                Revision(0),
+                &query,
+                editor,
+                &mut out as &mut dyn Canvas,
+            )
             .unwrap();
 
         let output = String::from_utf8(out.into_inner()).unwrap();

@@ -59,7 +59,8 @@ mod tests {
     use crate::core::content_store::ContentStore;
     use crate::protocol::content_query::{ContentQuery, RowRange, ViewPresentation};
     use crate::protocol::ids::{ContentId, ViewId};
-    use crate::protocol::remote::{RequestId, Revision};
+    use crate::protocol::remote::RequestId;
+    use crate::protocol::revision::Revision;
 
     struct Fixture {
         contents: ContentStore,

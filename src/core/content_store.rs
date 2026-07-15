@@ -8,7 +8,7 @@ use crate::protocol::content_query::{
     ContentData, ContentQuery, DocumentStatus, RowRange, StatusBarData,
 };
 use crate::protocol::ids::ContentId;
-use crate::protocol::remote::Revision;
+use crate::protocol::revision::Revision;
 use crate::protocol::status::StatusMessage;
 
 #[derive(Default)]

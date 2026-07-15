@@ -6,6 +6,7 @@ use crate::frontend::Frontend;
 use crate::protocol::content_query::RenderQuery;
 use crate::protocol::frontend_event::FrontendEvent;
 use crate::protocol::ids::SpaceId;
+use crate::protocol::revision::Revision;
 use crate::protocol::scene::Scene;
 use crate::terminal::input::Input;
 use crate::terminal::output::{Canvas, Output};
@@ -34,10 +35,16 @@ impl<W: io::Write> Frontend for TuiFrontend<W> {
     fn render(
         &mut self,
         scene: &Scene,
+        scene_revision: Revision,
         query: &dyn RenderQuery,
         focused: SpaceId,
     ) -> io::Result<()> {
-        self.renderer
-            .render(scene, query, focused, &mut self.output as &mut dyn Canvas)
+        self.renderer.render(
+            scene,
+            scene_revision,
+            query,
+            focused,
+            &mut self.output as &mut dyn Canvas,
+        )
     }
 }
