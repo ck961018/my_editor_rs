@@ -2008,6 +2008,85 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn vim_visual_counted_motion_then_delete_removes_selected_range() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::char('c')),
+                FrontendEvent::Key(KeyEvent::char('d')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('0')),
+                FrontendEvent::Key(KeyEvent::char('v')),
+                FrontendEvent::Key(KeyEvent::char('2')),
+                FrontendEvent::Key(KeyEvent::char('l')),
+                FrontendEvent::Key(KeyEvent::char('d')),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+
+        app.run().await.unwrap();
+
+        assert_eq!(text_rows(&app, editor_cid()), vec!["cd"]);
+        let selection = view_at(&app, app.session.focused)
+            .selections()
+            .unwrap()
+            .primary();
+        assert_eq!(selection.head.char_index, 0);
+        assert_eq!(selection.anchor, selection.head);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vim_visual_delete_without_motion_removes_current_char() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('0')),
+                FrontendEvent::Key(KeyEvent::char('v')),
+                FrontendEvent::Key(KeyEvent::char('d')),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+
+        app.run().await.unwrap();
+
+        assert_eq!(text_rows(&app, editor_cid()), vec!["b"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vim_visual_change_and_insert_is_one_undo_unit() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::char('c')),
+                FrontendEvent::Key(KeyEvent::char('d')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('0')),
+                FrontendEvent::Key(KeyEvent::char('v')),
+                FrontendEvent::Key(KeyEvent::char('l')),
+                FrontendEvent::Key(KeyEvent::char('c')),
+                FrontendEvent::Key(KeyEvent::char('X')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('u')),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+
+        app.run().await.unwrap();
+
+        assert_eq!(text_rows(&app, editor_cid()), vec!["abcd"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn vim_normal_h_moves_left_after_insert() {
         let mut app = make_app(
             vec![

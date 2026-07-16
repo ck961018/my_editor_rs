@@ -345,6 +345,8 @@ impl Mode for PlainEditMode {
 enum VimState {
     Normal,
     Insert,
+    // Charwise Visual 复用全局半开 selection；不在 mode state 复制 anchor/head。
+    Visual,
 }
 
 struct VimModeState {
@@ -370,11 +372,16 @@ struct VimMode {
     actions: Vec<ModeActionName>,
     normal_keymap: Keymap,
     insert_keymap: Keymap,
+    visual_keymap: Keymap,
 }
 
-const VIM_ACTION_NAMES: [&str; 27] = [
+const VIM_ACTION_NAMES: [&str; 40] = [
     "enter-insert",
     "enter-normal",
+    "toggle-visual",
+    "leave-visual",
+    "delete-selection",
+    "change-selection",
     "append",
     "open-below",
     "open-above",
@@ -387,6 +394,15 @@ const VIM_ACTION_NAMES: [&str; 27] = [
     "move-down",
     "move-up",
     "move-right",
+    "move-word-forward",
+    "move-word-backward",
+    "move-word-end",
+    "move-line-start",
+    "move-first-non-blank",
+    "move-line-end",
+    "move-last-line",
+    "move-prev-paragraph",
+    "move-next-paragraph",
     "goto-line",
     "find-forward",
     "find-backward",
@@ -412,6 +428,7 @@ impl VimMode {
                 .collect(),
             normal_keymap: vim_normal_keymap(),
             insert_keymap: vim_insert_keymap(),
+            visual_keymap: vim_visual_keymap(),
         }
     }
 
@@ -449,6 +466,14 @@ fn append_count(count: Option<usize>, digit: usize) -> usize {
     count.unwrap_or(0).saturating_mul(10).saturating_add(digit)
 }
 
+fn repeat_edit_command(command: EditCommand, count: usize) -> ContentCommand {
+    let count = count.max(1);
+    if count == 1 {
+        return command.into();
+    }
+    ContentCommand::Sequence((0..count).map(|_| command.clone().into()).collect())
+}
+
 impl Mode for VimMode {
     fn name(&self) -> &ModeName {
         &self.name
@@ -469,6 +494,7 @@ impl Mode for VimMode {
         match self.state(state).state {
             VimState::Normal => &self.normal_keymap,
             VimState::Insert => &self.insert_keymap,
+            VimState::Visual => &self.visual_keymap,
         }
     }
 
@@ -478,6 +504,7 @@ impl Mode for VimMode {
             VimState::Insert => key
                 .is_plain_char()
                 .map(|ch| EditCommand::InsertText(ch.to_string()).into()),
+            VimState::Visual => None,
         }
     }
 
@@ -512,14 +539,28 @@ impl Mode for VimMode {
                     state.pending = Some(VimPending::Count(count));
                     InputDecision::Pass
                 }
+                Some('b' | 'e' | '^' | '$' | 'G' | '{' | '}')
+                    if state.state == VimState::Visual =>
+                {
+                    state.pending = Some(VimPending::Count(count));
+                    InputDecision::Pass
+                }
                 _ => InputDecision::Consumed,
             },
             VimPending::Find { direction, count } => match key.is_plain_char() {
                 Some(target) => InputDecision::Emit(
-                    EditCommand::MoveToChar {
-                        target,
-                        direction,
-                        occurrence: count,
+                    if state.state == VimState::Visual {
+                        EditCommand::ExtendToChar {
+                            target,
+                            direction,
+                            occurrence: count,
+                        }
+                    } else {
+                        EditCommand::MoveToChar {
+                            target,
+                            direction,
+                            occurrence: count,
+                        }
                     }
                     .into(),
                 ),
@@ -593,7 +634,7 @@ impl Mode for VimMode {
 
     fn cursor_style(&self, state: &dyn ModeState) -> CursorStyle {
         match self.state(state).state {
-            VimState::Normal => CursorStyle::Block,
+            VimState::Normal | VimState::Visual => CursorStyle::Block,
             VimState::Insert => CursorStyle::Bar,
         }
     }
@@ -611,6 +652,25 @@ impl Mode for VimMode {
             "enter-normal" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Normal);
                 Some(ContentCommand::Transaction(TransactionCommand::Commit))
+            }
+            "toggle-visual" => {
+                Self::set_editor_state(self.state_mut(state), VimState::Visual);
+                None
+            }
+            "leave-visual" => {
+                Self::set_editor_state(self.state_mut(state), VimState::Normal);
+                Some(EditCommand::CollapseSelections.into())
+            }
+            "delete-selection" => {
+                Self::set_editor_state(self.state_mut(state), VimState::Normal);
+                Some(EditCommand::Delete(1).into())
+            }
+            "change-selection" => {
+                Self::set_editor_state(self.state_mut(state), VimState::Insert);
+                Some(ContentCommand::Sequence(vec![
+                    ContentCommand::Transaction(TransactionCommand::Begin),
+                    EditCommand::Delete(1).into(),
+                ]))
             }
             "append" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
@@ -668,30 +728,173 @@ impl Mode for VimMode {
                     EditCommand::DeleteLineContent.into(),
                 ]))
             }
-            "move-left" => Some(
-                EditCommand::MoveWithinLineLeftBy(
-                    Self::take_count(self.state_mut(state)).unwrap_or(1),
-                )
-                .into(),
-            ),
-            "move-down" => Some(
-                EditCommand::MoveDownBy(Self::take_count(self.state_mut(state)).unwrap_or(1))
+            "move-left" => {
+                let state = self.state_mut(state);
+                let count = Self::take_count(state).unwrap_or(1);
+                Some(
+                    if state.state == VimState::Visual {
+                        EditCommand::ExtendWithinLineLeftBy(count)
+                    } else {
+                        EditCommand::MoveWithinLineLeftBy(count)
+                    }
                     .into(),
-            ),
-            "move-up" => Some(
-                EditCommand::MoveUpBy(Self::take_count(self.state_mut(state)).unwrap_or(1)).into(),
-            ),
-            "move-right" => Some(
-                EditCommand::MoveWithinLineRightBy(
-                    Self::take_count(self.state_mut(state)).unwrap_or(1),
                 )
-                .into(),
-            ),
+            }
+            "move-down" => {
+                let state = self.state_mut(state);
+                let count = Self::take_count(state).unwrap_or(1);
+                Some(
+                    if state.state == VimState::Visual {
+                        EditCommand::ExtendDownBy(count)
+                    } else {
+                        EditCommand::MoveDownBy(count)
+                    }
+                    .into(),
+                )
+            }
+            "move-up" => {
+                let state = self.state_mut(state);
+                let count = Self::take_count(state).unwrap_or(1);
+                Some(
+                    if state.state == VimState::Visual {
+                        EditCommand::ExtendUpBy(count)
+                    } else {
+                        EditCommand::MoveUpBy(count)
+                    }
+                    .into(),
+                )
+            }
+            "move-right" => {
+                let state = self.state_mut(state);
+                let count = Self::take_count(state).unwrap_or(1);
+                Some(
+                    if state.state == VimState::Visual {
+                        EditCommand::ExtendWithinLineRightBy(count)
+                    } else {
+                        EditCommand::MoveWithinLineRightBy(count)
+                    }
+                    .into(),
+                )
+            }
+            "move-word-forward" => {
+                let state = self.state_mut(state);
+                let count = Self::take_count(state).unwrap_or(1);
+                Some(repeat_edit_command(
+                    if state.state == VimState::Visual {
+                        EditCommand::ExtendWordForward
+                    } else {
+                        EditCommand::MoveWordForward
+                    },
+                    count,
+                ))
+            }
+            "move-word-backward" => {
+                let state = self.state_mut(state);
+                let count = Self::take_count(state).unwrap_or(1);
+                Some(repeat_edit_command(
+                    if state.state == VimState::Visual {
+                        EditCommand::ExtendWordBackward
+                    } else {
+                        EditCommand::MoveWordBackward
+                    },
+                    count,
+                ))
+            }
+            "move-word-end" => {
+                let state = self.state_mut(state);
+                let count = Self::take_count(state).unwrap_or(1);
+                Some(repeat_edit_command(
+                    if state.state == VimState::Visual {
+                        EditCommand::ExtendWordEnd
+                    } else {
+                        EditCommand::MoveWordEnd
+                    },
+                    count,
+                ))
+            }
+            "move-line-start" => {
+                let state = self.state_mut(state);
+                Self::take_count(state);
+                Some(
+                    if state.state == VimState::Visual {
+                        EditCommand::ExtendToLineStart
+                    } else {
+                        EditCommand::MoveToLineStart
+                    }
+                    .into(),
+                )
+            }
+            "move-first-non-blank" => {
+                let state = self.state_mut(state);
+                Self::take_count(state);
+                Some(
+                    if state.state == VimState::Visual {
+                        EditCommand::ExtendToFirstNonBlank
+                    } else {
+                        EditCommand::MoveToFirstNonBlank
+                    }
+                    .into(),
+                )
+            }
+            "move-line-end" => {
+                let state = self.state_mut(state);
+                Self::take_count(state);
+                Some(
+                    if state.state == VimState::Visual {
+                        EditCommand::ExtendToLineEnd
+                    } else {
+                        EditCommand::MoveToLineEnd
+                    }
+                    .into(),
+                )
+            }
+            "move-last-line" => {
+                let state = self.state_mut(state);
+                Self::take_count(state);
+                Some(
+                    if state.state == VimState::Visual {
+                        EditCommand::ExtendToLastLine
+                    } else {
+                        EditCommand::MoveToLastLine
+                    }
+                    .into(),
+                )
+            }
+            "move-prev-paragraph" => {
+                let state = self.state_mut(state);
+                Self::take_count(state);
+                Some(
+                    if state.state == VimState::Visual {
+                        EditCommand::ExtendToPrevParagraph
+                    } else {
+                        EditCommand::MoveToPrevParagraph
+                    }
+                    .into(),
+                )
+            }
+            "move-next-paragraph" => {
+                let state = self.state_mut(state);
+                Self::take_count(state);
+                Some(
+                    if state.state == VimState::Visual {
+                        EditCommand::ExtendToNextParagraph
+                    } else {
+                        EditCommand::MoveToNextParagraph
+                    }
+                    .into(),
+                )
+            }
             "goto-line" => {
-                let line_index = Self::take_count(self.state_mut(state))
-                    .unwrap_or(1)
-                    .saturating_sub(1);
-                Some(EditCommand::MoveToLine { line_index }.into())
+                let state = self.state_mut(state);
+                let line_index = Self::take_count(state).unwrap_or(1).saturating_sub(1);
+                Some(
+                    if state.state == VimState::Visual {
+                        EditCommand::ExtendToLine { line_index }
+                    } else {
+                        EditCommand::MoveToLine { line_index }
+                    }
+                    .into(),
+                )
             }
             "find-forward" | "find-backward" => {
                 let state = self.state_mut(state);
@@ -834,6 +1037,7 @@ fn vim_normal_keymap() -> Keymap {
     km.bind(KeyEvent::char('S'), vim_mode_command("substitute-line"));
     km.bind(KeyEvent::char('i'), vim_mode_command("enter-insert"));
     km.bind(KeyEvent::char('a'), vim_mode_command("append"));
+    km.bind(KeyEvent::char('v'), vim_mode_command("toggle-visual"));
     km.bind(
         [KeyEvent::char('g'), KeyEvent::char('g')],
         vim_mode_command("goto-line"),
@@ -848,6 +1052,63 @@ fn vim_normal_keymap() -> Keymap {
         );
     }
     km.bind(KeyEvent::plain(KeyCode::Escape), Command::Noop);
+    km
+}
+
+fn vim_visual_keymap() -> Keymap {
+    let mut km = Keymap::new();
+    km.bind(KeyEvent::char('h'), vim_mode_command("move-left"));
+    km.bind(KeyEvent::char('j'), vim_mode_command("move-down"));
+    km.bind(KeyEvent::char('k'), vim_mode_command("move-up"));
+    km.bind(KeyEvent::char('l'), vim_mode_command("move-right"));
+    km.bind(KeyEvent::char('w'), vim_mode_command("move-word-forward"));
+    km.bind(KeyEvent::char('b'), vim_mode_command("move-word-backward"));
+    km.bind(KeyEvent::char('e'), vim_mode_command("move-word-end"));
+    km.bind(KeyEvent::char('0'), vim_mode_command("move-line-start"));
+    km.bind(
+        KeyEvent::char('^'),
+        vim_mode_command("move-first-non-blank"),
+    );
+    km.bind(KeyEvent::char('$'), vim_mode_command("move-line-end"));
+    km.bind(KeyEvent::char('G'), vim_mode_command("move-last-line"));
+    km.bind(KeyEvent::char('{'), vim_mode_command("move-prev-paragraph"));
+    km.bind(KeyEvent::char('}'), vim_mode_command("move-next-paragraph"));
+    km.bind(
+        [KeyEvent::char('g'), KeyEvent::char('g')],
+        vim_mode_command("goto-line"),
+    );
+    km.bind(KeyEvent::char('f'), vim_mode_command("find-forward"));
+    km.bind(KeyEvent::char('F'), vim_mode_command("find-backward"));
+    for key in ['d', 'x', 'D', 'X'] {
+        km.bind(KeyEvent::char(key), vim_mode_command("delete-selection"));
+    }
+    for key in ['c', 's'] {
+        km.bind(KeyEvent::char(key), vim_mode_command("change-selection"));
+    }
+    km.bind(KeyEvent::char('v'), vim_mode_command("leave-visual"));
+    km.bind(
+        KeyEvent::plain(KeyCode::Escape),
+        vim_mode_command("leave-visual"),
+    );
+    km.bind_edit(
+        KeyEvent::arrow(ArrowKey::Left),
+        EditCommand::ExtendLeftBy(1),
+    );
+    km.bind_edit(
+        KeyEvent::arrow(ArrowKey::Right),
+        EditCommand::ExtendRightBy(1),
+    );
+    km.bind_edit(KeyEvent::arrow(ArrowKey::Up), EditCommand::ExtendUpBy(1));
+    km.bind_edit(
+        KeyEvent::arrow(ArrowKey::Down),
+        EditCommand::ExtendDownBy(1),
+    );
+    for digit in '1'..='9' {
+        km.bind(
+            KeyEvent::char(digit),
+            vim_mode_command(&format!("count-{digit}")),
+        );
+    }
     km
 }
 
@@ -1008,6 +1269,102 @@ mod tests {
             ModeActionName::new("enter-insert"),
         );
         assert_eq!(modes.cursor_style(&runtime), CursorStyle::Bar);
+    }
+
+    #[test]
+    fn vim_visual_uses_extend_motions_and_block_cursor() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('v')),
+            Some(vim_mode_command("toggle-visual")),
+        );
+        assert_eq!(
+            modes.execute(
+                &mut runtime,
+                ModeName::new("vim"),
+                ModeActionName::new("toggle-visual"),
+            ),
+            None,
+        );
+        assert_eq!(modes.cursor_style(&runtime), CursorStyle::Block);
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('l')),
+            Some(vim_mode_command("move-right")),
+        );
+        assert_eq!(
+            modes.execute(
+                &mut runtime,
+                ModeName::new("vim"),
+                ModeActionName::new("move-right"),
+            ),
+            Some(EditCommand::ExtendWithinLineRightBy(1)),
+        );
+        assert_eq!(
+            modes.execute(
+                &mut runtime,
+                ModeName::new("vim"),
+                ModeActionName::new("move-word-forward"),
+            ),
+            Some(EditCommand::ExtendWordForward),
+        );
+    }
+
+    #[test]
+    fn vim_visual_delete_returns_to_normal() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+        modes.execute(
+            &mut runtime,
+            ModeName::new("vim"),
+            ModeActionName::new("toggle-visual"),
+        );
+
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('d')),
+            Some(vim_mode_command("delete-selection")),
+        );
+        assert_eq!(
+            modes.execute(
+                &mut runtime,
+                ModeName::new("vim"),
+                ModeActionName::new("delete-selection"),
+            ),
+            Some(EditCommand::Delete(1)),
+        );
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('v')),
+            Some(vim_mode_command("toggle-visual")),
+        );
+    }
+
+    #[test]
+    fn vim_visual_escape_collapses_and_returns_to_normal() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+        modes.execute(
+            &mut runtime,
+            ModeName::new("vim"),
+            ModeActionName::new("toggle-visual"),
+        );
+
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::plain(KeyCode::Escape)),
+            Some(vim_mode_command("leave-visual")),
+        );
+        assert_eq!(
+            modes.execute(
+                &mut runtime,
+                ModeName::new("vim"),
+                ModeActionName::new("leave-visual"),
+            ),
+            Some(EditCommand::CollapseSelections),
+        );
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('i')),
+            Some(vim_mode_command("enter-insert")),
+        );
     }
 
     #[test]

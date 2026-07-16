@@ -253,6 +253,16 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
                 buffer.move_head_right(sel, n);
             }
         }
+        EditCommand::ExtendWithinLineLeftBy(n) => {
+            for sel in selections.all_mut() {
+                buffer.move_head_within_line_left(sel, n);
+            }
+        }
+        EditCommand::ExtendWithinLineRightBy(n) => {
+            for sel in selections.all_mut() {
+                buffer.move_head_within_line_right(sel, n);
+            }
+        }
         EditCommand::ExtendUpBy(n) => {
             for sel in selections.all_mut() {
                 buffer.move_head_up(sel, n);
@@ -261,6 +271,65 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
         EditCommand::ExtendDownBy(n) => {
             for sel in selections.all_mut() {
                 buffer.move_head_down(sel, n);
+            }
+        }
+        EditCommand::ExtendToLine { line_index } => {
+            for sel in selections.all_mut() {
+                buffer.move_head_to_line(sel, line_index);
+            }
+        }
+        EditCommand::ExtendToChar {
+            target,
+            direction,
+            occurrence,
+        } => {
+            for sel in selections.all_mut() {
+                buffer.move_head_to_char(sel, target, direction, occurrence);
+            }
+        }
+        EditCommand::ExtendWordForward => {
+            for sel in selections.all_mut() {
+                buffer.move_head_word_forward(sel);
+            }
+        }
+        EditCommand::ExtendWordBackward => {
+            for sel in selections.all_mut() {
+                buffer.move_head_word_backward(sel);
+            }
+        }
+        EditCommand::ExtendWordEnd => {
+            for sel in selections.all_mut() {
+                buffer.move_head_word_end(sel);
+            }
+        }
+        EditCommand::ExtendToLineStart => {
+            for sel in selections.all_mut() {
+                buffer.move_head_to_line_start(sel);
+            }
+        }
+        EditCommand::ExtendToFirstNonBlank => {
+            for sel in selections.all_mut() {
+                buffer.move_head_to_first_non_blank(sel);
+            }
+        }
+        EditCommand::ExtendToLineEnd => {
+            for sel in selections.all_mut() {
+                buffer.move_head_to_line_end(sel);
+            }
+        }
+        EditCommand::ExtendToLastLine => {
+            for sel in selections.all_mut() {
+                buffer.move_head_to_last_line(sel);
+            }
+        }
+        EditCommand::ExtendToPrevParagraph => {
+            for sel in selections.all_mut() {
+                buffer.move_head_to_prev_paragraph(sel);
+            }
+        }
+        EditCommand::ExtendToNextParagraph => {
+            for sel in selections.all_mut() {
+                buffer.move_head_to_next_paragraph(sel);
             }
         }
         // Escape：collapse 到 head，并仅保留 primary selection。
@@ -464,6 +533,21 @@ mod tests {
         assert_eq!(s.primary().head().char_index, 1);
         assert_eq!(s.primary().anchor.char_index, 2);
         assert!(s.primary().anchor != s.primary().head());
+    }
+
+    #[test]
+    fn visual_style_extend_motions_keep_anchor() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "foo bar");
+        let mut s = single_sel(TextOffset::origin());
+
+        apply_edit(EditCommand::ExtendWordForward, &mut buf, &mut s);
+        assert_eq!(s.primary().anchor.char_index, 0);
+        assert_eq!(s.primary().head.char_index, 4);
+
+        apply_edit(EditCommand::ExtendToLineEnd, &mut buf, &mut s);
+        assert_eq!(s.primary().anchor.char_index, 0);
+        assert_eq!(s.primary().head.char_index, 6);
     }
 
     #[test]
