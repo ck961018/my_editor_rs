@@ -239,6 +239,12 @@ impl SceneBuilder {
             } else {
                 scene.root = container;
             }
+            scene
+                .nodes
+                .get_mut(&target)
+                .expect("validated target exists")
+                .space
+                .sizing = Sizing::Grow(1);
             self.set_children(scene, container, &children);
         }
 
@@ -297,7 +303,7 @@ impl SceneBuilder {
 
         let mut container = parent;
         loop {
-            let (remaining, grandparent) = {
+            let (remaining, grandparent, container_sizing) = {
                 let node = scene
                     .nodes
                     .get(&container)
@@ -305,8 +311,15 @@ impl SceneBuilder {
                 if node.children.len() != 1 {
                     break;
                 }
-                (node.children[0], node.parent)
+                (node.children[0], node.parent, node.space.sizing.clone())
             };
+
+            scene
+                .nodes
+                .get_mut(&remaining)
+                .expect("validated remaining child exists")
+                .space
+                .sizing = container_sizing;
 
             if let Some(grandparent) = grandparent {
                 let parent_index = scene
@@ -565,6 +578,42 @@ mod tests {
 
         assert!(matches!(scene.node(editor).space.sizing, Sizing::Fixed(12)));
         assert!(matches!(scene.node(status).space.sizing, Sizing::Fixed(1)));
+    }
+
+    #[test]
+    fn orthogonal_split_keeps_parent_axis_sizing_on_wrapper() {
+        let mut builder = SceneBuilder::new();
+        let (mut scene, _) =
+            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
+        let status = scene.node(scene.root()).children[1];
+
+        let split = builder
+            .split(&mut scene, status, ViewId(2), false, SplitDirection::Right)
+            .unwrap();
+        let wrapper = scene.node(status).parent.unwrap();
+
+        assert!(matches!(scene.node(wrapper).space.sizing, Sizing::Fixed(1)));
+        assert!(matches!(scene.node(status).space.sizing, Sizing::Grow(1)));
+        assert!(matches!(
+            scene.node(split.new_space).space.sizing,
+            Sizing::Grow(1)
+        ));
+    }
+
+    #[test]
+    fn closing_orthogonal_split_restores_wrapper_sizing_to_survivor() {
+        let mut builder = SceneBuilder::new();
+        let (mut scene, _) =
+            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
+        let status = scene.node(scene.root()).children[1];
+        let split = builder
+            .split(&mut scene, status, ViewId(2), false, SplitDirection::Right)
+            .unwrap();
+
+        builder.close(&mut scene, split.new_space).unwrap();
+
+        assert!(matches!(scene.node(status).space.sizing, Sizing::Fixed(1)));
+        assert_tree_valid(&scene);
     }
 
     #[test]

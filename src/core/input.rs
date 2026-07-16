@@ -147,7 +147,8 @@ pub fn continuations<A, S>(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PendingSequence {
+pub struct PendingSequence<S> {
+    pub owner: S,
     pub keys: Vec<KeyEvent>,
     pub deadline: Option<Instant>,
 }
@@ -155,7 +156,7 @@ pub struct PendingSequence {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AwaitingEntry<S> {
     Context { source: S, idle_since: Instant },
-    KeySequence(PendingSequence),
+    KeySequence(PendingSequence<S>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -220,26 +221,26 @@ impl<S: Clone + PartialEq> InputCoordinator<S> {
         );
     }
 
-    pub fn push_sequence(&mut self, pending: PendingSequence) {
+    pub fn push_sequence(&mut self, pending: PendingSequence<S>) {
         debug_assert!(self.pending_sequence().is_none());
         self.awaiting.push(AwaitingEntry::KeySequence(pending));
     }
 
-    pub fn pending_sequence(&self) -> Option<&PendingSequence> {
+    pub fn pending_sequence(&self) -> Option<&PendingSequence<S>> {
         self.awaiting.iter().find_map(|entry| match entry {
             AwaitingEntry::KeySequence(pending) => Some(pending),
             AwaitingEntry::Context { .. } => None,
         })
     }
 
-    pub fn pending_sequence_mut(&mut self) -> Option<&mut PendingSequence> {
+    pub fn pending_sequence_mut(&mut self) -> Option<&mut PendingSequence<S>> {
         self.awaiting.iter_mut().find_map(|entry| match entry {
             AwaitingEntry::KeySequence(pending) => Some(pending),
             AwaitingEntry::Context { .. } => None,
         })
     }
 
-    pub fn take_sequence(&mut self) -> Option<PendingSequence> {
+    pub fn take_sequence(&mut self) -> Option<PendingSequence<S>> {
         let index = self
             .awaiting
             .iter()
@@ -382,6 +383,7 @@ mod tests {
             start,
         );
         coordinator.push_sequence(PendingSequence {
+            owner: "vim",
             keys: vec![KeyEvent::char('g')],
             deadline: None,
         });

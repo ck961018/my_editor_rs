@@ -45,7 +45,7 @@ impl TaffyEngine {
                 items: Vec::new(),
                 order: 0,
             };
-            self.collect(scene, scene.root(), None, &map, &mut out);
+            self.collect(scene, scene.root(), None, (0, 0), &map, &mut out);
             self.cached_scene = Some(ResolvedScene { items: out.items });
             self.cached_revision = Some(revision);
         }
@@ -88,6 +88,7 @@ impl TaffyEngine {
         scene: &Scene,
         sid: SpaceId,
         parent_clip: Option<Rect>,
+        parent_origin: (i32, i32),
         map: &HashMap<SpaceId, NodeId>,
         out: &mut CollectOut,
     ) {
@@ -95,8 +96,8 @@ impl TaffyEngine {
         let taffy_id = map[&sid];
         let layout = self.tree.layout(taffy_id).expect("layout computed");
         let rect = Rect {
-            x: layout.location.x.round() as i32,
-            y: layout.location.y.round() as i32,
+            x: parent_origin.0 + layout.location.x.round() as i32,
+            y: parent_origin.1 + layout.location.y.round() as i32,
             width: layout.size.width.round() as i32,
             height: layout.size.height.round() as i32,
         };
@@ -122,7 +123,7 @@ impl TaffyEngine {
         }
         if let SpaceKind::Container { .. } = &node.space.kind {
             for c in &node.children {
-                self.collect(scene, *c, clip, map, out);
+                self.collect(scene, *c, clip, (rect.x, rect.y), map, out);
             }
         }
     }
@@ -183,11 +184,76 @@ fn style_for(node: &SpaceNode, parent_axis: Option<Axis>, root_size: Option<Scen
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::geometry::Size as ProtocolSize;
     use crate::protocol::ids::ViewId;
+    use crate::protocol::scene::SpaceNode;
+    use crate::protocol::space::{Layer, Space};
     use crate::tui::test_scene::{editor_scene, split_editor_scene};
 
     fn item_for(scene: &ResolvedScene, content: ViewId) -> &RenderItem {
         scene.items.iter().find(|i| i.view_id == content).unwrap()
+    }
+
+    fn nested_offset_scene() -> Scene {
+        let top = SpaceId(0);
+        let left = SpaceId(1);
+        let right = SpaceId(2);
+        let row = SpaceId(3);
+        let root = SpaceId(4);
+        let content = |id, parent, view, sizing| SpaceNode {
+            id,
+            parent: Some(parent),
+            children: Vec::new(),
+            space: Space {
+                id,
+                kind: SpaceKind::Content {
+                    view,
+                    focusable: true,
+                },
+                sizing,
+                layer: Layer::Base,
+            },
+        };
+        let container = |id, parent, direction, children, sizing| SpaceNode {
+            id,
+            parent,
+            children,
+            space: Space {
+                id,
+                kind: SpaceKind::Container {
+                    arrangement: Arrangement::Flex {
+                        direction,
+                        gap: 0,
+                        align: Align::Stretch,
+                    },
+                },
+                sizing,
+                layer: Layer::Base,
+            },
+        };
+        Scene::from_parts(
+            root,
+            ProtocolSize {
+                width: 20,
+                height: 10,
+            },
+            [
+                content(top, root, ViewId(0), Sizing::Fixed(2)),
+                content(left, row, ViewId(1), Sizing::Grow(1)),
+                content(right, row, ViewId(2), Sizing::Grow(1)),
+                container(
+                    row,
+                    Some(root),
+                    Axis::Horizontal,
+                    vec![left, right],
+                    Sizing::Grow(1),
+                ),
+                container(root, None, Axis::Vertical, vec![top, row], Sizing::Grow(1)),
+            ]
+            .into_iter()
+            .map(|node| (node.id, node))
+            .collect(),
+        )
     }
 
     #[test]
@@ -277,5 +343,17 @@ mod tests {
                 .width,
             100
         );
+    }
+
+    #[test]
+    fn nested_locations_are_accumulated_from_all_ancestors() {
+        let scene = nested_offset_scene();
+        let mut engine = TaffyEngine::new();
+
+        let resolved = engine.layout(&scene, Revision(0));
+
+        assert_eq!(item_for(resolved, ViewId(1)).rect.y, 2);
+        assert_eq!(item_for(resolved, ViewId(2)).rect.y, 2);
+        assert_eq!(item_for(resolved, ViewId(2)).rect.x, 10);
     }
 }

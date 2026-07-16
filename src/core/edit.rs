@@ -2,10 +2,10 @@ use crate::core::buffer::Buffer;
 use crate::core::command::EditCommand;
 use crate::protocol::selection::Selections;
 
-/// 鎵ц鏂囨湰缂栬緫鍛戒护銆傚叏灞€/澶氬厜鏍囧彉浣撲笉杩涙澶勶紙App 鍒嗘祦锛夈€?
+/// 执行文本编辑命令。全局命令由 App 分流；多 selection 在 Buffer 内统一处理。
 pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: &mut Selections) {
     match command {
-        // Left/Right 鏈夌鐐硅涔夛細闈炵┖鏀剁缉鍒?min/max锛堜笉棰濆绉伙級锛岀┖鍒欑Щ鍔?head
+        // Left/Right：非空 selection 收缩到 min/max，collapsed 时移动 head。
         EditCommand::MoveLeftBy(n) => {
             for sel in selections.all_mut() {
                 if sel.anchor != sel.head {
@@ -34,7 +34,35 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
                 Buffer::collapse_to_head(sel);
             }
         }
-        // Up/Down 鏃犵鐐硅涔夛細缁熶竴 move_head + collapse锛堝彇娑堝苟缁х画涓婁笅绉伙級
+        EditCommand::MoveWithinLineLeftBy(n) => {
+            for sel in selections.all_mut() {
+                if sel.anchor != sel.head {
+                    sel.head = if sel.anchor.char_index < sel.head.char_index {
+                        sel.anchor
+                    } else {
+                        sel.head
+                    };
+                } else {
+                    buffer.move_head_within_line_left(sel, n);
+                }
+                Buffer::collapse_to_head(sel);
+            }
+        }
+        EditCommand::MoveWithinLineRightBy(n) => {
+            for sel in selections.all_mut() {
+                if sel.anchor != sel.head {
+                    sel.head = if sel.anchor.char_index > sel.head.char_index {
+                        sel.anchor
+                    } else {
+                        sel.head
+                    };
+                } else {
+                    buffer.move_head_within_line_right(sel, n);
+                }
+                Buffer::collapse_to_head(sel);
+            }
+        }
+        // Up/Down：移动 head 后 collapse，取消 selection 并继续垂直移动。
         EditCommand::MoveUpBy(n) => {
             for sel in selections.all_mut() {
                 buffer.move_head_up(sel, n);
@@ -210,7 +238,7 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
                 Buffer::collapse_to_head(sel);
             }
         }
-        // Extend锛氬彧鍔?head 涓嶇 anchor锛屼笉 collapse锛堥€夊尯鍙橀潪绌猴級
+        // Extend：只移动 head，不改变 anchor，也不 collapse。
         EditCommand::ExtendLeftBy(n) => {
             for sel in selections.all_mut() {
                 buffer.move_head_left(sel, n);
@@ -231,7 +259,7 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
                 buffer.move_head_down(sel, n);
             }
         }
-        // Escape锛歝ollapse to head + 浠呯暀 primary
+        // Escape：collapse 到 head，并仅保留 primary selection。
         EditCommand::CollapseSelections => {
             for sel in selections.all_mut() {
                 Buffer::collapse_to_head(sel);

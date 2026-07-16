@@ -34,6 +34,16 @@ impl ContentStore {
         self.contents.get(&id).and_then(Content::default_mode)
     }
 
+    pub fn reconcile_view_state(
+        &self,
+        id: ContentId,
+        state: &mut ContentViewState,
+    ) -> Option<bool> {
+        self.contents
+            .get(&id)
+            .map(|content| content.reconcile_view_state(state))
+    }
+
     pub fn execute(
         &mut self,
         id: ContentId,
@@ -44,7 +54,7 @@ impl ContentStore {
             .get_mut(&id)
             .map(|content| content.execute(input))
             .unwrap_or(ContentResult::NotHandled);
-        if matches!(&result, ContentResult::Handled(_)) {
+        if matches!(&result, ContentResult::Handled(outcome) if outcome.content_changed) {
             self.revisions
                 .get_mut(&id)
                 .expect("inserted content has a revision")
@@ -104,7 +114,13 @@ fn text_rows(buffer: &crate::core::buffer::Buffer, range: RowRange) -> Vec<Strin
     let start = range.start.min(total);
     let end = range.end.min(total).max(start);
     (start..end)
-        .map(|row| buffer.line(row).trim_end_matches('\n').to_string())
+        .map(|row| {
+            buffer
+                .line(row)
+                .trim_end_matches('\n')
+                .trim_end_matches('\r')
+                .to_string()
+        })
         .collect()
 }
 
@@ -149,7 +165,13 @@ mod tests {
             },
         );
 
-        assert_eq!(effect, ContentResult::Handled(ContentEffect::None));
+        assert!(matches!(
+            effect,
+            ContentResult::Handled(ref outcome)
+                if outcome.effect == ContentEffect::None
+                    && outcome.content_changed
+                    && outcome.view_changed
+        ));
         assert_eq!(
             store.query(id, ContentQuery::TextRows(RowRange { start: 0, end: 1 })),
             ContentData::TextRows(vec!["x".to_string()])
@@ -217,5 +239,51 @@ mod tests {
         );
 
         assert_eq!(store.revision(status), Some(Revision(1)));
+    }
+
+    #[test]
+    fn movement_and_no_op_edit_do_not_advance_content_revision() {
+        let id = ContentId(0);
+        let mut store = ContentStore::default();
+        store.insert(id, Content::Buffer(Buffer::new()));
+        let mut state = store.create_view_state(id).unwrap();
+
+        store.execute(
+            id,
+            ContentInput::View {
+                command: ContentCommand::Edit(EditCommand::MoveLeftBy(1)),
+                state: &mut state,
+            },
+        );
+        store.execute(
+            id,
+            ContentInput::View {
+                command: ContentCommand::Edit(EditCommand::Delete(-1)),
+                state: &mut state,
+            },
+        );
+
+        assert_eq!(store.revision(id), Some(Revision(0)));
+    }
+
+    #[test]
+    fn text_rows_hide_both_characters_of_crlf() {
+        let id = ContentId(0);
+        let mut store = ContentStore::default();
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(
+            &mut crate::protocol::selection::Selections::single(
+                crate::protocol::selection::Selection::collapsed(
+                    crate::protocol::selection::TextOffset::origin(),
+                ),
+            ),
+            "a\r\nb",
+        );
+        store.insert(id, Content::Buffer(buffer));
+
+        assert_eq!(
+            store.query(id, ContentQuery::TextRows(RowRange { start: 0, end: 2 })),
+            ContentData::TextRows(vec!["a".to_string(), "b".to_string()])
+        );
     }
 }

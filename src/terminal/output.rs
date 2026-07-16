@@ -5,11 +5,10 @@ use crossterm::style::{Attribute, SetAttribute};
 use crossterm::{cursor, queue, terminal};
 
 /// 绘图画布抽象：SceneRenderer 经 &mut dyn Canvas 输出。
-/// 含 move_cursor/clear_line/write_str + hide_cursor/show_cursor/flush，
+/// 含 move_cursor/write_str + hide_cursor/show_cursor/flush，
 /// 使 renderer 与 Output 固有方法解耦（后端可换）。
 pub trait Canvas {
     fn move_cursor(&mut self, row: usize, col: usize) -> io::Result<()>;
-    fn clear_line(&mut self) -> io::Result<()>;
     fn write_str(&mut self, s: &str) -> io::Result<()>;
     fn hide_cursor(&mut self) -> io::Result<()>;
     fn show_cursor(&mut self) -> io::Result<()>;
@@ -21,9 +20,6 @@ pub trait Canvas {
 impl<W: Write> Canvas for Output<W> {
     fn move_cursor(&mut self, row: usize, col: usize) -> io::Result<()> {
         Output::move_cursor(self, row, col)
-    }
-    fn clear_line(&mut self) -> io::Result<()> {
-        Output::clear_line(self)
     }
     fn write_str(&mut self, s: &str) -> io::Result<()> {
         Output::write_str(self, s)
@@ -96,10 +92,6 @@ impl<W: Write> Output<W> {
         queue!(self.out, terminal::Clear(terminal::ClearType::All))
     }
 
-    pub fn clear_line(&mut self) -> io::Result<()> {
-        queue!(self.out, terminal::Clear(terminal::ClearType::CurrentLine))
-    }
-
     pub fn write_str(&mut self, s: &str) -> io::Result<()> {
         self.out.write_all(s.as_bytes())
     }
@@ -136,10 +128,9 @@ mod tests {
     }
 
     #[test]
-    fn clear_screen_and_line_queue_without_flush() {
+    fn clear_screen_queues_without_flush() {
         let mut out = Output::new(Vec::new());
         out.clear_screen().unwrap();
-        out.clear_line().unwrap();
         // queue! 不 flush，但 Vec 立即接收字节，应非空
         assert!(!out.into_inner().is_empty());
     }

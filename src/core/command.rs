@@ -36,6 +36,8 @@ pub enum EditCommand {
     },
     MoveLeftBy(usize),
     MoveRightBy(usize),
+    MoveWithinLineLeftBy(usize),
+    MoveWithinLineRightBy(usize),
     MoveUpBy(usize),
     MoveDownBy(usize),
     MoveToLine {
@@ -63,7 +65,7 @@ pub enum EditCommand {
     },
     DeleteWordBackward,
     CollapseSelections,
-    // 以下变体预留：vim 基础操作，后续任务接入 apply_edit / keymap / mode action。
+    // Vim 基础编辑与移动操作。
     DeleteToLineStart,
     DeleteToLineEnd,
     MoveWordForward,

@@ -38,8 +38,25 @@ pub enum ContentEffect {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub struct ContentOutcome {
+    pub effect: ContentEffect,
+    pub content_changed: bool,
+    pub view_changed: bool,
+}
+
+impl ContentOutcome {
+    fn new(effect: ContentEffect, content_changed: bool, view_changed: bool) -> Self {
+        Self {
+            effect,
+            content_changed,
+            view_changed,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum ContentResult {
-    Handled(ContentEffect),
+    Handled(ContentOutcome),
     NotHandled,
 }
 
@@ -63,6 +80,16 @@ impl Content {
         }
     }
 
+    pub fn reconcile_view_state(&self, state: &mut ContentViewState) -> bool {
+        match (self, state) {
+            (Self::Buffer(buffer), ContentViewState::Buffer(state)) => {
+                buffer.reconcile_selections(state.selections_mut())
+            }
+            (Self::StatusBar(_), ContentViewState::StatusBar) => false,
+            _ => panic!("content/view state mismatch"),
+        }
+    }
+
     pub fn execute(&mut self, input: ContentInput<'_>) -> ContentResult {
         match (self, input) {
             (
@@ -72,8 +99,14 @@ impl Content {
                     state: ContentViewState::Buffer(state),
                 },
             ) => {
+                let content_revision = buffer.revision();
+                let selections = state.selections().clone();
                 apply_edit(command, buffer, state.selections_mut());
-                ContentResult::Handled(ContentEffect::None)
+                ContentResult::Handled(ContentOutcome::new(
+                    ContentEffect::None,
+                    buffer.revision() != content_revision,
+                    state.selections() != &selections,
+                ))
             }
             (
                 Self::Buffer(_),
@@ -107,14 +140,22 @@ impl Content {
             ) => ContentResult::NotHandled,
             (Self::Buffer(buffer), ContentInput::Command(ContentCommand::Save)) => {
                 match buffer.path().cloned() {
-                    Some(path) => ContentResult::Handled(ContentEffect::Save(SaveSnapshot {
-                        path,
-                        bytes: buffer.slice().to_string(),
-                        revision: buffer.revision(),
-                    })),
+                    Some(path) => ContentResult::Handled(
+                        ContentEffect::Save(SaveSnapshot {
+                            path,
+                            bytes: buffer.slice().to_string(),
+                            revision: buffer.revision(),
+                        })
+                        .into(),
+                    ),
                     None => {
+                        let changed = buffer.status() != StatusMessage::SaveFailed;
                         buffer.set_status(StatusMessage::SaveFailed);
-                        ContentResult::Handled(ContentEffect::None)
+                        ContentResult::Handled(ContentOutcome::new(
+                            ContentEffect::None,
+                            changed,
+                            false,
+                        ))
                     }
                 }
             }
@@ -122,6 +163,8 @@ impl Content {
                 Self::Buffer(buffer),
                 ContentInput::Event(ContentEvent::SaveFinished { revision, result }),
             ) => {
+                let before_modified = buffer.modified();
+                let before_status = buffer.status();
                 match result {
                     Ok(()) => {
                         if buffer.mark_saved(revision) {
@@ -130,7 +173,11 @@ impl Content {
                     }
                     Err(_) => buffer.set_status(StatusMessage::SaveFailed),
                 }
-                ContentResult::Handled(ContentEffect::None)
+                ContentResult::Handled(ContentOutcome::new(
+                    ContentEffect::None,
+                    buffer.modified() != before_modified || buffer.status() != before_status,
+                    false,
+                ))
             }
             (
                 Self::Buffer(_),
@@ -142,6 +189,12 @@ impl Content {
             | (Self::Buffer(_), ContentInput::Command(_))
             | (Self::StatusBar(_), _) => ContentResult::NotHandled,
         }
+    }
+}
+
+impl From<ContentEffect> for ContentOutcome {
+    fn from(effect: ContentEffect) -> Self {
+        Self::new(effect, false, false)
     }
 }
 
@@ -193,7 +246,7 @@ mod tests {
                 command: command.clone(),
                 state: &mut buffer_state,
             }),
-            ContentResult::Handled(ContentEffect::None)
+            ContentResult::Handled(ContentOutcome::new(ContentEffect::None, false, false))
         );
 
         let mut status = Content::StatusBar(StatusBar::new(ContentId(0)));

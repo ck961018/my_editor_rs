@@ -211,8 +211,7 @@ fn paint_text_item(
     for (row, line) in lines.iter().enumerate() {
         let buf_row = start + row;
         let screen_row = (item.rect.y + row as i32) as usize;
-        canvas.move_cursor(screen_row, item.rect.x as usize)?;
-        canvas.clear_line()?;
+        clear_item_row(canvas, screen_row, item.rect.x as usize, width)?;
         let hi = selection.and_then(|(sel_start, sel_end)| {
             (buf_row >= sel_start.row && buf_row <= sel_end.row).then(|| {
                 let start = if buf_row == sel_start.row {
@@ -232,8 +231,7 @@ fn paint_text_item(
     }
     for row in lines.len()..height {
         let screen_row = (item.rect.y + row as i32) as usize;
-        canvas.move_cursor(screen_row, item.rect.x as usize)?;
-        canvas.clear_line()?;
+        clear_item_row(canvas, screen_row, item.rect.x as usize, width)?;
     }
     Ok(())
 }
@@ -248,13 +246,23 @@ fn paint_status_bar(
     else {
         panic!("status bar presentation must answer StatusBarData")
     };
-    canvas.move_cursor(item.rect.y as usize, item.rect.x as usize)?;
-    canvas.clear_line()?;
-    canvas.write_str(&status_line(
+    let width = item.rect.width.max(0) as usize;
+    clear_item_row(canvas, item.rect.y as usize, item.rect.x as usize, width)?;
+    let line = sanitize_terminal_text(&status_line(
         data.file_name.as_deref(),
         data.modified,
         &data.message,
-    ))
+    ));
+    canvas.write_str(&line.chars().take(width).collect::<String>())
+}
+
+fn clear_item_row(canvas: &mut dyn Canvas, row: usize, col: usize, width: usize) -> io::Result<()> {
+    canvas.move_cursor(row, col)?;
+    if width > 0 {
+        canvas.write_str(&" ".repeat(width))?;
+        canvas.move_cursor(row, col)?;
+    }
+    Ok(())
 }
 
 /// Paint the visible character interval `[left_col, left_col + width)` of one logical row.
@@ -267,7 +275,11 @@ fn paint_line_with_highlight(
     width: usize,
     hi: Option<(usize, usize)>,
 ) -> io::Result<()> {
-    let content = line.strip_suffix('\n').unwrap_or(line);
+    let content = line
+        .strip_suffix("\r\n")
+        .or_else(|| line.strip_suffix('\n'))
+        .unwrap_or(line);
+    let content = sanitize_terminal_text(content);
     // char 边界（byte offset, char），用于按列切 byte 范围
     let bounds: Vec<(usize, char)> = content.char_indices().collect();
     let content_len = bounds.len();
@@ -306,6 +318,12 @@ fn paint_line_with_highlight(
             write_segment(canvas, end, visible_end, false)
         }
     }
+}
+
+fn sanitize_terminal_text(text: &str) -> String {
+    text.chars()
+        .map(|ch| if ch.is_control() { '\u{fffd}' } else { ch })
+        .collect()
 }
 
 fn status_line(file_name: Option<&str>, modified: bool, message: &StatusMessage) -> String {
@@ -525,6 +543,10 @@ mod tests {
 
         assert!(output.contains("\x1b[7ma\x1b[27mbcd"), "left: {output}");
         assert!(output.contains("ab\x1b[7mc\x1b[27md"), "right: {output}");
+        assert!(
+            !output.contains("\x1b[2K"),
+            "pane painting must not clear the full terminal row: {output}"
+        );
     }
 
     #[test]
@@ -901,5 +923,47 @@ mod tests {
         let output = String::from_utf8(out.into_inner()).unwrap();
         assert!(output.contains("\x1b[7mdefg\x1b[27mh"), "output: {output}");
         assert!(!output.contains("\x1b[7mabc"), "output: {output}");
+    }
+
+    #[test]
+    fn document_control_characters_are_sanitized_before_terminal_output() {
+        let mut out = Output::new(Vec::new());
+
+        paint_line_with_highlight(&mut out, "safe\x1b]52;payload\u{0007}", 0, 40, None).unwrap();
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert_eq!(output, "safe�]52;payload�");
+        assert!(!output.contains('\x1b'));
+        assert!(!output.contains('\u{0007}'));
+    }
+
+    #[test]
+    fn status_bar_output_is_clipped_to_its_rect_width() {
+        let query = StubQuery {
+            editor_cid: ContentId(0),
+            lines: vec![String::new()],
+            selections: Selections::single(Selection::collapsed(TextOffset::origin())),
+        };
+        let item = RenderItem {
+            space_id: SpaceId(1),
+            view_id: ViewId(1),
+            rect: crate::protocol::geometry::Rect {
+                x: 0,
+                y: 0,
+                width: 3,
+                height: 1,
+            },
+            clip: None,
+            layer: crate::protocol::space::Layer::Base,
+            z_index: 0,
+            order: 0,
+        };
+        let mut out = Output::new(Vec::new());
+
+        paint_status_bar(&item, &query, ContentId(1), &mut out).unwrap();
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert!(output.ends_with("f.t"), "output: {output}");
+        assert!(!output.contains("f.txt"), "output: {output}");
     }
 }

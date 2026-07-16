@@ -112,17 +112,20 @@ impl<F: Frontend> App<F> {
     }
 
     pub async fn run(&mut self) -> io::Result<()> {
+        let run_result = self.run_loop().await;
+        let shutdown_result = self.shutdown_tasks().await;
+        run_result.and(shutdown_result)
+    }
+
+    async fn run_loop(&mut self) -> io::Result<()> {
         self.render()?;
         loop {
             let input_deadline = self.session.dispatcher.next_deadline(&self.session.views);
             tokio::select! {
-                ev = self.frontend.next_event() => {
-                    // frontend I/O 错误直接上抛（spec §10）：不进 shutdown_tasks，
-                    // 在途 critical 保存可能丢失。前端错误通常致命，此为既定取舍。
-                    match ev? {
-                        Some(event) => self.handle_event(event).await?,
-                        None => self.kernel.tasks.cancel(),
-                    }
+                biased;
+                _ = self.kernel.tasks.cancelled() => break,
+                _ = wait_for_input_deadline(input_deadline) => {
+                    self.handle_input_timeout()?;
                 }
                 message = self.kernel.message_rx.recv() => {
                     if let Some(message) = message {
@@ -131,12 +134,11 @@ impl<F: Frontend> App<F> {
                         self.kernel.tasks.cancel();
                     }
                 }
-                _ = self.kernel.tasks.cancelled() => {
-                    self.shutdown_tasks().await?;
-                    break;
-                }
-                _ = wait_for_input_deadline(input_deadline) => {
-                    self.handle_input_timeout()?;
+                ev = self.frontend.next_event() => {
+                    match ev? {
+                        Some(event) => self.handle_event(event).await?,
+                        None => self.kernel.tasks.cancel(),
+                    }
                 }
             }
             if !self.kernel.tasks.is_cancelled() {
@@ -182,7 +184,10 @@ impl<F: Frontend> App<F> {
     }
 
     fn process_input_queue(&mut self, mut queue: VecDeque<DispatchInput>) -> io::Result<()> {
-        while let Some(input) = queue.pop_front() {
+        while !self.kernel.tasks.is_cancelled() {
+            let Some(input) = queue.pop_front() else {
+                break;
+            };
             let now = Instant::now();
             let outcome = self.session.dispatcher.dispatch(
                 input,
@@ -269,33 +274,55 @@ impl<F: Frontend> App<F> {
                 view,
                 content,
             } => {
-                let view = self
-                    .session
-                    .views
-                    .get_mut(&view)
-                    .expect("target view exists");
-                assert_eq!(view.content(), content, "view/content target mismatch");
-                let command = match command {
-                    crate::core::command::ContentCommand::Mode { mode, action } => {
-                        match view.execute_mode_command(&self.kernel.modes, &mode, &action) {
-                            ModeCommandResult::Unknown => return Ok(()),
-                            ModeCommandResult::Handled(Some(command)) => command,
-                            ModeCommandResult::Handled(None) => {
-                                view.touch();
-                                return Ok(());
+                let result = {
+                    let target_view = self
+                        .session
+                        .views
+                        .get_mut(&view)
+                        .expect("target view exists");
+                    assert_eq!(
+                        target_view.content(),
+                        content,
+                        "view/content target mismatch"
+                    );
+                    let mut mode_changed = false;
+                    let command = match command {
+                        crate::core::command::ContentCommand::Mode { mode, action } => {
+                            match target_view.execute_mode_command(
+                                &self.kernel.modes,
+                                &mode,
+                                &action,
+                            ) {
+                                ModeCommandResult::Unknown => return Ok(()),
+                                ModeCommandResult::Handled(Some(command)) => {
+                                    mode_changed = true;
+                                    command
+                                }
+                                ModeCommandResult::Handled(None) => {
+                                    target_view.touch();
+                                    return Ok(());
+                                }
                             }
                         }
+                        command => command,
+                    };
+                    let result = self.kernel.contents.execute(
+                        content,
+                        ContentInput::View {
+                            command,
+                            state: target_view.state_mut(),
+                        },
+                    );
+                    if mode_changed
+                        || matches!(&result, ContentResult::Handled(outcome) if outcome.view_changed)
+                    {
+                        target_view.touch();
                     }
-                    command => command,
+                    result
                 };
-                let result = self.kernel.contents.execute(
-                    content,
-                    ContentInput::View {
-                        command,
-                        state: view.state_mut(),
-                    },
-                );
-                view.touch();
+                if matches!(&result, ContentResult::Handled(outcome) if outcome.content_changed) {
+                    self.reconcile_content_views(content, Some(view));
+                }
                 self.handle_content_result(content, result);
             }
             DispatchCommand::Noop => {}
@@ -330,8 +357,26 @@ impl<F: Frontend> App<F> {
     }
 
     fn handle_content_result(&mut self, id: ContentId, result: ContentResult) {
-        if let ContentResult::Handled(ContentEffect::Save(snapshot)) = result {
-            self.spawn_save(id, snapshot);
+        if let ContentResult::Handled(outcome) = result {
+            if let ContentEffect::Save(snapshot) = outcome.effect {
+                self.spawn_save(id, snapshot);
+            }
+        }
+    }
+
+    fn reconcile_content_views(&mut self, content: ContentId, except: Option<ViewId>) {
+        for (view_id, view) in &mut self.session.views {
+            if Some(*view_id) == except || view.content() != content {
+                continue;
+            }
+            if self
+                .kernel
+                .contents
+                .reconcile_view_state(content, view.state_mut())
+                .expect("view content exists")
+            {
+                view.touch();
+            }
         }
     }
 
@@ -422,6 +467,7 @@ impl<F: Frontend> App<F> {
             Ok(result) => result,
             Err(error) => {
                 self.session.views.remove(&view);
+                self.session.next_view_id = view.0;
                 return Err(error.into());
             }
         };
@@ -489,6 +535,7 @@ impl<F: Frontend> App<F> {
             focusable,
         ) {
             self.session.views.remove(&new_view);
+            self.session.next_view_id = new_view.0;
             return Err(error.into());
         }
         self.session
@@ -681,7 +728,7 @@ mod tests {
     use crate::protocol::frontend_event::ResizeEvent;
     use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
     use crate::protocol::revision::Revision;
-    use crate::protocol::selection::TextOffset;
+    use crate::protocol::selection::{Selection, Selections, TextOffset};
     use crate::protocol::space::{Sizing, SplitDirection};
     use crate::protocol::status::StatusMessage;
     use std::collections::VecDeque;
@@ -690,6 +737,8 @@ mod tests {
         events: VecDeque<FrontendEvent>,
         renders: usize,
         scene_revisions: Vec<Revision>,
+        fail_next_event: bool,
+        fail_render: bool,
     }
 
     impl ScriptedFrontend {
@@ -698,12 +747,18 @@ mod tests {
                 events: events.into(),
                 renders: 0,
                 scene_revisions: Vec::new(),
+                fail_next_event: false,
+                fail_render: false,
             }
         }
     }
 
     impl Frontend for ScriptedFrontend {
         async fn next_event(&mut self) -> io::Result<Option<FrontendEvent>> {
+            if self.fail_next_event {
+                self.fail_next_event = false;
+                return Err(io::Error::other("scripted frontend failure"));
+            }
             Ok(self.events.pop_front())
         }
 
@@ -716,6 +771,10 @@ mod tests {
         ) -> io::Result<()> {
             self.renders += 1;
             self.scene_revisions.push(scene_revision);
+            if self.fail_render {
+                self.fail_render = false;
+                return Err(io::Error::other("scripted render failure"));
+            }
             Ok(())
         }
     }
@@ -1970,5 +2029,192 @@ mod tests {
         app.run().await.unwrap();
         assert!(app.frontend.renders >= 1);
         assert_eq!(text_rows(&app, editor_cid()), vec!["a"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vim_normal_horizontal_motion_never_lands_on_or_deletes_newline() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Enter)),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('k')),
+                FrontendEvent::Key(KeyEvent::char('l')),
+                FrontendEvent::Key(KeyEvent::char('x')),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+
+        app.run().await.unwrap();
+
+        assert_eq!(text_rows(&app, editor_cid()), vec!["", "b"]);
+    }
+
+    #[test]
+    fn editing_shared_content_reconciles_other_view_selections() {
+        let mut app = make_app(vec![], None);
+        let left = app.session.focused;
+        let left_view = view_id(&app, left);
+        app.execute_command(DispatchCommand::ViewContent {
+            command: ContentCommand::Edit(EditCommand::InsertText("abc".to_string())),
+            view: left_view,
+            content: editor_cid(),
+        })
+        .unwrap();
+        let right = app
+            .split_space(left, editor_cid(), true, SplitDirection::Right, false)
+            .unwrap()
+            .new_space;
+        let right_view = view_id(&app, right);
+        let right_revision = app.session.views[&right_view].revision();
+        match app.session.views.get_mut(&left_view).unwrap().state_mut() {
+            crate::core::content_view_state::ContentViewState::Buffer(state) => {
+                *state.selections_mut() = Selections::single(Selection {
+                    anchor: TextOffset::origin(),
+                    head: TextOffset { char_index: 3 },
+                });
+            }
+            _ => unreachable!(),
+        }
+        match app.session.views.get_mut(&right_view).unwrap().state_mut() {
+            crate::core::content_view_state::ContentViewState::Buffer(state) => {
+                *state.selections_mut() =
+                    Selections::single(Selection::collapsed(TextOffset { char_index: 3 }));
+            }
+            _ => unreachable!(),
+        }
+
+        app.execute_command(DispatchCommand::ViewContent {
+            command: ContentCommand::Edit(EditCommand::Delete(-1)),
+            view: left_view,
+            content: editor_cid(),
+        })
+        .unwrap();
+
+        assert_eq!(text_rows(&app, editor_cid()), vec![""]);
+        assert_eq!(
+            app.session.views[&right_view]
+                .selections()
+                .unwrap()
+                .primary()
+                .head(),
+            TextOffset::origin()
+        );
+        assert!(app.session.views[&right_view].revision() > right_revision);
+    }
+
+    #[test]
+    fn failed_layout_mutations_do_not_consume_view_ids() {
+        let mut app = make_app(vec![], None);
+        let next = app.session.next_view_id;
+
+        assert!(
+            app.split_space(
+                SpaceId(999),
+                editor_cid(),
+                true,
+                SplitDirection::Right,
+                false,
+            )
+            .is_err()
+        );
+        assert_eq!(app.session.next_view_id, next);
+        assert!(
+            app.replace_space_content(SpaceId(999), editor_cid(), true)
+                .is_err()
+        );
+        assert_eq!(app.session.next_view_id, next);
+    }
+
+    #[test]
+    fn no_op_edit_does_not_advance_content_or_view_revision() {
+        let mut app = make_app(vec![], None);
+        let view = view_id(&app, app.session.focused);
+        let view_revision = app.session.views[&view].revision();
+        let content_revision = app.kernel.contents.revision(editor_cid()).unwrap();
+
+        app.execute_command(DispatchCommand::ViewContent {
+            command: ContentCommand::Edit(EditCommand::MoveLeftBy(1)),
+            view,
+            content: editor_cid(),
+        })
+        .unwrap();
+
+        assert_eq!(app.session.views[&view].revision(), view_revision);
+        assert_eq!(
+            app.kernel.contents.revision(editor_cid()),
+            Some(content_revision)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn frontend_error_still_waits_for_pending_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("save-on-error.txt");
+        std::fs::write(&path, "old").unwrap();
+        let mut app = make_app(vec![], path.to_str());
+        let view = view_id(&app, app.session.focused);
+        app.execute_command(DispatchCommand::ViewContent {
+            command: ContentCommand::Edit(EditCommand::InsertText("new".to_string())),
+            view,
+            content: editor_cid(),
+        })
+        .unwrap();
+        app.execute_command(DispatchCommand::Content {
+            command: ContentCommand::Save,
+            content: editor_cid(),
+        })
+        .unwrap();
+        app.frontend.fail_next_event = true;
+
+        assert!(app.run().await.is_err());
+
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "newold");
+        assert!(app.kernel.pending_saves.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn render_error_still_waits_for_pending_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("save-on-render-error.txt");
+        std::fs::write(&path, "old").unwrap();
+        let mut app = make_app(vec![], path.to_str());
+        let view = view_id(&app, app.session.focused);
+        app.execute_command(DispatchCommand::ViewContent {
+            command: ContentCommand::Edit(EditCommand::InsertText("new".to_string())),
+            view,
+            content: editor_cid(),
+        })
+        .unwrap();
+        app.execute_command(DispatchCommand::Content {
+            command: ContentCommand::Save,
+            content: editor_cid(),
+        })
+        .unwrap();
+        app.frontend.fail_render = true;
+
+        assert!(app.run().await.is_err());
+
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "newold");
+        assert!(app.kernel.pending_saves.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancellation_discards_frontend_events_after_quit() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+                FrontendEvent::Key(KeyEvent::char('x')),
+            ],
+            None,
+        );
+
+        app.run().await.unwrap();
+
+        assert_eq!(text_rows(&app, editor_cid()), vec![""]);
     }
 }

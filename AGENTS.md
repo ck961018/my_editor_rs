@@ -18,7 +18,7 @@
 - `crossterm` 负责终端 IO、原始模式、VT 序列和事件流。
 - `tokio` + `futures` 负责异步主循环和后台保存。
 - `taffy` 负责 Flex 布局。
-- `tempfile` 仅用于测试。
+- `tempfile` 用于生产路径的原子保存临时文件，也用于测试。
 
 ## 常用命令
 

@@ -519,6 +519,7 @@ impl Mode for VimMode {
                 operator_count,
                 motion_count,
             } => match key.is_plain_char() {
+                Some('0') if motion_count.is_none() => InputDecision::Consumed,
                 Some(ch @ '0'..='9') => {
                     state.pending = Some(VimPending::Delete {
                         operator_count,
@@ -602,8 +603,10 @@ impl Mode for VimMode {
                 Some(EditCommand::DeleteLineContent.into())
             }
             "move-left" => Some(
-                EditCommand::MoveLeftBy(Self::take_count(self.state_mut(state)).unwrap_or(1))
-                    .into(),
+                EditCommand::MoveWithinLineLeftBy(
+                    Self::take_count(self.state_mut(state)).unwrap_or(1),
+                )
+                .into(),
             ),
             "move-down" => Some(
                 EditCommand::MoveDownBy(Self::take_count(self.state_mut(state)).unwrap_or(1))
@@ -613,8 +616,10 @@ impl Mode for VimMode {
                 EditCommand::MoveUpBy(Self::take_count(self.state_mut(state)).unwrap_or(1)).into(),
             ),
             "move-right" => Some(
-                EditCommand::MoveRightBy(Self::take_count(self.state_mut(state)).unwrap_or(1))
-                    .into(),
+                EditCommand::MoveWithinLineRightBy(
+                    Self::take_count(self.state_mut(state)).unwrap_or(1),
+                )
+                .into(),
             ),
             "goto-line" => {
                 let line_index = Self::take_count(self.state_mut(state))
@@ -1447,11 +1452,36 @@ mod tests {
             InputDecision::Consumed
         );
         assert_eq!(
+            runtime.capture(KeyEvent::char('0')),
+            InputDecision::Consumed
+        );
+        assert_eq!(
             runtime.capture(KeyEvent::char('d')),
             InputDecision::Emit(Command::Content(ContentCommand::Edit(
-                EditCommand::DeleteLines { lines: 6 }
+                EditCommand::DeleteLines { lines: 60 }
             )))
         );
         assert_eq!(runtime.status(), InputStatus::Ready);
+    }
+
+    #[test]
+    fn vim_zero_cannot_start_a_motion_count_after_delete_operator() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+        assert_eq!(
+            modes.execute(
+                &mut runtime,
+                ModeName::new("vim"),
+                ModeActionName::new("delete-operator"),
+            ),
+            None
+        );
+
+        assert_eq!(
+            runtime.capture(KeyEvent::char('0')),
+            InputDecision::Consumed
+        );
+        assert_eq!(runtime.status(), InputStatus::Ready);
+        assert_eq!(runtime.capture(KeyEvent::char('d')), InputDecision::Pass);
     }
 }

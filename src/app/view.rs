@@ -13,7 +13,7 @@ use crate::protocol::revision::Revision;
 use crate::protocol::selection::Selections;
 
 pub struct View {
-    /// 绑定的 content；当前仅 View::new 写入，预留给同 content 多视图解析（spec §10）。
+    /// 绑定的 content；当前仅 View::new 写入，同一 content 可由多个 View 独立呈现。
     content: ContentId,
     state: ContentViewState,
     mode: Option<ModeInstance>,

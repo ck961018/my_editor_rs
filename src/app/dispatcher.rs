@@ -147,7 +147,13 @@ impl Dispatcher {
             view_state.cancel_input();
         }
         self.coordinator.remove_context(&CommandSource::View(view));
-        self.coordinator.discard_sequence();
+        if self
+            .coordinator
+            .pending_sequence()
+            .is_some_and(|pending| pending.owner == CommandSource::View(view))
+        {
+            self.coordinator.discard_sequence();
+        }
     }
 
     pub fn next_deadline(&self, views: &HashMap<ViewId, View>) -> Option<Instant> {
@@ -226,6 +232,7 @@ impl Dispatcher {
         if matched.has_children {
             let keys = vec![key];
             self.coordinator.push_sequence(PendingSequence {
+                owner: CommandSource::View(focused_view),
                 deadline: self.sequence_config.deadline(&keys, now),
                 keys,
             });
@@ -665,6 +672,43 @@ mod tests {
             views.get(&ViewId(0)).unwrap().input_status(),
             InputStatus::Ready
         );
+    }
+
+    #[test]
+    fn invalidating_an_unrelated_view_keeps_the_focused_views_sequence() {
+        let (mut dispatcher, scene, focused, mut views, _, _) = fixture();
+        let now = Instant::now();
+        assert_eq!(
+            dispatcher.dispatch(
+                DispatchInput::Normal(KeyEvent::char('g')),
+                now,
+                focused,
+                &scene,
+                &mut views,
+            ),
+            DispatchOutcome::Waiting
+        );
+
+        dispatcher.invalidate_view(ViewId(1), &mut views);
+
+        assert!(dispatcher.is_pending());
+        assert!(matches!(
+            dispatcher.dispatch(
+                DispatchInput::Normal(KeyEvent::char('g')),
+                now,
+                focused,
+                &scene,
+                &mut views,
+            ),
+            DispatchOutcome::Emit {
+                command: DispatchCommand::ViewContent {
+                    view: ViewId(0),
+                    content: ContentId(0),
+                    ..
+                },
+                replay,
+            } if replay.is_empty()
+        ));
     }
 
     #[test]

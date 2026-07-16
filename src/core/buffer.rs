@@ -110,7 +110,15 @@ impl Buffer {
         if char_idx == 0 {
             return false;
         }
-        self.rope.remove(char_idx - 1..char_idx);
+        let start = if char_idx >= 2
+            && self.rope.char(char_idx - 2) == '\r'
+            && self.rope.char(char_idx - 1) == '\n'
+        {
+            char_idx - 2
+        } else {
+            char_idx - 1
+        };
+        self.rope.remove(start..char_idx);
         self.mark_modified();
         true
     }
@@ -147,10 +155,19 @@ impl Buffer {
 
     pub fn clamp_offset(&self, cur: &mut TextOffset) {
         cur.char_index = cur.char_index.min(self.rope.len_chars());
+        if cur.char_index > 0
+            && cur.char_index < self.rope.len_chars()
+            && self.rope.char(cur.char_index - 1) == '\r'
+            && self.rope.char(cur.char_index) == '\n'
+        {
+            cur.char_index += 1;
+        }
     }
 
     pub fn text_point(&self, offset: TextOffset) -> TextPoint {
-        let clamped = offset.char_index.min(self.rope.len_chars());
+        let mut offset = offset;
+        self.clamp_offset(&mut offset);
+        let clamped = offset.char_index;
         let row = self.rope.char_to_line(clamped);
         TextPoint {
             row,
@@ -160,9 +177,11 @@ impl Buffer {
 
     pub(crate) fn move_cursor_by(&self, cur: &mut TextOffset, chars: isize, lines: isize) {
         if chars != 0 {
-            let len = self.rope.len_chars() as isize;
-            let target = (cur.char_index as isize + chars).clamp(0, len) as usize;
-            cur.char_index = target;
+            if chars < 0 {
+                self.move_cursor_left(cur, chars.unsigned_abs());
+            } else {
+                self.move_cursor_right(cur, chars as usize);
+            }
         }
         if lines != 0 {
             let point = self.text_point(*cur);
@@ -176,12 +195,30 @@ impl Buffer {
     }
 
     pub(crate) fn move_cursor_left(&self, cur: &mut TextOffset, n: usize) {
-        cur.char_index = cur.char_index.saturating_sub(n);
+        for _ in 0..n {
+            cur.char_index = if cur.char_index >= 2
+                && self.rope.char(cur.char_index - 2) == '\r'
+                && self.rope.char(cur.char_index - 1) == '\n'
+            {
+                cur.char_index - 2
+            } else {
+                cur.char_index.saturating_sub(1)
+            };
+        }
         self.clamp_offset(cur);
     }
 
     pub(crate) fn move_cursor_right(&self, cur: &mut TextOffset, n: usize) {
-        cur.char_index = cur.char_index.saturating_add(n).min(self.rope.len_chars());
+        for _ in 0..n {
+            cur.char_index = if cur.char_index + 1 < self.rope.len_chars()
+                && self.rope.char(cur.char_index) == '\r'
+                && self.rope.char(cur.char_index + 1) == '\n'
+            {
+                cur.char_index + 2
+            } else {
+                cur.char_index.saturating_add(1).min(self.rope.len_chars())
+            };
+        }
         self.clamp_offset(cur);
     }
 
@@ -218,6 +255,14 @@ impl Buffer {
         self.clamp_offset(&mut sel.anchor);
     }
 
+    pub fn reconcile_selections(&self, selections: &mut Selections) -> bool {
+        let before = selections.clone();
+        for selection in selections.all_mut() {
+            self.clamp_selection(selection);
+        }
+        *selections != before
+    }
+
     /// 移动 head，不碰 anchor（extend 语义：selection 变非空）。
     pub fn move_head_by(&self, sel: &mut Selection, chars: isize, lines: isize) {
         self.move_cursor_by(&mut sel.head, chars, lines);
@@ -229,6 +274,20 @@ impl Buffer {
 
     pub fn move_head_right(&self, sel: &mut Selection, n: usize) {
         self.move_cursor_right(&mut sel.head, n);
+    }
+
+    pub fn move_head_within_line_left(&self, sel: &mut Selection, n: usize) {
+        let point = self.text_point(sel.head);
+        let line_start = self.rope.line_to_char(point.row);
+        sel.head.char_index = sel.head.char_index.saturating_sub(n).max(line_start);
+        self.clamp_offset(&mut sel.head);
+    }
+
+    pub fn move_head_within_line_right(&self, sel: &mut Selection, n: usize) {
+        let point = self.text_point(sel.head);
+        let line_end = line_end_char(&self.rope, point.row);
+        sel.head.char_index = sel.head.char_index.saturating_add(n).min(line_end);
+        self.clamp_offset(&mut sel.head);
     }
 
     pub fn move_head_up(&self, sel: &mut Selection, n: usize) {
@@ -356,6 +415,11 @@ impl Buffer {
     /// 在每个 selection 插入文本：非空时先删 [min,max] 再插入，head 到插入末尾，collapse。
     /// 空时在 head 点插入，head 前移 text_len，collapse。
     pub fn insert_at_selections(&mut self, selections: &mut Selections, text: &str) {
+        self.reconcile_selections(selections);
+        let text = self.normalize_insert_text(text);
+        if text.is_empty() {
+            return;
+        }
         let text_len = text.chars().count();
         // 1) 非空 selection 先删 range（按 min 降序，避免索引偏移）
         let mut del_ranges: Vec<(usize, usize)> = selections
@@ -384,7 +448,7 @@ impl Buffer {
         insert_indices.sort_unstable_by(|a, b| b.cmp(a));
         insert_indices.dedup();
         for idx in insert_indices {
-            self.rope.insert(idx, text);
+            self.rope.insert(idx, &text);
         }
         self.mark_modified();
         // 3) 更新每个 selection：head = 插入点 + text_len，collapse（编辑后重置 anchor）
@@ -399,9 +463,10 @@ impl Buffer {
     /// 在每个 selection 删除：非空时删 [min,max]，head=min，collapse。
     /// 空时按方向删 n，head 回退（backward）或不动（forward），collapse。
     pub fn delete_at_selections(&mut self, selections: &mut Selections, n: isize) {
+        self.reconcile_selections(selections);
         let len = self.rope.len_chars();
         // 1) 计算每个 selection 的删除区间
-        let mut ranges: Vec<(usize, usize)> = selections
+        let selection_ranges: Vec<(usize, usize)> = selections
             .all()
             .map(|s| {
                 if s.anchor != s.head {
@@ -411,39 +476,61 @@ impl Buffer {
                     // 空：按方向删 n
                     let ci = s.head.char_index.min(len);
                     if n < 0 {
-                        let start = ci.saturating_sub((-n) as usize);
-                        (start, ci)
+                        let mut start = TextOffset { char_index: ci };
+                        self.move_cursor_left(&mut start, n.unsigned_abs());
+                        (start.char_index, ci)
                     } else {
-                        let end = ci.saturating_add(n as usize).min(len);
-                        (ci, end)
+                        let mut end = TextOffset { char_index: ci };
+                        self.move_cursor_right(&mut end, n as usize);
+                        (ci, end.char_index)
                     }
                 }
             })
             .collect();
-        ranges.sort_unstable_by_key(|b| std::cmp::Reverse(b.0));
-        ranges.dedup();
+        let mut ranges = selection_ranges.clone();
+        ranges.sort_unstable_by_key(|range| range.0);
+        let mut normalized: Vec<(usize, usize)> = Vec::new();
         for (start, end) in ranges {
+            if let Some(last) = normalized.last_mut() {
+                if start <= last.1 {
+                    last.1 = last.1.max(end);
+                    continue;
+                }
+            }
+            normalized.push((start, end));
+        }
+        let mut changed = false;
+        for &(start, end) in normalized.iter().rev() {
             if end > start {
                 self.rope.remove(start..end);
+                changed = true;
             }
         }
-        self.mark_modified();
+        if changed {
+            self.mark_modified();
+        }
         // 2) 更新每个 selection
-        for sel in selections.all_mut() {
-            if sel.anchor != sel.head {
-                // 非空：head = min 端点
-                sel.head.char_index = sel.anchor.char_index.min(sel.head.char_index);
-            } else if n < 0 {
-                // 空 backward：head 回退
-                sel.head.char_index = sel.head.char_index.saturating_sub((-n) as usize);
+        for (sel, (target, _)) in selections.all_mut().zip(selection_ranges) {
+            let mut deleted_before = 0;
+            sel.head.char_index = target;
+            for &(start, end) in &normalized {
+                if target < start {
+                    break;
+                }
+                if target <= end {
+                    sel.head.char_index = start - deleted_before;
+                    break;
+                }
+                deleted_before += end - start;
+                sel.head.char_index = target - deleted_before;
             }
-            // 空 forward：head 不动（删除在 head 之后）
             self.clamp_offset(&mut sel.head);
             Self::collapse_to_head(sel);
         }
     }
 
     pub fn delete_word_backward_at_selections(&mut self, selections: &mut Selections) {
+        self.reconcile_selections(selections);
         let starts: Vec<usize> = selections
             .all()
             .map(|selection| {
@@ -475,12 +562,16 @@ impl Buffer {
             }
         }
 
+        let mut changed = false;
         for &(start, end) in normalized_ranges.iter().rev() {
             if end > start {
                 self.rope.remove(start..end);
+                changed = true;
             }
         }
-        self.mark_modified();
+        if changed {
+            self.mark_modified();
+        }
         for (selection, start) in selections.all_mut().zip(starts) {
             let mut deleted_before = 0;
             selection.head.char_index = start;
@@ -500,6 +591,7 @@ impl Buffer {
     }
 
     pub fn delete_lines_at_selections(&mut self, selections: &mut Selections, lines: usize) {
+        self.reconcile_selections(selections);
         let lines = lines.max(1);
         let max_row = self.rope.len_lines().saturating_sub(1);
         let rows: Vec<usize> = selections
@@ -518,7 +610,7 @@ impl Buffer {
                     self.rope.line_to_char(end_row + 1)
                 } else {
                     if *row > 0 {
-                        start = start.saturating_sub(1);
+                        start = start.saturating_sub(line_break_width_before(&self.rope, *row));
                     }
                     self.rope.len_chars()
                 };
@@ -536,12 +628,16 @@ impl Buffer {
                 normalized.push((start, end));
             }
         }
+        let mut changed = false;
         for &(start, end) in normalized.iter().rev() {
             if start < end {
                 self.rope.remove(start..end);
+                changed = true;
             }
         }
-        self.mark_modified();
+        if changed {
+            self.mark_modified();
+        }
         let new_max_row = self.rope.len_lines().saturating_sub(1);
         for (selection, row) in selections.all_mut().zip(rows) {
             selection.head.char_index = self.rope.line_to_char(row.min(new_max_row));
@@ -551,6 +647,7 @@ impl Buffer {
     }
 
     pub fn delete_to_line_start_at_selections(&mut self, selections: &mut Selections) {
+        self.reconcile_selections(selections);
         let ranges: Vec<(usize, usize)> = selections
             .all()
             .map(|s| {
@@ -569,12 +666,16 @@ impl Buffer {
         let mut sorted = ranges.clone();
         sorted.sort_unstable_by_key(|b| std::cmp::Reverse(b.0));
         sorted.dedup();
+        let mut changed = false;
         for (start, end) in &sorted {
             if end > start {
                 self.rope.remove(*start..*end);
+                changed = true;
             }
         }
-        self.mark_modified();
+        if changed {
+            self.mark_modified();
+        }
         for (sel, (start, _)) in selections.all_mut().zip(ranges.iter()) {
             let mut deleted_before = 0;
             for &(r_start, r_end) in &sorted {
@@ -589,6 +690,7 @@ impl Buffer {
     }
 
     pub fn delete_to_line_end_at_selections(&mut self, selections: &mut Selections) {
+        self.reconcile_selections(selections);
         let ranges: Vec<(usize, usize)> = selections
             .all()
             .map(|s| {
@@ -607,12 +709,16 @@ impl Buffer {
         let mut sorted = ranges.clone();
         sorted.sort_unstable_by_key(|b| std::cmp::Reverse(b.0));
         sorted.dedup();
+        let mut changed = false;
         for (start, end) in &sorted {
             if end > start {
                 self.rope.remove(*start..*end);
+                changed = true;
             }
         }
-        self.mark_modified();
+        if changed {
+            self.mark_modified();
+        }
         for (sel, (start, _end)) in selections.all_mut().zip(ranges.iter()) {
             let mut deleted_before = 0;
             for &(r_start, r_end) in &sorted {
@@ -627,6 +733,7 @@ impl Buffer {
     }
 
     pub fn join_lines_at_selections(&mut self, selections: &mut Selections) {
+        self.reconcile_selections(selections);
         let max_row = self.rope.len_lines().saturating_sub(1);
         let mut joins: Vec<Option<(usize, usize, usize)>> = selections
             .all()
@@ -638,7 +745,7 @@ impl Buffer {
                     return None;
                 }
                 let newline_pos = self.rope.line_to_char(row) + line_content_len(&self.rope, row);
-                let next_line_start = newline_pos + 1;
+                let next_line_start = self.rope.line_to_char(row + 1);
                 let next_row = row + 1;
                 let next_content_len = line_content_len(&self.rope, next_row);
                 let next_content_start = next_line_start;
@@ -665,7 +772,9 @@ impl Buffer {
             self.rope.remove(*newline_pos..*strip_end);
             self.rope.insert(*newline_pos, " ");
         }
-        self.mark_modified();
+        if !sorted_joins.is_empty() {
+            self.mark_modified();
+        }
         for (sel, (newline_pos, _, _)) in selections.all_mut().zip(joins.iter()) {
             sel.head.char_index = *newline_pos;
             self.clamp_offset(&mut sel.head);
@@ -674,58 +783,92 @@ impl Buffer {
     }
 
     pub fn toggle_case_at_selections(&mut self, selections: &mut Selections) {
+        self.reconcile_selections(selections);
         let len = self.rope.len_chars();
-        let ranges: Vec<(usize, usize)> = selections
+        let ranges: Vec<(usize, usize, bool, bool)> = selections
             .all()
             .map(|s| {
                 if s.anchor != s.head {
                     let (a, b) = (s.anchor.char_index, s.head.char_index);
-                    (a.min(b), a.max(b))
+                    (a.min(b), a.max(b), false, false)
                 } else {
                     let ci = s.head.char_index.min(len);
-                    if ci < len { (ci, ci + 1) } else { (ci, ci) }
+                    let row = self.rope.char_to_line(ci);
+                    let at_line_end = ci >= line_end_char(&self.rope, row);
+                    if ci < len {
+                        (ci, ci + 1, true, at_line_end)
+                    } else {
+                        (ci, ci, true, true)
+                    }
                 }
             })
             .collect();
-        for (start, end) in &ranges {
-            if end > start {
-                let slice = self.rope.slice(*start..*end);
-                let flipped: String = slice
-                    .chars()
-                    .map(|c| {
-                        if c.is_uppercase() {
-                            c.to_lowercase().next().unwrap_or(c)
-                        } else if c.is_lowercase() {
-                            c.to_uppercase().next().unwrap_or(c)
-                        } else {
-                            c
-                        }
-                    })
-                    .collect();
-                self.rope.remove(*start..*end);
-                self.rope.insert(*start, &flipped);
+        let mut replacements = Vec::new();
+        let mut targeted_chars: Vec<usize> = ranges
+            .iter()
+            .flat_map(|(start, end, _, _)| *start..*end)
+            .collect();
+        targeted_chars.sort_unstable();
+        targeted_chars.dedup();
+        for index in targeted_chars {
+            let original = self.rope.char(index);
+            let flipped: String = if original.is_uppercase() {
+                original.to_lowercase().collect()
+            } else if original.is_lowercase() {
+                original.to_uppercase().collect()
+            } else {
+                original.to_string()
+            };
+            if flipped != original.to_string() {
+                replacements.push((index, index + 1, flipped));
             }
         }
-        self.mark_modified();
-        for (sel, (_start, end)) in selections.all_mut().zip(ranges.iter()) {
-            if sel.anchor == sel.head {
-                // Collapsed: advance head by 1 unless at/past line end
-                let row = self
-                    .rope
-                    .char_to_line(sel.head.char_index.min(self.rope.len_chars()));
-                let line_end = line_end_char(&self.rope, row);
-                if sel.head.char_index < line_end {
-                    sel.head.char_index += 1;
+        let rebase = |offset: usize| {
+            replacements
+                .iter()
+                .filter(|(_, end, _)| *end <= offset)
+                .fold(offset as isize, |value, (start, end, text)| {
+                    value + text.chars().count() as isize - (*end - *start) as isize
+                }) as usize
+        };
+        let new_heads: Vec<usize> = ranges
+            .iter()
+            .map(|(start, end, collapsed, at_line_end)| {
+                let replacement = replacements.iter().find(|(r_start, _, _)| r_start == start);
+                let new_start = rebase(*start);
+                if *collapsed {
+                    let new_end = replacement.map_or_else(
+                        || rebase(*end),
+                        |(_, _, text)| new_start + text.chars().count(),
+                    );
+                    if *at_line_end && new_end > new_start {
+                        new_end - 1
+                    } else {
+                        new_end
+                    }
+                } else {
+                    rebase(*end)
                 }
-            } else {
-                sel.head.char_index = *end;
-            }
+            })
+            .collect();
+        for (start, end, flipped) in replacements.iter().rev() {
+            self.rope.remove(*start..*end);
+            self.rope.insert(*start, flipped);
+        }
+        if !replacements.is_empty() {
+            self.mark_modified();
+        }
+        for (sel, new_head) in selections.all_mut().zip(new_heads) {
+            sel.head.char_index = new_head;
             self.clamp_offset(&mut sel.head);
             Self::collapse_to_head(sel);
         }
     }
 
     pub fn insert_new_line_below_at_selections(&mut self, selections: &mut Selections) {
+        self.reconcile_selections(selections);
+        let newline = self.preferred_line_ending();
+        let newline_len = newline.chars().count();
         let insert_points: Vec<usize> = selections
             .all()
             .map(|s| {
@@ -739,17 +882,19 @@ impl Buffer {
         sorted.sort_unstable_by(|a, b| b.cmp(a));
         sorted.dedup();
         for pos in &sorted {
-            self.rope.insert(*pos, "\n");
+            self.rope.insert(*pos, newline);
         }
         self.mark_modified();
         for (sel, pos) in selections.all_mut().zip(insert_points.iter()) {
-            sel.head.char_index = *pos + 1;
+            sel.head.char_index = *pos + newline_len;
             self.clamp_offset(&mut sel.head);
             Self::collapse_to_head(sel);
         }
     }
 
     pub fn insert_new_line_above_at_selections(&mut self, selections: &mut Selections) {
+        self.reconcile_selections(selections);
+        let newline = self.preferred_line_ending();
         let insert_points: Vec<usize> = selections
             .all()
             .map(|s| {
@@ -763,7 +908,7 @@ impl Buffer {
         sorted.sort_unstable_by(|a, b| b.cmp(a));
         sorted.dedup();
         for pos in &sorted {
-            self.rope.insert(*pos, "\n");
+            self.rope.insert(*pos, newline);
         }
         self.mark_modified();
         for (sel, pos) in selections.all_mut().zip(insert_points.iter()) {
@@ -774,6 +919,7 @@ impl Buffer {
     }
 
     pub fn delete_line_content_at_selections(&mut self, selections: &mut Selections) {
+        self.reconcile_selections(selections);
         let ranges: Vec<(usize, usize)> = selections
             .all()
             .map(|s| {
@@ -788,17 +934,51 @@ impl Buffer {
         let mut sorted = ranges.clone();
         sorted.sort_unstable_by_key(|b| std::cmp::Reverse(b.0));
         sorted.dedup();
+        let mut changed = false;
         for (start, end) in &sorted {
             if end > start {
                 self.rope.remove(*start..*end);
+                changed = true;
             }
         }
-        self.mark_modified();
+        if changed {
+            self.mark_modified();
+        }
         for (sel, (start, _)) in selections.all_mut().zip(ranges.iter()) {
             sel.head.char_index = *start;
             self.clamp_offset(&mut sel.head);
             Self::collapse_to_head(sel);
         }
+    }
+
+    fn preferred_line_ending(&self) -> &'static str {
+        for row in 0..self.rope.len_lines().saturating_sub(1) {
+            let line = self.rope.line(row);
+            let len = line.len_chars();
+            if len >= 2 && line.char(len - 2) == '\r' && line.char(len - 1) == '\n' {
+                return "\r\n";
+            }
+            if len >= 1 && line.char(len - 1) == '\n' {
+                return "\n";
+            }
+        }
+        "\n"
+    }
+
+    fn normalize_insert_text(&self, text: &str) -> String {
+        if self.preferred_line_ending() == "\n" || !text.contains('\n') {
+            return text.to_string();
+        }
+        let mut normalized = String::with_capacity(text.len());
+        let mut previous = None;
+        for ch in text.chars() {
+            if ch == '\n' && previous != Some('\r') {
+                normalized.push('\r');
+            }
+            normalized.push(ch);
+            previous = Some(ch);
+        }
+        normalized
     }
 }
 
@@ -809,10 +989,23 @@ impl Default for Buffer {
 }
 
 fn line_content_len(rope: &Rope, row: usize) -> usize {
-    let s = rope.line(row).to_string();
-    match s.strip_suffix('\n') {
-        Some(rest) => rest.chars().count(),
-        None => s.chars().count(),
+    let line = rope.line(row);
+    let len = line.len_chars();
+    if len >= 2 && line.char(len - 2) == '\r' && line.char(len - 1) == '\n' {
+        len - 2
+    } else if len >= 1 && line.char(len - 1) == '\n' {
+        len - 1
+    } else {
+        len
+    }
+}
+
+fn line_break_width_before(rope: &Rope, row: usize) -> usize {
+    let line_start = rope.line_to_char(row);
+    if line_start >= 2 && rope.char(line_start - 2) == '\r' && rope.char(line_start - 1) == '\n' {
+        2
+    } else {
+        usize::from(line_start > 0)
     }
 }
 
@@ -1435,6 +1628,20 @@ mod tests {
     }
 
     #[test]
+    fn delete_last_line_without_trailing_newline_removes_full_crlf() {
+        let mut buffer = Buffer::new();
+        for (i, ch) in "a\r\nb".chars().enumerate() {
+            buffer.insert_char(i, ch);
+        }
+        let mut s = selection_at(&buffer, 3);
+
+        buffer.delete_lines_at_selections(&mut s, 1);
+
+        assert_eq!(buffer.slice().to_string(), "a");
+        assert_eq!(s.primary().head().char_index, 0);
+    }
+
+    #[test]
     fn forward_word_start_skips_word_then_whitespace() {
         let mut buffer = Buffer::new();
         for (i, ch) in "foo bar".chars().enumerate() {
@@ -1886,5 +2093,69 @@ mod tests {
         assert_eq!(b.slice().to_string(), "aXb");
         assert_eq!(s.primary().head().char_index, 2);
         assert_eq!(s.primary().anchor, s.primary().head());
+    }
+
+    #[test]
+    fn crlf_is_one_logical_step_for_horizontal_movement_and_deletion() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "a\r\nb");
+        let mut selection = single_sel(cur(1));
+
+        buffer.move_head_right(selection.primary_mut(), 1);
+        assert_eq!(selection.primary().head().char_index, 3);
+        assert_eq!(
+            buffer.text_point(selection.primary().head()),
+            TextPoint { row: 1, col: 0 }
+        );
+        buffer.move_head_left(selection.primary_mut(), 1);
+        assert_eq!(selection.primary().head().char_index, 1);
+
+        buffer.delete_at_selections(&mut selection, 1);
+        assert_eq!(buffer.slice().to_string(), "ab");
+
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "a\r\nb");
+        let mut selection = single_sel(cur(3));
+        buffer.delete_at_selections(&mut selection, -1);
+        assert_eq!(buffer.slice().to_string(), "ab");
+        assert_eq!(selection.primary().head().char_index, 1);
+    }
+
+    #[test]
+    fn editing_crlf_buffer_preserves_its_line_ending_style() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "a\r\nb");
+        let mut selection = single_sel(cur(4));
+
+        buffer.insert_at_selections(&mut selection, "\n");
+
+        assert_eq!(buffer.slice().to_string(), "a\r\nb\r\n");
+        assert_eq!(selection.primary().head().char_index, 6);
+    }
+
+    #[test]
+    fn no_op_edits_do_not_mark_buffer_modified_or_advance_revision() {
+        let mut buffer = Buffer::new();
+        let mut selection = single_sel(TextOffset::origin());
+
+        buffer.delete_at_selections(&mut selection, -1);
+        buffer.insert_at_selections(&mut selection, "");
+        buffer.join_lines_at_selections(&mut selection);
+        buffer.toggle_case_at_selections(&mut selection);
+
+        assert_eq!(buffer.revision(), 0);
+        assert!(!buffer.modified());
+    }
+
+    #[test]
+    fn toggle_case_keeps_all_scalars_from_unicode_mapping() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "ßx");
+        let mut selection = single_sel(TextOffset::origin());
+
+        buffer.toggle_case_at_selections(&mut selection);
+
+        assert_eq!(buffer.slice().to_string(), "SSx");
+        assert_eq!(selection.primary().head().char_index, 2);
     }
 }
