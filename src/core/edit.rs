@@ -369,6 +369,9 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
         EditCommand::DeleteLineContent => {
             buffer.delete_line_content_at_selections(selections);
         }
+        EditCommand::DeleteSelectedLines => {
+            buffer.delete_selected_lines_at_selections(selections);
+        }
     }
 }
 
@@ -775,5 +778,21 @@ mod tests {
         apply_edit(EditCommand::DeleteLineContent, &mut buf, &mut s);
         assert_eq!(buf.slice().to_string(), "\nbar");
         assert_eq!(s.primary().head().char_index, 0);
+    }
+
+    #[test]
+    fn delete_selected_lines_removes_all_touched_rows() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "one\ntwo\nthree");
+        let mut selections = Selections::single(Selection {
+            anchor: TextOffset { char_index: 1 },
+            head: TextOffset { char_index: 6 },
+        });
+
+        apply_edit(EditCommand::DeleteSelectedLines, &mut buf, &mut selections);
+
+        assert_eq!(buf.slice().to_string(), "three");
+        assert_eq!(selections.primary().anchor, TextOffset::origin());
+        assert_eq!(selections.primary().head, TextOffset::origin());
     }
 }

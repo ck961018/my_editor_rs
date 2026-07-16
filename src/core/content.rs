@@ -321,7 +321,9 @@ fn execute_buffer_view(
         ContentCommand::Mode { .. } => {
             panic!("mode commands must be executed by the view mode instance")
         }
-        ContentCommand::Save | ContentCommand::Sequence(_) => return ContentResult::NotHandled,
+        ContentCommand::Save | ContentCommand::Sequence(_) | ContentCommand::Viewport(_) => {
+            return ContentResult::NotHandled;
+        }
     }
 
     let change = TransactionalContent::take_change(buffer);

@@ -1,5 +1,6 @@
 use crate::core::mode::{ModeActionName, ModeName};
 use crate::core::motion::OperatorCommand;
+use crate::protocol::viewport::ViewportCommand;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -29,6 +30,7 @@ pub enum ContentCommand {
         mode: ModeName,
         action: ModeActionName,
     },
+    Viewport(ViewportCommand),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +119,7 @@ pub enum EditCommand {
     InsertNewLineAbove,
     MoveAfterLineEnd,
     DeleteLineContent,
+    DeleteSelectedLines,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

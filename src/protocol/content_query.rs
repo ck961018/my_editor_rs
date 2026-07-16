@@ -28,10 +28,17 @@ pub enum CursorStyle {
     Bar,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionShape {
+    Character,
+    Line,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TextPresentation {
     pub selections: Selections,
     pub cursor_style: CursorStyle,
+    pub selection_shape: SelectionShape,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,6 +133,7 @@ mod tests {
             presentation: ViewPresentation::Text(TextPresentation {
                 selections: selections.clone(),
                 cursor_style: CursorStyle::Block,
+                selection_shape: SelectionShape::Character,
             }),
         };
         assert_eq!(data.content, ContentId(7));
@@ -134,6 +142,7 @@ mod tests {
             ViewPresentation::Text(TextPresentation {
                 selections,
                 cursor_style: CursorStyle::Block,
+                selection_shape: SelectionShape::Character,
             })
         );
     }

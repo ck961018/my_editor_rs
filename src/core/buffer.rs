@@ -821,6 +821,54 @@ impl Buffer {
         }
     }
 
+    /// 删除每个 selection 的 anchor/head 所触及的完整逻辑行（两端行都包含）。
+    pub fn delete_selected_lines_at_selections(&mut self, selections: &mut Selections) {
+        self.reconcile_selections(selections);
+        let max_row = self.rope.len_lines().saturating_sub(1);
+        let row_ranges: Vec<(usize, usize)> = selections
+            .all()
+            .map(|selection| {
+                let anchor_row = self
+                    .rope
+                    .char_to_line(selection.anchor.char_index.min(self.rope.len_chars()));
+                let head_row = self
+                    .rope
+                    .char_to_line(selection.head.char_index.min(self.rope.len_chars()));
+                (anchor_row.min(head_row), anchor_row.max(head_row))
+            })
+            .collect();
+        let ranges: Vec<(usize, usize)> = row_ranges
+            .iter()
+            .map(|(start_row, end_row)| {
+                let mut start = self.rope.line_to_char(*start_row);
+                let end = if *end_row < max_row {
+                    self.rope.line_to_char(end_row + 1)
+                } else {
+                    if *start_row > 0 {
+                        start =
+                            start.saturating_sub(line_break_width_before(&self.rope, *start_row));
+                    }
+                    self.rope.len_chars()
+                };
+                (start, end)
+            })
+            .collect();
+        let normalized = merge_ranges(ranges);
+        self.apply_text_edits(
+            normalized
+                .iter()
+                .map(|&(start, end)| TextEdit::new(start..end, ""))
+                .collect(),
+        )
+        .expect("valid selected-line deletion");
+        let new_max_row = self.rope.len_lines().saturating_sub(1);
+        for (selection, (start_row, _)) in selections.all_mut().zip(row_ranges) {
+            selection.head.char_index = self.rope.line_to_char(start_row.min(new_max_row));
+            self.clamp_offset(&mut selection.head);
+            Self::collapse_to_head(selection);
+        }
+    }
+
     pub fn delete_to_line_start_at_selections(&mut self, selections: &mut Selections) {
         self.reconcile_selections(selections);
         let ranges: Vec<(usize, usize)> = selections

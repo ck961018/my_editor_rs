@@ -6,7 +6,7 @@ use crate::core::content_view_state::ContentViewState;
 use crate::core::input::{InputContext, InputDecision, InputStatus};
 use crate::core::keymap::Keymap;
 use crate::core::mode::{ModeActionName, ModeInstance, ModeName, ModeRegistry};
-use crate::protocol::content_query::CursorStyle;
+use crate::protocol::content_query::{CursorStyle, SelectionShape};
 use crate::protocol::ids::ContentId;
 use crate::protocol::key_event::KeyEvent;
 use crate::protocol::revision::Revision;
@@ -79,6 +79,12 @@ impl View {
         self.mode
             .as_ref()
             .map_or(CursorStyle::Default, ModeInstance::cursor_style)
+    }
+
+    pub fn selection_shape(&self) -> SelectionShape {
+        self.mode
+            .as_ref()
+            .map_or(SelectionShape::Character, ModeInstance::selection_shape)
     }
 
     pub(crate) fn execute_mode_command(

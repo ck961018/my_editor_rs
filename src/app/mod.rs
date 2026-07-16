@@ -28,7 +28,7 @@ use crate::app::scene_model::{
 use crate::app::session::ClientSession;
 use crate::app::view::{ModeCommandResult, View};
 use crate::core::buffer::Buffer;
-use crate::core::command::AppCommand;
+use crate::core::command::{AppCommand, ContentCommand, EditCommand};
 use crate::core::content::{
     Content, ContentEffect, ContentEvent, ContentInput, ContentResult, SaveSnapshot,
 };
@@ -43,6 +43,7 @@ use crate::protocol::frontend_event::FrontendEvent;
 use crate::protocol::ids::{ContentId, SpaceId, ViewId};
 use crate::protocol::scene::Scene;
 use crate::protocol::space::{Sizing, SpaceKind, SplitDirection};
+use crate::protocol::viewport::{ViewportCommand, ViewportCursorBehavior, ViewportMoveDirection};
 
 pub struct App<F: Frontend> {
     kernel: Kernel,
@@ -274,6 +275,57 @@ impl<F: Frontend> App<F> {
                 view,
                 content,
             } => {
+                let (command, mode_changed) = {
+                    let target_view = self
+                        .session
+                        .views
+                        .get_mut(&view)
+                        .expect("target view exists");
+                    assert_eq!(
+                        target_view.content(),
+                        content,
+                        "view/content target mismatch"
+                    );
+                    match command {
+                        ContentCommand::Mode { mode, action } => {
+                            match target_view.execute_mode_command(
+                                &self.kernel.modes,
+                                &mode,
+                                &action,
+                            ) {
+                                ModeCommandResult::Unknown => return Ok(()),
+                                ModeCommandResult::Handled(Some(command)) => (command, true),
+                                ModeCommandResult::Handled(None) => {
+                                    target_view.touch();
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        command => (command, false),
+                    }
+                };
+                let command = match command {
+                    ContentCommand::Viewport(command) => {
+                        let lines = self.frontend.execute_viewport_command(
+                            &self.session.scene,
+                            self.session.scene_revision,
+                            view,
+                            command,
+                        )?;
+                        if lines == 0 {
+                            if mode_changed {
+                                self.session
+                                    .views
+                                    .get_mut(&view)
+                                    .expect("target view exists")
+                                    .touch();
+                            }
+                            return Ok(());
+                        }
+                        ContentCommand::Edit(viewport_cursor_edit(command, lines))
+                    }
+                    command => command,
+                };
                 let result = {
                     let target_view = self
                         .session
@@ -285,27 +337,6 @@ impl<F: Frontend> App<F> {
                         content,
                         "view/content target mismatch"
                     );
-                    let mut mode_changed = false;
-                    let command = match command {
-                        crate::core::command::ContentCommand::Mode { mode, action } => {
-                            match target_view.execute_mode_command(
-                                &self.kernel.modes,
-                                &mode,
-                                &action,
-                            ) {
-                                ModeCommandResult::Unknown => return Ok(()),
-                                ModeCommandResult::Handled(Some(command)) => {
-                                    mode_changed = true;
-                                    command
-                                }
-                                ModeCommandResult::Handled(None) => {
-                                    target_view.touch();
-                                    return Ok(());
-                                }
-                            }
-                        }
-                        command => command,
-                    };
                     let result = self.kernel.contents.execute(
                         content,
                         ContentInput::View {
@@ -581,6 +612,21 @@ impl<F: Frontend> App<F> {
     }
 }
 
+fn viewport_cursor_edit(command: ViewportCommand, lines: usize) -> EditCommand {
+    match (command.direction, command.cursor_behavior) {
+        (ViewportMoveDirection::Up, ViewportCursorBehavior::Move) => EditCommand::MoveUpBy(lines),
+        (ViewportMoveDirection::Down, ViewportCursorBehavior::Move) => {
+            EditCommand::MoveDownBy(lines)
+        }
+        (ViewportMoveDirection::Up, ViewportCursorBehavior::Extend) => {
+            EditCommand::ExtendUpBy(lines)
+        }
+        (ViewportMoveDirection::Down, ViewportCursorBehavior::Extend) => {
+            EditCommand::ExtendDownBy(lines)
+        }
+    }
+}
+
 #[allow(dead_code)] // 伴随尚未接入 UI 的布局入口。
 #[derive(Debug, PartialEq, Eq)]
 enum LayoutError {
@@ -718,6 +764,7 @@ impl RenderQuery for AppQuery<'_> {
             Some(selections) => ViewPresentation::Text(TextPresentation {
                 selections: selections.clone(),
                 cursor_style: view.cursor_style(),
+                selection_shape: view.selection_shape(),
             }),
             None => ViewPresentation::StatusBar,
         };
@@ -752,6 +799,8 @@ mod tests {
         scene_revisions: Vec<Revision>,
         fail_next_event: bool,
         fail_render: bool,
+        viewport_height: usize,
+        viewport_commands: Vec<(ViewId, ViewportCommand)>,
     }
 
     impl ScriptedFrontend {
@@ -762,6 +811,8 @@ mod tests {
                 scene_revisions: Vec::new(),
                 fail_next_event: false,
                 fail_render: false,
+                viewport_height: 4,
+                viewport_commands: Vec::new(),
             }
         }
     }
@@ -789,6 +840,22 @@ mod tests {
                 return Err(io::Error::other("scripted render failure"));
             }
             Ok(())
+        }
+
+        fn execute_viewport_command(
+            &mut self,
+            _scene: &Scene,
+            _scene_revision: Revision,
+            view: ViewId,
+            command: ViewportCommand,
+        ) -> io::Result<usize> {
+            self.viewport_commands.push((view, command));
+            Ok(match command.amount {
+                crate::protocol::viewport::ViewportMoveAmount::HalfPage => {
+                    (self.viewport_height / 2).max(1)
+                }
+                crate::protocol::viewport::ViewportMoveAmount::FullPage => self.viewport_height,
+            })
         }
     }
 
@@ -2057,6 +2124,46 @@ mod tests {
         app.run().await.unwrap();
 
         assert_eq!(text_rows(&app, editor_cid()), vec!["b"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vim_line_visual_ctrl_d_deletes_frontend_sized_line_range() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('g')),
+                FrontendEvent::Key(KeyEvent::char('g')),
+                FrontendEvent::Key(KeyEvent::char('V')),
+                FrontendEvent::Key(KeyEvent::ctrl('d')),
+                FrontendEvent::Key(KeyEvent::char('d')),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+        let focused_view = view_id(&app, app.session.focused);
+        app.execute_command(DispatchCommand::ViewContent {
+            command: ContentCommand::Edit(EditCommand::InsertText(
+                "one\ntwo\nthree\nfour".to_string(),
+            )),
+            view: focused_view,
+            content: editor_cid(),
+        })
+        .unwrap();
+
+        app.run().await.unwrap();
+
+        assert_eq!(text_rows(&app, editor_cid()), vec!["four"]);
+        assert_eq!(app.frontend.viewport_commands.len(), 1);
+        assert_eq!(
+            app.frontend.viewport_commands[0],
+            (
+                focused_view,
+                ViewportCommand::new(
+                    crate::protocol::viewport::ViewportMoveDirection::Down,
+                    crate::protocol::viewport::ViewportMoveAmount::HalfPage,
+                    ViewportCursorBehavior::Extend,
+                ),
+            )
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

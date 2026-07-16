@@ -5,9 +5,10 @@ use std::io;
 use crate::frontend::Frontend;
 use crate::protocol::content_query::RenderQuery;
 use crate::protocol::frontend_event::FrontendEvent;
-use crate::protocol::ids::SpaceId;
+use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::revision::Revision;
 use crate::protocol::scene::Scene;
+use crate::protocol::viewport::ViewportCommand;
 use crate::terminal::input::Input;
 use crate::terminal::output::{Canvas, Output};
 use crate::tui::scene_renderer::SceneRenderer;
@@ -46,5 +47,17 @@ impl<W: io::Write> Frontend for TuiFrontend<W> {
             focused,
             &mut self.output as &mut dyn Canvas,
         )
+    }
+
+    fn execute_viewport_command(
+        &mut self,
+        scene: &Scene,
+        scene_revision: Revision,
+        view: ViewId,
+        command: ViewportCommand,
+    ) -> io::Result<usize> {
+        Ok(self
+            .renderer
+            .execute_viewport_command(scene, scene_revision, view, command))
     }
 }

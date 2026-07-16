@@ -8,8 +8,11 @@ use crate::core::command::{
 use crate::core::input::{InputContext, InputDecision, InputStatus, TimeoutPolicy};
 use crate::core::keymap::Keymap;
 use crate::core::motion::{OperatorCommand, TextMotion, TextOperator, TextTarget};
-use crate::protocol::content_query::CursorStyle;
+use crate::protocol::content_query::{CursorStyle, SelectionShape};
 use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
+use crate::protocol::viewport::{
+    ViewportCommand, ViewportCursorBehavior, ViewportMoveAmount, ViewportMoveDirection,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ModeName(String);
@@ -74,6 +77,9 @@ pub trait Mode {
     fn on_timeout(&self, _state: &mut dyn ModeState) {}
     fn cancel(&self, _state: &mut dyn ModeState) {}
     fn cursor_style(&self, state: &dyn ModeState) -> CursorStyle;
+    fn selection_shape(&self, _state: &dyn ModeState) -> SelectionShape {
+        SelectionShape::Character
+    }
     fn execute(&self, state: &mut dyn ModeState, action: &ModeActionName)
     -> Option<ContentCommand>;
 }
@@ -198,6 +204,12 @@ impl ModeInstance {
         self.registered.definition.cursor_style(self.state.as_ref())
     }
 
+    pub(crate) fn selection_shape(&self) -> SelectionShape {
+        self.registered
+            .definition
+            .selection_shape(self.state.as_ref())
+    }
+
     pub(crate) fn execute(&mut self, mode: ModeId, action: ModeActionId) -> Option<ContentCommand> {
         assert_eq!(self.registered.id, mode, "mode command targets active mode");
         let action = self
@@ -281,7 +293,7 @@ impl ModeSet {
                     None
                 }
             }),
-            None | Some(ContentCommand::Transaction(_)) => None,
+            None | Some(ContentCommand::Transaction(_)) | Some(ContentCommand::Viewport(_)) => None,
             Some(command) => panic!("test helper expected edit command, got {command:?}"),
         }
     }
@@ -347,6 +359,8 @@ enum VimState {
     Insert,
     // Charwise Visual 复用全局半开 selection；不在 mode state 复制 anchor/head。
     Visual,
+    // Linewise Visual 仍只保存 anchor/head；行形态由 presentation 与专用编辑命令表达。
+    VisualLine,
 }
 
 struct VimModeState {
@@ -375,10 +389,11 @@ struct VimMode {
     visual_keymap: Keymap,
 }
 
-const VIM_ACTION_NAMES: [&str; 40] = [
+const VIM_ACTION_NAMES: [&str; 45] = [
     "enter-insert",
     "enter-normal",
     "toggle-visual",
+    "toggle-line-visual",
     "leave-visual",
     "delete-selection",
     "change-selection",
@@ -407,6 +422,10 @@ const VIM_ACTION_NAMES: [&str; 40] = [
     "find-forward",
     "find-backward",
     "delete-operator",
+    "viewport-half-up",
+    "viewport-half-down",
+    "viewport-full-up",
+    "viewport-full-down",
     "count-1",
     "count-2",
     "count-3",
@@ -494,7 +513,7 @@ impl Mode for VimMode {
         match self.state(state).state {
             VimState::Normal => &self.normal_keymap,
             VimState::Insert => &self.insert_keymap,
-            VimState::Visual => &self.visual_keymap,
+            VimState::Visual | VimState::VisualLine => &self.visual_keymap,
         }
     }
 
@@ -504,7 +523,7 @@ impl Mode for VimMode {
             VimState::Insert => key
                 .is_plain_char()
                 .map(|ch| EditCommand::InsertText(ch.to_string()).into()),
-            VimState::Visual => None,
+            VimState::Visual | VimState::VisualLine => None,
         }
     }
 
@@ -540,7 +559,7 @@ impl Mode for VimMode {
                     InputDecision::Pass
                 }
                 Some('b' | 'e' | '^' | '$' | 'G' | '{' | '}')
-                    if state.state == VimState::Visual =>
+                    if matches!(state.state, VimState::Visual | VimState::VisualLine) =>
                 {
                     state.pending = Some(VimPending::Count(count));
                     InputDecision::Pass
@@ -549,7 +568,7 @@ impl Mode for VimMode {
             },
             VimPending::Find { direction, count } => match key.is_plain_char() {
                 Some(target) => InputDecision::Emit(
-                    if state.state == VimState::Visual {
+                    if matches!(state.state, VimState::Visual | VimState::VisualLine) {
                         EditCommand::ExtendToChar {
                             target,
                             direction,
@@ -634,8 +653,16 @@ impl Mode for VimMode {
 
     fn cursor_style(&self, state: &dyn ModeState) -> CursorStyle {
         match self.state(state).state {
-            VimState::Normal | VimState::Visual => CursorStyle::Block,
+            VimState::Normal | VimState::Visual | VimState::VisualLine => CursorStyle::Block,
             VimState::Insert => CursorStyle::Bar,
+        }
+    }
+
+    fn selection_shape(&self, state: &dyn ModeState) -> SelectionShape {
+        if self.state(state).state == VimState::VisualLine {
+            SelectionShape::Line
+        } else {
+            SelectionShape::Character
         }
     }
 
@@ -654,22 +681,54 @@ impl Mode for VimMode {
                 Some(ContentCommand::Transaction(TransactionCommand::Commit))
             }
             "toggle-visual" => {
-                Self::set_editor_state(self.state_mut(state), VimState::Visual);
-                None
+                let state = self.state_mut(state);
+                if state.state == VimState::Visual {
+                    Self::set_editor_state(state, VimState::Normal);
+                    Some(EditCommand::CollapseSelections.into())
+                } else {
+                    Self::set_editor_state(state, VimState::Visual);
+                    None
+                }
+            }
+            "toggle-line-visual" => {
+                let state = self.state_mut(state);
+                if state.state == VimState::VisualLine {
+                    Self::set_editor_state(state, VimState::Normal);
+                    Some(EditCommand::CollapseSelections.into())
+                } else {
+                    Self::set_editor_state(state, VimState::VisualLine);
+                    None
+                }
             }
             "leave-visual" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Normal);
                 Some(EditCommand::CollapseSelections.into())
             }
             "delete-selection" => {
-                Self::set_editor_state(self.state_mut(state), VimState::Normal);
-                Some(EditCommand::Delete(1).into())
+                let state = self.state_mut(state);
+                let linewise = state.state == VimState::VisualLine;
+                Self::set_editor_state(state, VimState::Normal);
+                Some(
+                    if linewise {
+                        EditCommand::DeleteSelectedLines
+                    } else {
+                        EditCommand::Delete(1)
+                    }
+                    .into(),
+                )
             }
             "change-selection" => {
-                Self::set_editor_state(self.state_mut(state), VimState::Insert);
+                let state = self.state_mut(state);
+                let linewise = state.state == VimState::VisualLine;
+                Self::set_editor_state(state, VimState::Insert);
                 Some(ContentCommand::Sequence(vec![
                     ContentCommand::Transaction(TransactionCommand::Begin),
-                    EditCommand::Delete(1).into(),
+                    if linewise {
+                        EditCommand::DeleteSelectedLines
+                    } else {
+                        EditCommand::Delete(1)
+                    }
+                    .into(),
                 ]))
             }
             "append" => {
@@ -732,7 +791,7 @@ impl Mode for VimMode {
                 let state = self.state_mut(state);
                 let count = Self::take_count(state).unwrap_or(1);
                 Some(
-                    if state.state == VimState::Visual {
+                    if matches!(state.state, VimState::Visual | VimState::VisualLine) {
                         EditCommand::ExtendWithinLineLeftBy(count)
                     } else {
                         EditCommand::MoveWithinLineLeftBy(count)
@@ -744,7 +803,7 @@ impl Mode for VimMode {
                 let state = self.state_mut(state);
                 let count = Self::take_count(state).unwrap_or(1);
                 Some(
-                    if state.state == VimState::Visual {
+                    if matches!(state.state, VimState::Visual | VimState::VisualLine) {
                         EditCommand::ExtendDownBy(count)
                     } else {
                         EditCommand::MoveDownBy(count)
@@ -756,7 +815,7 @@ impl Mode for VimMode {
                 let state = self.state_mut(state);
                 let count = Self::take_count(state).unwrap_or(1);
                 Some(
-                    if state.state == VimState::Visual {
+                    if matches!(state.state, VimState::Visual | VimState::VisualLine) {
                         EditCommand::ExtendUpBy(count)
                     } else {
                         EditCommand::MoveUpBy(count)
@@ -768,7 +827,7 @@ impl Mode for VimMode {
                 let state = self.state_mut(state);
                 let count = Self::take_count(state).unwrap_or(1);
                 Some(
-                    if state.state == VimState::Visual {
+                    if matches!(state.state, VimState::Visual | VimState::VisualLine) {
                         EditCommand::ExtendWithinLineRightBy(count)
                     } else {
                         EditCommand::MoveWithinLineRightBy(count)
@@ -780,7 +839,7 @@ impl Mode for VimMode {
                 let state = self.state_mut(state);
                 let count = Self::take_count(state).unwrap_or(1);
                 Some(repeat_edit_command(
-                    if state.state == VimState::Visual {
+                    if matches!(state.state, VimState::Visual | VimState::VisualLine) {
                         EditCommand::ExtendWordForward
                     } else {
                         EditCommand::MoveWordForward
@@ -792,7 +851,7 @@ impl Mode for VimMode {
                 let state = self.state_mut(state);
                 let count = Self::take_count(state).unwrap_or(1);
                 Some(repeat_edit_command(
-                    if state.state == VimState::Visual {
+                    if matches!(state.state, VimState::Visual | VimState::VisualLine) {
                         EditCommand::ExtendWordBackward
                     } else {
                         EditCommand::MoveWordBackward
@@ -804,7 +863,7 @@ impl Mode for VimMode {
                 let state = self.state_mut(state);
                 let count = Self::take_count(state).unwrap_or(1);
                 Some(repeat_edit_command(
-                    if state.state == VimState::Visual {
+                    if matches!(state.state, VimState::Visual | VimState::VisualLine) {
                         EditCommand::ExtendWordEnd
                     } else {
                         EditCommand::MoveWordEnd
@@ -816,7 +875,7 @@ impl Mode for VimMode {
                 let state = self.state_mut(state);
                 Self::take_count(state);
                 Some(
-                    if state.state == VimState::Visual {
+                    if matches!(state.state, VimState::Visual | VimState::VisualLine) {
                         EditCommand::ExtendToLineStart
                     } else {
                         EditCommand::MoveToLineStart
@@ -828,7 +887,7 @@ impl Mode for VimMode {
                 let state = self.state_mut(state);
                 Self::take_count(state);
                 Some(
-                    if state.state == VimState::Visual {
+                    if matches!(state.state, VimState::Visual | VimState::VisualLine) {
                         EditCommand::ExtendToFirstNonBlank
                     } else {
                         EditCommand::MoveToFirstNonBlank
@@ -840,7 +899,7 @@ impl Mode for VimMode {
                 let state = self.state_mut(state);
                 Self::take_count(state);
                 Some(
-                    if state.state == VimState::Visual {
+                    if matches!(state.state, VimState::Visual | VimState::VisualLine) {
                         EditCommand::ExtendToLineEnd
                     } else {
                         EditCommand::MoveToLineEnd
@@ -852,7 +911,7 @@ impl Mode for VimMode {
                 let state = self.state_mut(state);
                 Self::take_count(state);
                 Some(
-                    if state.state == VimState::Visual {
+                    if matches!(state.state, VimState::Visual | VimState::VisualLine) {
                         EditCommand::ExtendToLastLine
                     } else {
                         EditCommand::MoveToLastLine
@@ -864,7 +923,7 @@ impl Mode for VimMode {
                 let state = self.state_mut(state);
                 Self::take_count(state);
                 Some(
-                    if state.state == VimState::Visual {
+                    if matches!(state.state, VimState::Visual | VimState::VisualLine) {
                         EditCommand::ExtendToPrevParagraph
                     } else {
                         EditCommand::MoveToPrevParagraph
@@ -876,7 +935,7 @@ impl Mode for VimMode {
                 let state = self.state_mut(state);
                 Self::take_count(state);
                 Some(
-                    if state.state == VimState::Visual {
+                    if matches!(state.state, VimState::Visual | VimState::VisualLine) {
                         EditCommand::ExtendToNextParagraph
                     } else {
                         EditCommand::MoveToNextParagraph
@@ -888,7 +947,7 @@ impl Mode for VimMode {
                 let state = self.state_mut(state);
                 let line_index = Self::take_count(state).unwrap_or(1).saturating_sub(1);
                 Some(
-                    if state.state == VimState::Visual {
+                    if matches!(state.state, VimState::Visual | VimState::VisualLine) {
                         EditCommand::ExtendToLine { line_index }
                     } else {
                         EditCommand::MoveToLine { line_index }
@@ -918,6 +977,26 @@ impl Mode for VimMode {
                 });
                 None
             }
+            "viewport-half-up" => Some(viewport_command(
+                self.state_mut(state),
+                ViewportMoveDirection::Up,
+                ViewportMoveAmount::HalfPage,
+            )),
+            "viewport-half-down" => Some(viewport_command(
+                self.state_mut(state),
+                ViewportMoveDirection::Down,
+                ViewportMoveAmount::HalfPage,
+            )),
+            "viewport-full-up" => Some(viewport_command(
+                self.state_mut(state),
+                ViewportMoveDirection::Up,
+                ViewportMoveAmount::FullPage,
+            )),
+            "viewport-full-down" => Some(viewport_command(
+                self.state_mut(state),
+                ViewportMoveDirection::Down,
+                ViewportMoveAmount::FullPage,
+            )),
             name if name
                 .strip_prefix("count-")
                 .and_then(|digit| digit.parse::<usize>().ok())
@@ -933,6 +1012,23 @@ impl Mode for VimMode {
             _ => None,
         }
     }
+}
+
+fn viewport_command(
+    state: &mut VimModeState,
+    direction: ViewportMoveDirection,
+    amount: ViewportMoveAmount,
+) -> ContentCommand {
+    VimMode::take_count(state);
+    ContentCommand::Viewport(ViewportCommand::new(
+        direction,
+        amount,
+        if matches!(state.state, VimState::Visual | VimState::VisualLine) {
+            ViewportCursorBehavior::Extend
+        } else {
+            ViewportCursorBehavior::Move
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -1038,6 +1134,8 @@ fn vim_normal_keymap() -> Keymap {
     km.bind(KeyEvent::char('i'), vim_mode_command("enter-insert"));
     km.bind(KeyEvent::char('a'), vim_mode_command("append"));
     km.bind(KeyEvent::char('v'), vim_mode_command("toggle-visual"));
+    km.bind(KeyEvent::char('V'), vim_mode_command("toggle-line-visual"));
+    bind_vim_viewport_keys(&mut km);
     km.bind(
         [KeyEvent::char('g'), KeyEvent::char('g')],
         vim_mode_command("goto-line"),
@@ -1085,7 +1183,9 @@ fn vim_visual_keymap() -> Keymap {
     for key in ['c', 's'] {
         km.bind(KeyEvent::char(key), vim_mode_command("change-selection"));
     }
-    km.bind(KeyEvent::char('v'), vim_mode_command("leave-visual"));
+    km.bind(KeyEvent::char('v'), vim_mode_command("toggle-visual"));
+    km.bind(KeyEvent::char('V'), vim_mode_command("toggle-line-visual"));
+    bind_vim_viewport_keys(&mut km);
     km.bind(
         KeyEvent::plain(KeyCode::Escape),
         vim_mode_command("leave-visual"),
@@ -1110,6 +1210,13 @@ fn vim_visual_keymap() -> Keymap {
         );
     }
     km
+}
+
+fn bind_vim_viewport_keys(keymap: &mut Keymap) {
+    keymap.bind(KeyEvent::ctrl('u'), vim_mode_command("viewport-half-up"));
+    keymap.bind(KeyEvent::ctrl('d'), vim_mode_command("viewport-half-down"));
+    keymap.bind(KeyEvent::ctrl('b'), vim_mode_command("viewport-full-up"));
+    keymap.bind(KeyEvent::ctrl('f'), vim_mode_command("viewport-full-down"));
 }
 
 fn vim_mode_command(action: &str) -> Command {
@@ -1337,6 +1444,93 @@ mod tests {
             modes.resolve_key(&runtime, KeyEvent::char('v')),
             Some(vim_mode_command("toggle-visual")),
         );
+    }
+
+    #[test]
+    fn vim_line_visual_uses_line_shape_and_deletes_touched_lines() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::char('V')),
+            Some(vim_mode_command("toggle-line-visual")),
+        );
+        assert_eq!(
+            modes.execute(
+                &mut runtime,
+                ModeName::new("vim"),
+                ModeActionName::new("toggle-line-visual"),
+            ),
+            None,
+        );
+        assert_eq!(runtime.selection_shape(), SelectionShape::Line);
+        assert_eq!(
+            modes.execute(
+                &mut runtime,
+                ModeName::new("vim"),
+                ModeActionName::new("move-down"),
+            ),
+            Some(EditCommand::ExtendDownBy(1)),
+        );
+        assert_eq!(
+            modes.execute(
+                &mut runtime,
+                ModeName::new("vim"),
+                ModeActionName::new("delete-selection"),
+            ),
+            Some(EditCommand::DeleteSelectedLines),
+        );
+        assert_eq!(runtime.selection_shape(), SelectionShape::Character);
+    }
+
+    #[test]
+    fn vim_viewport_keys_emit_frontend_sized_commands() {
+        let registry = ModeRegistry::builtin();
+        let mode_name = ModeName::new("vim");
+        let mut runtime = registry.instantiate(&mode_name).unwrap();
+
+        for (key, action_name, direction, amount) in [
+            (
+                'u',
+                "viewport-half-up",
+                ViewportMoveDirection::Up,
+                ViewportMoveAmount::HalfPage,
+            ),
+            (
+                'd',
+                "viewport-half-down",
+                ViewportMoveDirection::Down,
+                ViewportMoveAmount::HalfPage,
+            ),
+            (
+                'b',
+                "viewport-full-up",
+                ViewportMoveDirection::Up,
+                ViewportMoveAmount::FullPage,
+            ),
+            (
+                'f',
+                "viewport-full-down",
+                ViewportMoveDirection::Down,
+                ViewportMoveAmount::FullPage,
+            ),
+        ] {
+            assert_eq!(
+                runtime.resolve_key(KeyEvent::ctrl(key)),
+                Some(vim_mode_command(action_name)),
+            );
+            let (mode, action) = registry
+                .resolve_command(&mode_name, &ModeActionName::new(action_name))
+                .unwrap();
+            assert_eq!(
+                runtime.execute(mode, action),
+                Some(ContentCommand::Viewport(ViewportCommand::new(
+                    direction,
+                    amount,
+                    ViewportCursorBehavior::Move,
+                ))),
+            );
+        }
     }
 
     #[test]

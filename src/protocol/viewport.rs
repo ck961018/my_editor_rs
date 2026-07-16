@@ -6,6 +6,47 @@ pub struct Viewport {
     pub left_col: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewportMoveAmount {
+    HalfPage,
+    FullPage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewportMoveDirection {
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewportCursorBehavior {
+    Move,
+    Extend,
+}
+
+/// 由后端上送给前端的视口移动请求。前端用实际布局高度解析移动行数，
+/// App 再按 cursor_behavior 把同一行数应用到当前 View 的 selection。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewportCommand {
+    pub direction: ViewportMoveDirection,
+    pub amount: ViewportMoveAmount,
+    pub cursor_behavior: ViewportCursorBehavior,
+}
+
+impl ViewportCommand {
+    pub const fn new(
+        direction: ViewportMoveDirection,
+        amount: ViewportMoveAmount,
+        cursor_behavior: ViewportCursorBehavior,
+    ) -> Self {
+        Self {
+            direction,
+            amount,
+            cursor_behavior,
+        }
+    }
+}
+
 impl Viewport {
     pub const fn origin() -> Self {
         Self {
@@ -27,13 +68,10 @@ impl Viewport {
         }
     }
 
-    #[allow(dead_code)] // v0.2 预留滚动 API
-    pub fn scroll_down(&mut self, n: usize, view_height: usize) {
+    pub fn scroll_down(&mut self, n: usize) {
         self.top_row = self.top_row.saturating_add(n);
-        let _ = view_height; // v0.2 预留：未来按 view_height 钳位
     }
 
-    #[allow(dead_code)] // v0.2 预留滚动 API
     pub fn scroll_up(&mut self, n: usize) {
         self.top_row = self.top_row.saturating_sub(n);
     }
@@ -107,5 +145,18 @@ mod tests {
         };
         v.scroll_by(-4);
         assert_eq!(v.top_row, 6);
+    }
+
+    #[test]
+    fn viewport_command_preserves_frontend_owned_amount() {
+        let command = ViewportCommand::new(
+            ViewportMoveDirection::Down,
+            ViewportMoveAmount::HalfPage,
+            ViewportCursorBehavior::Extend,
+        );
+
+        assert_eq!(command.direction, ViewportMoveDirection::Down);
+        assert_eq!(command.amount, ViewportMoveAmount::HalfPage);
+        assert_eq!(command.cursor_behavior, ViewportCursorBehavior::Extend);
     }
 }

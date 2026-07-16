@@ -423,6 +423,7 @@ fn resolve_command(
             | ContentCommand::Transaction(_)
             | ContentCommand::Undo
             | ContentCommand::Redo
+            | ContentCommand::Viewport(_)
             | ContentCommand::Sequence(_)),
         ) => {
             let view = match source {

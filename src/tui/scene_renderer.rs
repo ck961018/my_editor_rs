@@ -7,14 +7,17 @@ use std::io;
 use unicode_width::UnicodeWidthChar;
 
 use crate::protocol::content_query::{
-    ContentData, ContentQuery, RenderQuery, RowRange, TextPresentation, ViewData, ViewPresentation,
+    ContentData, ContentQuery, RenderQuery, RowRange, SelectionShape, TextPresentation, ViewData,
+    ViewPresentation,
 };
 use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::revision::Revision;
 use crate::protocol::scene::Scene;
 use crate::protocol::selection::{TextOffset, TextPoint};
 use crate::protocol::status::StatusMessage;
-use crate::protocol::viewport::Viewport;
+use crate::protocol::viewport::{
+    Viewport, ViewportCommand, ViewportMoveAmount, ViewportMoveDirection,
+};
 use crate::terminal::output::Canvas;
 use crate::tui::resolved::{RenderItem, ResolvedScene};
 use crate::tui::taffy_engine::TaffyEngine;
@@ -126,6 +129,33 @@ impl SceneRenderer {
         }
         canvas.flush()
     }
+
+    pub fn execute_viewport_command(
+        &mut self,
+        scene: &Scene,
+        scene_revision: Revision,
+        view: ViewId,
+        command: ViewportCommand,
+    ) -> usize {
+        let resolved = self.engine.layout(scene, scene_revision);
+        let Some(item) = resolved.items.iter().find(|item| item.view_id == view) else {
+            return 0;
+        };
+        let height = item.rect.height.max(0) as usize;
+        if height == 0 {
+            return 0;
+        }
+        let lines = match command.amount {
+            ViewportMoveAmount::HalfPage => (height / 2).max(1),
+            ViewportMoveAmount::FullPage => height,
+        };
+        let viewport = self.viewports.entry(view).or_insert_with(Viewport::origin);
+        match command.direction {
+            ViewportMoveDirection::Up => viewport.scroll_up(lines),
+            ViewportMoveDirection::Down => viewport.scroll_down(lines),
+        }
+        lines
+    }
 }
 
 fn text_row(
@@ -234,13 +264,16 @@ fn paint_text_item(
         panic!("text presentation must answer TextRows")
     };
     let primary = text.selections.primary();
-    let selection_offsets = (primary.anchor != primary.head).then_some({
-        if primary.anchor.char_index <= primary.head.char_index {
-            (primary.anchor, primary.head)
-        } else {
-            (primary.head, primary.anchor)
-        }
-    });
+    let selection_offsets = match text.selection_shape {
+        SelectionShape::Character => (primary.anchor != primary.head).then_some({
+            if primary.anchor.char_index <= primary.head.char_index {
+                (primary.anchor, primary.head)
+            } else {
+                (primary.head, primary.anchor)
+            }
+        }),
+        SelectionShape::Line => Some((primary.anchor, primary.head)),
+    };
     let selection = selection_offsets.map(|(start, end)| {
         let ContentData::TextPoints(points) =
             query.content(content, ContentQuery::TextPoints(vec![start, end]))
@@ -253,22 +286,40 @@ fn paint_text_item(
     for (row, line) in lines.iter().enumerate() {
         let buf_row = start + row;
         let screen_row = (item.rect.y + row as i32) as usize;
-        clear_item_row(canvas, screen_row, item.rect.x as usize, width)?;
-        let hi = selection.and_then(|(sel_start, sel_end)| {
-            (buf_row >= sel_start.row && buf_row <= sel_end.row).then(|| {
-                let start = if buf_row == sel_start.row {
-                    sel_start.col
-                } else {
-                    0
-                };
-                let end = if buf_row == sel_end.row {
-                    sel_end.col
-                } else {
-                    usize::MAX
-                };
-                (start, end)
+        let linewise_highlight = text.selection_shape == SelectionShape::Line
+            && selection.is_some_and(|(anchor, head)| {
+                let first = anchor.row.min(head.row);
+                let last = anchor.row.max(head.row);
+                buf_row >= first && buf_row <= last
+            });
+        clear_item_row_with_highlight(
+            canvas,
+            screen_row,
+            item.rect.x as usize,
+            width,
+            linewise_highlight,
+        )?;
+        let hi = if linewise_highlight {
+            Some((0, usize::MAX))
+        } else if text.selection_shape == SelectionShape::Character {
+            selection.and_then(|(sel_start, sel_end)| {
+                (buf_row >= sel_start.row && buf_row <= sel_end.row).then(|| {
+                    let start = if buf_row == sel_start.row {
+                        sel_start.col
+                    } else {
+                        0
+                    };
+                    let end = if buf_row == sel_end.row {
+                        sel_end.col
+                    } else {
+                        usize::MAX
+                    };
+                    (start, end)
+                })
             })
-        });
+        } else {
+            None
+        };
         paint_line_with_highlight(canvas, line, vp.left_col, width, hi)?;
     }
     for row in lines.len()..height {
@@ -299,9 +350,25 @@ fn paint_status_bar(
 }
 
 fn clear_item_row(canvas: &mut dyn Canvas, row: usize, col: usize, width: usize) -> io::Result<()> {
+    clear_item_row_with_highlight(canvas, row, col, width, false)
+}
+
+fn clear_item_row_with_highlight(
+    canvas: &mut dyn Canvas,
+    row: usize,
+    col: usize,
+    width: usize,
+    highlighted: bool,
+) -> io::Result<()> {
     canvas.move_cursor(row, col)?;
     if width > 0 {
+        if highlighted {
+            canvas.set_reverse(true)?;
+        }
         canvas.write_str(&" ".repeat(width))?;
+        if highlighted {
+            canvas.set_reverse(false)?;
+        }
         canvas.move_cursor(row, col)?;
     }
     Ok(())
@@ -469,11 +536,21 @@ mod tests {
         selections: Selections,
         cursor_style: CursorStyle,
     ) -> ViewData {
+        text_view_with_shape(content, selections, cursor_style, SelectionShape::Character)
+    }
+
+    fn text_view_with_shape(
+        content: ContentId,
+        selections: Selections,
+        cursor_style: CursorStyle,
+        selection_shape: SelectionShape,
+    ) -> ViewData {
         ViewData {
             content,
             presentation: ViewPresentation::Text(TextPresentation {
                 selections,
                 cursor_style,
+                selection_shape,
             }),
         }
     }
@@ -784,6 +861,44 @@ mod tests {
     }
 
     #[test]
+    fn viewport_commands_resolve_half_and_full_page_from_layout_height() {
+        let (scene, _editor) = editor_scene(40, 5, ViewId(0), ViewId(1));
+        let mut renderer = SceneRenderer::new();
+        renderer.viewports.insert(
+            ViewId(0),
+            Viewport {
+                top_row: 10,
+                left_col: 0,
+            },
+        );
+
+        let half = renderer.execute_viewport_command(
+            &scene,
+            Revision(0),
+            ViewId(0),
+            ViewportCommand::new(
+                ViewportMoveDirection::Up,
+                ViewportMoveAmount::HalfPage,
+                crate::protocol::viewport::ViewportCursorBehavior::Move,
+            ),
+        );
+        let full = renderer.execute_viewport_command(
+            &scene,
+            Revision(0),
+            ViewId(0),
+            ViewportCommand::new(
+                ViewportMoveDirection::Down,
+                ViewportMoveAmount::FullPage,
+                crate::protocol::viewport::ViewportCursorBehavior::Move,
+            ),
+        );
+
+        assert_eq!(half, 2);
+        assert_eq!(full, 4);
+        assert_eq!(renderer.viewports[&ViewId(0)].top_row, 12);
+    }
+
+    #[test]
     fn renders_non_empty_selection_with_reverse() {
         let (scene, ed) = editor_scene(40, 5, ViewId(0), ViewId(1));
         let query = StubQuery {
@@ -817,6 +932,42 @@ mod tests {
             .unwrap();
         let s = String::from_utf8(out.into_inner()).unwrap();
         assert!(!s.contains("\x1b[7m"), "collapsed should not reverse: {s}");
+    }
+
+    #[test]
+    fn line_selection_highlights_collapsed_cursor_row_across_pane_width() {
+        let (scene, editor) = editor_scene(8, 2, ViewId(0), ViewId(1));
+        let query = MultiSpaceQuery {
+            lines: vec!["hello".to_string()],
+            selections: HashMap::from([(
+                ViewId(0),
+                text_view_with_shape(
+                    ContentId(0),
+                    Selections::single(Selection::collapsed(TextOffset::origin())),
+                    CursorStyle::Block,
+                    SelectionShape::Line,
+                ),
+            )]),
+        };
+        let mut renderer = SceneRenderer::new();
+        let mut out = Output::new(Vec::new());
+
+        renderer
+            .render(
+                &scene,
+                Revision(0),
+                &query,
+                editor,
+                &mut out as &mut dyn Canvas,
+            )
+            .unwrap();
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert!(
+            output.contains("\x1b[7m        \x1b[27m"),
+            "output: {output}"
+        );
+        assert!(output.contains("\x1b[7mhello\x1b[27m"), "output: {output}");
     }
 
     #[test]
