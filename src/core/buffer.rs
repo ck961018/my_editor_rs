@@ -4,6 +4,10 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::core::command::CharSearchDirection;
+use crate::core::motion::{TextRange, TextTarget, resolve_target};
+use crate::core::transaction::{
+    Affinity, TextChangeSet, TextEdit, TextStateId, TextTransactionError,
+};
 use crate::protocol::selection::{Selection, Selections, TextOffset, TextPoint};
 use crate::protocol::status::StatusMessage;
 
@@ -11,8 +15,27 @@ pub struct Buffer {
     rope: Rope,
     path: Option<PathBuf>,
     revision: u64,
-    modified: bool,
+    current_state: TextStateId,
+    saved_state: TextStateId,
+    next_state: u64,
+    active_transaction: Option<ActiveTextTransaction>,
+    history: Vec<TextHistoryEntry>,
+    history_cursor: usize,
+    last_change: Option<TextChangeSet>,
     status: StatusMessage,
+}
+
+struct ActiveTextTransaction {
+    original: Rope,
+    changes: TextChangeSet,
+    before_state: TextStateId,
+}
+
+struct TextHistoryEntry {
+    forward: TextChangeSet,
+    inverse: TextChangeSet,
+    before_state: TextStateId,
+    after_state: TextStateId,
 }
 
 impl Buffer {
@@ -21,7 +44,13 @@ impl Buffer {
             rope: Rope::new(),
             path: None,
             revision: 0,
-            modified: false,
+            current_state: TextStateId(0),
+            saved_state: TextStateId(0),
+            next_state: 1,
+            active_transaction: None,
+            history: Vec::new(),
+            history_cursor: 0,
+            last_change: None,
             status: StatusMessage::None,
         }
     }
@@ -32,13 +61,13 @@ impl Buffer {
             Ok(text) => {
                 self.rope = Rope::from_str(&text);
                 self.advance_revision();
-                self.modified = false;
+                self.reset_history_to_saved_state();
                 Ok(())
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 self.rope = Rope::new();
                 self.advance_revision();
-                self.modified = false;
+                self.reset_history_to_saved_state();
                 Ok(())
             }
             Err(e) => Err(e),
@@ -71,12 +100,13 @@ impl Buffer {
         self.revision
     }
 
-    pub fn mark_saved(&mut self, revision: u64) -> bool {
-        if self.revision != revision {
-            return false;
-        }
-        self.modified = false;
-        true
+    pub fn state_id(&self) -> TextStateId {
+        self.current_state
+    }
+
+    pub fn mark_saved(&mut self, state: TextStateId) -> bool {
+        self.saved_state = state;
+        !self.active_transaction_is_dirty() && self.current_state == state
     }
 
     fn advance_revision(&mut self) {
@@ -86,9 +116,204 @@ impl Buffer {
             .expect("buffer revision overflow");
     }
 
-    fn mark_modified(&mut self) {
+    fn allocate_state(&mut self) -> TextStateId {
+        let state = TextStateId(self.next_state);
+        self.next_state = self
+            .next_state
+            .checked_add(1)
+            .expect("text state id overflow");
+        state
+    }
+
+    fn reset_history_to_saved_state(&mut self) {
+        let state = self.allocate_state();
+        self.current_state = state;
+        self.saved_state = state;
+        self.active_transaction = None;
+        self.history.clear();
+        self.history_cursor = 0;
+        self.last_change = None;
+    }
+
+    pub fn begin_transaction(&mut self) {
+        if self.active_transaction.is_none() {
+            self.active_transaction = Some(ActiveTextTransaction {
+                original: self.rope.clone(),
+                changes: TextChangeSet::empty(self.rope.len_chars()),
+                before_state: self.current_state,
+            });
+        }
+    }
+
+    pub fn transaction_active(&self) -> bool {
+        self.active_transaction.is_some()
+    }
+
+    pub fn commit_transaction(&mut self) -> Result<bool, TextTransactionError> {
+        let Some(active) = self.active_transaction.take() else {
+            return Ok(false);
+        };
+        if active.changes.is_empty() {
+            self.current_state = active.before_state;
+            return Ok(false);
+        }
+        let inverse = active.changes.invert(&active.original)?;
+        self.history.truncate(self.history_cursor);
+        let after_state = self.allocate_state();
+        self.history.push(TextHistoryEntry {
+            forward: active.changes,
+            inverse,
+            before_state: active.before_state,
+            after_state,
+        });
+        self.history_cursor = self.history.len();
+        self.current_state = after_state;
+        Ok(true)
+    }
+
+    pub fn rollback_transaction(&mut self) -> Result<bool, TextTransactionError> {
+        let Some(active) = self.active_transaction.take() else {
+            return Ok(false);
+        };
+        if active.changes.is_empty() {
+            self.current_state = active.before_state;
+            return Ok(false);
+        }
+        let inverse = active.changes.invert(&active.original)?;
+        inverse.apply(&mut self.rope)?;
         self.advance_revision();
-        self.modified = true;
+        self.current_state = active.before_state;
+        self.last_change = Some(inverse);
+        Ok(true)
+    }
+
+    pub fn undo(&mut self) -> Result<bool, TextTransactionError> {
+        self.commit_transaction()?;
+        if self.history_cursor == 0 {
+            return Ok(false);
+        }
+        let index = self.history_cursor - 1;
+        let inverse = self.history[index].inverse.clone();
+        inverse.apply(&mut self.rope)?;
+        self.history_cursor = index;
+        self.current_state = self.history[index].before_state;
+        self.advance_revision();
+        self.last_change = Some(inverse);
+        Ok(true)
+    }
+
+    pub fn redo(&mut self) -> Result<bool, TextTransactionError> {
+        self.commit_transaction()?;
+        if self.history_cursor >= self.history.len() {
+            return Ok(false);
+        }
+        let index = self.history_cursor;
+        let forward = self.history[index].forward.clone();
+        forward.apply(&mut self.rope)?;
+        self.history_cursor += 1;
+        self.current_state = self.history[index].after_state;
+        self.advance_revision();
+        self.last_change = Some(forward);
+        Ok(true)
+    }
+
+    pub fn take_last_change(&mut self) -> Option<TextChangeSet> {
+        self.last_change.take()
+    }
+
+    pub fn transform_selections(
+        &self,
+        selections: &mut Selections,
+        changes: &TextChangeSet,
+    ) -> bool {
+        let before = selections.clone();
+        for selection in selections.all_mut() {
+            let anchor = selection.anchor.char_index;
+            let head = selection.head.char_index;
+            if anchor == head {
+                let mapped = changes.map_position(head, Affinity::After);
+                selection.anchor.char_index = mapped;
+                selection.head.char_index = mapped;
+                continue;
+            }
+
+            let (start, end, forward) = if anchor < head {
+                (anchor, head, true)
+            } else {
+                (head, anchor, false)
+            };
+            let mapped_start = changes.map_position(start, Affinity::After);
+            let mapped_end = changes.map_position(end, Affinity::Before);
+            let (mapped_start, mapped_end) =
+                (mapped_start.min(mapped_end), mapped_start.max(mapped_end));
+            if forward {
+                selection.anchor.char_index = mapped_start;
+                selection.head.char_index = mapped_end;
+            } else {
+                selection.anchor.char_index = mapped_end;
+                selection.head.char_index = mapped_start;
+            }
+        }
+        self.reconcile_selections(selections);
+        selections != &before
+    }
+
+    fn active_transaction_is_dirty(&self) -> bool {
+        self.active_transaction
+            .as_ref()
+            .is_some_and(|active| !active.changes.is_empty())
+    }
+
+    fn apply_text_edits(&mut self, edits: Vec<TextEdit>) -> Result<bool, TextTransactionError> {
+        let changes = TextChangeSet::from_edits(self.rope.len_chars(), edits)?;
+        if changes.is_empty() {
+            self.last_change = None;
+            return Ok(false);
+        }
+        self.validate_crlf_boundaries(&changes)?;
+        let implicit = self.active_transaction.is_none();
+        if implicit {
+            self.begin_transaction();
+        }
+        let composed = self
+            .active_transaction
+            .as_ref()
+            .expect("transaction was started")
+            .changes
+            .compose(&changes)?;
+        changes.apply(&mut self.rope)?;
+        let active = self
+            .active_transaction
+            .as_mut()
+            .expect("transaction was started");
+        active.changes = composed;
+        self.advance_revision();
+        self.last_change = Some(changes);
+        if implicit {
+            self.commit_transaction()?;
+        }
+        Ok(true)
+    }
+
+    fn validate_crlf_boundaries(
+        &self,
+        changes: &TextChangeSet,
+    ) -> Result<(), TextTransactionError> {
+        for edit in changes.to_edits()? {
+            for offset in [edit.range.start, edit.range.end] {
+                if offset > 0
+                    && offset < self.rope.len_chars()
+                    && self.rope.char(offset - 1) == '\r'
+                    && self.rope.char(offset) == '\n'
+                {
+                    return Err(TextTransactionError::InvalidRange {
+                        start: edit.range.start,
+                        end: edit.range.end,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn set_status(&mut self, msg: StatusMessage) {
@@ -101,8 +326,8 @@ impl Buffer {
 
     #[allow(dead_code)] // 测试辅助：生产路径走 executor::execute→insert_at_selections
     pub fn insert_char(&mut self, char_idx: usize, ch: char) {
-        self.rope.insert_char(char_idx, ch);
-        self.mark_modified();
+        self.apply_text_edits(vec![TextEdit::new(char_idx..char_idx, ch.to_string())])
+            .expect("valid character insertion");
     }
 
     #[allow(dead_code)] // v0.2 预留：生产路径走 delete_at_selections
@@ -118,8 +343,8 @@ impl Buffer {
         } else {
             char_idx - 1
         };
-        self.rope.remove(start..char_idx);
-        self.mark_modified();
+        self.apply_text_edits(vec![TextEdit::new(start..char_idx, "")])
+            .expect("valid backward deletion");
         true
     }
 
@@ -148,7 +373,7 @@ impl Buffer {
     }
 
     pub fn modified(&self) -> bool {
-        self.modified
+        self.active_transaction_is_dirty() || self.current_state != self.saved_state
     }
 
     // ——编辑原语：底层点操作（pub(crate)，操作 head）——
@@ -421,8 +646,7 @@ impl Buffer {
             return;
         }
         let text_len = text.chars().count();
-        // 1) 非空 selection 先删 range（按 min 降序，避免索引偏移）
-        let mut del_ranges: Vec<(usize, usize)> = selections
+        let ranges: Vec<(usize, usize)> = selections
             .all()
             .map(|s| {
                 if s.anchor != s.head {
@@ -433,28 +657,20 @@ impl Buffer {
                 }
             })
             .collect();
-        del_ranges.sort_unstable_by_key(|b| std::cmp::Reverse(b.0));
-        del_ranges.dedup();
-        for (start, end) in del_ranges {
-            if end > start {
-                self.rope.remove(start..end);
-            }
-        }
-        // 2) 在 min 端点插入（空 selection 在 head）
-        let mut insert_indices: Vec<usize> = selections
-            .all()
-            .map(|s| s.anchor.char_index.min(s.head.char_index))
-            .collect();
-        insert_indices.sort_unstable_by(|a, b| b.cmp(a));
-        insert_indices.dedup();
-        for idx in insert_indices {
-            self.rope.insert(idx, &text);
-        }
-        self.mark_modified();
-        // 3) 更新每个 selection：head = 插入点 + text_len，collapse（编辑后重置 anchor）
+        let normalized = merge_ranges(ranges.clone());
+        self.apply_text_edits(
+            normalized
+                .into_iter()
+                .map(|(start, end)| TextEdit::new(start..end, text.clone()))
+                .collect(),
+        )
+        .expect("valid selection insertion");
+        let change = self.last_change.as_ref().cloned();
         for sel in selections.all_mut() {
             let insert_at = sel.anchor.char_index.min(sel.head.char_index);
-            sel.head.char_index = insert_at + text_len;
+            sel.head.char_index = change.as_ref().map_or(insert_at + text_len, |change| {
+                change.map_position(insert_at, crate::core::transaction::Affinity::After)
+            });
             self.clamp_offset(&mut sel.head);
             Self::collapse_to_head(sel);
         }
@@ -487,28 +703,14 @@ impl Buffer {
                 }
             })
             .collect();
-        let mut ranges = selection_ranges.clone();
-        ranges.sort_unstable_by_key(|range| range.0);
-        let mut normalized: Vec<(usize, usize)> = Vec::new();
-        for (start, end) in ranges {
-            if let Some(last) = normalized.last_mut() {
-                if start <= last.1 {
-                    last.1 = last.1.max(end);
-                    continue;
-                }
-            }
-            normalized.push((start, end));
-        }
-        let mut changed = false;
-        for &(start, end) in normalized.iter().rev() {
-            if end > start {
-                self.rope.remove(start..end);
-                changed = true;
-            }
-        }
-        if changed {
-            self.mark_modified();
-        }
+        let normalized = merge_ranges(selection_ranges.clone());
+        self.apply_text_edits(
+            normalized
+                .iter()
+                .map(|&(start, end)| TextEdit::new(start..end, ""))
+                .collect(),
+        )
+        .expect("valid selection deletion");
         // 2) 更新每个 selection
         for (sel, (target, _)) in selections.all_mut().zip(selection_ranges) {
             let mut deleted_before = 0;
@@ -541,7 +743,7 @@ impl Buffer {
                 }
             })
             .collect();
-        let mut ranges: Vec<(usize, usize)> = selections
+        let ranges: Vec<(usize, usize)> = selections
             .all()
             .zip(starts.iter().copied())
             .map(|(selection, start)| {
@@ -550,28 +752,14 @@ impl Buffer {
             })
             .collect();
 
-        ranges.sort_unstable_by_key(|range| range.0);
-        let mut normalized_ranges: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
-        for (start, end) in ranges {
-            if let Some((_, previous_end)) = normalized_ranges.last_mut()
-                && start <= *previous_end
-            {
-                *previous_end = (*previous_end).max(end);
-            } else {
-                normalized_ranges.push((start, end));
-            }
-        }
-
-        let mut changed = false;
-        for &(start, end) in normalized_ranges.iter().rev() {
-            if end > start {
-                self.rope.remove(start..end);
-                changed = true;
-            }
-        }
-        if changed {
-            self.mark_modified();
-        }
+        let normalized_ranges = merge_ranges(ranges);
+        self.apply_text_edits(
+            normalized_ranges
+                .iter()
+                .map(|&(start, end)| TextEdit::new(start..end, ""))
+                .collect(),
+        )
+        .expect("valid word deletion");
         for (selection, start) in selections.all_mut().zip(starts) {
             let mut deleted_before = 0;
             selection.head.char_index = start;
@@ -601,7 +789,7 @@ impl Buffer {
                     .char_to_line(selection.head.char_index.min(self.rope.len_chars()))
             })
             .collect();
-        let mut ranges: Vec<(usize, usize)> = rows
+        let ranges: Vec<(usize, usize)> = rows
             .iter()
             .map(|row| {
                 let end_row = row.saturating_add(lines.saturating_sub(1)).min(max_row);
@@ -617,27 +805,14 @@ impl Buffer {
                 (start, end)
             })
             .collect();
-        ranges.sort_unstable_by_key(|range| range.0);
-        let mut normalized: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
-        for (start, end) in ranges {
-            if let Some((_, previous_end)) = normalized.last_mut()
-                && start <= *previous_end
-            {
-                *previous_end = (*previous_end).max(end);
-            } else {
-                normalized.push((start, end));
-            }
-        }
-        let mut changed = false;
-        for &(start, end) in normalized.iter().rev() {
-            if start < end {
-                self.rope.remove(start..end);
-                changed = true;
-            }
-        }
-        if changed {
-            self.mark_modified();
-        }
+        let normalized = merge_ranges(ranges);
+        self.apply_text_edits(
+            normalized
+                .iter()
+                .map(|&(start, end)| TextEdit::new(start..end, ""))
+                .collect(),
+        )
+        .expect("valid line deletion");
         let new_max_row = self.rope.len_lines().saturating_sub(1);
         for (selection, row) in selections.all_mut().zip(rows) {
             selection.head.char_index = self.rope.line_to_char(row.min(new_max_row));
@@ -663,19 +838,14 @@ impl Buffer {
                 }
             })
             .collect();
-        let mut sorted = ranges.clone();
-        sorted.sort_unstable_by_key(|b| std::cmp::Reverse(b.0));
-        sorted.dedup();
-        let mut changed = false;
-        for (start, end) in &sorted {
-            if end > start {
-                self.rope.remove(*start..*end);
-                changed = true;
-            }
-        }
-        if changed {
-            self.mark_modified();
-        }
+        let sorted = merge_ranges(ranges.clone());
+        self.apply_text_edits(
+            sorted
+                .iter()
+                .map(|&(start, end)| TextEdit::new(start..end, ""))
+                .collect(),
+        )
+        .expect("valid deletion to line start");
         for (sel, (start, _)) in selections.all_mut().zip(ranges.iter()) {
             let mut deleted_before = 0;
             for &(r_start, r_end) in &sorted {
@@ -706,19 +876,14 @@ impl Buffer {
                 }
             })
             .collect();
-        let mut sorted = ranges.clone();
-        sorted.sort_unstable_by_key(|b| std::cmp::Reverse(b.0));
-        sorted.dedup();
-        let mut changed = false;
-        for (start, end) in &sorted {
-            if end > start {
-                self.rope.remove(*start..*end);
-                changed = true;
-            }
-        }
-        if changed {
-            self.mark_modified();
-        }
+        let sorted = merge_ranges(ranges.clone());
+        self.apply_text_edits(
+            sorted
+                .iter()
+                .map(|&(start, end)| TextEdit::new(start..end, ""))
+                .collect(),
+        )
+        .expect("valid deletion to line end");
         for (sel, (start, _end)) in selections.all_mut().zip(ranges.iter()) {
             let mut deleted_before = 0;
             for &(r_start, r_end) in &sorted {
@@ -767,14 +932,15 @@ impl Buffer {
         // Simpler: remove range [newline_pos, next_content_start + ws_len) and insert " " at newline_pos
         // Actually: remove range [newline_pos, next_line_start + ws_len) then insert " " at newline_pos
         let mut sorted_joins = joins.clone();
-        sorted_joins.sort_unstable_by_key(|j| std::cmp::Reverse(j.0));
-        for (newline_pos, strip_end, _) in &sorted_joins {
-            self.rope.remove(*newline_pos..*strip_end);
-            self.rope.insert(*newline_pos, " ");
-        }
-        if !sorted_joins.is_empty() {
-            self.mark_modified();
-        }
+        sorted_joins.sort_unstable_by_key(|join| join.0);
+        sorted_joins.dedup_by_key(|join| join.0);
+        self.apply_text_edits(
+            sorted_joins
+                .iter()
+                .map(|&(newline_pos, strip_end, _)| TextEdit::new(newline_pos..strip_end, " "))
+                .collect(),
+        )
+        .expect("valid line joins");
         for (sel, (newline_pos, _, _)) in selections.all_mut().zip(joins.iter()) {
             sel.head.char_index = *newline_pos;
             self.clamp_offset(&mut sel.head);
@@ -851,13 +1017,13 @@ impl Buffer {
                 }
             })
             .collect();
-        for (start, end, flipped) in replacements.iter().rev() {
-            self.rope.remove(*start..*end);
-            self.rope.insert(*start, flipped);
-        }
-        if !replacements.is_empty() {
-            self.mark_modified();
-        }
+        self.apply_text_edits(
+            replacements
+                .iter()
+                .map(|(start, end, flipped)| TextEdit::new(*start..*end, flipped.clone()))
+                .collect(),
+        )
+        .expect("valid case replacements");
         for (sel, new_head) in selections.all_mut().zip(new_heads) {
             sel.head.char_index = new_head;
             self.clamp_offset(&mut sel.head);
@@ -879,12 +1045,15 @@ impl Buffer {
             })
             .collect();
         let mut sorted = insert_points.clone();
-        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        sorted.sort_unstable();
         sorted.dedup();
-        for pos in &sorted {
-            self.rope.insert(*pos, newline);
-        }
-        self.mark_modified();
+        self.apply_text_edits(
+            sorted
+                .iter()
+                .map(|&pos| TextEdit::new(pos..pos, newline))
+                .collect(),
+        )
+        .expect("valid new-line insertion");
         for (sel, pos) in selections.all_mut().zip(insert_points.iter()) {
             sel.head.char_index = *pos + newline_len;
             self.clamp_offset(&mut sel.head);
@@ -905,12 +1074,15 @@ impl Buffer {
             })
             .collect();
         let mut sorted = insert_points.clone();
-        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        sorted.sort_unstable();
         sorted.dedup();
-        for pos in &sorted {
-            self.rope.insert(*pos, newline);
-        }
-        self.mark_modified();
+        self.apply_text_edits(
+            sorted
+                .iter()
+                .map(|&pos| TextEdit::new(pos..pos, newline))
+                .collect(),
+        )
+        .expect("valid new-line insertion");
         for (sel, pos) in selections.all_mut().zip(insert_points.iter()) {
             sel.head.char_index = *pos;
             self.clamp_offset(&mut sel.head);
@@ -931,19 +1103,14 @@ impl Buffer {
                 (line_start, content_end)
             })
             .collect();
-        let mut sorted = ranges.clone();
-        sorted.sort_unstable_by_key(|b| std::cmp::Reverse(b.0));
-        sorted.dedup();
-        let mut changed = false;
-        for (start, end) in &sorted {
-            if end > start {
-                self.rope.remove(*start..*end);
-                changed = true;
-            }
-        }
-        if changed {
-            self.mark_modified();
-        }
+        let sorted = merge_ranges(ranges.clone());
+        self.apply_text_edits(
+            sorted
+                .iter()
+                .map(|&(start, end)| TextEdit::new(start..end, ""))
+                .collect(),
+        )
+        .expect("valid line-content deletion");
         for (sel, (start, _)) in selections.all_mut().zip(ranges.iter()) {
             sel.head.char_index = *start;
             self.clamp_offset(&mut sel.head);
@@ -980,12 +1147,71 @@ impl Buffer {
         }
         normalized
     }
+
+    pub fn delete_target_at_selections(&mut self, selections: &mut Selections, target: TextTarget) {
+        if let TextTarget::Lines { count } = target {
+            self.delete_lines_at_selections(selections, count);
+            return;
+        }
+
+        self.reconcile_selections(selections);
+        let destinations_and_ranges: Vec<(usize, (usize, usize))> = selections
+            .all()
+            .map(|selection| {
+                let outcome = resolve_target(&self.rope, selection.head.char_index, target);
+                let TextRange::Charwise(range) = outcome.covered else {
+                    unreachable!("motion target resolves to a charwise range")
+                };
+                (outcome.destination, (range.start, range.end))
+            })
+            .collect();
+        let normalized = merge_ranges(
+            destinations_and_ranges
+                .iter()
+                .map(|(_, range)| *range)
+                .collect(),
+        );
+        self.apply_text_edits(
+            normalized
+                .iter()
+                .map(|&(start, end)| TextEdit::new(start..end, ""))
+                .collect(),
+        )
+        .expect("valid operator ranges");
+        let change = self.last_change.clone();
+        for (selection, (destination, _)) in selections.all_mut().zip(destinations_and_ranges) {
+            let mapped = change.as_ref().map_or(destination, |change| {
+                change.map_position(destination, Affinity::Before)
+            });
+            selection.anchor.char_index = mapped;
+            selection.head.char_index = mapped;
+            self.clamp_offset(&mut selection.head);
+            selection.anchor = selection.head;
+        }
+    }
 }
 
 impl Default for Buffer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn merge_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    ranges.sort_unstable_by_key(|&(start, end)| (start, end));
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        if let Some((previous_start, previous_end)) = merged.last_mut()
+            && start <= *previous_end
+        {
+            *previous_start = (*previous_start).min(start);
+            *previous_end = (*previous_end).max(end);
+        } else {
+            merged.push((start, end));
+        }
+    }
+
+    merged
 }
 
 fn line_content_len(rope: &Rope, row: usize) -> usize {
@@ -1027,7 +1253,7 @@ fn backward_word_start(rope: &Rope, char_index: usize) -> usize {
     start
 }
 
-fn forward_word_start(rope: &Rope, char_index: usize) -> usize {
+pub(crate) fn forward_word_start(rope: &Rope, char_index: usize) -> usize {
     let len = rope.len_chars();
     let mut pos = char_index.min(len);
     if pos >= len {
@@ -1116,7 +1342,7 @@ fn line_end_char(rope: &Rope, row: usize) -> usize {
     }
 }
 
-fn line_end_insert(rope: &Rope, row: usize) -> usize {
+pub(crate) fn line_end_insert(rope: &Rope, row: usize) -> usize {
     let line_start = rope.line_to_char(row);
     line_start + line_content_len(rope, row)
 }
@@ -1218,7 +1444,7 @@ mod tests {
         let mut b = Buffer::new();
         b.insert_char(0, 'x');
         assert!(b.modified());
-        b.mark_saved(b.revision());
+        b.mark_saved(b.state_id());
         assert!(!b.modified());
     }
 
@@ -1226,11 +1452,83 @@ mod tests {
     fn stale_revision_does_not_clear_modified() {
         let mut b = Buffer::new();
         b.insert_char(0, 'x');
-        let saved_revision = b.revision();
+        let saved_state = b.state_id();
         b.insert_char(1, 'y');
 
-        assert!(!b.mark_saved(saved_revision));
+        assert!(!b.mark_saved(saved_state));
         assert!(b.modified());
+    }
+
+    #[test]
+    fn explicit_transaction_groups_multiple_visible_edits_for_undo() {
+        let mut buffer = Buffer::new();
+        buffer.begin_transaction();
+        buffer.insert_char(0, 'a');
+        buffer.insert_char(1, 'b');
+        assert_eq!(buffer.slice().to_string(), "ab");
+
+        assert!(buffer.commit_transaction().unwrap());
+        assert!(buffer.undo().unwrap());
+        assert_eq!(buffer.slice().to_string(), "");
+        assert!(buffer.redo().unwrap());
+        assert_eq!(buffer.slice().to_string(), "ab");
+    }
+
+    #[test]
+    fn editing_after_undo_truncates_the_redo_branch() {
+        let mut buffer = Buffer::new();
+        buffer.insert_char(0, 'a');
+        buffer.insert_char(1, 'b');
+        assert!(buffer.undo().unwrap());
+        buffer.insert_char(1, 'c');
+
+        assert_eq!(buffer.slice().to_string(), "ac");
+        assert!(!buffer.redo().unwrap());
+    }
+
+    #[test]
+    fn modified_is_derived_from_stable_saved_state_across_history() {
+        let mut buffer = Buffer::new();
+        buffer.insert_char(0, 'a');
+        let saved = buffer.state_id();
+        assert!(buffer.mark_saved(saved));
+        buffer.insert_char(1, 'b');
+        assert!(buffer.modified());
+
+        assert!(buffer.undo().unwrap());
+        assert!(!buffer.modified());
+        assert!(buffer.redo().unwrap());
+        assert!(buffer.modified());
+    }
+
+    #[test]
+    fn rollback_restores_the_transaction_start_without_history() {
+        let mut buffer = Buffer::new();
+        buffer.insert_char(0, 'a');
+        buffer.begin_transaction();
+        buffer.insert_char(1, 'b');
+
+        assert!(buffer.rollback_transaction().unwrap());
+        assert_eq!(buffer.slice().to_string(), "a");
+        assert!(buffer.undo().unwrap());
+        assert_eq!(buffer.slice().to_string(), "");
+    }
+
+    #[test]
+    fn text_change_mapping_preserves_backward_selection_direction() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "abc");
+        let mut other = Selections::single(Selection {
+            anchor: cur(3),
+            head: cur(1),
+        });
+        let mut editing = single_sel(cur(1));
+        buffer.insert_at_selections(&mut editing, "X");
+        let change = buffer.take_last_change().unwrap();
+
+        assert!(buffer.transform_selections(&mut other, &change));
+        assert_eq!(other.primary().anchor, cur(4));
+        assert_eq!(other.primary().head, cur(2));
     }
 
     #[test]

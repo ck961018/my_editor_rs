@@ -1,4 +1,5 @@
 use crate::core::mode::{ModeActionName, ModeName};
+use crate::core::motion::OperatorCommand;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -19,6 +20,10 @@ pub enum AppCommand {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContentCommand {
     Edit(EditCommand),
+    Transaction(TransactionCommand),
+    Undo,
+    Redo,
+    Sequence(Vec<ContentCommand>),
     Save,
     Mode {
         mode: ModeName,
@@ -26,8 +31,17 @@ pub enum ContentCommand {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransactionCommand {
+    Begin,
+    Commit,
+    #[allow(dead_code)] // 为取消复合编辑预留；当前 Vim Escape 提交而非回滚。
+    Rollback,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EditCommand {
+    Operate(OperatorCommand),
     #[allow(dead_code)]
     // 预留：仅 executor 单测构造，生产 keymap 用 MoveLeftBy/RightBy/UpBy/DownBy
     MoveBy {
@@ -60,6 +74,7 @@ pub enum EditCommand {
     ExtendDownBy(usize),
     InsertText(String),
     Delete(isize),
+    #[allow(dead_code)] // 兼容直接编辑命令；Vim dd 已走 operator + linewise target。
     DeleteLines {
         lines: usize,
     },

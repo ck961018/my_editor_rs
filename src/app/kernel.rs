@@ -7,6 +7,7 @@ use crate::app::tasks::AppTasks;
 use crate::core::content::SaveSnapshot;
 use crate::core::content_store::ContentStore;
 use crate::core::mode::ModeRegistry;
+use crate::core::transaction::TextStateId;
 use crate::protocol::ids::ContentId;
 
 pub(super) struct Kernel {
@@ -34,5 +35,6 @@ impl Kernel {
 
 pub(super) struct PendingSave {
     pub(super) revision: u64,
+    pub(super) state: TextStateId,
     pub(super) queued: Option<SaveSnapshot>,
 }

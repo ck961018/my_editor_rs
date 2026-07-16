@@ -2,9 +2,12 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::core::command::{CharSearchDirection, Command, ContentCommand, EditCommand};
+use crate::core::command::{
+    CharSearchDirection, Command, ContentCommand, EditCommand, TransactionCommand,
+};
 use crate::core::input::{InputContext, InputDecision, InputStatus, TimeoutPolicy};
 use crate::core::keymap::Keymap;
+use crate::core::motion::{OperatorCommand, TextMotion, TextOperator, TextTarget};
 use crate::protocol::content_query::CursorStyle;
 use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
 
@@ -271,7 +274,14 @@ impl ModeSet {
         let (mode, action) = self.registry.resolve_command(&mode, &action)?;
         match instance.execute(mode, action) {
             Some(ContentCommand::Edit(edit)) => Some(edit),
-            None => None,
+            Some(ContentCommand::Sequence(commands)) => commands.into_iter().find_map(|command| {
+                if let ContentCommand::Edit(edit) = command {
+                    Some(edit)
+                } else {
+                    None
+                }
+            }),
+            None | Some(ContentCommand::Transaction(_)) => None,
             Some(command) => panic!("test helper expected edit command, got {command:?}"),
         }
     }
@@ -498,7 +508,7 @@ impl Mode for VimMode {
                     )));
                     InputDecision::Consumed
                 }
-                Some('h' | 'j' | 'k' | 'l' | 'f' | 'F' | 'g' | 'd') => {
+                Some('h' | 'j' | 'k' | 'l' | 'w' | 'f' | 'F' | 'g' | 'd') => {
                     state.pending = Some(VimPending::Count(count));
                     InputDecision::Pass
                 }
@@ -519,7 +529,16 @@ impl Mode for VimMode {
                 operator_count,
                 motion_count,
             } => match key.is_plain_char() {
-                Some('0') if motion_count.is_none() => InputDecision::Consumed,
+                Some('0') if motion_count.is_none() => InputDecision::Emit(
+                    EditCommand::Operate(OperatorCommand {
+                        operator: TextOperator::Delete,
+                        target: TextTarget::Motion {
+                            motion: TextMotion::LineStart,
+                            count: operator_count,
+                        },
+                    })
+                    .into(),
+                ),
                 Some(ch @ '0'..='9') => {
                     state.pending = Some(VimPending::Delete {
                         operator_count,
@@ -531,9 +550,32 @@ impl Mode for VimMode {
                     InputDecision::Consumed
                 }
                 Some('d') => InputDecision::Emit(
-                    EditCommand::DeleteLines {
-                        lines: operator_count.saturating_mul(motion_count.unwrap_or(1)),
-                    }
+                    EditCommand::Operate(OperatorCommand {
+                        operator: TextOperator::Delete,
+                        target: TextTarget::Lines {
+                            count: operator_count.saturating_mul(motion_count.unwrap_or(1)),
+                        },
+                    })
+                    .into(),
+                ),
+                Some('w') => InputDecision::Emit(
+                    EditCommand::Operate(OperatorCommand {
+                        operator: TextOperator::Delete,
+                        target: TextTarget::Motion {
+                            motion: TextMotion::WordForward,
+                            count: operator_count.saturating_mul(motion_count.unwrap_or(1)),
+                        },
+                    })
+                    .into(),
+                ),
+                Some('$') => InputDecision::Emit(
+                    EditCommand::Operate(OperatorCommand {
+                        operator: TextOperator::Delete,
+                        target: TextTarget::Motion {
+                            motion: TextMotion::LineEnd,
+                            count: operator_count.saturating_mul(motion_count.unwrap_or(1)),
+                        },
+                    })
                     .into(),
                 ),
                 _ => InputDecision::Consumed,
@@ -564,43 +606,67 @@ impl Mode for VimMode {
         match action.as_str() {
             "enter-insert" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
-                None
+                Some(ContentCommand::Transaction(TransactionCommand::Begin))
             }
             "enter-normal" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Normal);
-                None
+                Some(ContentCommand::Transaction(TransactionCommand::Commit))
             }
             "append" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
-                Some(EditCommand::MoveRightBy(1).into())
+                Some(ContentCommand::Sequence(vec![
+                    EditCommand::MoveRightBy(1).into(),
+                    ContentCommand::Transaction(TransactionCommand::Begin),
+                ]))
             }
             "open-below" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
-                Some(EditCommand::InsertNewLineBelow.into())
+                Some(ContentCommand::Sequence(vec![
+                    ContentCommand::Transaction(TransactionCommand::Begin),
+                    EditCommand::InsertNewLineBelow.into(),
+                ]))
             }
             "open-above" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
-                Some(EditCommand::InsertNewLineAbove.into())
+                Some(ContentCommand::Sequence(vec![
+                    ContentCommand::Transaction(TransactionCommand::Begin),
+                    EditCommand::InsertNewLineAbove.into(),
+                ]))
             }
             "insert-at-first-non-blank" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
-                Some(EditCommand::MoveToFirstNonBlank.into())
+                Some(ContentCommand::Sequence(vec![
+                    EditCommand::MoveToFirstNonBlank.into(),
+                    ContentCommand::Transaction(TransactionCommand::Begin),
+                ]))
             }
             "append-at-line-end" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
-                Some(EditCommand::MoveAfterLineEnd.into())
+                Some(ContentCommand::Sequence(vec![
+                    EditCommand::MoveAfterLineEnd.into(),
+                    ContentCommand::Transaction(TransactionCommand::Begin),
+                ]))
             }
             "substitute-char" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
-                Some(EditCommand::Delete(1).into())
+                Some(ContentCommand::Sequence(vec![
+                    ContentCommand::Transaction(TransactionCommand::Begin),
+                    EditCommand::Delete(1).into(),
+                ]))
             }
             "change-to-line-end" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
-                Some(EditCommand::DeleteToLineEnd.into())
+                Some(ContentCommand::Sequence(vec![
+                    ContentCommand::Transaction(TransactionCommand::Begin),
+                    EditCommand::DeleteToLineEnd.into(),
+                ]))
             }
             "substitute-line" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
-                Some(EditCommand::DeleteLineContent.into())
+                Some(ContentCommand::Sequence(vec![
+                    ContentCommand::Transaction(TransactionCommand::Begin),
+                    EditCommand::DeleteLineContent.into(),
+                ]))
             }
             "move-left" => Some(
                 EditCommand::MoveWithinLineLeftBy(
@@ -754,6 +820,8 @@ fn vim_normal_keymap() -> Keymap {
     km.bind_edit(KeyEvent::char('J'), EditCommand::JoinLines);
     km.bind_edit(KeyEvent::char('D'), EditCommand::DeleteToLineEnd);
     km.bind_edit(KeyEvent::char('~'), EditCommand::ToggleCase);
+    km.bind(KeyEvent::char('u'), Command::Content(ContentCommand::Undo));
+    km.bind(KeyEvent::ctrl('r'), Command::Content(ContentCommand::Redo));
     km.bind(KeyEvent::char('o'), vim_mode_command("open-below"));
     km.bind(KeyEvent::char('O'), vim_mode_command("open-above"));
     km.bind(
@@ -1077,7 +1145,10 @@ mod tests {
 
         assert_eq!(
             instance.execute(mode, action),
-            Some(ContentCommand::Edit(EditCommand::MoveRightBy(1)))
+            Some(ContentCommand::Sequence(vec![
+                ContentCommand::Edit(EditCommand::MoveRightBy(1)),
+                ContentCommand::Transaction(TransactionCommand::Begin),
+            ]))
         );
     }
 
@@ -1458,14 +1529,17 @@ mod tests {
         assert_eq!(
             runtime.capture(KeyEvent::char('d')),
             InputDecision::Emit(Command::Content(ContentCommand::Edit(
-                EditCommand::DeleteLines { lines: 60 }
+                EditCommand::Operate(OperatorCommand {
+                    operator: TextOperator::Delete,
+                    target: TextTarget::Lines { count: 60 },
+                })
             )))
         );
         assert_eq!(runtime.status(), InputStatus::Ready);
     }
 
     #[test]
-    fn vim_zero_cannot_start_a_motion_count_after_delete_operator() {
+    fn vim_zero_after_delete_operator_is_line_start_motion() {
         let modes = ModeSet::vim();
         let mut runtime = modes.create_runtime();
         assert_eq!(
@@ -1479,9 +1553,16 @@ mod tests {
 
         assert_eq!(
             runtime.capture(KeyEvent::char('0')),
-            InputDecision::Consumed
+            InputDecision::Emit(Command::Content(ContentCommand::Edit(
+                EditCommand::Operate(OperatorCommand {
+                    operator: TextOperator::Delete,
+                    target: TextTarget::Motion {
+                        motion: TextMotion::LineStart,
+                        count: 1,
+                    },
+                })
+            )))
         );
         assert_eq!(runtime.status(), InputStatus::Ready);
-        assert_eq!(runtime.capture(KeyEvent::char('d')), InputDecision::Pass);
     }
 }

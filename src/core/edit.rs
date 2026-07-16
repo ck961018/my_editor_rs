@@ -1,10 +1,14 @@
 use crate::core::buffer::Buffer;
 use crate::core::command::EditCommand;
+use crate::core::motion::TextOperator;
 use crate::protocol::selection::Selections;
 
 /// 执行文本编辑命令。全局命令由 App 分流；多 selection 在 Buffer 内统一处理。
 pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: &mut Selections) {
     match command {
+        EditCommand::Operate(command) => match command.operator {
+            TextOperator::Delete => buffer.delete_target_at_selections(selections, command.target),
+        },
         // Left/Right：非空 selection 收缩到 min/max，collapsed 时移动 head。
         EditCommand::MoveLeftBy(n) => {
             for sel in selections.all_mut() {

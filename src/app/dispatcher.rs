@@ -417,7 +417,14 @@ fn resolve_command(
     match command {
         Command::App(command) => Some(DispatchCommand::App(command)),
         Command::Noop => Some(DispatchCommand::Noop),
-        Command::Content(command @ (ContentCommand::Edit(_) | ContentCommand::Mode { .. })) => {
+        Command::Content(
+            command @ (ContentCommand::Edit(_)
+            | ContentCommand::Mode { .. }
+            | ContentCommand::Transaction(_)
+            | ContentCommand::Undo
+            | ContentCommand::Redo
+            | ContentCommand::Sequence(_)),
+        ) => {
             let view = match source {
                 CommandSource::View(view) => view,
                 CommandSource::Global => focused_view,

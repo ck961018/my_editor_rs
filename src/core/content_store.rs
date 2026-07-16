@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::core::content::{Content, ContentResult};
+use crate::core::content::{Content, ContentChange, ContentResult};
 use crate::core::content_view_state::ContentViewState;
 use crate::core::mode::ModeName;
 use crate::protocol::content_query::{
@@ -34,14 +34,15 @@ impl ContentStore {
         self.contents.get(&id).and_then(Content::default_mode)
     }
 
-    pub fn reconcile_view_state(
+    pub fn transform_view_state(
         &self,
         id: ContentId,
         state: &mut ContentViewState,
+        change: &ContentChange,
     ) -> Option<bool> {
         self.contents
             .get(&id)
-            .map(|content| content.reconcile_view_state(state))
+            .map(|content| content.transform_view_state(state, change))
     }
 
     pub fn execute(
