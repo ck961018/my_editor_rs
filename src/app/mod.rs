@@ -1,5 +1,5 @@
 //! App：tokio::select! 多路复用 evloop。不感知 tui/gui（只依赖 Frontend trait + Scene）。
-//! 事件分发委托 Dispatcher（捕获链 + 前缀状态机），Command 执行通过 ContentStore。
+//! 事件分发委托 Dispatcher（活动输入层 + Awaiting 状态机），Command 执行通过 ContentStore。
 //! 不持 editor_content/status_content 角色 ID——从 scene/focused 推导。
 
 mod dispatcher;
@@ -11,18 +11,22 @@ mod session;
 mod tasks;
 mod view;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::future;
 use std::io;
 use std::path::Path;
+use std::time::Instant;
 
-use crate::app::dispatcher::{DispatchCommand, Dispatcher, default_global_keymap};
+use crate::app::dispatcher::{
+    DispatchCommand, DispatchInput, DispatchOutcome, Dispatcher, default_global_keymap,
+};
 use crate::app::kernel::{Kernel, PendingSave};
 use crate::app::message::AppMessage;
 use crate::app::scene_model::{
     CloseResult, SceneBuilder, SceneError, SplitResult, build_editor_scene,
 };
 use crate::app::session::ClientSession;
-use crate::app::view::View;
+use crate::app::view::{ModeCommandResult, View};
 use crate::core::buffer::Buffer;
 use crate::core::command::AppCommand;
 use crate::core::content::{
@@ -33,8 +37,7 @@ use crate::core::mode::ModeRegistry;
 use crate::core::status_bar::StatusBar;
 use crate::frontend::Frontend;
 use crate::protocol::content_query::{
-    ContentData, ContentQuery, CursorStyle, RenderQuery, TextPresentation, ViewData,
-    ViewPresentation,
+    ContentData, ContentQuery, RenderQuery, TextPresentation, ViewData, ViewPresentation,
 };
 use crate::protocol::frontend_event::FrontendEvent;
 use crate::protocol::ids::{ContentId, SpaceId, ViewId};
@@ -45,6 +48,19 @@ pub struct App<F: Frontend> {
     kernel: Kernel,
     session: ClientSession,
     frontend: F,
+}
+
+async fn wait_for_input_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+        None => future::pending::<()>().await,
+    }
+}
+
+fn prepend_inputs(queue: &mut VecDeque<DispatchInput>, inputs: Vec<DispatchInput>) {
+    for input in inputs.into_iter().rev() {
+        queue.push_front(input);
+    }
 }
 
 async fn atomic_write(snapshot: SaveSnapshot) -> io::Result<()> {
@@ -98,6 +114,7 @@ impl<F: Frontend> App<F> {
     pub async fn run(&mut self) -> io::Result<()> {
         self.render()?;
         loop {
+            let input_deadline = self.session.dispatcher.next_deadline(&self.session.views);
             tokio::select! {
                 ev = self.frontend.next_event() => {
                     // frontend I/O 错误直接上抛（spec §10）：不进 shutdown_tasks，
@@ -117,6 +134,9 @@ impl<F: Frontend> App<F> {
                 _ = self.kernel.tasks.cancelled() => {
                     self.shutdown_tasks().await?;
                     break;
+                }
+                _ = wait_for_input_deadline(input_deadline) => {
+                    self.handle_input_timeout()?;
                 }
             }
             if !self.kernel.tasks.is_cancelled() {
@@ -154,32 +174,81 @@ impl<F: Frontend> App<F> {
                 self.session.scene_revision.next();
             }
             FrontendEvent::Key(k) => {
-                let command = {
-                    let view_id = view_for_space(&self.session.scene, self.session.focused)
-                        .expect("focused space hosts a view");
-                    let mode = self
-                        .session
-                        .views
-                        .get(&view_id)
-                        .expect("focused view exists")
-                        .mode()
-                        .expect("focused view has a mode");
-                    self.session.dispatcher.dispatch(
-                        k,
-                        self.session.focused,
-                        &self.session.scene,
-                        &self.kernel.contents,
-                        &self.session.views,
-                        mode,
-                    )
-                };
-                if let Some(command) = command {
-                    self.execute_command(command)?;
-                }
+                self.process_input_queue(VecDeque::from([DispatchInput::Normal(k)]))?;
             }
             FrontendEvent::QuitRequest => self.kernel.tasks.cancel(),
         }
         Ok(())
+    }
+
+    fn process_input_queue(&mut self, mut queue: VecDeque<DispatchInput>) -> io::Result<()> {
+        while let Some(input) = queue.pop_front() {
+            let now = Instant::now();
+            let outcome = self.session.dispatcher.dispatch(
+                input,
+                now,
+                self.session.focused,
+                &self.session.scene,
+                &mut self.session.views,
+            );
+            self.apply_dispatch_outcome(outcome, &mut queue, now)?;
+        }
+        Ok(())
+    }
+
+    fn apply_dispatch_outcome(
+        &mut self,
+        outcome: DispatchOutcome,
+        queue: &mut VecDeque<DispatchInput>,
+        now: Instant,
+    ) -> io::Result<()> {
+        match outcome {
+            DispatchOutcome::Waiting | DispatchOutcome::Consumed => {}
+            DispatchOutcome::Replay(replay) => prepend_inputs(queue, replay),
+            DispatchOutcome::Emit { command, replay } => {
+                self.execute_command(command)?;
+                self.sync_focused_input(now);
+                prepend_inputs(queue, replay);
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_input_timeout(&mut self) -> io::Result<()> {
+        loop {
+            let now = Instant::now();
+            if self
+                .session
+                .dispatcher
+                .next_deadline(&self.session.views)
+                .is_none_or(|deadline| deadline > now)
+            {
+                return Ok(());
+            }
+            let outcome = self.session.dispatcher.dispatch_timeout(
+                now,
+                self.session.focused,
+                &self.session.scene,
+                &mut self.session.views,
+            );
+            let mut replay = VecDeque::new();
+            self.apply_dispatch_outcome(outcome, &mut replay, now)?;
+            self.process_input_queue(replay)?;
+        }
+    }
+
+    fn sync_focused_input(&mut self, now: Instant) {
+        let Some(view_id) = view_for_space(&self.session.scene, self.session.focused) else {
+            return;
+        };
+        let status = self
+            .session
+            .views
+            .get(&view_id)
+            .map_or(crate::core::input::InputStatus::Ready, View::input_status);
+        self.session
+            .dispatcher
+            .sync_view(view_id, status, true, now);
     }
 
     fn execute_command(&mut self, command: DispatchCommand) -> io::Result<()> {
@@ -208,18 +277,10 @@ impl<F: Frontend> App<F> {
                 assert_eq!(view.content(), content, "view/content target mismatch");
                 let command = match command {
                     crate::core::command::ContentCommand::Mode { mode, action } => {
-                        let Some((mode, action)) =
-                            self.kernel.modes.resolve_command(&mode, &action)
-                        else {
-                            return Ok(());
-                        };
-                        match view
-                            .mode_mut()
-                            .expect("mode command requires a view mode")
-                            .execute(mode, action)
-                        {
-                            Some(command) => command,
-                            None => {
+                        match view.execute_mode_command(&self.kernel.modes, &mode, &action) {
+                            ModeCommandResult::Unknown => return Ok(()),
+                            ModeCommandResult::Handled(Some(command)) => command,
+                            ModeCommandResult::Handled(None) => {
                                 view.touch();
                                 return Ok(());
                             }
@@ -348,6 +409,8 @@ impl<F: Frontend> App<F> {
         }
 
         let previous = self.session.focused;
+        let previous_view =
+            view_for_space(&self.session.scene, previous).expect("focused space hosts a view");
         let view = self.insert_view(content);
         let result = match self.session.scene_builder.split(
             &mut self.session.scene,
@@ -362,6 +425,11 @@ impl<F: Frontend> App<F> {
                 return Err(error.into());
             }
         };
+        if focus_new {
+            self.session
+                .dispatcher
+                .invalidate_view(previous_view, &mut self.session.views);
+        }
         self.reconcile_layout(if focus_new {
             Some(result.new_space)
         } else {
@@ -385,6 +453,9 @@ impl<F: Frontend> App<F> {
             .session
             .scene_builder
             .close(&mut self.session.scene, target)?;
+        self.session
+            .dispatcher
+            .invalidate_view(removed_view, &mut self.session.views);
         self.session.views.remove(&removed_view);
         self.reconcile_layout(result.surviving_neighbor);
         self.session.scene_revision.next();
@@ -420,6 +491,9 @@ impl<F: Frontend> App<F> {
             self.session.views.remove(&new_view);
             return Err(error.into());
         }
+        self.session
+            .dispatcher
+            .invalidate_view(old_view, &mut self.session.views);
         self.session.views.remove(&old_view);
         self.reconcile_layout(Some(target));
         self.session.scene_revision.next();
@@ -584,9 +658,7 @@ impl RenderQuery for AppQuery<'_> {
         let presentation = match view.selections() {
             Some(selections) => ViewPresentation::Text(TextPresentation {
                 selections: selections.clone(),
-                cursor_style: view
-                    .mode()
-                    .map_or(CursorStyle::Default, |mode| mode.cursor_style()),
+                cursor_style: view.cursor_style(),
             }),
             None => ViewPresentation::StatusBar,
         };
@@ -1429,6 +1501,158 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn vim_gg_moves_to_the_first_line() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Enter)),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('g')),
+                FrontendEvent::Key(KeyEvent::char('g')),
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('X')),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+
+        app.run().await.unwrap();
+
+        assert_eq!(text_rows(&app, editor_cid()), vec!["Xa", "b"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vim_counted_gg_moves_to_the_requested_line() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Enter)),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('2')),
+                FrontendEvent::Key(KeyEvent::char('g')),
+                FrontendEvent::Key(KeyEvent::char('g')),
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('X')),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+
+        app.run().await.unwrap();
+
+        assert_eq!(text_rows(&app, editor_cid()), vec!["a", "Xb"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vim_f_and_count_use_dynamic_awaiting_input() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('c')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('0')),
+                FrontendEvent::Key(KeyEvent::char('2')),
+                FrontendEvent::Key(KeyEvent::char('f')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('X')),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+
+        app.run().await.unwrap();
+
+        assert_eq!(text_rows(&app, editor_cid()), vec!["abacXa"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vim_capital_f_searches_backward_on_the_current_line() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('F')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('X')),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+
+        app.run().await.unwrap();
+
+        assert_eq!(text_rows(&app, editor_cid()), vec!["abXa"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vim_counted_j_uses_private_count_state() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Enter)),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Enter)),
+                FrontendEvent::Key(KeyEvent::char('c')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('g')),
+                FrontendEvent::Key(KeyEvent::char('g')),
+                FrontendEvent::Key(KeyEvent::char('2')),
+                FrontendEvent::Key(KeyEvent::char('j')),
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('X')),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+
+        app.run().await.unwrap();
+
+        assert_eq!(text_rows(&app, editor_cid()), vec!["a", "b", "Xc"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vim_counted_dd_deletes_whole_lines() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('a')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Enter)),
+                FrontendEvent::Key(KeyEvent::char('b')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Enter)),
+                FrontendEvent::Key(KeyEvent::char('c')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Enter)),
+                FrontendEvent::Key(KeyEvent::char('d')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('g')),
+                FrontendEvent::Key(KeyEvent::char('g')),
+                FrontendEvent::Key(KeyEvent::char('3')),
+                FrontendEvent::Key(KeyEvent::char('d')),
+                FrontendEvent::Key(KeyEvent::char('d')),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+
+        app.run().await.unwrap();
+
+        assert_eq!(text_rows(&app, editor_cid()), vec!["d"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn prefix_key_sequence_saves() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("g.txt");
@@ -1443,15 +1667,12 @@ mod tests {
             ],
             Some(&path_str),
         );
-        // 给 Buffer 绑前缀
-        let mut buffer = Buffer::new();
-        buffer.open_path(&path_str).unwrap();
-        let mut sub = crate::core::keymap::Keymap::new();
-        sub.bind(KeyEvent::char('s'), Command::Content(ContentCommand::Save));
-        buffer.keymap_mut().bind_prefix(KeyEvent::char('z'), sub);
-        app.kernel
-            .contents
-            .insert(editor_cid(), Content::Buffer(buffer));
+        let mut global = default_global_keymap();
+        global.bind(
+            [KeyEvent::char('z'), KeyEvent::char('s')],
+            Command::Content(ContentCommand::Save),
+        );
+        app.session.dispatcher = Dispatcher::new(global);
         app.run().await.unwrap();
         assert_eq!(
             document_status(&app, editor_cid()).message,

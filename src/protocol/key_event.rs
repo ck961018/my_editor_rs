@@ -66,6 +66,12 @@ pub struct KeyEvent {
     pub modifiers: KeyModifiers,
 }
 
+impl AsRef<[KeyEvent]> for KeyEvent {
+    fn as_ref(&self) -> &[KeyEvent] {
+        std::slice::from_ref(self)
+    }
+}
+
 impl KeyEvent {
     pub fn plain(code: KeyCode) -> Self {
         Self {

@@ -1,201 +1,324 @@
 # Editor Kernel Architecture
 
-**状态：** 架构方向  
-**更新日期：** 2026-07-13
+**状态：** 当前实现架构
+**更新日期：** 2026-07-16
 
-## 1. 定位
+## 1. 文档定位
 
-`my_editor_rs` 的长期目标不是把业务逻辑绑定在某一种终端界面上，而是形成一个可被
-不同前端驱动的编辑器内核：
+本文描述当前源码已经实现的架构、所有权和运行时数据流。尚未实现的脚本运行时、远程
+transport、多客户端调度、完整 Vim 语法和增量布局等方向统一记录在
+`docs/roadmap/editor-evolution-roadmap.md`，不作为当前代码契约。
+
+项目的核心目标是让编辑内核不依赖某一种界面实现：
 
 ```text
-编辑器内核 + 可扩展 Mode + 多种 Content + 本地或远程 Frontend
+编辑领域逻辑 + View 交互会话 + Scene 快照 + Frontend 抽象
 ```
 
-TUI 是当前的第一个前端实现。未来的 GUI 或远程前端应复用同一套内容、视图、命令和
-任务语义，而不要求内核了解终端单元格、GUI 控件或传输实现。
+TUI 是目前唯一的生产 Frontend，但 `app` 不依赖 `tui`，TUI 也不反向依赖 App。
 
-## 2. 核心概念
+## 2. 分层与依赖方向
 
-### 2.1 Content
+```text
+frontend -> protocol
+app      -> frontend + core + protocol
+tui      -> frontend + terminal + protocol
+main     -> app + tui + terminal
+terminal -> protocol
+core     -> protocol + std
+protocol -> std
+```
 
-Content 是可被展示和操作的共享实体。当前包含文本 `Buffer` 和 `StatusBar`，未来可扩展
-为 terminal、选择栏、帮助页或 web 页面等内建类型。
+各层职责如下：
 
-Content 负责：
+| 层 | 当前职责 |
+| --- | --- |
+| `protocol` | ID、几何、Scene 快照、selection、按键、viewport、查询数据和远程语义消息 |
+| `core` | Buffer、Content、ContentStore、编辑命令、Mode、keymap trie 和通用输入状态机 |
+| `frontend` | 只定义 `Frontend` 行为接缝 |
+| `app` | 主循环、命令路由、View/Session/Kernel 所有权、Scene 修改和后台保存 |
+| `terminal` | crossterm 输入翻译、终端生命周期和 `Canvas` 输出 |
+| `tui` | Taffy 布局、viewport 跟随、pull 查询和终端绘制 |
+| `main` | 组装 Terminal、TUI Frontend 与 `App<TuiFrontend<_>>` |
 
-- 保存自身的共享状态；
-- 回答只读 `ContentQuery`；
-- 执行语义命令或处理异步事件；
-- 返回由 App 解释的 effect，而不直接执行前端 IO。
+`core` 不感知终端、布局、异步任务或渲染；`protocol` 不执行业务 IO；具体前后端接线只在
+`main.rs`。
 
-Content 不拥有某一次展示的 selection、viewport、焦点或 Mode 实例。同一 Content 可以
-同时被多个 View 展示。
+## 3. 顶层所有权
 
-Content 当前采用静态闭合的枚举集合。只有在确实需要由脚本注册新 Content 类型时，才
-重新评估动态注册机制；Mode 的可脚本扩展不要求 Content 同时动态化。
+当前运行时所有权为：
 
-### 2.2 View
+```text
+App<F: Frontend>
+├── Kernel
+│   ├── ContentStore
+│   ├── ModeRegistry
+│   ├── AppTasks
+│   ├── pending_saves
+│   └── AppMessage channel
+├── ClientSession
+│   ├── Scene + SceneBuilder + scene revision
+│   ├── ViewStore: HashMap<ViewId, View>
+│   ├── focused SpaceId
+│   └── Dispatcher
+└── F: Frontend
+```
 
-View 是某个 Content 的一次展示和交互会话。它至少绑定一个 Content，并持有该会话独立
-的状态，例如 Mode 实例、文本 selection 或 terminal/web 的局部交互状态。
+`Kernel` 与 `ClientSession` 已按共享数据和客户端会话拆分，但当前仍是一对一组合：没有
+session registry，也没有用 `Arc<Mutex<_>>` 提供并发共享。该拆分首先用于明确所有权，并为
+未来多 Frontend 保留自然扩展点。
 
-长期概念模型为：
+Viewport 属于具体 Frontend。TUI 的 `SceneRenderer` 按 `ViewId` 保存 viewport，后端
+`ClientSession` 不保存终端滚动位置。
+
+## 4. 三种身份
+
+布局、交互会话和共享内容使用不同 ID：
+
+```text
+Scene: SpaceId -> ViewId
+View:  ViewId  -> ContentId + ModeInstance + ContentViewState
+Store: ContentId -> Content
+```
+
+- `SpaceId` 标识 Scene 树中的布局节点；
+- `ViewId` 标识一次独立的展示和交互会话；
+- `ContentId` 标识可被多个 View 引用的共享内容。
+
+同一个 `ViewId` 不能同时挂载到多个 Scene leaf。同一 `ContentId` 可以由多个 View 展示，
+这些 View 拥有彼此独立的 selection、Mode 状态、revision 和前端 viewport。
+
+## 5. Content 与 View
+
+### 5.1 Content
+
+`Content` 当前是静态闭合枚举：
+
+```rust
+enum Content {
+    Buffer(Buffer),
+    StatusBar(StatusBar),
+}
+```
+
+`ContentStore` 是唯一 Content 表。除启动时构造内建 Content 外，App 的执行与查询路径不借出
+`Buffer`/`StatusBar`，而是通过 ContentStore 分派。Content 通过三类 `ContentInput` 接收行为：
+
+- `Command`：不依赖某个 View 的共享内容命令，例如保存；
+- `View`：同时携带语义命令和该 View 的 `ContentViewState`，例如编辑文本并更新 selection；
+- `Event`：后台结果，例如带 Buffer revision 的 `SaveFinished`。
+
+执行结果显式区分 `Handled(ContentEffect)` 与 `NotHandled`。当前 effect 只有保存快照；App
+解释 effect 并启动 IO，Content 不直接管理异步任务或 Frontend。
+
+只读数据统一通过 `ContentStore::query(ContentId, ContentQuery)` 返回 owned `ContentData`。
+状态栏通过目标 Buffer 的 `DocumentStatus` 生成数据，而不是让渲染层识别具体 Content 类型。
+
+### 5.2 View
+
+`View` 是 App 层完整的交互边界，当前持有：
 
 ```text
 View
 ├── ContentId
-├── ModeInstance
 ├── ContentViewState
-└── presentation state
+├── Option<ModeInstance>
+└── Revision
 ```
 
-`ContentViewState` 是 Content 相关的，不要求所有 View 都具有文本 selection。Buffer View
-可以有 selections，StatusBar 可以没有局部状态，Terminal 和 Web View 可以定义各自的
-会话状态。
+`ContentViewState` 与 Content 类型配对。Buffer View 保存 `Selections`，StatusBar View 没有
+selection。类型不匹配属于 App 内部不变量破坏，会直接 panic，而不是跨边界的可恢复错误。
 
-前端读取的 `ViewData` 使用显式 `ViewPresentation`。当前 `Text` presentation 携带 selections
-与 cursor style，`StatusBar` 没有文本字段；前端只按该枚举发送对应的 Content query，
-不通过 `Unsupported` 响应或 `TextLineCount` 探测 Content 类型。Terminal/Web 在实际加入时
-扩展自己的 presentation 数据。
+View 对上游只暴露中立行为：当前 keymap、输入状态、动态 capture、typing fallback、输入取消、
+超时通知、cursor style 和 mode command 执行。App 与 Dispatcher 不读取 Vim 的 count、operator
+或字符搜索状态。
 
-### 2.3 Mode
+## 6. Mode 与命令模型
 
-Mode 是可复用的输入和交互策略。Vim Mode 是当前实现，但不是内核中的唯一固定模式。
-后续 Mode 可以由脚本语言注册，并可应用于一个或多个具有相应能力的 Content。
+### 6.1 定义、注册与实例
 
-Mode 定义和 Mode 实例必须区分：
+`Mode` trait 是原生 Mode 的定义契约，负责：
 
-- Mode 定义由 Mode registry 管理，可被多个 View 复用；
-- Mode 实例属于 View，保存该 View 独立的运行时状态；
-- 原生 Rust Mode 和脚本 Mode 可以有不同的内部状态表示，但通过同一 host 契约工作；
-- 脚本对象和 Rust `Any` 都属于后端内部实现，不进入前端协议。
+- 声明 owned `ModeName` 与 `ModeActionName`；
+- 为每个 View 创建私有 `ModeState`；
+- 根据状态提供 keymap、typing fallback 和 cursor style；
+- 实现通用 `InputContext<Command>` 所需的等待、capture、timeout 与 cancel 行为；
+- 将 mode action 转换为 `ContentCommand`。
 
-Mode 不应以 Buffer 专属的编辑函数作为最终扩展契约。目标分发链是：
+`ModeRegistry` 按名称注册定义，并在进程内分配稳定的 `ModeId`/`ModeActionId`。`ModeInstance`
+通过 `Rc` 共享已注册定义，同时独占 `Box<dyn ModeState>`。当前生产 registry 只注册内建 Vim；
+脚本 adapter 尚未实现。
+
+Mode 的私有语法只产生通用命令。例如 Vim 的 `f/F`、count 和 `dd` 最终产生
+`MoveToChar`、`MoveToLine` 或 `DeleteLines`，Buffer 不知道这些按键语法。
+
+### 6.2 命令层级
 
 ```text
-KeyEvent -> Mode -> semantic command -> target Content -> ContentEffect
+Command
+├── App(AppCommand)
+├── Content(ContentCommand)
+│   ├── Edit(EditCommand)
+│   ├── Save
+│   └── Mode { mode, action }
+└── Noop
 ```
 
-Content 可以返回 `Handled` 或 `NotHandled`。只有在需要提前筛选可用 Mode 时，才增加
-capability 元数据；相比按具体 Content 类型维护 allowlist，能力或命令契约对新 Content
-更稳定。
+`Dispatcher` 再将 `Command` 解析为带实际目标的 App 内部 `DispatchCommand`。App command 由 App
+执行；Mode command 交给目标 View 的 ModeInstance；其他 Content command 交给目标
+`ContentStore` 条目，并在需要时借用该 View 的 `ContentViewState`。
 
-“Mode”未来可能包含不同维度：跨 Content 的输入模式、与 Content 语义相关的 major mode，
-以及可叠加的 minor mode。出现第二个需要组合的 Mode 之前，不提前实现完整 Mode stack；
-扩展契约应保留 `NotHandled`，使后续组合无需推翻命令模型。
+Mode action 先更新 Mode 私有状态，再执行后续 replay。这样按键导致 Normal/Insert 切换后，
+同一输入队列中的下一个键立即使用新状态。
 
-### 2.4 Space 与 Scene
+## 7. 输入架构
 
-Space 是布局身份，View 是交互会话身份，Content 是共享资源身份。这三个概念不能在外部
-协议中合并：
+### 7.1 中立按键
+
+Terminal 将 crossterm 事件翻译为协议层：
+
+```rust
+KeyEvent { code: KeyCode, modifiers: KeyModifiers }
+```
+
+Ctrl、Alt、Shift 都是 modifiers，不编码进 `KeyCode`。GUI 或远程 Frontend 将来应产生同一
+中立事件，而不是复用 terminal 翻译细节。
+
+### 7.2 固定序列
+
+`Keymap<A>` 是泛型 trie。每个 `KeyNode<A>` 可以同时拥有 action 和 children，因此单键动作与
+更长前缀可以共存。当前活动固定层只有：
+
+1. focused View 当前 Mode 的 keymap；
+2. global keymap。
+
+Dispatcher 不物理合并这些树，而是在匹配时虚拟叠加：同序列按层优先级选择 action，任一层
+存在更长候选就继续等待。中止时选择已缓冲序列中消费按键最多的完整绑定。
+
+每个 binding 的 RHS 是一个结构化 action，不在 keymap 层内嵌 action list、脚本字符串或递归
+remap。需要组合行为时，由该 action 对应的语义命令或未来脚本函数负责。
+
+Leader 是定义绑定时展开的 alias，运行时 trie 只保存 concrete `KeyEvent`。固定序列共享全局
+默认超时；显式 prefix 可以覆盖为 `After(Duration)` 或 `Never`，descendant 继承当前路径上
+最近遇到的设置。
+
+### 7.3 通用 Awaiting
+
+动态输入使用与 Vim 无关的接口：
+
+```rust
+InputStatus::{Ready, Awaiting(TimeoutPolicy)}
+InputDecision<A>::{Pass, Consumed, Emit(A)}
+InputContext<A>::{status, capture, on_timeout, cancel}
+```
+
+`InputCoordinator` 将固定序列 pending 和动态 context 放在同一 LIFO 等待栈中，并选择最近到期
+的 deadline；被较新 context 覆盖的底层 timer 不暂停。Dispatcher 只在 context 处于
+`Awaiting` 时调用 `capture`；`Pass` 传播原键，`Consumed` 吞掉输入，`Emit` 产生中立 action。
+
+固定序列 mismatch/timeout 的处理顺序为：
+
+1. 若已有完整绑定，先执行它；
+2. 再把未消费的缓冲键作为普通新输入 replay；
+3. 若没有完整绑定，原始 prefix 直接走 unmapped/fallback，不重新进入固定 keymap；
+4. 导致 mismatch 的新键随后按普通输入处理。
+
+mode 或 focus 切换会丢弃相关 fixed pending，并取消受影响 View 的动态 Awaiting，不 replay 旧
+状态下的输入。
+
+### 7.4 App 输入循环
+
+App 在每轮事件循环中向 Dispatcher 查询最近 input deadline，并与 Frontend event、后台
+`AppMessage`、任务取消信号一起进入 `tokio::select!`。输入使用显式队列处理，保证
+“执行 action -> 同步 focused View 输入状态 -> replay”这一顺序。
+
+## 8. Scene、布局与渲染
+
+### 8.1 Scene 模型
+
+`protocol::scene` 只保存可拥有的 `Scene`/`SpaceNode` 快照和只读访问。树修改属于
+`app::scene_model::SceneBuilder`：
+
+- 分配唯一 `SpaceId`；
+- 构建标准 editor + status bar 场景；
+- split、close、replace view、set sizing；
+- 校验父子关系、Content leaf 和 View 唯一挂载不变量。
+
+每个 `ClientSession` 持有唯一 builder。成功修改 Scene 后递增 scene revision，并同步创建、
+移除或保留对应 View。
+
+### 8.2 Pull 渲染
+
+渲染数据流为：
 
 ```text
-Scene: SpaceId -> ViewId
-View:  ViewId  -> ContentId + ModeInstance + view state
+Scene snapshot
+  -> TaffyEngine.layout(scene, scene_revision)
+  -> ResolvedScene<RenderItem>
+  -> RenderQuery.view/content
+  -> viewport follow + paint
+  -> Canvas
 ```
 
-当前实现已使用独立 `ViewId`：Scene leaf 只引用 View，App 的 ViewStore 按 ViewId 索引，
-View 再引用 ContentId。同一 View 同时只能被一个 Scene leaf 引用；同一 Content 可以创建
-多个拥有独立 Mode、selection 和 viewport 的 View。
+`TaffyEngine` 按 scene revision 缓存 `ResolvedScene`。revision 改变时，当前实现重建整棵
+`TaffyTree` 并重新计算布局；它不会在每一帧无条件创建新树，也尚未消费 Scene diff 做增量更新。
 
-当前 `protocol::scene` 只保留可拥有的 `Scene`/`SpaceNode` 快照数据和只读访问；
-`app::scene_model` 持有 SceneBuilder、split、close、节点修复和树不变量。TUI 只消费快照，
-这些后端模型行为不进入远程 wire protocol。
+`SceneRenderer` 按 `ViewPresentation::{Text, StatusBar}` 显式分派，不通过不支持的 query 猜测
+Content 类型。它只拉取可见文本行，并在前端计算 `DisplayPoint`、viewport 和光标位置。
 
-### 2.5 文本位置与显示位置
-
-文本 View 的持久 selection 只保存 Rope 字符偏移 `TextOffset`。逻辑行列 `TextPoint` 由
-Buffer 按当前内容派生，并作为 owned query 结果返回；前端再结合 viewport 和布局得到自己的
-`DisplayPoint`。因此编辑模型不缓存可能随内容变化而失效的 row/col，后端也不感知终端 cell
-或 GUI pixel。当前 TUI 对逻辑列和 cell 列采用一对一映射，未来可在前端显示适配器中加入
-tab、Unicode width、grapheme 或软换行，而不改变 Selection。
-
-## 3. 所有权
-
-当前所有权关系如下：
+### 8.3 文本位置
 
 ```text
-App<F>
-├── Kernel
-│   ├── ContentStore      共享 Content
-│   ├── ModeRegistry      原生与脚本 Mode 定义
-│   └── TaskManager       保存等后台任务
-├── ClientSession
-│   ├── Scene + SceneBuilder + revision
-│   ├── Focus + Dispatcher
-│   └── ViewStore
-│       └── View          Mode 实例 + ContentViewState
-└── Frontend              viewport 与具体 presentation 状态
+TextOffset   Selection 持久保存的 Rope 字符偏移
+TextPoint    Buffer 按当前内容派生的逻辑行列
+DisplayPoint TUI 结合布局和 viewport 计算的显示位置
 ```
 
-当前 App 只有一个 ClientSession 和一个 Frontend，但共享 Kernel 与客户端会话已经分层。
-如果未来允许多个前端同时连接，每个客户端创建独立 ClientSession 与 Frontend；共享
-Content、Mode 定义和后台服务仍留在 Kernel。Viewport 属于具体前端，不进入后端 session。
+当前逻辑列与 terminal cell 列按一对一映射。tab stop、Unicode width、grapheme、emoji 和软换行
+尚未进入显示模型。
 
-## 4. 前后端边界
+## 9. 保存与后台任务
 
-后端只依赖中立协议：
+Buffer 每次编辑递增文档 revision。保存时 Content 生成包含 path、bytes 和 revision 的不可变
+`SaveSnapshot`，App 使用临时文件加 rename 执行原子写入。
 
-- 接收按键、Resize、退出等 FrontendEvent；
-- 维护 Content、View、Mode、Scene 和后台任务；
-- 提供 Content 和 View 的只读数据；
-- 不依赖 crossterm、Taffy、GUI toolkit 或具体网络传输。
+保存完成事件带回原 revision。只有当前 Buffer revision 与已保存 revision 相等时才清除
+modified；在途保存期间的新保存请求保留最新快照，并在当前任务结束后继续执行。关闭时取消
+普通任务，但等待 critical 保存任务完成。
 
-前端只依赖协议：
+## 10. 前后端与远程语义边界
 
-- 根据 Scene 进行布局和绘制；
-- 按 ContentId/ViewId 查询所需数据；
-- 持有与具体呈现相关的状态；
-- 不借出或识别 Buffer、StatusBar 等后端具体类型。
+同进程 Frontend 只有两个行为：异步产生 `FrontendEvent`，以及同步
+`render(&Scene, Revision, &dyn RenderQuery, focused)`。
 
-当前 `Frontend::render(&Scene, &dyn RenderQuery, ...)` 仍是同进程 TUI 的直接适配器。远程
-边界已有 owned request/response 语义协议和 AppQuery 适配器，两条路径共享同一 ViewData、
-ContentQuery 与 ContentData 契约。
+协议层还定义了尚未接入 transport 的 owned 远程语义消息：
 
-## 5. 远程协议方向
+- `Hello/Welcome` 与 capability negotiation；
+- 带 `RequestId` 的 View/Content request/response；
+- scene、view、content revision；
+- `SceneChanged`、`ViewChanged`、`ContentInvalidated` 通知；
+- unknown object、unsupported query 和版本不兼容等结构化错误。
 
-远程前端仍使用 pull 模型，跨进程边界表达为消息：
+`app::remote` 已能把本地 `AppQuery` 适配为 response，但当前没有 serde、网络 transport、Scene
+snapshot/delta、连接管理或远程 Frontend 事件循环。
 
-```text
-Backend -> Frontend
-  SceneChanged
-  ViewChanged
-  ContentInvalidated
-
-Frontend -> Backend
-  Hello { version, capabilities }
-  ViewRequest { request_id, view_id }
-  ContentRequest { request_id, content_id, query }
-
-Backend -> Frontend
-  Welcome { version, capabilities }
-  Response { request_id, revision, data | error }
-```
-
-语义协议已定义 request ID、scene/view/content revision、结构化错误和 capability negotiation，
-且消息负载均为 owned 数据。传输格式、序列化库、Scene snapshot/delta、增量帧算法和断线
-恢复在真正实现远程前端前保持未定。
-
-## 6. 不变量
+## 11. 当前不变量
 
 - Content 共享状态与 View 会话状态分离。
-- Mode 定义可共享，Mode 实例按 View 隔离。
-- Mode 产生语义命令，不直接执行前端 IO。
-- SpaceId、ViewId、ContentId 表达不同身份。
-- 前端不依赖后端具体 Content 类型；后端不依赖具体前端。
-- 协议只包含可传递的数据和消息，不包含本地对象借用或后端 builder。
-- 异步结果必须携带足够的对象身份和 revision，不能覆盖更新后的状态。
+- Mode 定义由 registry 共享，ModeInstance 和 ModeState 按 View 隔离。
+- App/Dispatcher 只看通用输入状态和命令，不读取具体 Mode 语法。
+- SpaceId、ViewId、ContentId 不互相替代。
+- ContentStore 是唯一 Content 表；Frontend 不识别具体 Content 对象。
+- 布局和 viewport 属于 TUI；core/protocol 不依赖 Taffy。
+- Scene builder 属于 App，协议只保存 Scene 快照。
+- 渲染使用 owned pull query，后端不 push frame。
+- 异步保存结果必须以文档 revision 校验，不能覆盖更新后的状态。
 
-## 7. 当前阶段的有意简化
+## 12. 当前有意保留的边界
 
-- 只有一个 Frontend 和一份客户端会话状态。
-- 尚未实现 session registry、多客户端调度、认证或并发共享；Kernel 暂不需要 Arc/Mutex。
-- Kernel 持有共享 ModeRegistry，View 从中创建独立 ModeInstance。
-- Mode/Action 在命令边界使用 owned 名称，Registry 将其解析为进程内稳定的数值 ID。
-- 原生 Mode 暂时使用 Rust trait object 和 `Any` 保存类型状态。
-- TUI 继续同步调用 `RenderQuery`；远程语义协议尚未绑定 transport 或序列化格式。
-- Content 集合暂时是静态枚举。
-
-这些简化有明确升级触发条件，不因远期设想而提前引入脚本 runtime、网络 transport、
-多客户端调度或通用插件 ABI。
+- Content 继续使用静态 enum，不为 Mode 脚本化提前改成插件对象。
+- 只有单 Frontend、单 ClientSession；不提前加入并发共享和连接管理。
+- ModeRegistry 只承载原生 Mode；不伪造尚未确定的脚本对象或 ABI 字段。
+- 当前只有 focused Mode + global 两个固定 keymap 层，不提前实现完整 major/minor mode stack。
+- 远程协议只完成语义数据结构，不提前绑定 transport 和序列化库。
+- Taffy 只按 revision 缓存整树结果；是否增量更新由真实性能数据决定。

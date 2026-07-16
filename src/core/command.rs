@@ -38,6 +38,14 @@ pub enum EditCommand {
     MoveRightBy(usize),
     MoveUpBy(usize),
     MoveDownBy(usize),
+    MoveToLine {
+        line_index: usize,
+    },
+    MoveToChar {
+        target: char,
+        direction: CharSearchDirection,
+        occurrence: usize,
+    },
     #[allow(dead_code)]
     // 预留：仅 executor 单测构造，生产 keymap 用 MoveLeftBy/RightBy/UpBy/DownBy
     MoveTo {
@@ -50,6 +58,9 @@ pub enum EditCommand {
     ExtendDownBy(usize),
     InsertText(String),
     Delete(isize),
+    DeleteLines {
+        lines: usize,
+    },
     DeleteWordBackward,
     CollapseSelections,
     // 以下变体预留：vim 基础操作，后续任务接入 apply_edit / keymap / mode action。
@@ -70,6 +81,12 @@ pub enum EditCommand {
     InsertNewLineAbove,
     MoveAfterLineEnd,
     DeleteLineContent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CharSearchDirection {
+    Forward,
+    Backward,
 }
 
 impl From<EditCommand> for Command {

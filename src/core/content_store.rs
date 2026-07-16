@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use crate::core::content::{Content, ContentResult};
 use crate::core::content_view_state::ContentViewState;
-use crate::core::keymap::Keymap;
 use crate::core::mode::ModeName;
 use crate::protocol::content_query::{
     ContentData, ContentQuery, DocumentStatus, RowRange, StatusBarData,
@@ -25,10 +24,6 @@ impl ContentStore {
 
     pub fn contains(&self, id: ContentId) -> bool {
         self.contents.contains_key(&id)
-    }
-
-    pub fn keymap(&self, id: ContentId) -> Option<&Keymap> {
-        self.contents.get(&id).map(Content::keymap)
     }
 
     pub fn create_view_state(&self, id: ContentId) -> Option<ContentViewState> {

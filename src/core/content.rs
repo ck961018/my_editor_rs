@@ -4,7 +4,6 @@ use crate::core::buffer::Buffer;
 use crate::core::command::ContentCommand;
 use crate::core::content_view_state::ContentViewState;
 use crate::core::edit::apply_edit;
-use crate::core::keymap::Keymap;
 use crate::core::mode::ModeName;
 use crate::core::status_bar::StatusBar;
 use crate::protocol::status::StatusMessage;
@@ -50,21 +49,6 @@ pub enum Content {
 }
 
 impl Content {
-    pub fn keymap(&self) -> &Keymap {
-        match self {
-            Self::Buffer(buffer) => buffer.keymap(),
-            Self::StatusBar(status_bar) => status_bar.keymap(),
-        }
-    }
-
-    #[allow(dead_code)] // Static Content API reserves keymap mutation for future bindings.
-    pub fn keymap_mut(&mut self) -> &mut Keymap {
-        match self {
-            Self::Buffer(buffer) => buffer.keymap_mut(),
-            Self::StatusBar(status_bar) => status_bar.keymap_mut(),
-        }
-    }
-
     pub fn create_view_state(&self) -> ContentViewState {
         match self {
             Self::Buffer(_) => ContentViewState::buffer(),
@@ -164,25 +148,8 @@ impl Content {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::command::{Command, ContentCommand, EditCommand};
-    use crate::core::keymap::KeyBinding;
+    use crate::core::command::{ContentCommand, EditCommand};
     use crate::protocol::ids::ContentId;
-    use crate::protocol::key_event::KeyEvent;
-
-    #[test]
-    fn keymap_mut_updates_static_buffer_content_keymap() {
-        let mut content = Content::Buffer(Buffer::new());
-        let command = Command::Content(ContentCommand::Edit(EditCommand::CollapseSelections));
-
-        content
-            .keymap_mut()
-            .bind(KeyEvent::char('x'), command.clone());
-
-        assert_eq!(
-            content.keymap().lookup(KeyEvent::char('x')),
-            Some(&KeyBinding::Command(command))
-        );
-    }
 
     #[test]
     fn buffer_creates_text_view_state_with_vim_default() {

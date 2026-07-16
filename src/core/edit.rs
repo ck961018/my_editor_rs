@@ -47,6 +47,23 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
                 Buffer::collapse_to_head(sel);
             }
         }
+        EditCommand::MoveToLine { line_index } => {
+            for sel in selections.all_mut() {
+                buffer.move_head_to_line(sel, line_index);
+                Buffer::collapse_to_head(sel);
+            }
+        }
+        EditCommand::MoveToChar {
+            target,
+            direction,
+            occurrence,
+        } => {
+            for sel in selections.all_mut() {
+                if buffer.move_head_to_char(sel, target, direction, occurrence) {
+                    Buffer::collapse_to_head(sel);
+                }
+            }
+        }
         EditCommand::MoveWordForward => {
             for sel in selections.all_mut() {
                 if sel.anchor != sel.head {
@@ -228,6 +245,7 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
         }
         EditCommand::InsertText(text) => buffer.insert_at_selections(selections, &text),
         EditCommand::Delete(n) => buffer.delete_at_selections(selections, n),
+        EditCommand::DeleteLines { lines } => buffer.delete_lines_at_selections(selections, lines),
         EditCommand::DeleteWordBackward => buffer.delete_word_backward_at_selections(selections),
         EditCommand::DeleteToLineStart => {
             buffer.delete_to_line_start_at_selections(selections);

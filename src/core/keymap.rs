@@ -3,38 +3,122 @@ use std::collections::HashMap;
 use crate::core::command::{Command, ContentCommand, EditCommand};
 use crate::protocol::key_event::KeyEvent;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Configuration-facing leader alias; production config loading is deferred.
+pub enum KeyStroke {
+    Key(KeyEvent),
+    Leader,
+}
+
+#[allow(dead_code)] // Bindings are expanded during definition; current built-ins do not use leader.
+pub fn expand_key_sequence(sequence: &[KeyStroke], leader: KeyEvent) -> Vec<KeyEvent> {
+    sequence
+        .iter()
+        .map(|stroke| match stroke {
+            KeyStroke::Key(key) => *key,
+            KeyStroke::Leader => leader,
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum KeyBinding {
-    Command(Command),
-    #[allow(dead_code)] // 仅测试构造前缀链；Dispatcher 读但生产 keymap 不绑前缀
-    Prefix(Keymap),
+pub struct KeyNode<A> {
+    action: Option<A>,
+    children: HashMap<KeyEvent, KeyNode<A>>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Keymap {
-    bindings: HashMap<KeyEvent, KeyBinding>,
+impl<A> Default for KeyNode<A> {
+    fn default() -> Self {
+        Self {
+            action: None,
+            children: HashMap::new(),
+        }
+    }
 }
 
-impl Keymap {
+impl<A> KeyNode<A> {
+    pub fn action(&self) -> Option<&A> {
+        self.action.as_ref()
+    }
+
+    pub fn children(&self) -> &HashMap<KeyEvent, KeyNode<A>> {
+        &self.children
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Keymap<A = Command> {
+    roots: HashMap<KeyEvent, KeyNode<A>>,
+}
+
+impl<A> Default for Keymap<A> {
+    fn default() -> Self {
+        Self {
+            roots: HashMap::new(),
+        }
+    }
+}
+
+impl<A> Keymap<A> {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn lookup(&self, key: KeyEvent) -> Option<&KeyBinding> {
-        self.bindings.get(&key)
+
+    pub fn node(&self, sequence: &[KeyEvent]) -> Option<&KeyNode<A>> {
+        let (first, rest) = sequence.split_first()?;
+        let mut node = self.roots.get(first)?;
+        for key in rest {
+            node = node.children.get(key)?;
+        }
+        Some(node)
     }
-    pub fn bind(&mut self, key: KeyEvent, command: Command) {
-        self.bindings.insert(key, KeyBinding::Command(command));
+
+    pub fn bind(&mut self, sequence: impl AsRef<[KeyEvent]>, action: A) -> Option<A> {
+        let sequence = sequence.as_ref();
+        let (first, rest) = sequence
+            .split_first()
+            .expect("key sequence must contain at least one key");
+        let mut node = self.roots.entry(*first).or_default();
+        for key in rest {
+            node = node.children.entry(*key).or_default();
+        }
+        node.action.replace(action)
     }
-    pub fn bind_edit(&mut self, key: KeyEvent, command: EditCommand) {
-        self.bind(key, Command::Content(ContentCommand::Edit(command)));
+
+    #[allow(dead_code)] // Public mutation seam for future runtime/script configuration.
+    pub fn unbind(&mut self, sequence: impl AsRef<[KeyEvent]>) -> Option<A> {
+        let sequence = sequence.as_ref();
+        let (first, rest) = sequence.split_first()?;
+        let removed = remove_action(self.roots.get_mut(first)?, rest);
+        if self.roots.get(first).is_some_and(node_is_empty) {
+            self.roots.remove(first);
+        }
+        removed
     }
-    #[allow(dead_code)] // 测试用：生产 keymap 不绑前缀，前缀链仅 dispatcher 单测构造
-    pub fn bind_prefix(&mut self, key: KeyEvent, sub: Keymap) {
-        self.bindings.insert(key, KeyBinding::Prefix(sub));
+}
+
+fn remove_action<A>(node: &mut KeyNode<A>, rest: &[KeyEvent]) -> Option<A> {
+    let Some((key, tail)) = rest.split_first() else {
+        return node.action.take();
+    };
+    let removed = remove_action(node.children.get_mut(key)?, tail);
+    if node.children.get(key).is_some_and(node_is_empty) {
+        node.children.remove(key);
     }
-    #[allow(dead_code)] // 预留：v0.2 无 unbind 键路径
-    pub fn unbind(&mut self, key: KeyEvent) {
-        self.bindings.remove(&key);
+    removed
+}
+
+fn node_is_empty<A>(node: &KeyNode<A>) -> bool {
+    node.action.is_none() && node.children.is_empty()
+}
+
+impl Keymap<Command> {
+    pub fn bind_edit(
+        &mut self,
+        sequence: impl AsRef<[KeyEvent]>,
+        command: EditCommand,
+    ) -> Option<Command> {
+        self.bind(sequence, Command::Content(ContentCommand::Edit(command)))
     }
 }
 
@@ -45,57 +129,82 @@ mod tests {
     use crate::protocol::key_event::{ArrowKey, KeyCode};
 
     #[test]
-    fn bind_and_lookup_command() {
-        let mut km = Keymap::new();
-        km.bind_edit(
-            KeyEvent::plain(KeyCode::Enter),
-            EditCommand::InsertText("\n".to_string()),
-        );
-        let binding = km.lookup(KeyEvent::plain(KeyCode::Enter)).unwrap();
+    fn node_can_hold_an_action_and_children() {
+        let g = KeyEvent::char('g');
+        let mut keymap = Keymap::new();
+        keymap.bind([g], 1);
+        keymap.bind([g, g], 2);
+
+        let node = keymap.node(&[g]).unwrap();
+        assert_eq!(node.action(), Some(&1));
+        assert!(node.children().contains_key(&g));
+        assert_eq!(keymap.node(&[g, g]).unwrap().action(), Some(&2));
+    }
+
+    #[test]
+    fn rebinding_replaces_only_the_action() {
+        let g = KeyEvent::char('g');
+        let mut keymap = Keymap::new();
+        keymap.bind([g], 1);
+        keymap.bind([g, g], 2);
+
+        assert_eq!(keymap.bind([g], 3), Some(1));
+        assert_eq!(keymap.node(&[g]).unwrap().action(), Some(&3));
+        assert_eq!(keymap.node(&[g, g]).unwrap().action(), Some(&2));
+    }
+
+    #[test]
+    fn unbind_keeps_descendants_and_prunes_empty_nodes() {
+        let g = KeyEvent::char('g');
+        let mut keymap = Keymap::new();
+        keymap.bind([g], 1);
+        keymap.bind([g, g], 2);
+
+        assert_eq!(keymap.unbind([g]), Some(1));
+        assert!(keymap.node(&[g]).unwrap().action().is_none());
+        assert_eq!(keymap.unbind([g, g]), Some(2));
+        assert!(keymap.node(&[g]).is_none());
+    }
+
+    #[test]
+    fn edit_binding_wraps_the_command() {
+        let mut keymap = Keymap::new();
+        let enter = KeyEvent::plain(KeyCode::Enter);
+        keymap.bind_edit([enter], EditCommand::InsertText("\n".to_string()));
+
         assert_eq!(
-            binding,
-            &KeyBinding::Command(Command::Content(ContentCommand::Edit(
+            keymap.node(&[enter]).and_then(KeyNode::action),
+            Some(&Command::Content(ContentCommand::Edit(
                 EditCommand::InsertText("\n".to_string())
             )))
         );
     }
 
     #[test]
-    fn lookup_missing_is_none() {
-        let km = Keymap::new();
-        assert!(km.lookup(KeyEvent::plain(KeyCode::Enter)).is_none());
-    }
+    fn leader_is_expanded_when_a_binding_is_defined() {
+        let leader = KeyEvent::char(' ');
+        let sequence = expand_key_sequence(
+            &[KeyStroke::Leader, KeyStroke::Key(KeyEvent::char('s'))],
+            leader,
+        );
+        let mut keymap = Keymap::new();
+        keymap.bind(sequence, 7);
 
-    #[test]
-    fn unbind_removes() {
-        let mut km = Keymap::new();
-        km.bind_edit(KeyEvent::plain(KeyCode::Backspace), EditCommand::Delete(-1));
-        km.unbind(KeyEvent::plain(KeyCode::Backspace));
-        assert!(km.lookup(KeyEvent::plain(KeyCode::Backspace)).is_none());
-    }
-
-    #[test]
-    fn bind_prefix_nested() {
-        let mut sub = Keymap::new();
-        sub.bind(KeyEvent::char('s'), Command::Content(ContentCommand::Save));
-        let mut km = Keymap::new();
-        km.bind_prefix(KeyEvent::char('x'), sub);
-        match km.lookup(KeyEvent::char('x')).unwrap() {
-            KeyBinding::Prefix(sub_km) => {
-                assert!(matches!(
-                    sub_km.lookup(KeyEvent::char('s')),
-                    Some(KeyBinding::Command(Command::Content(ContentCommand::Save)))
-                ));
-            }
-            _ => panic!("expected Prefix"),
-        }
+        assert_eq!(
+            keymap
+                .node(&[leader, KeyEvent::char('s')])
+                .and_then(KeyNode::action),
+            Some(&7)
+        );
     }
 
     #[test]
     fn keymap_clone_eq() {
-        let mut km = Keymap::new();
-        km.bind_edit(KeyEvent::arrow(ArrowKey::Left), EditCommand::MoveLeftBy(1));
-        let cloned = km.clone();
-        assert_eq!(km, cloned);
+        let mut keymap = Keymap::new();
+        keymap.bind_edit(
+            [KeyEvent::arrow(ArrowKey::Left)],
+            EditCommand::MoveLeftBy(1),
+        );
+        assert_eq!(keymap, keymap.clone());
     }
 }

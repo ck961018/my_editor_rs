@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use std::io;
 use std::path::PathBuf;
 
-use crate::core::keymap::Keymap;
+use crate::core::command::CharSearchDirection;
 use crate::protocol::selection::{Selection, Selections, TextOffset, TextPoint};
 use crate::protocol::status::StatusMessage;
 
@@ -13,8 +13,6 @@ pub struct Buffer {
     revision: u64,
     modified: bool,
     status: StatusMessage,
-    /// 静态 Content 捕获链使用的普通 keymap；模式化按键由 View 的 ModeInstance 处理。
-    keymap: Keymap,
 }
 
 impl Buffer {
@@ -25,17 +23,7 @@ impl Buffer {
             revision: 0,
             modified: false,
             status: StatusMessage::None,
-            keymap: Keymap::new(),
         }
-    }
-
-    pub(crate) fn keymap(&self) -> &Keymap {
-        &self.keymap
-    }
-
-    #[allow(dead_code)] // Static Content API reserves keymap mutation for future bindings.
-    pub(crate) fn keymap_mut(&mut self) -> &mut Keymap {
-        &mut self.keymap
     }
 
     pub fn load_from_file(&mut self, path: &str) -> io::Result<()> {
@@ -193,7 +181,7 @@ impl Buffer {
     }
 
     pub(crate) fn move_cursor_right(&self, cur: &mut TextOffset, n: usize) {
-        cur.char_index = (cur.char_index + n).min(self.rope.len_chars());
+        cur.char_index = cur.char_index.saturating_add(n).min(self.rope.len_chars());
         self.clamp_offset(cur);
     }
 
@@ -209,7 +197,7 @@ impl Buffer {
     pub(crate) fn move_cursor_down(&self, cur: &mut TextOffset, n: usize) {
         let point = self.text_point(*cur);
         let max_row = self.rope.len_lines().saturating_sub(1);
-        let target_row = (point.row + n).min(max_row);
+        let target_row = point.row.saturating_add(n).min(max_row);
         let line_len = line_content_len(&self.rope, target_row);
         let new_col = point.col.min(line_len);
         cur.char_index = self.rope.line_to_char(target_row) + new_col;
@@ -249,6 +237,44 @@ impl Buffer {
 
     pub fn move_head_down(&self, sel: &mut Selection, n: usize) {
         self.move_cursor_down(&mut sel.head, n);
+    }
+
+    pub fn move_head_to_line(&self, sel: &mut Selection, line_index: usize) {
+        let row = line_index.min(self.rope.len_lines().saturating_sub(1));
+        sel.head.char_index = self.rope.line_to_char(row);
+        self.clamp_offset(&mut sel.head);
+    }
+
+    pub fn move_head_to_char(
+        &self,
+        sel: &mut Selection,
+        target: char,
+        direction: CharSearchDirection,
+        occurrence: usize,
+    ) -> bool {
+        let occurrence = occurrence.max(1);
+        let head = sel.head.char_index.min(self.rope.len_chars());
+        let row = self.rope.char_to_line(head);
+        let line_start = self.rope.line_to_char(row);
+        let line_end = line_start + line_content_len(&self.rope, row);
+        let found = match direction {
+            CharSearchDirection::Forward => {
+                let start = head.saturating_add(1).min(line_end);
+                (start..line_end)
+                    .filter(|index| self.rope.char(*index) == target)
+                    .nth(occurrence - 1)
+            }
+            CharSearchDirection::Backward => (line_start..head)
+                .rev()
+                .filter(|index| self.rope.char(*index) == target)
+                .nth(occurrence - 1),
+        };
+        let Some(found) = found else {
+            return false;
+        };
+        sel.head.char_index = found;
+        self.clamp_offset(&mut sel.head);
+        true
     }
 
     pub fn move_head_word_forward(&self, sel: &mut Selection) {
@@ -388,7 +414,7 @@ impl Buffer {
                         let start = ci.saturating_sub((-n) as usize);
                         (start, ci)
                     } else {
-                        let end = (ci + n as usize).min(len);
+                        let end = ci.saturating_add(n as usize).min(len);
                         (ci, end)
                     }
                 }
@@ -468,6 +494,57 @@ impl Buffer {
                     selection.head.char_index = start - deleted_before;
                 }
             }
+            self.clamp_offset(&mut selection.head);
+            Self::collapse_to_head(selection);
+        }
+    }
+
+    pub fn delete_lines_at_selections(&mut self, selections: &mut Selections, lines: usize) {
+        let lines = lines.max(1);
+        let max_row = self.rope.len_lines().saturating_sub(1);
+        let rows: Vec<usize> = selections
+            .all()
+            .map(|selection| {
+                self.rope
+                    .char_to_line(selection.head.char_index.min(self.rope.len_chars()))
+            })
+            .collect();
+        let mut ranges: Vec<(usize, usize)> = rows
+            .iter()
+            .map(|row| {
+                let end_row = row.saturating_add(lines.saturating_sub(1)).min(max_row);
+                let mut start = self.rope.line_to_char(*row);
+                let end = if end_row < max_row {
+                    self.rope.line_to_char(end_row + 1)
+                } else {
+                    if *row > 0 {
+                        start = start.saturating_sub(1);
+                    }
+                    self.rope.len_chars()
+                };
+                (start, end)
+            })
+            .collect();
+        ranges.sort_unstable_by_key(|range| range.0);
+        let mut normalized: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+        for (start, end) in ranges {
+            if let Some((_, previous_end)) = normalized.last_mut()
+                && start <= *previous_end
+            {
+                *previous_end = (*previous_end).max(end);
+            } else {
+                normalized.push((start, end));
+            }
+        }
+        for &(start, end) in normalized.iter().rev() {
+            if start < end {
+                self.rope.remove(start..end);
+            }
+        }
+        self.mark_modified();
+        let new_max_row = self.rope.len_lines().saturating_sub(1);
+        for (selection, row) in selections.all_mut().zip(rows) {
+            selection.head.char_index = self.rope.line_to_char(row.min(new_max_row));
             self.clamp_offset(&mut selection.head);
             Self::collapse_to_head(selection);
         }

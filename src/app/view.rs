@@ -1,9 +1,14 @@
 //! 视图实例的交互会话：绑定一个 content，并持有独立 mode 与 content view state。
 //! 按 ViewId 索引（App.views），同一 Content 可被多个独立 View 绑定。
 
+use crate::core::command::{Command, ContentCommand};
 use crate::core::content_view_state::ContentViewState;
-use crate::core::mode::ModeInstance;
+use crate::core::input::{InputContext, InputDecision, InputStatus};
+use crate::core::keymap::Keymap;
+use crate::core::mode::{ModeActionName, ModeInstance, ModeName, ModeRegistry};
+use crate::protocol::content_query::CursorStyle;
 use crate::protocol::ids::ContentId;
+use crate::protocol::key_event::KeyEvent;
 use crate::protocol::revision::Revision;
 use crate::protocol::selection::Selections;
 
@@ -13,6 +18,11 @@ pub struct View {
     state: ContentViewState,
     mode: Option<ModeInstance>,
     revision: Revision,
+}
+
+pub(crate) enum ModeCommandResult {
+    Unknown,
+    Handled(Option<ContentCommand>),
 }
 
 impl View {
@@ -33,11 +43,57 @@ impl View {
     pub fn state_mut(&mut self) -> &mut ContentViewState {
         &mut self.state
     }
-    pub fn mode(&self) -> Option<&ModeInstance> {
-        self.mode.as_ref()
+    pub fn keymap(&self) -> Option<&Keymap> {
+        self.mode.as_ref().map(ModeInstance::keymap)
     }
-    pub fn mode_mut(&mut self) -> Option<&mut ModeInstance> {
-        self.mode.as_mut()
+
+    pub fn input_status(&self) -> InputStatus {
+        self.mode
+            .as_ref()
+            .map_or(InputStatus::Ready, InputContext::status)
+    }
+
+    pub fn capture(&mut self, key: KeyEvent) -> InputDecision<Command> {
+        self.mode
+            .as_mut()
+            .map_or(InputDecision::Pass, |mode| mode.capture(key))
+    }
+
+    pub fn fallback(&self, key: KeyEvent) -> Option<Command> {
+        self.mode.as_ref().and_then(|mode| mode.fallback(key))
+    }
+
+    pub fn on_input_timeout(&mut self) {
+        if let Some(mode) = self.mode.as_mut() {
+            mode.on_timeout();
+        }
+    }
+
+    pub fn cancel_input(&mut self) {
+        if let Some(mode) = self.mode.as_mut() {
+            mode.cancel();
+        }
+    }
+
+    pub fn cursor_style(&self) -> CursorStyle {
+        self.mode
+            .as_ref()
+            .map_or(CursorStyle::Default, ModeInstance::cursor_style)
+    }
+
+    pub(crate) fn execute_mode_command(
+        &mut self,
+        registry: &ModeRegistry,
+        mode: &ModeName,
+        action: &ModeActionName,
+    ) -> ModeCommandResult {
+        let Some((mode, action)) = registry.resolve_command(mode, action) else {
+            return ModeCommandResult::Unknown;
+        };
+        let Some(instance) = self.mode.as_mut() else {
+            return ModeCommandResult::Unknown;
+        };
+        ModeCommandResult::Handled(instance.execute(mode, action))
     }
     pub fn revision(&self) -> Revision {
         self.revision
@@ -56,7 +112,7 @@ mod tests {
     fn status_bar_view_has_no_mode_or_selections() {
         let v = View::new(ContentId(0), ContentViewState::StatusBar, None);
         assert_eq!(v.content(), ContentId(0));
-        assert!(v.mode().is_none());
+        assert!(v.keymap().is_none());
         assert!(v.selections().is_none());
     }
 

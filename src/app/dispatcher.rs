@@ -1,23 +1,26 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use crate::app::view::View;
 use crate::core::command::{AppCommand, Command, ContentCommand};
-use crate::core::content_store::ContentStore;
-use crate::core::keymap::{KeyBinding, Keymap};
-use crate::core::mode::ModeInstance;
+use crate::core::input::{
+    AwaitingSource, InputCoordinator, InputDecision, InputStatus, KeySequenceConfig, KeymapLayer,
+    PendingSequence, continuations, longest_complete, match_sequence,
+};
+use crate::core::keymap::Keymap;
 use crate::protocol::ids::{ContentId, SpaceId, ViewId};
 use crate::protocol::key_event::KeyEvent;
 use crate::protocol::scene::Scene;
 use crate::protocol::space::SpaceKind;
 
+const DEFAULT_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(1_000);
+
 pub struct Dispatcher {
     global_keymap: Keymap,
-    pending: Option<PendingKeymap>,
+    coordinator: InputCoordinator<CommandSource>,
+    sequence_config: KeySequenceConfig,
 }
 
-/// dispatcher 解析出的目标已决命令。命令本身是相对的（Command 不带 ContentId/SpaceId），
-/// dispatcher 按捕获来源补全运行期目标：App 无目标、Content 带单 content、
-/// ViewContent 带 view+content（文本命令需要 View 的 selections）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DispatchCommand {
     App(AppCommand),
@@ -33,213 +36,416 @@ pub(crate) enum DispatchCommand {
     Noop,
 }
 
-/// 命令来源：捕获链命中时记录来自哪个 view/content 的 keymap。
-/// 前缀状态下挂载在 PendingKeymap，使前缀完成后仍能回溯到原 keymap 的来源。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct CommandSource {
-    view: Option<ViewId>,
-    cid: Option<ContentId>,
+pub(crate) enum DispatchInput {
+    Normal(KeyEvent),
+    Unmapped(KeyEvent),
 }
 
-#[derive(Clone)]
-struct PendingKeymap {
-    keymap: Keymap,
-    source: CommandSource,
+impl DispatchInput {
+    fn key(self) -> KeyEvent {
+        match self {
+            Self::Normal(key) | Self::Unmapped(key) => key,
+        }
+    }
 }
 
-struct CaptureEntry<'a> {
-    keymap: &'a Keymap,
-    source: CommandSource,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DispatchOutcome {
+    Waiting,
+    Consumed,
+    Replay(Vec<DispatchInput>),
+    Emit {
+        command: DispatchCommand,
+        replay: Vec<DispatchInput>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandSource {
+    View(ViewId),
+    Global,
 }
 
 impl Dispatcher {
     pub fn new(global_keymap: Keymap) -> Self {
+        Self::with_config(
+            global_keymap,
+            KeySequenceConfig::new(DEFAULT_SEQUENCE_TIMEOUT),
+        )
+    }
+
+    pub fn with_config(global_keymap: Keymap, sequence_config: KeySequenceConfig) -> Self {
         Self {
             global_keymap,
-            pending: None,
+            coordinator: InputCoordinator::default(),
+            sequence_config,
         }
     }
 
-    #[allow(dead_code)] // 测试辅助：App 不读 is_pending，dispatcher 单测用
+    #[cfg(test)]
     pub fn is_pending(&self) -> bool {
-        self.pending.is_some()
+        self.coordinator.pending_sequence().is_some()
     }
 
     pub fn dispatch(
         &mut self,
-        key: KeyEvent,
+        input: DispatchInput,
+        now: Instant,
         focused: SpaceId,
         scene: &Scene,
-        contents: &ContentStore,
-        views: &HashMap<ViewId, View>,
-        mode: &ModeInstance,
-    ) -> Option<DispatchCommand> {
-        if let Some(pending) = self.pending.take() {
-            return match lookup_in(&pending.keymap, &key) {
-                LookupResult::Hit(command) => {
-                    resolve_command(command, pending.source, focused, scene, contents, views)
-                }
-                LookupResult::Prefix(sub) => {
-                    self.pending = Some(PendingKeymap {
-                        keymap: sub.clone(),
-                        source: pending.source,
-                    });
-                    None
-                }
-                LookupResult::Miss => None,
-            };
-        }
+        views: &mut HashMap<ViewId, View>,
+    ) -> DispatchOutcome {
+        let focused_view = match focused_view_id(scene, focused) {
+            Some(view) => view,
+            None => return DispatchOutcome::Consumed,
+        };
+        let key = input.key();
 
-        for entry in self.capture_chain(focused, scene, contents, views) {
-            match lookup_in(entry.keymap, &key) {
-                LookupResult::Hit(command) => {
-                    return resolve_command(command, entry.source, focused, scene, contents, views);
+        for source in self.coordinator.sources_top_down() {
+            match source {
+                AwaitingSource::Context(source) => {
+                    let (decision, status) = capture_context(views, source, key);
+                    let handled = !matches!(decision, InputDecision::Pass);
+                    self.coordinator.sync_context(source, status, handled, now);
+                    match decision {
+                        InputDecision::Pass => continue,
+                        InputDecision::Consumed => return DispatchOutcome::Consumed,
+                        InputDecision::Emit(action) => {
+                            let Some(command) =
+                                resolve_command(action, source, focused_view, views)
+                            else {
+                                return DispatchOutcome::Consumed;
+                            };
+                            return DispatchOutcome::Emit {
+                                command,
+                                replay: Vec::new(),
+                            };
+                        }
+                    }
                 }
-                LookupResult::Prefix(sub) => {
-                    self.pending = Some(PendingKeymap {
-                        keymap: sub.clone(),
-                        source: entry.source,
-                    });
-                    return None;
+                AwaitingSource::KeySequence if matches!(input, DispatchInput::Normal(_)) => {
+                    return self.continue_sequence(key, now, focused_view, views);
                 }
-                LookupResult::Miss => continue,
+                AwaitingSource::KeySequence => continue,
             }
         }
 
-        // 兜底：focused view 使用自己的 mode instance 解析 mode keymap 与 typing。
-        let view = focused_view_id(scene, focused)?;
-        let cid = views.get(&view)?.content();
-        let command = mode.resolve_key(key)?;
-        resolve_command(
-            command,
-            CommandSource {
-                view: Some(view),
-                cid: Some(cid),
-            },
-            focused,
-            scene,
-            contents,
-            views,
-        )
+        match input {
+            DispatchInput::Normal(key) => self.start_sequence(key, now, focused_view, views),
+            DispatchInput::Unmapped(key) => fallback(key, focused_view, views),
+        }
     }
 
-    fn capture_chain<'a>(
-        &'a self,
+    pub fn sync_view(&mut self, view: ViewId, status: InputStatus, handled: bool, now: Instant) {
+        self.coordinator
+            .sync_context(CommandSource::View(view), status, handled, now);
+    }
+
+    pub fn invalidate_view(&mut self, view: ViewId, views: &mut HashMap<ViewId, View>) {
+        if let Some(view_state) = views.get_mut(&view) {
+            view_state.cancel_input();
+        }
+        self.coordinator.remove_context(&CommandSource::View(view));
+        self.coordinator.discard_sequence();
+    }
+
+    pub fn next_deadline(&self, views: &HashMap<ViewId, View>) -> Option<Instant> {
+        self.coordinator
+            .next_deadline(|source| context_status(views, *source))
+    }
+
+    pub fn dispatch_timeout(
+        &mut self,
+        now: Instant,
         focused: SpaceId,
-        scene: &'a Scene,
-        contents: &'a ContentStore,
-        views: &'a HashMap<ViewId, View>,
-    ) -> Vec<CaptureEntry<'a>> {
-        let mut chain = Vec::new();
-        let mut cur = Some(focused);
-        while let Some(sid) = cur {
-            let node = scene.node(sid);
-            if let SpaceKind::Content { view, .. } = &node.space.kind {
-                let content = views.get(view).expect("scene view exists").content();
-                if let Some(keymap) = contents.keymap(content) {
-                    chain.push(CaptureEntry {
-                        keymap,
-                        source: CommandSource {
-                            view: Some(*view),
-                            cid: Some(content),
-                        },
-                    });
+        scene: &Scene,
+        views: &mut HashMap<ViewId, View>,
+    ) -> DispatchOutcome {
+        let focused_view = match focused_view_id(scene, focused) {
+            Some(view) => view,
+            None => return DispatchOutcome::Consumed,
+        };
+        let Some(due) = self
+            .coordinator
+            .next_due(now, |source| context_status(views, *source))
+        else {
+            return DispatchOutcome::Waiting;
+        };
+        match due {
+            AwaitingSource::Context(source) => {
+                if let CommandSource::View(view) = source
+                    && let Some(view) = views.get_mut(&view)
+                {
+                    view.on_input_timeout();
+                    let status = view.input_status();
+                    self.coordinator.sync_context(source, status, true, now);
+                } else {
+                    self.coordinator.remove_context(&source);
+                }
+                DispatchOutcome::Consumed
+            }
+            AwaitingSource::KeySequence => {
+                let pending = self
+                    .coordinator
+                    .take_sequence()
+                    .expect("due sequence exists");
+                self.resolve_aborted_sequence(pending.keys, None, focused_view, views)
+            }
+        }
+    }
+
+    #[allow(dead_code)] // Query seam for a future which-key frontend.
+    pub fn pending_continuations(
+        &self,
+        focused: SpaceId,
+        scene: &Scene,
+        views: &HashMap<ViewId, View>,
+    ) -> HashSet<KeyEvent> {
+        let Some(view) = focused_view_id(scene, focused) else {
+            return HashSet::new();
+        };
+        let Some(pending) = self.coordinator.pending_sequence() else {
+            return HashSet::new();
+        };
+        self.with_layers(view, views, |layers| continuations(layers, &pending.keys))
+    }
+
+    fn start_sequence(
+        &mut self,
+        key: KeyEvent,
+        now: Instant,
+        focused_view: ViewId,
+        views: &HashMap<ViewId, View>,
+    ) -> DispatchOutcome {
+        let matched =
+            self.with_layers(focused_view, views, |layers| match_sequence(layers, &[key]));
+        let Some(matched) = matched else {
+            return fallback(key, focused_view, views);
+        };
+        if matched.has_children {
+            let keys = vec![key];
+            self.coordinator.push_sequence(PendingSequence {
+                deadline: self.sequence_config.deadline(&keys, now),
+                keys,
+            });
+            return DispatchOutcome::Waiting;
+        }
+        let Some(resolved) = matched.exact else {
+            return fallback(key, focused_view, views);
+        };
+        let Some(command) = resolve_command(resolved.action, resolved.source, focused_view, views)
+        else {
+            return DispatchOutcome::Consumed;
+        };
+        DispatchOutcome::Emit {
+            command,
+            replay: Vec::new(),
+        }
+    }
+
+    fn continue_sequence(
+        &mut self,
+        key: KeyEvent,
+        now: Instant,
+        focused_view: ViewId,
+        views: &HashMap<ViewId, View>,
+    ) -> DispatchOutcome {
+        let mut keys = self
+            .coordinator
+            .pending_sequence()
+            .expect("sequence source has pending data")
+            .keys
+            .clone();
+        keys.push(key);
+        let matched = self.with_layers(focused_view, views, |layers| match_sequence(layers, &keys));
+        match matched {
+            Some(matched) if matched.has_children => {
+                let deadline = self.sequence_config.deadline(&keys, now);
+                let pending = self
+                    .coordinator
+                    .pending_sequence_mut()
+                    .expect("continuing sequence exists");
+                pending.keys = keys;
+                pending.deadline = deadline;
+                DispatchOutcome::Waiting
+            }
+            Some(matched) => {
+                let _ = self.coordinator.take_sequence();
+                let Some(resolved) = matched.exact else {
+                    return DispatchOutcome::Consumed;
+                };
+                let Some(command) =
+                    resolve_command(resolved.action, resolved.source, focused_view, views)
+                else {
+                    return DispatchOutcome::Consumed;
+                };
+                DispatchOutcome::Emit {
+                    command,
+                    replay: Vec::new(),
                 }
             }
-            cur = node.parent;
+            None => {
+                let pending = self
+                    .coordinator
+                    .take_sequence()
+                    .expect("mismatched sequence exists");
+                self.resolve_aborted_sequence(
+                    pending.keys,
+                    Some(DispatchInput::Normal(key)),
+                    focused_view,
+                    views,
+                )
+            }
         }
-        chain.push(CaptureEntry {
-            keymap: &self.global_keymap,
-            source: CommandSource {
-                view: None,
-                cid: None,
-            },
+    }
+
+    fn resolve_aborted_sequence(
+        &self,
+        keys: Vec<KeyEvent>,
+        trailing: Option<DispatchInput>,
+        focused_view: ViewId,
+        views: &HashMap<ViewId, View>,
+    ) -> DispatchOutcome {
+        let complete = self.with_layers(focused_view, views, |layers| {
+            longest_complete(layers, &keys)
         });
-        chain
+        match complete {
+            Some(complete) => {
+                let mut replay: Vec<_> = keys[complete.consumed..]
+                    .iter()
+                    .copied()
+                    .map(DispatchInput::Normal)
+                    .collect();
+                replay.extend(trailing);
+                let Some(command) = resolve_command(
+                    complete.resolved.action,
+                    complete.resolved.source,
+                    focused_view,
+                    views,
+                ) else {
+                    return DispatchOutcome::Replay(replay);
+                };
+                DispatchOutcome::Emit { command, replay }
+            }
+            None => {
+                let mut replay: Vec<_> = keys.into_iter().map(DispatchInput::Unmapped).collect();
+                replay.extend(trailing);
+                DispatchOutcome::Replay(replay)
+            }
+        }
+    }
+
+    fn with_layers<R>(
+        &self,
+        focused_view: ViewId,
+        views: &HashMap<ViewId, View>,
+        query: impl FnOnce(&[KeymapLayer<'_, Command, CommandSource>]) -> R,
+    ) -> R {
+        let mut layers = Vec::with_capacity(2);
+        if let Some(keymap) = views.get(&focused_view).and_then(View::keymap) {
+            layers.push(KeymapLayer {
+                source: CommandSource::View(focused_view),
+                keymap,
+            });
+        }
+        layers.push(KeymapLayer {
+            source: CommandSource::Global,
+            keymap: &self.global_keymap,
+        });
+        query(&layers)
     }
 }
 
-enum LookupResult<'a> {
-    Hit(Command),
-    Prefix(&'a Keymap),
-    Miss,
-}
-
-fn lookup_in<'a>(keymap: &'a Keymap, key: &KeyEvent) -> LookupResult<'a> {
-    match keymap.lookup(*key) {
-        Some(KeyBinding::Command(command)) => LookupResult::Hit(command.clone()),
-        Some(KeyBinding::Prefix(sub)) => LookupResult::Prefix(sub),
-        None => LookupResult::Miss,
+fn capture_context(
+    views: &mut HashMap<ViewId, View>,
+    source: CommandSource,
+    key: KeyEvent,
+) -> (InputDecision<Command>, InputStatus) {
+    match source {
+        CommandSource::View(view) => {
+            let Some(view) = views.get_mut(&view) else {
+                return (InputDecision::Pass, InputStatus::Ready);
+            };
+            let decision = view.capture(key);
+            (decision, view.input_status())
+        }
+        CommandSource::Global => (InputDecision::Pass, InputStatus::Ready),
     }
 }
 
-/// 按 Command 变体补全运行期目标：
-/// - App/Noop → 无目标。
-/// - Content(Edit|Mode) → ViewContent{view, content}（需要 View session）。
-/// - Content(Save) → Content{content}。
+fn context_status(views: &HashMap<ViewId, View>, source: CommandSource) -> InputStatus {
+    match source {
+        CommandSource::View(view) => views
+            .get(&view)
+            .map_or(InputStatus::Ready, View::input_status),
+        CommandSource::Global => InputStatus::Ready,
+    }
+}
+
+fn fallback(key: KeyEvent, focused_view: ViewId, views: &HashMap<ViewId, View>) -> DispatchOutcome {
+    let Some(action) = views.get(&focused_view).and_then(|view| view.fallback(key)) else {
+        return DispatchOutcome::Consumed;
+    };
+    let Some(command) = resolve_command(
+        action,
+        CommandSource::View(focused_view),
+        focused_view,
+        views,
+    ) else {
+        return DispatchOutcome::Consumed;
+    };
+    DispatchOutcome::Emit {
+        command,
+        replay: Vec::new(),
+    }
+}
+
 fn resolve_command(
     command: Command,
     source: CommandSource,
-    focused: SpaceId,
-    scene: &Scene,
-    contents: &ContentStore,
+    focused_view: ViewId,
     views: &HashMap<ViewId, View>,
 ) -> Option<DispatchCommand> {
     match command {
         Command::App(command) => Some(DispatchCommand::App(command)),
         Command::Noop => Some(DispatchCommand::Noop),
         Command::Content(command @ (ContentCommand::Edit(_) | ContentCommand::Mode { .. })) => {
-            let (view, content) = view_content_target(source, focused, scene, contents, views)?;
+            let view = match source {
+                CommandSource::View(view) => view,
+                CommandSource::Global => focused_view,
+            };
             Some(DispatchCommand::ViewContent {
                 command,
                 view,
-                content,
+                content: views.get(&view)?.content(),
             })
         }
         Command::Content(command @ ContentCommand::Save) => {
-            let content = source.cid.or_else(|| {
-                let view = focused_view_id(scene, focused)?;
-                Some(views.get(&view)?.content())
-            })?;
-            contents.keymap(content)?;
-            Some(DispatchCommand::Content { command, content })
+            let view = match source {
+                CommandSource::View(view) => view,
+                CommandSource::Global => focused_view,
+            };
+            Some(DispatchCommand::Content {
+                command,
+                content: views.get(&view)?.content(),
+            })
         }
     }
 }
 
-/// 文本命令目标：来源有完整 view+content 用之，否则回退到 focused View 及其 Content。
-fn view_content_target(
-    source: CommandSource,
-    focused: SpaceId,
-    scene: &Scene,
-    contents: &ContentStore,
-    views: &HashMap<ViewId, View>,
-) -> Option<(ViewId, ContentId)> {
-    let (view, content) = match (source.view, source.cid) {
-        (Some(view), Some(content)) => (view, content),
-        _ => {
-            let view = focused_view_id(scene, focused)?;
-            let content = views.get(&view)?.content();
-            (view, content)
-        }
-    };
-    contents.keymap(content)?;
-    Some((view, content))
-}
-
 fn focused_view_id(scene: &Scene, focused: SpaceId) -> Option<ViewId> {
-    let node = scene.node(focused);
-    match &node.space.kind {
+    match &scene.node(focused).space.kind {
         SpaceKind::Content { view, .. } => Some(*view),
-        _ => None,
+        SpaceKind::Container { .. } => None,
     }
 }
 
 pub fn default_global_keymap() -> Keymap {
-    let mut km = Keymap::new();
-    km.bind(KeyEvent::ctrl('q'), Command::App(AppCommand::Quit));
-    km.bind(KeyEvent::ctrl('s'), Command::Content(ContentCommand::Save));
-    km
+    let mut keymap = Keymap::new();
+    keymap.bind(KeyEvent::ctrl('q'), Command::App(AppCommand::Quit));
+    keymap.bind(KeyEvent::ctrl('s'), Command::Content(ContentCommand::Save));
+    keymap
 }
 
 #[cfg(test)]
@@ -247,692 +453,243 @@ mod tests {
     use super::*;
     use crate::app::scene_model::{SceneBuilder, build_editor_scene};
     use crate::core::buffer::Buffer;
-    use crate::core::command::{AppCommand, ContentCommand, EditCommand};
-    use crate::core::content::Content;
+    use crate::core::content::{Content, ContentInput};
     use crate::core::content_store::ContentStore;
-    use crate::core::mode::{ModeActionName, ModeInstance, ModeName, ModeRegistry};
+    use crate::core::mode::{ModeName, ModeRegistry};
     use crate::core::status_bar::StatusBar;
-    use crate::protocol::ids::{ContentId, ViewId};
-    use crate::protocol::key_event::{ArrowKey, KeyCode};
+    use crate::protocol::ids::ContentId;
+
     fn fixture() -> (
         Dispatcher,
-        crate::protocol::scene::Scene,
+        Scene,
         SpaceId,
-        ContentStore,
         HashMap<ViewId, View>,
-        ModeInstance,
-    ) {
-        fixture_with_buffer(Buffer::new())
-    }
-
-    fn fixture_with_buffer(
-        buffer: Buffer,
-    ) -> (
-        Dispatcher,
-        crate::protocol::scene::Scene,
-        SpaceId,
+        ModeRegistry,
         ContentStore,
-        HashMap<ViewId, View>,
-        ModeInstance,
     ) {
         let editor = ContentId(0);
         let status = ContentId(1);
-        let mut builder = SceneBuilder::new();
-        let (scene, ed_space) =
-            build_editor_scene(&mut builder, 40, 5, ViewId(0), ViewId(1)).unwrap();
         let mut contents = ContentStore::default();
-        contents.insert(editor, Content::Buffer(buffer));
+        contents.insert(editor, Content::Buffer(Buffer::new()));
         contents.insert(status, Content::StatusBar(StatusBar::new(editor)));
+        let modes = ModeRegistry::builtin();
+        let mut builder = SceneBuilder::new();
+        let (scene, focused) =
+            build_editor_scene(&mut builder, 40, 5, ViewId(0), ViewId(1)).unwrap();
         let views = HashMap::from([
             (
                 ViewId(0),
-                View::new(editor, contents.create_view_state(editor).unwrap(), None),
+                View::new(
+                    editor,
+                    contents.create_view_state(editor).unwrap(),
+                    modes.instantiate(&ModeName::new("vim")),
+                ),
             ),
             (
                 ViewId(1),
                 View::new(status, contents.create_view_state(status).unwrap(), None),
             ),
         ]);
-        let runtime = ModeRegistry::builtin()
-            .instantiate(&ModeName::new("vim"))
-            .expect("vim mode exists");
-        let d = Dispatcher::new(default_global_keymap());
-        (d, scene, ed_space, contents, views, runtime)
-    }
-
-    fn enter_insert(runtime: &mut ModeInstance) {
-        runtime.execute_action_named(&ModeActionName::new("enter-insert"));
+        (
+            Dispatcher::new(default_global_keymap()),
+            scene,
+            focused,
+            views,
+            modes,
+            contents,
+        )
     }
 
     #[test]
     fn global_quit_resolves_to_app_command() {
-        let (mut dispatcher, scene, focused, contents, views, runtime) = fixture();
-
-        let command = dispatcher
-            .dispatch(
-                KeyEvent::ctrl('q'),
-                focused,
-                &scene,
-                &contents,
-                &views,
-                &runtime,
-            )
-            .unwrap();
-
-        assert_eq!(command, DispatchCommand::App(AppCommand::Quit));
-    }
-
-    #[test]
-    fn global_quit_when_content_no_bind() {
-        // 同上：vim Normal 无 Ctrl+Q，落入全局 → App(Quit)。
-        let (mut dispatcher, scene, focused, contents, views, runtime) = fixture();
-        let command = dispatcher
-            .dispatch(
-                KeyEvent::ctrl('q'),
-                focused,
-                &scene,
-                &contents,
-                &views,
-                &runtime,
-            )
-            .unwrap();
-        assert_eq!(command, DispatchCommand::App(AppCommand::Quit));
-    }
-
-    #[test]
-    fn global_save_resolves_to_focused_content() {
-        let (mut dispatcher, scene, focused, contents, views, runtime) = fixture();
-
-        let command = dispatcher
-            .dispatch(
-                KeyEvent::ctrl('s'),
-                focused,
-                &scene,
-                &contents,
-                &views,
-                &runtime,
-            )
-            .unwrap();
-
+        let (mut dispatcher, scene, focused, mut views, _, _) = fixture();
         assert_eq!(
-            command,
-            DispatchCommand::Content {
-                command: ContentCommand::Save,
-                content: ContentId(0),
-            }
-        );
-    }
-
-    #[test]
-    fn global_save_when_content_no_bind() {
-        // 同上：vim Normal 无 Ctrl+S，落入全局 Save。
-        let (mut dispatcher, scene, focused, contents, views, runtime) = fixture();
-        let command = dispatcher
-            .dispatch(
-                KeyEvent::ctrl('s'),
+            dispatcher.dispatch(
+                DispatchInput::Normal(KeyEvent::ctrl('q')),
+                Instant::now(),
                 focused,
                 &scene,
-                &contents,
-                &views,
-                &runtime,
-            )
-            .unwrap();
-        assert_eq!(
-            command,
-            DispatchCommand::Content {
-                command: ContentCommand::Save,
-                content: ContentId(0),
-            }
-        );
-    }
-
-    #[test]
-    fn vim_a_resolves_to_view_content_mode_command_and_z_is_unbound() {
-        let (mut dispatcher, scene, focused, contents, views, runtime) = fixture();
-
-        assert_eq!(
-            dispatcher
-                .dispatch(
-                    KeyEvent::char('a'),
-                    focused,
-                    &scene,
-                    &contents,
-                    &views,
-                    &runtime
-                )
-                .unwrap(),
-            DispatchCommand::ViewContent {
-                command: ContentCommand::Mode {
-                    mode: ModeName::new("vim"),
-                    action: ModeActionName::new("append"),
-                },
-                view: ViewId(0),
-                content: ContentId(0),
-            }
-        );
-        assert!(
-            dispatcher
-                .dispatch(
-                    KeyEvent::char('z'),
-                    focused,
-                    &scene,
-                    &contents,
-                    &views,
-                    &runtime
-                )
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn vim_i_resolves_to_view_content_mode_command() {
-        let (mut dispatcher, scene, focused, contents, views, runtime) = fixture();
-
-        let command = dispatcher
-            .dispatch(
-                KeyEvent::char('i'),
-                focused,
-                &scene,
-                &contents,
-                &views,
-                &runtime,
-            )
-            .unwrap();
-
-        assert_eq!(
-            command,
-            DispatchCommand::ViewContent {
-                command: ContentCommand::Mode {
-                    mode: ModeName::new("vim"),
-                    action: ModeActionName::new("enter-insert"),
-                },
-                view: ViewId(0),
-                content: ContentId(0),
-            }
-        );
-    }
-
-    #[test]
-    fn vim_h_resolves_to_view_content_edit_command() {
-        let (mut dispatcher, scene, focused, contents, views, runtime) = fixture();
-
-        let command = dispatcher
-            .dispatch(
-                KeyEvent::char('h'),
-                focused,
-                &scene,
-                &contents,
-                &views,
-                &runtime,
-            )
-            .unwrap();
-
-        assert_eq!(
-            command,
-            DispatchCommand::ViewContent {
-                command: ContentCommand::Edit(EditCommand::MoveLeftBy(1)),
-                view: ViewId(0),
-                content: ContentId(0),
-            }
-        );
-    }
-
-    #[test]
-    fn vim_j_resolves_to_view_content_edit_command() {
-        let (mut dispatcher, scene, focused, contents, views, runtime) = fixture();
-
-        let command = dispatcher
-            .dispatch(
-                KeyEvent::char('j'),
-                focused,
-                &scene,
-                &contents,
-                &views,
-                &runtime,
-            )
-            .unwrap();
-
-        assert_eq!(
-            command,
-            DispatchCommand::ViewContent {
-                command: ContentCommand::Edit(EditCommand::MoveDownBy(1)),
-                view: ViewId(0),
-                content: ContentId(0),
-            }
-        );
-    }
-
-    #[test]
-    fn vim_k_resolves_to_view_content_edit_command() {
-        let (mut dispatcher, scene, focused, contents, views, runtime) = fixture();
-
-        let command = dispatcher
-            .dispatch(
-                KeyEvent::char('k'),
-                focused,
-                &scene,
-                &contents,
-                &views,
-                &runtime,
-            )
-            .unwrap();
-
-        assert_eq!(
-            command,
-            DispatchCommand::ViewContent {
-                command: ContentCommand::Edit(EditCommand::MoveUpBy(1)),
-                view: ViewId(0),
-                content: ContentId(0),
-            }
-        );
-    }
-
-    #[test]
-    fn vim_l_resolves_to_view_content_edit_command() {
-        let (mut dispatcher, scene, focused, contents, views, runtime) = fixture();
-
-        let command = dispatcher
-            .dispatch(
-                KeyEvent::char('l'),
-                focused,
-                &scene,
-                &contents,
-                &views,
-                &runtime,
-            )
-            .unwrap();
-
-        assert_eq!(
-            command,
-            DispatchCommand::ViewContent {
-                command: ContentCommand::Edit(EditCommand::MoveRightBy(1)),
-                view: ViewId(0),
-                content: ContentId(0),
-            }
-        );
-    }
-
-    #[test]
-    fn vim_insert_char_after_enter_insert_resolves_to_view_content() {
-        let (mut dispatcher, scene, focused, contents, views, mut runtime) = fixture();
-        enter_insert(&mut runtime);
-
-        let command = dispatcher
-            .dispatch(
-                KeyEvent::char('a'),
-                focused,
-                &scene,
-                &contents,
-                &views,
-                &runtime,
-            )
-            .unwrap();
-
-        assert_eq!(
-            command,
-            DispatchCommand::ViewContent {
-                command: ContentCommand::Edit(EditCommand::InsertText("a".to_string())),
-                view: ViewId(0),
-                content: ContentId(0),
-            }
-        );
-    }
-
-    #[test]
-    fn buffer_keymap_enter_inserts_newline_when_insert_mode() {
-        let (mut dispatcher, scene, focused, contents, views, mut runtime) = fixture();
-        enter_insert(&mut runtime);
-
-        let command = dispatcher
-            .dispatch(
-                KeyEvent::plain(KeyCode::Enter),
-                focused,
-                &scene,
-                &contents,
-                &views,
-                &runtime,
-            )
-            .unwrap();
-
-        assert_eq!(
-            command,
-            DispatchCommand::ViewContent {
-                command: ContentCommand::Edit(EditCommand::InsertText("\n".to_string())),
-                view: ViewId(0),
-                content: ContentId(0),
-            }
-        );
-    }
-
-    #[test]
-    fn buffer_keymap_arrow_left_when_insert_mode() {
-        let (mut dispatcher, scene, focused, contents, views, mut runtime) = fixture();
-        enter_insert(&mut runtime);
-
-        let command = dispatcher
-            .dispatch(
-                KeyEvent::arrow(ArrowKey::Left),
-                focused,
-                &scene,
-                &contents,
-                &views,
-                &runtime,
-            )
-            .unwrap();
-
-        assert_eq!(
-            command,
-            DispatchCommand::ViewContent {
-                command: ContentCommand::Edit(EditCommand::MoveLeftBy(1)),
-                view: ViewId(0),
-                content: ContentId(0),
-            }
-        );
-    }
-
-    #[test]
-    fn global_edit_command_resolves_to_focused_view_content() {
-        // 全局绑 'g' → InsertText("g")；无来源，回退到 focused View 及其 Content。
-        let editor = ContentId(0);
-        let status = ContentId(1);
-        let mut builder = SceneBuilder::new();
-        let (scene, focused) =
-            build_editor_scene(&mut builder, 40, 5, ViewId(0), ViewId(1)).unwrap();
-        let mut contents = ContentStore::default();
-        contents.insert(editor, Content::Buffer(Buffer::new()));
-        contents.insert(status, Content::StatusBar(StatusBar::new(editor)));
-        let views = HashMap::from([
-            (
-                ViewId(0),
-                View::new(editor, contents.create_view_state(editor).unwrap(), None),
+                &mut views,
             ),
-            (
-                ViewId(1),
-                View::new(status, contents.create_view_state(status).unwrap(), None),
+            DispatchOutcome::Emit {
+                command: DispatchCommand::App(AppCommand::Quit),
+                replay: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn vim_gg_waits_then_resolves_to_the_view() {
+        let (mut dispatcher, scene, focused, mut views, _, _) = fixture();
+        let now = Instant::now();
+        assert_eq!(
+            dispatcher.dispatch(
+                DispatchInput::Normal(KeyEvent::char('g')),
+                now,
+                focused,
+                &scene,
+                &mut views,
             ),
-        ]);
-        let runtime = ModeRegistry::builtin()
-            .instantiate(&ModeName::new("vim"))
-            .expect("vim mode exists");
-
-        let mut global = Keymap::new();
-        global.bind(
-            KeyEvent::char('g'),
-            Command::Content(ContentCommand::Edit(EditCommand::InsertText(
-                "g".to_string(),
-            ))),
-        );
-        let mut dispatcher = Dispatcher::new(global);
-
-        let command = dispatcher
-            .dispatch(
-                KeyEvent::char('g'),
-                focused,
-                &scene,
-                &contents,
-                &views,
-                &runtime,
-            )
-            .unwrap();
-
-        assert_eq!(
-            command,
-            DispatchCommand::ViewContent {
-                command: ContentCommand::Edit(EditCommand::InsertText("g".to_string())),
-                view: ViewId(0),
-                content: editor,
-            }
-        );
-    }
-
-    #[test]
-    fn global_focus_command_resolves_to_app_command() {
-        let (mut dispatcher, scene, focused, contents, views, runtime) = fixture();
-        dispatcher
-            .global_keymap
-            .bind(KeyEvent::char('n'), Command::App(AppCommand::FocusNext));
-
-        let command = dispatcher
-            .dispatch(
-                KeyEvent::char('n'),
-                focused,
-                &scene,
-                &contents,
-                &views,
-                &runtime,
-            )
-            .unwrap();
-
-        assert_eq!(command, DispatchCommand::App(AppCommand::FocusNext));
-    }
-
-    #[test]
-    fn content_overrides_global_and_resolves_to_content_source() {
-        let mut buffer = Buffer::new();
-        // Buffer 默认 vim Normal 无 Ctrl+Q；这里改 content 自持 keymap 绑 Ctrl+Q → InsertText。
-        // 注意：Buffer::keymap() 返回空 keymap，绑到它不会影响 mode runtime（resolve_key 走 modes），
-        // capture_chain reads the static Content keymap, so this binding wins over the global map.
-        buffer.keymap_mut().bind(
-            KeyEvent::ctrl('q'),
-            Command::Content(ContentCommand::Edit(EditCommand::InsertText(
-                "q".to_string(),
-            ))),
-        );
-        let (mut dispatcher, scene, focused, contents, views, runtime) =
-            fixture_with_buffer(buffer);
-
-        let command = dispatcher
-            .dispatch(
-                KeyEvent::ctrl('q'),
-                focused,
-                &scene,
-                &contents,
-                &views,
-                &runtime,
-            )
-            .unwrap();
-
-        assert_eq!(
-            command,
-            DispatchCommand::ViewContent {
-                command: ContentCommand::Edit(EditCommand::InsertText("q".to_string())),
-                view: ViewId(0),
-                content: ContentId(0),
-            }
-        );
-    }
-
-    #[test]
-    fn unbound_key_returns_none() {
-        let (mut dispatcher, scene, focused, contents, views, runtime) = fixture();
-        // Unknown 无绑定；vim Normal typing 返回 None。
-        assert!(
-            dispatcher
-                .dispatch(
-                    KeyEvent::unknown(),
-                    focused,
-                    &scene,
-                    &contents,
-                    &views,
-                    &runtime
-                )
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn prefix_key_waits_then_completes() {
-        let mut buffer = Buffer::new();
-        let mut sub = Keymap::new();
-        sub.bind(KeyEvent::char('s'), Command::Content(ContentCommand::Save));
-        buffer.keymap_mut().bind_prefix(KeyEvent::char('x'), sub);
-        let (mut dispatcher, scene, focused, contents, views, runtime) =
-            fixture_with_buffer(buffer);
-
-        assert!(
-            dispatcher
-                .dispatch(
-                    KeyEvent::char('x'),
-                    focused,
-                    &scene,
-                    &contents,
-                    &views,
-                    &runtime
-                )
-                .is_none()
+            DispatchOutcome::Waiting
         );
         assert!(dispatcher.is_pending());
-
-        let command = dispatcher
-            .dispatch(
-                KeyEvent::char('s'),
-                focused,
-                &scene,
-                &contents,
-                &views,
-                &runtime,
-            )
-            .unwrap();
-
-        assert_eq!(
-            command,
-            DispatchCommand::Content {
-                command: ContentCommand::Save,
-                content: ContentId(0),
-            }
-        );
-        assert!(!dispatcher.is_pending());
-    }
-
-    #[test]
-    fn prefix_completion_keeps_original_content_source() {
-        let mut buffer = Buffer::new();
-        let mut sub = Keymap::new();
-        sub.bind(KeyEvent::char('s'), Command::Content(ContentCommand::Save));
-        buffer.keymap_mut().bind_prefix(KeyEvent::char('x'), sub);
-        let (mut dispatcher, scene, focused, contents, views, runtime) =
-            fixture_with_buffer(buffer);
-
-        assert!(
-            dispatcher
-                .dispatch(
-                    KeyEvent::char('x'),
-                    focused,
-                    &scene,
-                    &contents,
-                    &views,
-                    &runtime
-                )
-                .is_none()
-        );
-
-        let command = dispatcher
-            .dispatch(
-                KeyEvent::char('s'),
-                focused,
-                &scene,
-                &contents,
-                &views,
-                &runtime,
-            )
-            .unwrap();
-
-        // 前缀始于 content keymap（content source），完成时 Save 命令的目标 content 仍是该来源 content。
-        assert_eq!(
-            command,
-            DispatchCommand::Content {
-                command: ContentCommand::Save,
-                content: ContentId(0),
-            }
-        );
-    }
-
-    #[test]
-    fn prefix_interrupt_resets() {
-        let mut buffer = Buffer::new();
-        let mut sub = Keymap::new();
-        sub.bind(KeyEvent::char('s'), Command::Content(ContentCommand::Save));
-        buffer.keymap_mut().bind_prefix(KeyEvent::char('x'), sub);
-        let (mut dispatcher, scene, focused, contents, views, runtime) =
-            fixture_with_buffer(buffer);
-        dispatcher.dispatch(
-            KeyEvent::char('x'),
+        let outcome = dispatcher.dispatch(
+            DispatchInput::Normal(KeyEvent::char('g')),
+            now,
             focused,
             &scene,
-            &contents,
-            &views,
-            &runtime,
+            &mut views,
         );
-        assert!(dispatcher.is_pending());
-        // 'z' 不在 sub 表：Miss，重置 Idle。但 'z' 会落入 capture_chain + typing 兜底——
-        // vim Normal 无 'z' 绑定且 typing 返回 None，故整体 None。
-        assert!(
-            dispatcher
-                .dispatch(
-                    KeyEvent::char('z'),
-                    focused,
-                    &scene,
-                    &contents,
-                    &views,
-                    &runtime
-                )
-                .is_none()
-        );
-        assert!(!dispatcher.is_pending());
+        assert!(matches!(
+            outcome,
+            DispatchOutcome::Emit {
+                command: DispatchCommand::ViewContent {
+                    command: ContentCommand::Mode { .. },
+                    view: ViewId(0),
+                    content: ContentId(0),
+                },
+                replay,
+            } if replay.is_empty()
+        ));
     }
 
     #[test]
-    fn nested_prefix() {
-        let mut buffer = Buffer::new();
-        let mut inner = Keymap::new();
-        inner.bind(KeyEvent::char('s'), Command::Content(ContentCommand::Save));
-        let mut outer = Keymap::new();
-        outer.bind_prefix(KeyEvent::char('c'), inner);
-        buffer.keymap_mut().bind_prefix(KeyEvent::char('x'), outer);
-        let (mut dispatcher, scene, focused, contents, views, runtime) =
-            fixture_with_buffer(buffer);
-
-        assert!(
-            dispatcher
-                .dispatch(
-                    KeyEvent::char('x'),
-                    focused,
-                    &scene,
-                    &contents,
-                    &views,
-                    &runtime
-                )
-                .is_none()
+    fn mismatch_without_complete_binding_replays_prefix_as_unmapped() {
+        let (mut dispatcher, scene, focused, mut views, _, _) = fixture();
+        let now = Instant::now();
+        dispatcher.dispatch(
+            DispatchInput::Normal(KeyEvent::char('g')),
+            now,
+            focused,
+            &scene,
+            &mut views,
         );
-        assert!(
-            dispatcher
-                .dispatch(
-                    KeyEvent::char('c'),
-                    focused,
-                    &scene,
-                    &contents,
-                    &views,
-                    &runtime
-                )
-                .is_none()
-        );
-        let command = dispatcher
-            .dispatch(
-                KeyEvent::char('s'),
+        assert_eq!(
+            dispatcher.dispatch(
+                DispatchInput::Normal(KeyEvent::char('x')),
+                now,
                 focused,
                 &scene,
-                &contents,
-                &views,
-                &runtime,
-            )
-            .unwrap();
+                &mut views,
+            ),
+            DispatchOutcome::Replay(vec![
+                DispatchInput::Unmapped(KeyEvent::char('g')),
+                DispatchInput::Normal(KeyEvent::char('x')),
+            ])
+        );
+    }
 
+    #[test]
+    fn timeout_executes_the_longest_complete_binding_and_replays_suffix() {
+        let (mut dispatcher, scene, focused, mut views, _, _) = fixture();
+        let g = KeyEvent::char('g');
+        dispatcher
+            .global_keymap
+            .bind([g], Command::App(AppCommand::FocusNext));
+        let start = Instant::now();
         assert_eq!(
-            command,
-            DispatchCommand::Content {
-                command: ContentCommand::Save,
-                content: ContentId(0),
+            dispatcher.dispatch(DispatchInput::Normal(g), start, focused, &scene, &mut views,),
+            DispatchOutcome::Waiting
+        );
+        assert_eq!(
+            dispatcher.dispatch_timeout(
+                start + DEFAULT_SEQUENCE_TIMEOUT,
+                focused,
+                &scene,
+                &mut views,
+            ),
+            DispatchOutcome::Emit {
+                command: DispatchCommand::App(AppCommand::FocusNext),
+                replay: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn mismatch_executes_shorter_complete_binding_before_replaying_new_key() {
+        let (mut dispatcher, scene, focused, mut views, _, _) = fixture();
+        let g = KeyEvent::char('g');
+        dispatcher
+            .global_keymap
+            .bind([g], Command::App(AppCommand::FocusNext));
+        let now = Instant::now();
+        assert_eq!(
+            dispatcher.dispatch(DispatchInput::Normal(g), now, focused, &scene, &mut views,),
+            DispatchOutcome::Waiting
+        );
+
+        assert_eq!(
+            dispatcher.dispatch(
+                DispatchInput::Normal(KeyEvent::char('x')),
+                now,
+                focused,
+                &scene,
+                &mut views,
+            ),
+            DispatchOutcome::Emit {
+                command: DispatchCommand::App(AppCommand::FocusNext),
+                replay: vec![DispatchInput::Normal(KeyEvent::char('x'))],
+            }
+        );
+    }
+
+    #[test]
+    fn invalidating_a_view_discards_sequence_and_cancels_private_awaiting() {
+        let (mut dispatcher, scene, focused, mut views, modes, _) = fixture();
+        let now = Instant::now();
+        assert_eq!(
+            dispatcher.dispatch(
+                DispatchInput::Normal(KeyEvent::char('g')),
+                now,
+                focused,
+                &scene,
+                &mut views,
+            ),
+            DispatchOutcome::Waiting
+        );
+        let view = views.get_mut(&ViewId(0)).unwrap();
+        assert!(matches!(
+            view.execute_mode_command(
+                &modes,
+                &ModeName::new("vim"),
+                &crate::core::mode::ModeActionName::new("count-2"),
+            ),
+            crate::app::view::ModeCommandResult::Handled(None)
+        ));
+        dispatcher.sync_view(ViewId(0), view.input_status(), true, now);
+
+        dispatcher.invalidate_view(ViewId(0), &mut views);
+
+        assert!(!dispatcher.is_pending());
+        assert_eq!(
+            views.get(&ViewId(0)).unwrap().input_status(),
+            InputStatus::Ready
+        );
+    }
+
+    #[test]
+    fn emitted_edit_can_be_executed_by_the_content_store() {
+        let (mut dispatcher, scene, focused, mut views, _, mut contents) = fixture();
+        let outcome = dispatcher.dispatch(
+            DispatchInput::Normal(KeyEvent::char('x')),
+            Instant::now(),
+            focused,
+            &scene,
+            &mut views,
+        );
+        let DispatchOutcome::Emit {
+            command:
+                DispatchCommand::ViewContent {
+                    command,
+                    view,
+                    content,
+                },
+            ..
+        } = outcome
+        else {
+            panic!("x must emit an edit command");
+        };
+        let state = views.get_mut(&view).unwrap().state_mut();
+        let _ = contents.execute(content, ContentInput::View { command, state });
     }
 }
