@@ -1,4 +1,5 @@
-/// 视口滚动位置。尺寸不存（从 layout 给的 rect 拿），消除「预留状态栏行」越权。
+/// 视口滚动位置。top_row 是逻辑行，left_col 是终端显示 cell 列。
+/// 尺寸不存（从 layout 给的 rect 拿），消除「预留状态栏行」越权。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Viewport {
     pub top_row: usize,

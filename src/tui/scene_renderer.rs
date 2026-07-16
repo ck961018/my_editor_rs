@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::io;
 
+use unicode_width::UnicodeWidthChar;
+
 use crate::protocol::content_query::{
     ContentData, ContentQuery, RenderQuery, RowRange, TextPresentation, ViewData, ViewPresentation,
 };
@@ -67,14 +69,21 @@ impl SceneRenderer {
                 text.selections.primary().head(),
             )
         });
-        if let (Some(item), Some(focused_head)) = (focused_item, focused_head) {
+        let focused_display_col = focused_head.map(|head| {
+            let line = text_row(query, focused_view.content, head.row);
+            display_width_before_col(&line, head.col)
+        });
+        if let (Some(item), Some(focused_head), Some(focused_display_col)) =
+            (focused_item, focused_head, focused_display_col)
+        {
             let viewport = self
                 .viewports
                 .entry(item.view_id)
                 .or_insert_with(Viewport::origin);
             follow_viewport(
                 viewport,
-                focused_head,
+                focused_head.row,
+                focused_display_col,
                 item.rect.width as usize,
                 item.rect.height as usize,
             );
@@ -101,7 +110,12 @@ impl SceneRenderer {
                 .get(&item.view_id)
                 .copied()
                 .unwrap_or_else(Viewport::origin);
-            let display = display_point(focused_head, item, vp);
+            let display = display_point(
+                focused_head.row,
+                focused_display_col.expect("text cursor has a display column"),
+                item,
+                vp,
+            );
             canvas.move_cursor(display.row, display.col)?;
             canvas.set_cursor_style(
                 focused_text
@@ -112,6 +126,23 @@ impl SceneRenderer {
         }
         canvas.flush()
     }
+}
+
+fn text_row(
+    query: &dyn RenderQuery,
+    content: crate::protocol::ids::ContentId,
+    row: usize,
+) -> String {
+    let ContentData::TextRows(lines) = query.content(
+        content,
+        ContentQuery::TextRows(RowRange {
+            start: row,
+            end: row.saturating_add(1),
+        }),
+    ) else {
+        panic!("text presentation must answer TextRows")
+    };
+    lines.into_iter().next().unwrap_or_default()
 }
 
 impl Default for SceneRenderer {
@@ -134,20 +165,31 @@ fn text_point(
     points.remove(0)
 }
 
-fn follow_viewport(viewport: &mut Viewport, head: TextPoint, width: usize, height: usize) {
-    viewport.ensure_cursor_visible(head.row, height);
+fn follow_viewport(
+    viewport: &mut Viewport,
+    cursor_row: usize,
+    cursor_col: usize,
+    width: usize,
+    height: usize,
+) {
+    viewport.ensure_cursor_visible(cursor_row, height);
 
-    if width == 0 || head.col < viewport.left_col {
-        viewport.left_col = head.col;
-    } else if head.col >= viewport.left_col.saturating_add(width) {
-        viewport.left_col = head.col - width + 1;
+    if width == 0 || cursor_col < viewport.left_col {
+        viewport.left_col = cursor_col;
+    } else if cursor_col >= viewport.left_col.saturating_add(width) {
+        viewport.left_col = cursor_col - width + 1;
     }
 }
 
-fn display_point(point: TextPoint, item: &RenderItem, viewport: Viewport) -> DisplayPoint {
+fn display_point(
+    row: usize,
+    cell_col: usize,
+    item: &RenderItem,
+    viewport: Viewport,
+) -> DisplayPoint {
     DisplayPoint {
-        row: point.row.saturating_sub(viewport.top_row) + item.rect.y as usize,
-        col: point.col.saturating_sub(viewport.left_col) + item.rect.x as usize,
+        row: row.saturating_sub(viewport.top_row) + item.rect.y as usize,
+        col: cell_col.saturating_sub(viewport.left_col) + item.rect.x as usize,
     }
 }
 
@@ -253,7 +295,7 @@ fn paint_status_bar(
         data.modified,
         &data.message,
     ));
-    canvas.write_str(&line.chars().take(width).collect::<String>())
+    canvas.write_str(&take_display_width(&line, width))
 }
 
 fn clear_item_row(canvas: &mut dyn Canvas, row: usize, col: usize, width: usize) -> io::Result<()> {
@@ -265,9 +307,9 @@ fn clear_item_row(canvas: &mut dyn Canvas, row: usize, col: usize, width: usize)
     Ok(())
 }
 
-/// Paint the visible character interval `[left_col, left_col + width)` of one logical row.
-/// A trailing logical newline is discarded. `hi`, when present, is an absolute logical-column
-/// range and is clipped to the visible interval before reverse highlighting is emitted.
+/// Paint the visible display-cell interval `[left_col, left_col + width)` of one logical row.
+/// A trailing logical newline is discarded. `hi`, when present, remains an absolute logical-char
+/// range; each complete visible character is highlighted according to its logical column.
 fn paint_line_with_highlight(
     canvas: &mut dyn Canvas,
     line: &str,
@@ -275,54 +317,99 @@ fn paint_line_with_highlight(
     width: usize,
     hi: Option<(usize, usize)>,
 ) -> io::Result<()> {
-    let content = line
-        .strip_suffix("\r\n")
-        .or_else(|| line.strip_suffix('\n'))
-        .unwrap_or(line);
-    let content = sanitize_terminal_text(content);
-    // char 边界（byte offset, char），用于按列切 byte 范围
-    let bounds: Vec<(usize, char)> = content.char_indices().collect();
-    let content_len = bounds.len();
-    let visible_start = left_col.min(content_len);
-    let visible_end = left_col.saturating_add(width).min(content_len);
-    let write_segment =
-        |canvas: &mut dyn Canvas, from: usize, to: usize, reverse: bool| -> io::Result<()> {
-            if to <= from {
-                return Ok(());
-            }
-            let start_byte = bounds[from].0;
-            let end_byte = if to == content_len {
-                content.len()
-            } else {
-                bounds[to].0
-            };
-            if reverse {
-                canvas.set_reverse(true)?;
-            }
-            canvas.write_str(&content[start_byte..end_byte])?;
-            if reverse {
-                canvas.set_reverse(false)?;
-            }
-            Ok(())
-        };
-    let clipped_hi = hi.and_then(|(start, end)| {
-        let start = start.max(visible_start);
-        let end = end.min(visible_end);
-        (start < end).then_some((start, end))
-    });
-    match clipped_hi {
-        None => write_segment(canvas, visible_start, visible_end, false),
-        Some((start, end)) => {
-            write_segment(canvas, visible_start, start, false)?;
-            write_segment(canvas, start, end, true)?;
-            write_segment(canvas, end, visible_end, false)
-        }
+    if width == 0 {
+        return Ok(());
     }
+    let content = line_content(line);
+    let visible_end = left_col.saturating_add(width);
+    let mut cell_col: usize = 0;
+    let mut reverse_on = false;
+    let mut previous_char_was_visible = false;
+
+    for (logical_col, source) in content.chars().enumerate() {
+        let ch = terminal_char(source);
+        let char_width = terminal_char_width(ch);
+        let char_start = cell_col;
+        let char_end = char_start.saturating_add(char_width);
+        cell_col = char_end;
+
+        if char_width == 0 {
+            if previous_char_was_visible {
+                let mut encoded = [0; 4];
+                canvas.write_str(ch.encode_utf8(&mut encoded))?;
+            }
+            continue;
+        }
+        previous_char_was_visible = false;
+        if char_end <= left_col {
+            continue;
+        }
+        if char_start < left_col {
+            if reverse_on {
+                canvas.set_reverse(false)?;
+                reverse_on = false;
+            }
+            canvas.write_str(&" ".repeat(char_end.min(visible_end) - left_col))?;
+            continue;
+        }
+        if char_start >= visible_end || char_end > visible_end {
+            break;
+        }
+
+        let highlighted = hi.is_some_and(|(start, end)| logical_col >= start && logical_col < end);
+        if highlighted != reverse_on {
+            canvas.set_reverse(highlighted)?;
+            reverse_on = highlighted;
+        }
+        let mut encoded = [0; 4];
+        canvas.write_str(ch.encode_utf8(&mut encoded))?;
+        previous_char_was_visible = true;
+    }
+    if reverse_on {
+        canvas.set_reverse(false)?;
+    }
+    Ok(())
 }
 
 fn sanitize_terminal_text(text: &str) -> String {
+    text.chars().map(terminal_char).collect()
+}
+
+fn line_content(line: &str) -> &str {
+    line.strip_suffix("\r\n")
+        .or_else(|| line.strip_suffix('\n'))
+        .unwrap_or(line)
+}
+
+fn terminal_char(ch: char) -> char {
+    if ch.is_control() { '\u{fffd}' } else { ch }
+}
+
+fn terminal_char_width(ch: char) -> usize {
+    UnicodeWidthChar::width(ch).unwrap_or(1)
+}
+
+fn display_width_before_col(line: &str, logical_col: usize) -> usize {
+    line_content(line)
+        .chars()
+        .take(logical_col)
+        .map(terminal_char)
+        .map(terminal_char_width)
+        .sum()
+}
+
+fn take_display_width(text: &str, width: usize) -> String {
+    let mut used: usize = 0;
     text.chars()
-        .map(|ch| if ch.is_control() { '\u{fffd}' } else { ch })
+        .map(terminal_char)
+        .take_while(|ch| {
+            let next = used.saturating_add(terminal_char_width(*ch));
+            if next > width {
+                return false;
+            }
+            used = next;
+            true
+        })
         .collect()
 }
 
@@ -822,6 +909,77 @@ mod tests {
             output.contains("1;5H"),
             "cursor should be at column 4: {output}"
         );
+    }
+
+    #[test]
+    fn wide_unicode_uses_terminal_cell_columns() {
+        let (scene, editor) = editor_scene(5, 2, ViewId(0), ViewId(1));
+        let query = StubQuery {
+            editor_cid: ContentId(0),
+            lines: vec!["中文a".to_string()],
+            selections: Selections::single(Selection::collapsed(TextOffset { char_index: 2 })),
+        };
+        let mut renderer = SceneRenderer::new();
+        let mut out = Output::new(Vec::new());
+
+        renderer
+            .render(
+                &scene,
+                Revision(0),
+                &query,
+                editor,
+                &mut out as &mut dyn Canvas,
+            )
+            .unwrap();
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert!(output.contains("中文a"), "output: {output}");
+        assert!(
+            output.contains("1;5H"),
+            "cursor after two wide characters should be at cell 4: {output}"
+        );
+    }
+
+    #[test]
+    fn wide_unicode_clip_preserves_terminal_cell_alignment() {
+        let (scene, editor) = editor_scene(4, 2, ViewId(0), ViewId(1));
+        let query = StubQuery {
+            editor_cid: ContentId(0),
+            lines: vec!["a中文".to_string()],
+            selections: Selections::single(Selection::collapsed(TextOffset { char_index: 3 })),
+        };
+        let mut renderer = SceneRenderer::new();
+        let mut out = Output::new(Vec::new());
+
+        renderer
+            .render(
+                &scene,
+                Revision(0),
+                &query,
+                editor,
+                &mut out as &mut dyn Canvas,
+            )
+            .unwrap();
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert!(
+            output.contains(" 文"),
+            "a clipped half of a wide character should remain one blank cell: {output}"
+        );
+        assert!(
+            output.contains("1;4H"),
+            "cursor should stay aligned after clipping a wide character: {output}"
+        );
+    }
+
+    #[test]
+    fn selection_highlight_uses_logical_columns_with_wide_unicode() {
+        let mut out = Output::new(Vec::new());
+
+        paint_line_with_highlight(&mut out, "中文a", 0, 5, Some((1, 2))).unwrap();
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert_eq!(output, "中\x1b[7m文\x1b[27ma");
     }
 
     #[test]

@@ -15,8 +15,8 @@ fn translate_modifiers(modifiers: CrosstermModifiers) -> KeyModifiers {
 pub(crate) fn translate_key(key: CrosstermKey) -> KeyEvent {
     let mut modifiers = translate_modifiers(key.modifiers);
     let code = match key.code {
-        CrosstermCode::Char(character) if character.is_ascii_graphic() || character == ' ' => {
-            let character = if modifiers.ctrl {
+        CrosstermCode::Char(character) if !character.is_control() => {
+            let character = if modifiers.ctrl && character.is_ascii() {
                 character.to_ascii_lowercase()
             } else {
                 character
@@ -73,6 +73,14 @@ mod tests {
         assert_eq!(
             super::translate_key(key(CrosstermCode::Char('Z'), CrosstermModifiers::empty())),
             KeyEvent::char('Z')
+        );
+    }
+
+    #[test]
+    fn printable_unicode_becomes_char() {
+        assert_eq!(
+            super::translate_key(key(CrosstermCode::Char('中'), CrosstermModifiers::empty())),
+            KeyEvent::char('中')
         );
     }
 

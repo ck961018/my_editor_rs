@@ -2112,6 +2112,24 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn vim_insert_accepts_unicode_text() {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('中')),
+                FrontendEvent::Key(KeyEvent::char('文')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+
+        app.run().await.unwrap();
+
+        assert_eq!(text_rows(&app, editor_cid()), vec!["中文"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn run_renders_after_state_changes() {
         let mut app = make_app(
             vec![
