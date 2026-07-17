@@ -2,10 +2,10 @@ use std::io;
 
 use super::App;
 use super::dispatcher::{DispatchCommand, Dispatcher, default_global_keymap};
-use super::kernel::PendingSave;
-use super::layout::{LayoutError, create_editor_session, resolve_focus, view_for_space};
+use super::layout::{LayoutError, resolve_focus, view_for_space};
 use super::message::AppMessage;
 use super::query::AppQuery;
+use super::session::ClientSession;
 use super::view::View;
 use crate::core::buffer::Buffer;
 use crate::core::command::{Command, ContentCommand, EditCommand};
@@ -102,11 +102,11 @@ fn editor_cid() -> ContentId {
 }
 
 fn view_id(app: &App<ScriptedFrontend>, space: SpaceId) -> ViewId {
-    view_for_space(&app.session.scene, space).expect("space hosts a view")
+    view_for_space(app.session.scene(), space).expect("space hosts a view")
 }
 
 fn view_at(app: &App<ScriptedFrontend>, space: SpaceId) -> &View {
-    &app.session.views[&view_id(app, space)]
+    &app.session.views()[&view_id(app, space)]
 }
 
 fn text_presentation(view: &ViewData) -> &TextPresentation {
@@ -119,12 +119,11 @@ fn text_presentation(view: &ViewData) -> &TextPresentation {
 #[tokio::test(flavor = "multi_thread")]
 async fn sessions_sharing_one_kernel_keep_client_state_independent() {
     let mut app = make_app(vec![], None);
-    let mut second = create_editor_session(&app.kernel.contents, &app.kernel.modes, 80, 20);
-    let first_view = view_id(&app, app.session.focused);
-    let second_view = view_for_space(&second.scene, second.focused).unwrap();
+    let mut second = ClientSession::editor(app.kernel.contents(), app.kernel.modes(), 80, 20);
+    let first_view = view_id(&app, app.session.focused());
+    let second_view = view_for_space(second.scene(), second.focused()).unwrap();
 
-    second.scene.size.width = 100;
-    second.scene.size.height = 30;
+    second.resize(100, 30);
     app.handle_event(FrontendEvent::Key(KeyEvent::char('i')))
         .await
         .unwrap();
@@ -132,12 +131,12 @@ async fn sessions_sharing_one_kernel_keep_client_state_independent() {
         .await
         .unwrap();
 
-    assert_eq!(app.session.views[&first_view].content(), editor_cid());
-    assert_eq!(second.views[&second_view].content(), editor_cid());
-    assert_eq!(app.session.scene.size.width, 40);
-    assert_eq!(second.scene.size.width, 100);
+    assert_eq!(app.session.views()[&first_view].content(), editor_cid());
+    assert_eq!(second.views()[&second_view].content(), editor_cid());
+    assert_eq!(app.session.scene().size.width, 40);
+    assert_eq!(second.scene().size.width, 100);
     assert_eq!(
-        app.session.views[&first_view]
+        app.session.views()[&first_view]
             .selections()
             .unwrap()
             .primary()
@@ -146,7 +145,7 @@ async fn sessions_sharing_one_kernel_keep_client_state_independent() {
         1
     );
     assert_eq!(
-        second.views[&second_view]
+        second.views()[&second_view]
             .selections()
             .unwrap()
             .primary()
@@ -184,7 +183,7 @@ fn production_content_paths_have_no_dynamic_type_probes() {
 }
 
 fn text_rows(app: &App<ScriptedFrontend>, content: ContentId) -> Vec<String> {
-    match app.kernel.contents.query(
+    match app.kernel.contents().query(
         content,
         ContentQuery::TextRows(RowRange { start: 0, end: 5 }),
     ) {
@@ -200,7 +199,7 @@ fn text_point(
 ) -> crate::protocol::selection::TextPoint {
     match app
         .kernel
-        .contents
+        .contents()
         .query(content, ContentQuery::TextPoints(vec![offset]))
     {
         ContentData::TextPoints(mut points) => points.remove(0),
@@ -211,7 +210,7 @@ fn text_point(
 fn document_status(app: &App<ScriptedFrontend>, content: ContentId) -> DocumentStatus {
     match app
         .kernel
-        .contents
+        .contents()
         .query(content, ContentQuery::DocumentStatus)
     {
         ContentData::DocumentStatus(status) => status,
@@ -222,7 +221,7 @@ fn document_status(app: &App<ScriptedFrontend>, content: ContentId) -> DocumentS
 #[test]
 fn content_query_reads_buffer_and_view() {
     let mut app = make_app(vec![], None);
-    let focused_view = view_id(&app, app.session.focused);
+    let focused_view = view_id(&app, app.session.focused());
     app.execute_command(DispatchCommand::ViewContent {
         command: ContentCommand::Edit(EditCommand::InsertText("hi".to_string())),
         view: focused_view,
@@ -230,8 +229,8 @@ fn content_query_reads_buffer_and_view() {
     })
     .unwrap();
     let query = AppQuery {
-        contents: &app.kernel.contents,
-        views: &app.session.views,
+        contents: app.kernel.contents(),
+        views: app.session.views(),
     };
     assert_eq!(
         query.content(
@@ -251,13 +250,13 @@ fn status_bar_view_data_has_no_text_selection_or_mode_cursor() {
     let app = make_app(vec![], None);
     let status_view = app
         .session
-        .views
+        .views()
         .iter()
         .find_map(|(id, view)| (view.content() == ContentId(1)).then_some(*id))
         .expect("status bar view exists");
     let query = AppQuery {
-        contents: &app.kernel.contents,
-        views: &app.session.views,
+        contents: app.kernel.contents(),
+        views: app.session.views(),
     };
 
     let view = query.view(status_view);
@@ -267,7 +266,7 @@ fn status_bar_view_data_has_no_text_selection_or_mode_cursor() {
 #[tokio::test(flavor = "multi_thread")]
 async fn two_views_of_one_buffer_keep_independent_mode_instances() {
     let mut app = make_app(vec![], None);
-    let left = app.session.focused;
+    let left = app.session.focused();
     app.handle_event(FrontendEvent::Key(KeyEvent::char('i')))
         .await
         .unwrap();
@@ -278,11 +277,11 @@ async fn two_views_of_one_buffer_keep_independent_mode_instances() {
         .split_space(left, editor_cid(), true, SplitDirection::Right, true)
         .unwrap()
         .new_space;
-    assert_eq!(app.session.focused, right);
+    assert_eq!(app.session.focused(), right);
 
     let query = AppQuery {
-        contents: &app.kernel.contents,
-        views: &app.session.views,
+        contents: app.kernel.contents(),
+        views: app.session.views(),
     };
     let left_id = view_id(&app, left);
     let right_id = view_id(&app, right);
@@ -296,11 +295,11 @@ async fn two_views_of_one_buffer_keep_independent_mode_instances() {
     assert_ne!(left_id, right_id);
     assert_eq!(
         Some(&left_text.selections),
-        app.session.views[&left_id].selections()
+        app.session.views()[&left_id].selections()
     );
     assert_eq!(
         Some(&right_text.selections),
-        app.session.views[&right_id].selections()
+        app.session.views()[&right_id].selections()
     );
     assert_eq!(left_text.selections.primary().head().char_index, 1);
     assert_eq!(right_text.selections.primary().head(), TextOffset::origin());
@@ -315,11 +314,11 @@ async fn unchanged_space_binding_preserves_its_view_selection() {
             .unwrap();
     }
 
-    app.set_space_sizing(app.session.focused, Sizing::Fixed(12))
+    app.set_space_sizing(app.session.focused(), Sizing::Fixed(12))
         .unwrap();
 
     assert_eq!(
-        view_at(&app, app.session.focused)
+        view_at(&app, app.session.focused())
             .selections()
             .unwrap()
             .primary()
@@ -334,7 +333,7 @@ async fn replace_content_rebuilds_view_from_origin() {
     let mut app = make_app(vec![], None);
     let other = ContentId(9);
     app.kernel
-        .contents
+        .contents_mut()
         .insert(other, Content::Buffer(Buffer::new()));
     for key in ['i', 'a', 'b', 'c'] {
         app.handle_event(FrontendEvent::Key(KeyEvent::char(key)))
@@ -342,10 +341,10 @@ async fn replace_content_rebuilds_view_from_origin() {
             .unwrap();
     }
 
-    app.replace_space_content(app.session.focused, other, true)
+    app.replace_space_content(app.session.focused(), other, true)
         .unwrap();
 
-    let view = view_at(&app, app.session.focused);
+    let view = view_at(&app, app.session.focused());
     assert_eq!(view.content(), other);
     assert_eq!(
         view.selections().unwrap().primary().head(),
@@ -360,7 +359,7 @@ async fn replace_content_rebuilds_view_from_origin() {
 #[test]
 fn close_focused_space_prefers_surviving_neighbor_and_drops_its_view() {
     let mut app = make_app(vec![], None);
-    let left = app.session.focused;
+    let left = app.session.focused();
     let right = app
         .split_space(left, editor_cid(), true, SplitDirection::Right, true)
         .unwrap()
@@ -369,38 +368,38 @@ fn close_focused_space_prefers_surviving_neighbor_and_drops_its_view() {
 
     app.close_space(right).unwrap();
 
-    assert_eq!(app.session.focused, left);
-    assert!(!app.session.views.contains_key(&right_view));
+    assert_eq!(app.session.focused(), left);
+    assert!(!app.session.views().contains_key(&right_view));
 }
 
 #[test]
 fn missing_content_is_rejected_before_scene_mutation() {
     let mut app = make_app(vec![], None);
-    let root = app.session.scene.root();
-    let revision = app.session.scene_revision;
+    let root = app.session.scene().root();
+    let revision = app.session.scene_revision();
 
     assert!(matches!(
         app.split_space(root, ContentId(999), true, SplitDirection::Right, true),
         Err(LayoutError::MissingContent(ContentId(999)))
     ));
-    assert_eq!(app.session.scene.root(), root);
-    assert_eq!(app.session.scene_revision, revision);
+    assert_eq!(app.session.scene().root(), root);
+    assert_eq!(app.session.scene_revision(), revision);
 }
 
 #[test]
 fn successful_layout_mutation_advances_scene_revision() {
     let mut app = make_app(vec![], None);
 
-    app.set_space_sizing(app.session.focused, Sizing::Fixed(12))
+    app.set_space_sizing(app.session.focused(), Sizing::Fixed(12))
         .unwrap();
 
-    assert_eq!(app.session.scene_revision, Revision(1));
+    assert_eq!(app.session.scene_revision(), Revision(1));
 }
 
 #[test]
 fn render_passes_current_scene_revision_to_frontend() {
     let mut app = make_app(vec![], None);
-    app.set_space_sizing(app.session.focused, Sizing::Fixed(12))
+    app.set_space_sizing(app.session.focused(), Sizing::Fixed(12))
         .unwrap();
 
     app.render().unwrap();
@@ -411,7 +410,7 @@ fn render_passes_current_scene_revision_to_frontend() {
 #[tokio::test(flavor = "multi_thread")]
 async fn edit_commands_advance_view_and_content_revisions() {
     let mut app = make_app(vec![], None);
-    let view = view_id(&app, app.session.focused);
+    let view = view_id(&app, app.session.focused());
 
     app.handle_event(FrontendEvent::Key(KeyEvent::char('i')))
         .await
@@ -420,52 +419,60 @@ async fn edit_commands_advance_view_and_content_revisions() {
         .await
         .unwrap();
 
-    assert!(app.session.views[&view].revision() > Revision(0));
-    assert!(app.kernel.contents.revision(editor_cid()).unwrap() > Revision(0));
-    assert_eq!(app.session.scene_revision, Revision(0));
+    assert!(app.session.views()[&view].revision() > Revision(0));
+    assert!(app.kernel.contents().revision(editor_cid()).unwrap() > Revision(0));
+    assert_eq!(app.session.scene_revision(), Revision(0));
 }
 
 #[test]
 fn preferred_inert_status_space_is_not_selected() {
     let app = make_app(vec![], None);
-    let status = app.session.scene.node(app.session.scene.root()).children[1];
+    let status = app
+        .session
+        .scene()
+        .node(app.session.scene().root())
+        .children[1];
 
     assert_eq!(
-        resolve_focus(&app.session.scene, app.session.focused, Some(status)),
-        Some(app.session.focused)
+        resolve_focus(app.session.scene(), app.session.focused(), Some(status)),
+        Some(app.session.focused())
     );
 }
 
 #[test]
 fn closing_last_focusable_space_is_rejected() {
     let mut app = make_app(vec![], None);
-    let status = app.session.scene.node(app.session.scene.root()).children[1];
+    let status = app
+        .session
+        .scene()
+        .node(app.session.scene().root())
+        .children[1];
 
     assert!(matches!(
-        app.close_space(app.session.focused),
+        app.close_space(app.session.focused()),
         Err(LayoutError::WouldRemoveLastFocusable(_))
     ));
-    assert_ne!(app.session.focused, status);
+    assert_ne!(app.session.focused(), status);
 }
 
 #[test]
 fn replacing_only_focusable_content_with_inert_space_is_rejected() {
     let mut app = make_app(vec![], None);
-    let focused = app.session.focused;
+    let focused = app.session.focused();
     let other = ContentId(9);
     app.kernel
-        .contents
+        .contents_mut()
         .insert(other, Content::Buffer(Buffer::new()));
 
     assert_eq!(
         app.replace_space_content(focused, other, false),
         Err(LayoutError::NoFocusableSpace)
     );
-    assert_eq!(app.session.focused, focused);
+    assert_eq!(app.session.focused(), focused);
     assert!(matches!(
-        &app.session.scene.node(focused).space.kind,
+        &app.session.scene().node(focused).space.kind,
         SpaceKind::Content { view, .. }
-            if app.session.views[view].content() == editor_cid()
+            if app.session.views()[view].content() == editor_cid()
     ));
 }
 
@@ -483,7 +490,7 @@ async fn default_vim_a_enters_insert_before_text_input() {
     );
     app.run().await.unwrap();
     assert_eq!(text_rows(&app, editor_cid()), vec!["ia"]);
-    assert!(app.kernel.tasks.is_cancelled());
+    assert!(app.kernel.is_cancelled());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -753,7 +760,7 @@ async fn run_supports_backspace_and_arrows() {
     );
     app.run().await.unwrap();
     assert_eq!(text_rows(&app, editor_cid()), vec!["a"]);
-    let cursor = view_at(&app, app.session.focused)
+    let cursor = view_at(&app, app.session.focused())
         .selections()
         .unwrap()
         .primary()
@@ -766,11 +773,11 @@ fn multi_space_edit_targets_only_focused_content() {
     let mut app = make_app(vec![], None);
     let other_cid = ContentId(9);
     app.kernel
-        .contents
+        .contents_mut()
         .insert(other_cid, Content::Buffer(Buffer::new()));
     let other_sid = app
         .split_space(
-            app.session.focused,
+            app.session.focused(),
             other_cid,
             true,
             SplitDirection::Right,
@@ -788,14 +795,14 @@ fn multi_space_edit_targets_only_focused_content() {
     .unwrap();
 
     assert_eq!(
-        app.kernel.contents.query(
+        app.kernel.contents().query(
             editor_cid(),
             ContentQuery::TextRows(RowRange { start: 0, end: 1 }),
         ),
         ContentData::TextRows(vec!["".to_string()]),
     );
     assert_eq!(
-        app.kernel.contents.query(
+        app.kernel.contents().query(
             other_cid,
             ContentQuery::TextRows(RowRange { start: 0, end: 1 }),
         ),
@@ -803,7 +810,7 @@ fn multi_space_edit_targets_only_focused_content() {
     );
     assert_eq!(
         app.session
-            .views
+            .views()
             .get(&other_view)
             .unwrap()
             .selections()
@@ -821,12 +828,12 @@ fn view_content_rejects_mismatched_view_content_target() {
     let mut app = make_app(vec![], None);
     let other_cid = ContentId(9);
     app.kernel
-        .contents
+        .contents_mut()
         .insert(other_cid, Content::Buffer(Buffer::new()));
 
     app.execute_command(DispatchCommand::ViewContent {
         command: ContentCommand::Edit(EditCommand::InsertText("Z".to_string())),
-        view: view_id(&app, app.session.focused),
+        view: view_id(&app, app.session.focused()),
         content: other_cid,
     })
     .unwrap();
@@ -845,9 +852,9 @@ async fn run_forwards_resize_to_scene() {
         None,
     );
     app.run().await.unwrap();
-    assert_eq!(app.session.scene.size.width, 100);
-    assert_eq!(app.session.scene.size.height, 40);
-    assert_eq!(app.session.scene_revision, Revision(1));
+    assert_eq!(app.session.scene().size.width, 100);
+    assert_eq!(app.session.scene().size.height, 40);
+    assert_eq!(app.session.scene_revision(), Revision(1));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -870,7 +877,7 @@ async fn ctrl_s_saves_file_and_marks_saved() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "Xhi");
     assert!(matches!(
         app.kernel
-            .contents
+            .contents()
             .query(editor_cid(), ContentQuery::DocumentStatus),
         ContentData::DocumentStatus(DocumentStatus {
             modified: false,
@@ -1052,7 +1059,8 @@ async fn prefix_key_sequence_saves() {
         [KeyEvent::char('z'), KeyEvent::char('s')],
         Command::Content(ContentCommand::Save),
     );
-    app.session.dispatcher = Dispatcher::new(global);
+    app.session
+        .replace_dispatcher_for_test(Dispatcher::new(global));
     app.run().await.unwrap();
     assert_eq!(
         document_status(&app, editor_cid()).message,
@@ -1065,18 +1073,16 @@ fn save_completed_ok_marks_buffer_saved() {
     let mut app = make_app(vec![], None);
     app.execute_command(DispatchCommand::ViewContent {
         command: ContentCommand::Edit(EditCommand::InsertText("x".to_string())),
-        view: view_id(&app, app.session.focused),
+        view: view_id(&app, app.session.focused()),
         content: editor_cid(),
     })
     .unwrap();
     assert!(document_status(&app, editor_cid()).modified);
-    app.kernel.pending_saves.insert(
+    app.kernel.track_pending_save_for_test(
         editor_cid(),
-        PendingSave {
-            revision: 1,
-            state: crate::core::transaction::TextStateId(1),
-            queued: None,
-        },
+        1,
+        crate::core::transaction::TextStateId(1),
+        None,
     );
 
     app.handle_app_message(AppMessage::SaveCompleted {
@@ -1087,7 +1093,7 @@ fn save_completed_ok_marks_buffer_saved() {
     })
     .unwrap();
 
-    assert!(!app.kernel.pending_saves.contains_key(&editor_cid()));
+    assert!(!app.kernel.has_pending_save(editor_cid()));
     let status = document_status(&app, editor_cid());
     assert!(!status.modified);
     assert_eq!(status.message, StatusMessage::Saved);
@@ -1096,13 +1102,11 @@ fn save_completed_ok_marks_buffer_saved() {
 #[test]
 fn save_completed_err_marks_buffer_save_failed() {
     let mut app = make_app(vec![], None);
-    app.kernel.pending_saves.insert(
+    app.kernel.track_pending_save_for_test(
         editor_cid(),
-        PendingSave {
-            revision: 0,
-            state: crate::core::transaction::TextStateId(0),
-            queued: None,
-        },
+        0,
+        crate::core::transaction::TextStateId(0),
+        None,
     );
 
     app.handle_app_message(AppMessage::SaveCompleted {
@@ -1113,7 +1117,7 @@ fn save_completed_err_marks_buffer_save_failed() {
     })
     .unwrap();
 
-    assert!(!app.kernel.pending_saves.contains_key(&editor_cid()));
+    assert!(!app.kernel.has_pending_save(editor_cid()));
     assert_eq!(
         document_status(&app, editor_cid()).message,
         StatusMessage::SaveFailed
@@ -1135,7 +1139,7 @@ async fn stale_save_completion_keeps_newer_edits_modified() {
     .unwrap();
     app.execute_command(DispatchCommand::ViewContent {
         command: ContentCommand::Edit(EditCommand::InsertText("X".to_string())),
-        view: view_id(&app, app.session.focused),
+        view: view_id(&app, app.session.focused()),
         content: editor_cid(),
     })
     .unwrap();
@@ -1156,7 +1160,7 @@ async fn save_during_pending_write_queues_latest_snapshot() {
 
     app.execute_command(DispatchCommand::ViewContent {
         command: ContentCommand::Edit(EditCommand::InsertText("A".to_string())),
-        view: view_id(&app, app.session.focused),
+        view: view_id(&app, app.session.focused()),
         content: editor_cid(),
     })
     .unwrap();
@@ -1167,7 +1171,7 @@ async fn save_during_pending_write_queues_latest_snapshot() {
     .unwrap();
     app.execute_command(DispatchCommand::ViewContent {
         command: ContentCommand::Edit(EditCommand::InsertText("B".to_string())),
-        view: view_id(&app, app.session.focused),
+        view: view_id(&app, app.session.focused()),
         content: editor_cid(),
     })
     .unwrap();
@@ -1176,11 +1180,11 @@ async fn save_during_pending_write_queues_latest_snapshot() {
         content: editor_cid(),
     })
     .unwrap();
-    assert!(app.kernel.pending_saves.contains_key(&editor_cid()));
+    assert!(app.kernel.has_pending_save(editor_cid()));
 
     app.shutdown_tasks().await.unwrap();
 
-    assert!(!app.kernel.pending_saves.contains_key(&editor_cid()));
+    assert!(!app.kernel.has_pending_save(editor_cid()));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "ABhello");
     let status = document_status(&app, editor_cid());
     assert!(!status.modified);
@@ -1203,7 +1207,7 @@ async fn execute_save_uses_resolved_content_target() {
     other.open_path(&other_path_str).unwrap();
     other.insert_char(0, 'X');
     app.kernel
-        .contents
+        .contents_mut()
         .insert(other_cid, Content::Buffer(other));
 
     app.execute_command(DispatchCommand::Content {
@@ -1239,7 +1243,7 @@ async fn run_waits_for_pending_save_before_returning() {
     result.unwrap().unwrap();
 
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "Xhi");
-    assert!(!app.kernel.pending_saves.contains_key(&editor_cid()));
+    assert!(!app.kernel.has_pending_save(editor_cid()));
     assert_eq!(
         document_status(&app, editor_cid()).message,
         StatusMessage::Saved
@@ -1263,14 +1267,14 @@ async fn shift_arrow_builds_selection_then_input_replaces() {
     );
     app.run().await.unwrap();
     assert_eq!(text_rows(&app, editor_cid()), vec!["abX"]);
-    let head = view_at(&app, app.session.focused)
+    let head = view_at(&app, app.session.focused())
         .selections()
         .unwrap()
         .primary()
         .head();
     assert_eq!(head.char_index, 3);
     assert_eq!(
-        view_at(&app, app.session.focused)
+        view_at(&app, app.session.focused())
             .selections()
             .unwrap()
             .primary()
@@ -1299,14 +1303,14 @@ async fn escape_enters_normal_then_h_moves_left_of_selection() {
     );
     app.run().await.unwrap();
     assert_eq!(text_rows(&app, editor_cid()), vec!["abc"]); // Escape/h 不改文本
-    let head = view_at(&app, app.session.focused)
+    let head = view_at(&app, app.session.focused())
         .selections()
         .unwrap()
         .primary()
         .head();
     assert_eq!(text_point(&app, editor_cid(), head).col, 1);
     assert_eq!(
-        view_at(&app, app.session.focused)
+        view_at(&app, app.session.focused())
             .selections()
             .unwrap()
             .primary()
@@ -1338,7 +1342,7 @@ async fn vim_visual_counted_motion_then_delete_removes_selected_range() {
     app.run().await.unwrap();
 
     assert_eq!(text_rows(&app, editor_cid()), vec!["cd"]);
-    let selection = view_at(&app, app.session.focused)
+    let selection = view_at(&app, app.session.focused())
         .selections()
         .unwrap()
         .primary();
@@ -1380,7 +1384,7 @@ async fn vim_line_visual_ctrl_d_deletes_frontend_sized_line_range() {
         ],
         None,
     );
-    let focused_view = view_id(&app, app.session.focused);
+    let focused_view = view_id(&app, app.session.focused());
     app.execute_command(DispatchCommand::ViewContent {
         command: ContentCommand::Edit(EditCommand::InsertText("one\ntwo\nthree\nfour".to_string())),
         view: focused_view,
@@ -1449,7 +1453,7 @@ async fn vim_normal_h_moves_left_after_insert() {
     app.run().await.unwrap();
 
     assert_eq!(text_rows(&app, editor_cid()), vec!["ab"]);
-    let head = view_at(&app, app.session.focused)
+    let head = view_at(&app, app.session.focused())
         .selections()
         .unwrap()
         .primary()
@@ -1624,7 +1628,7 @@ async fn vim_normal_horizontal_motion_never_lands_on_or_deletes_newline() {
 #[test]
 fn editing_shared_content_reconciles_other_view_selections() {
     let mut app = make_app(vec![], None);
-    let left = app.session.focused;
+    let left = app.session.focused();
     let left_view = view_id(&app, left);
     app.execute_command(DispatchCommand::ViewContent {
         command: ContentCommand::Edit(EditCommand::InsertText("abc".to_string())),
@@ -1637,8 +1641,8 @@ fn editing_shared_content_reconciles_other_view_selections() {
         .unwrap()
         .new_space;
     let right_view = view_id(&app, right);
-    let right_revision = app.session.views[&right_view].revision();
-    match app.session.views.get_mut(&left_view).unwrap().state_mut() {
+    let right_revision = app.session.views()[&right_view].revision();
+    match app.session.view_mut(left_view).unwrap().state_mut() {
         crate::core::content_view_state::ContentViewState::Buffer(state) => {
             *state.selections_mut() = Selections::single(Selection {
                 anchor: TextOffset::origin(),
@@ -1647,7 +1651,7 @@ fn editing_shared_content_reconciles_other_view_selections() {
         }
         _ => unreachable!(),
     }
-    match app.session.views.get_mut(&right_view).unwrap().state_mut() {
+    match app.session.view_mut(right_view).unwrap().state_mut() {
         crate::core::content_view_state::ContentViewState::Buffer(state) => {
             *state.selections_mut() =
                 Selections::single(Selection::collapsed(TextOffset { char_index: 3 }));
@@ -1664,20 +1668,20 @@ fn editing_shared_content_reconciles_other_view_selections() {
 
     assert_eq!(text_rows(&app, editor_cid()), vec![""]);
     assert_eq!(
-        app.session.views[&right_view]
+        app.session.views()[&right_view]
             .selections()
             .unwrap()
             .primary()
             .head(),
         TextOffset::origin()
     );
-    assert!(app.session.views[&right_view].revision() > right_revision);
+    assert!(app.session.views()[&right_view].revision() > right_revision);
 }
 
 #[test]
 fn shared_view_positions_follow_text_change_affinity() {
     let mut app = make_app(vec![], None);
-    let left = app.session.focused;
+    let left = app.session.focused();
     let left_view = view_id(&app, left);
     app.execute_command(DispatchCommand::ViewContent {
         command: ContentCommand::Edit(EditCommand::InsertText("abc".to_string())),
@@ -1691,7 +1695,7 @@ fn shared_view_positions_follow_text_change_affinity() {
         .new_space;
     let right_view = view_id(&app, right);
     for view in [left_view, right_view] {
-        let ContentViewState::Buffer(state) = app.session.views.get_mut(&view).unwrap().state_mut()
+        let ContentViewState::Buffer(state) = app.session.view_mut(view).unwrap().state_mut()
         else {
             unreachable!()
         };
@@ -1708,7 +1712,7 @@ fn shared_view_positions_follow_text_change_affinity() {
 
     assert_eq!(text_rows(&app, editor_cid()), vec!["aXbc"]);
     assert_eq!(
-        app.session.views[&right_view]
+        app.session.views()[&right_view]
             .selections()
             .unwrap()
             .primary()
@@ -1721,7 +1725,7 @@ fn shared_view_positions_follow_text_change_affinity() {
 #[test]
 fn shared_view_positions_follow_undo_and_redo_changes() {
     let mut app = make_app(vec![], None);
-    let left = app.session.focused;
+    let left = app.session.focused();
     let left_view = view_id(&app, left);
     app.execute_command(DispatchCommand::ViewContent {
         command: ContentCommand::Edit(EditCommand::InsertText("abc".to_string())),
@@ -1734,8 +1738,7 @@ fn shared_view_positions_follow_undo_and_redo_changes() {
         .unwrap()
         .new_space;
     let right_view = view_id(&app, right);
-    let ContentViewState::Buffer(state) =
-        app.session.views.get_mut(&right_view).unwrap().state_mut()
+    let ContentViewState::Buffer(state) = app.session.view_mut(right_view).unwrap().state_mut()
     else {
         unreachable!()
     };
@@ -1751,7 +1754,7 @@ fn shared_view_positions_follow_undo_and_redo_changes() {
     assert_eq!(text_rows(&app, editor_cid()), vec![""]);
     for view in [left_view, right_view] {
         assert_eq!(
-            app.session.views[&view]
+            app.session.views()[&view]
                 .selections()
                 .unwrap()
                 .primary()
@@ -1769,7 +1772,7 @@ fn shared_view_positions_follow_undo_and_redo_changes() {
     assert_eq!(text_rows(&app, editor_cid()), vec!["abc"]);
     for view in [left_view, right_view] {
         assert_eq!(
-            app.session.views[&view]
+            app.session.views()[&view]
                 .selections()
                 .unwrap()
                 .primary()
@@ -1783,7 +1786,7 @@ fn shared_view_positions_follow_undo_and_redo_changes() {
 #[test]
 fn failed_layout_mutations_do_not_consume_view_ids() {
     let mut app = make_app(vec![], None);
-    let next = app.session.next_view_id;
+    let next = app.session.next_view_id_for_test();
 
     assert!(
         app.split_space(
@@ -1795,20 +1798,20 @@ fn failed_layout_mutations_do_not_consume_view_ids() {
         )
         .is_err()
     );
-    assert_eq!(app.session.next_view_id, next);
+    assert_eq!(app.session.next_view_id_for_test(), next);
     assert!(
         app.replace_space_content(SpaceId(999), editor_cid(), true)
             .is_err()
     );
-    assert_eq!(app.session.next_view_id, next);
+    assert_eq!(app.session.next_view_id_for_test(), next);
 }
 
 #[test]
 fn no_op_edit_does_not_advance_content_or_view_revision() {
     let mut app = make_app(vec![], None);
-    let view = view_id(&app, app.session.focused);
-    let view_revision = app.session.views[&view].revision();
-    let content_revision = app.kernel.contents.revision(editor_cid()).unwrap();
+    let view = view_id(&app, app.session.focused());
+    let view_revision = app.session.views()[&view].revision();
+    let content_revision = app.kernel.contents().revision(editor_cid()).unwrap();
 
     app.execute_command(DispatchCommand::ViewContent {
         command: ContentCommand::Edit(EditCommand::MoveLeftBy(1)),
@@ -1817,9 +1820,9 @@ fn no_op_edit_does_not_advance_content_or_view_revision() {
     })
     .unwrap();
 
-    assert_eq!(app.session.views[&view].revision(), view_revision);
+    assert_eq!(app.session.views()[&view].revision(), view_revision);
     assert_eq!(
-        app.kernel.contents.revision(editor_cid()),
+        app.kernel.contents().revision(editor_cid()),
         Some(content_revision)
     );
 }
@@ -1830,7 +1833,7 @@ async fn frontend_error_still_waits_for_pending_save() {
     let path = dir.path().join("save-on-error.txt");
     std::fs::write(&path, "old").unwrap();
     let mut app = make_app(vec![], path.to_str());
-    let view = view_id(&app, app.session.focused);
+    let view = view_id(&app, app.session.focused());
     app.execute_command(DispatchCommand::ViewContent {
         command: ContentCommand::Edit(EditCommand::InsertText("new".to_string())),
         view,
@@ -1847,7 +1850,7 @@ async fn frontend_error_still_waits_for_pending_save() {
     assert!(app.run().await.is_err());
 
     assert_eq!(std::fs::read_to_string(path).unwrap(), "newold");
-    assert!(app.kernel.pending_saves.is_empty());
+    assert!(!app.kernel.has_pending_saves());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1856,7 +1859,7 @@ async fn render_error_still_waits_for_pending_save() {
     let path = dir.path().join("save-on-render-error.txt");
     std::fs::write(&path, "old").unwrap();
     let mut app = make_app(vec![], path.to_str());
-    let view = view_id(&app, app.session.focused);
+    let view = view_id(&app, app.session.focused());
     app.execute_command(DispatchCommand::ViewContent {
         command: ContentCommand::Edit(EditCommand::InsertText("new".to_string())),
         view,
@@ -1873,7 +1876,7 @@ async fn render_error_still_waits_for_pending_save() {
     assert!(app.run().await.is_err());
 
     assert_eq!(std::fs::read_to_string(path).unwrap(), "newold");
-    assert!(app.kernel.pending_saves.is_empty());
+    assert!(!app.kernel.has_pending_saves());
 }
 
 #[tokio::test(flavor = "multi_thread")]

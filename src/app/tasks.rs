@@ -27,8 +27,8 @@ impl AppTasks {
         self.cancel.is_cancelled()
     }
 
-    pub(crate) async fn cancelled(&self) {
-        self.cancel.cancelled().await;
+    pub(crate) fn cancellation_token(&self) -> CancellationToken {
+        self.cancel.clone()
     }
 
     // 预留：detached 任务（语法解析/搜索预计算等）超出当前范围，仅 tasks.rs 测试覆盖。

@@ -5,15 +5,13 @@ use std::time::Instant;
 
 use crate::app::application::App;
 use crate::app::dispatcher::{DispatchCommand, DispatchInput, DispatchOutcome};
-use crate::app::layout::view_for_space;
 use crate::app::query::AppQuery;
-use crate::app::view::{ModeCommandResult, View};
+use crate::app::view::ModeCommandResult;
 use crate::core::command::{AppCommand, ContentCommand, EditCommand};
 use crate::core::content::{ContentInput, ContentResult};
 use crate::frontend::Frontend;
 use crate::protocol::content_query::RenderQuery;
 use crate::protocol::frontend_event::FrontendEvent;
-use crate::protocol::ids::{ContentId, ViewId};
 use crate::protocol::viewport::{ViewportCommand, ViewportCursorBehavior, ViewportMoveDirection};
 
 async fn wait_for_input_deadline(deadline: Option<Instant>) {
@@ -39,28 +37,29 @@ impl<F: Frontend> App<F> {
     async fn run_loop(&mut self) -> io::Result<()> {
         self.render()?;
         loop {
-            let input_deadline = self.session.dispatcher.next_deadline(&self.session.views);
+            let input_deadline = self.session.next_input_deadline();
+            let cancellation = self.kernel.cancellation_token();
             tokio::select! {
                 biased;
-                _ = self.kernel.tasks.cancelled() => break,
+                _ = cancellation.cancelled() => break,
                 _ = wait_for_input_deadline(input_deadline) => {
                     self.handle_input_timeout()?;
                 }
-                message = self.kernel.message_rx.recv() => {
+                message = self.kernel.receive_message() => {
                     if let Some(message) = message {
                         self.handle_app_message(message)?;
                     } else {
-                        self.kernel.tasks.cancel();
+                        self.kernel.cancel();
                     }
                 }
                 ev = self.frontend.next_event() => {
                     match ev? {
                         Some(event) => self.handle_event(event).await?,
-                        None => self.kernel.tasks.cancel(),
+                        None => self.kernel.cancel(),
                     }
                 }
             }
-            if !self.kernel.tasks.is_cancelled() {
+            if !self.kernel.is_cancelled() {
                 self.render()?;
             }
         }
@@ -68,20 +67,18 @@ impl<F: Frontend> App<F> {
     }
 
     pub(super) async fn shutdown_tasks(&mut self) -> io::Result<()> {
-        self.kernel.tasks.cancel();
-        self.kernel.tasks.close_detached();
-        while !self.kernel.pending_saves.is_empty() {
+        self.kernel.begin_shutdown();
+        while self.kernel.has_pending_saves() {
             let message = self
                 .kernel
-                .message_rx
-                .recv()
+                .receive_message()
                 .await
                 .expect("pending save task must report completion");
             self.handle_app_message(message)?;
         }
-        self.kernel.tasks.close_critical();
-        self.kernel.tasks.wait_critical().await;
-        while let Ok(message) = self.kernel.message_rx.try_recv() {
+        self.kernel.close_critical_tasks();
+        self.kernel.wait_for_critical_tasks().await;
+        while let Some(message) = self.kernel.try_receive_message() {
             self.handle_app_message(message)?;
         }
         Ok(())
@@ -89,32 +86,22 @@ impl<F: Frontend> App<F> {
 
     pub(super) async fn handle_event(&mut self, event: FrontendEvent) -> io::Result<()> {
         match event {
-            FrontendEvent::Resize(r) => {
-                self.session.scene.size.width = r.width as i32;
-                self.session.scene.size.height = r.height as i32;
-                self.session.scene_revision.next();
-            }
+            FrontendEvent::Resize(r) => self.session.resize(r.width, r.height),
             FrontendEvent::Key(k) => {
                 self.process_input_queue(VecDeque::from([DispatchInput::Normal(k)]))?;
             }
-            FrontendEvent::QuitRequest => self.kernel.tasks.cancel(),
+            FrontendEvent::QuitRequest => self.kernel.cancel(),
         }
         Ok(())
     }
 
     fn process_input_queue(&mut self, mut queue: VecDeque<DispatchInput>) -> io::Result<()> {
-        while !self.kernel.tasks.is_cancelled() {
+        while !self.kernel.is_cancelled() {
             let Some(input) = queue.pop_front() else {
                 break;
             };
             let now = Instant::now();
-            let outcome = self.session.dispatcher.dispatch(
-                input,
-                now,
-                self.session.focused,
-                &self.session.scene,
-                &mut self.session.views,
-            );
+            let outcome = self.session.dispatch(input, now);
             self.apply_dispatch_outcome(outcome, &mut queue, now)?;
         }
         Ok(())
@@ -131,7 +118,7 @@ impl<F: Frontend> App<F> {
             DispatchOutcome::Replay(replay) => prepend_inputs(queue, replay),
             DispatchOutcome::Emit { command, replay } => {
                 self.execute_command(command)?;
-                self.sync_focused_input(now);
+                self.session.sync_focused_input(now);
                 prepend_inputs(queue, replay);
             }
         }
@@ -143,49 +130,26 @@ impl<F: Frontend> App<F> {
             let now = Instant::now();
             if self
                 .session
-                .dispatcher
-                .next_deadline(&self.session.views)
+                .next_input_deadline()
                 .is_none_or(|deadline| deadline > now)
             {
                 return Ok(());
             }
-            let outcome = self.session.dispatcher.dispatch_timeout(
-                now,
-                self.session.focused,
-                &self.session.scene,
-                &mut self.session.views,
-            );
+            let outcome = self.session.dispatch_timeout(now);
             let mut replay = VecDeque::new();
             self.apply_dispatch_outcome(outcome, &mut replay, now)?;
             self.process_input_queue(replay)?;
         }
     }
 
-    fn sync_focused_input(&mut self, now: Instant) {
-        let Some(view_id) = view_for_space(&self.session.scene, self.session.focused) else {
-            return;
-        };
-        let status = self
-            .session
-            .views
-            .get(&view_id)
-            .map_or(crate::core::input::InputStatus::Ready, View::input_status);
-        self.session
-            .dispatcher
-            .sync_view(view_id, status, true, now);
-    }
-
     pub(super) fn execute_command(&mut self, command: DispatchCommand) -> io::Result<()> {
         match command {
             DispatchCommand::App(command) => match command {
-                AppCommand::Quit => self.kernel.tasks.cancel(),
+                AppCommand::Quit => self.kernel.cancel(),
                 AppCommand::FocusNext | AppCommand::FocusPrev => {}
             },
             DispatchCommand::Content { command, content } => {
-                let result = self
-                    .kernel
-                    .contents
-                    .execute(content, ContentInput::Command(command));
+                let result = self.kernel.execute(content, ContentInput::Command(command));
                 self.handle_content_result(content, result);
             }
             DispatchCommand::ViewContent {
@@ -194,11 +158,7 @@ impl<F: Frontend> App<F> {
                 content,
             } => {
                 let (command, mode_changed) = {
-                    let target_view = self
-                        .session
-                        .views
-                        .get_mut(&view)
-                        .expect("target view exists");
+                    let target_view = self.session.view_mut(view).expect("target view exists");
                     assert_eq!(
                         target_view.content(),
                         content,
@@ -207,7 +167,7 @@ impl<F: Frontend> App<F> {
                     match command {
                         ContentCommand::Mode { mode, action } => {
                             match target_view.execute_mode_command(
-                                &self.kernel.modes,
+                                self.kernel.modes(),
                                 &mode,
                                 &action,
                             ) {
@@ -225,16 +185,15 @@ impl<F: Frontend> App<F> {
                 let command = match command {
                     ContentCommand::Viewport(command) => {
                         let lines = self.frontend.execute_viewport_command(
-                            &self.session.scene,
-                            self.session.scene_revision,
+                            self.session.scene(),
+                            self.session.scene_revision(),
                             view,
                             command,
                         )?;
                         if lines == 0 {
                             if mode_changed {
                                 self.session
-                                    .views
-                                    .get_mut(&view)
+                                    .view_mut(view)
                                     .expect("target view exists")
                                     .touch();
                             }
@@ -245,17 +204,13 @@ impl<F: Frontend> App<F> {
                     command => command,
                 };
                 let result = {
-                    let target_view = self
-                        .session
-                        .views
-                        .get_mut(&view)
-                        .expect("target view exists");
+                    let target_view = self.session.view_mut(view).expect("target view exists");
                     assert_eq!(
                         target_view.content(),
                         content,
                         "view/content target mismatch"
                     );
-                    let result = self.kernel.contents.execute(
+                    let result = self.kernel.execute(
                         content,
                         ContentInput::View {
                             command,
@@ -272,7 +227,12 @@ impl<F: Frontend> App<F> {
                 if let ContentResult::Handled(outcome) = &result
                     && let Some(change) = &outcome.change
                 {
-                    self.transform_content_views(content, Some(view), change);
+                    self.session.transform_content_views(
+                        self.kernel.contents(),
+                        content,
+                        Some(view),
+                        change,
+                    );
                 }
                 self.handle_content_result(content, result);
             }
@@ -281,38 +241,16 @@ impl<F: Frontend> App<F> {
         Ok(())
     }
 
-    fn transform_content_views(
-        &mut self,
-        content: ContentId,
-        except: Option<ViewId>,
-        change: &crate::core::content::ContentChange,
-    ) {
-        for (view_id, view) in &mut self.session.views {
-            if Some(*view_id) == except || view.content() != content {
-                continue;
-            }
-            if self
-                .kernel
-                .contents
-                .transform_view_state(content, view.state_mut(), change)
-                .expect("view content exists")
-            {
-                view.touch();
-            }
-        }
-    }
-
-    /// 发起异步保存；同一 content 已在保存时，仅保留最新的后续快照。
     pub(super) fn render(&mut self) -> io::Result<()> {
         let query = AppQuery {
-            contents: &self.kernel.contents,
-            views: &self.session.views,
+            contents: self.kernel.contents(),
+            views: self.session.views(),
         };
         self.frontend.render(
-            &self.session.scene,
-            self.session.scene_revision,
+            self.session.scene(),
+            self.session.scene_revision(),
             &query as &dyn RenderQuery,
-            self.session.focused,
+            self.session.focused(),
         )
     }
 }

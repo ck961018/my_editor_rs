@@ -1,7 +1,6 @@
 use std::io;
 
 use crate::app::kernel::Kernel;
-use crate::app::layout::create_editor_session;
 use crate::app::session::ClientSession;
 use crate::core::buffer::Buffer;
 use crate::core::content::Content;
@@ -30,7 +29,7 @@ impl<F: Frontend> App<F> {
         contents.insert(editor_content, Content::Buffer(buffer));
         contents.insert(status_content, Content::StatusBar(status_bar));
         let modes = ModeRegistry::builtin();
-        let session = create_editor_session(&contents, &modes, width, height);
+        let session = ClientSession::editor(&contents, &modes, width, height);
         let kernel = Kernel::new(contents, modes);
         Ok(Self {
             kernel,
