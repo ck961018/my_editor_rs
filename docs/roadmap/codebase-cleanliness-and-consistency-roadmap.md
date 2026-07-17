@@ -252,7 +252,7 @@ keymap 构造代码中。`vim_mode_command(&str)` 还允许构造任意字符串
 
 ### R08：拆分职责过密的大文件
 
-**状态：** 待处理
+**状态：** 处理中
 **说明：** 每个文件单独处理，不进行一次性全仓拆分
 
 候选文件和职责：
@@ -269,6 +269,11 @@ keymap 构造代码中。`vim_mode_command(&str)` 还允许构造任意字符串
 - 若改为目录模块，`mod.rs` 继续只做声明和 re-export；
 - 先移动测试和私有辅助，再考虑类型边界；
 - 每次只处理一个文件，并保持行为不变。
+
+当前进度：
+
+- `tui/scene_renderer.rs`：终端 cell/Unicode 映射已移入 `tui/text_cells.rs`，状态栏字符串
+  格式化已移入 `tui/status_line.rs`；SceneRenderer 保留布局、viewport、查询和绘制编排。
 
 ### R09：清理 dead_code、可见性和阶段性注释
 

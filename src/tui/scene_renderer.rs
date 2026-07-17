@@ -4,8 +4,6 @@
 use std::collections::HashMap;
 use std::io;
 
-use unicode_width::UnicodeWidthChar;
-
 use crate::protocol::content_query::{
     ContentData, ContentQuery, RenderQuery, RowRange, SelectionShape, TextPresentation, ViewData,
     ViewPresentation,
@@ -14,13 +12,17 @@ use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::revision::Revision;
 use crate::protocol::scene::Scene;
 use crate::protocol::selection::{TextOffset, TextPoint};
-use crate::protocol::status::StatusMessage;
 use crate::protocol::viewport::{
     Viewport, ViewportCommand, ViewportMoveAmount, ViewportMoveDirection,
 };
 use crate::terminal::output::Canvas;
 use crate::tui::resolved::{RenderItem, ResolvedScene};
+use crate::tui::status_line::status_line;
 use crate::tui::taffy_engine::TaffyEngine;
+use crate::tui::text_cells::{
+    display_width_before_col, line_content, sanitize_terminal_text, take_display_width,
+    terminal_char, terminal_char_width,
+};
 
 pub struct SceneRenderer {
     engine: TaffyEngine,
@@ -436,61 +438,6 @@ fn paint_line_with_highlight(
         canvas.set_reverse(false)?;
     }
     Ok(())
-}
-
-fn sanitize_terminal_text(text: &str) -> String {
-    text.chars().map(terminal_char).collect()
-}
-
-fn line_content(line: &str) -> &str {
-    line.strip_suffix("\r\n")
-        .or_else(|| line.strip_suffix('\n'))
-        .unwrap_or(line)
-}
-
-fn terminal_char(ch: char) -> char {
-    if ch.is_control() { '\u{fffd}' } else { ch }
-}
-
-fn terminal_char_width(ch: char) -> usize {
-    UnicodeWidthChar::width(ch).unwrap_or(1)
-}
-
-fn display_width_before_col(line: &str, logical_col: usize) -> usize {
-    line_content(line)
-        .chars()
-        .take(logical_col)
-        .map(terminal_char)
-        .map(terminal_char_width)
-        .sum()
-}
-
-fn take_display_width(text: &str, width: usize) -> String {
-    let mut used: usize = 0;
-    text.chars()
-        .map(terminal_char)
-        .take_while(|ch| {
-            let next = used.saturating_add(terminal_char_width(*ch));
-            if next > width {
-                return false;
-            }
-            used = next;
-            true
-        })
-        .collect()
-}
-
-fn status_line(file_name: Option<&str>, modified: bool, message: &StatusMessage) -> String {
-    let name = file_name.unwrap_or("[No Name]");
-    let modified = if modified { "[+]" } else { "" };
-    let msg = match message {
-        StatusMessage::None => "",
-        StatusMessage::Saved => "Saved",
-        StatusMessage::SaveFailed => "SaveFailed",
-        StatusMessage::NewFile => "NewFile",
-        StatusMessage::OpenFailed => "OpenFailed",
-    };
-    format!("{name} {modified}  {msg}")
 }
 
 #[cfg(test)]
