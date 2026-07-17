@@ -1,0 +1,2 @@
+# Normalize text in Git and use LF in every working tree.
+* text=auto eol=lf
