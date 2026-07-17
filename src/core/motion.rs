@@ -2,8 +2,6 @@ use std::ops::Range;
 
 use ropey::Rope;
 
-use crate::core::buffer::{forward_word_start, line_end_insert};
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextMotion {
     WordForward,
@@ -38,6 +36,49 @@ pub enum TextOperator {
 pub struct OperatorCommand {
     pub operator: TextOperator,
     pub target: TextTarget,
+}
+
+pub(crate) fn forward_word_start(rope: &Rope, char_index: usize) -> usize {
+    let len = rope.len_chars();
+    let mut pos = char_index.min(len);
+    if pos >= len {
+        return len;
+    }
+    let start_class = char_class(rope.char(pos));
+    while pos < len && char_class(rope.char(pos)) == start_class {
+        pos += 1;
+    }
+    while pos < len && rope.char(pos).is_whitespace() {
+        pos += 1;
+    }
+    pos
+}
+
+pub(crate) fn line_end_insert(rope: &Rope, row: usize) -> usize {
+    let line_start = rope.line_to_char(row);
+    line_start + line_content_len(rope, row)
+}
+
+fn line_content_len(rope: &Rope, row: usize) -> usize {
+    let line = rope.line(row);
+    let len = line.len_chars();
+    if len >= 2 && line.char(len - 2) == '\r' && line.char(len - 1) == '\n' {
+        len - 2
+    } else if len >= 1 && line.char(len - 1) == '\n' {
+        len - 1
+    } else {
+        len
+    }
+}
+
+fn char_class(ch: char) -> u8 {
+    if ch.is_whitespace() {
+        0
+    } else if ch.is_alphanumeric() || ch == '_' {
+        1
+    } else {
+        2
+    }
 }
 
 pub fn resolve_motion(
@@ -95,6 +136,27 @@ mod tests {
 
         assert_eq!(outcome.destination, 4);
         assert_eq!(outcome.covered, TextRange::Charwise(0..4));
+    }
+
+    #[test]
+    fn word_start_skips_the_current_unit_and_whitespace() {
+        let rope = Rope::from_str("foo.bar baz");
+
+        assert_eq!(forward_word_start(&rope, 0), 3);
+        assert_eq!(forward_word_start(&rope, 3), 4);
+        assert_eq!(forward_word_start(&rope, 4), 8);
+        assert_eq!(
+            forward_word_start(&rope, rope.len_chars()),
+            rope.len_chars()
+        );
+    }
+
+    #[test]
+    fn line_end_insert_excludes_lf_and_crlf() {
+        let rope = Rope::from_str("foo\r\nbar\n");
+
+        assert_eq!(line_end_insert(&rope, 0), 3);
+        assert_eq!(line_end_insert(&rope, 1), 8);
     }
 
     #[test]

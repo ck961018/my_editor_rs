@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::core::mode::{ModeActionName, ModeName};
+use crate::core::mode_name::{ModeActionName, ModeName};
 use crate::core::motion::OperatorCommand;
 use crate::protocol::viewport::ViewportCommand;
 

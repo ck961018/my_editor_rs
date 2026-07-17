@@ -4,7 +4,7 @@ use crate::core::buffer::Buffer;
 use crate::core::command::{ContentCommand, TransactionCommand};
 use crate::core::content_view_state::ContentViewState;
 use crate::core::edit::apply_edit;
-use crate::core::mode::ModeName;
+use crate::core::mode_name::ModeName;
 use crate::core::status_bar::StatusBar;
 use crate::core::transaction::{TextChangeSet, TextStateId, TextTransactionError};
 use crate::protocol::status::StatusMessage;

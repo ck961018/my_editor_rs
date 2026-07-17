@@ -19,7 +19,7 @@ use crate::protocol::viewport::ViewportCommand;
 const DEFAULT_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(1_000);
 
 pub struct Dispatcher {
-    global_keymap: Keymap,
+    global_keymap: Keymap<Command>,
     coordinator: InputCoordinator<CommandSource>,
     sequence_config: KeySequenceConfig,
 }
@@ -81,14 +81,14 @@ enum CommandSource {
 }
 
 impl Dispatcher {
-    pub fn new(global_keymap: Keymap) -> Self {
+    pub fn new(global_keymap: Keymap<Command>) -> Self {
         Self::with_config(
             global_keymap,
             KeySequenceConfig::new(DEFAULT_SEQUENCE_TIMEOUT),
         )
     }
 
-    pub fn with_config(global_keymap: Keymap, sequence_config: KeySequenceConfig) -> Self {
+    pub fn with_config(global_keymap: Keymap<Command>, sequence_config: KeySequenceConfig) -> Self {
         Self {
             global_keymap,
             coordinator: InputCoordinator::default(),
@@ -492,7 +492,7 @@ fn focused_view_id(scene: &Scene, focused: SpaceId) -> Option<ViewId> {
     }
 }
 
-pub fn default_global_keymap() -> Keymap {
+pub fn default_global_keymap() -> Keymap<Command> {
     let mut keymap = Keymap::new();
     keymap.bind(KeyEvent::ctrl('q'), Command::App(AppCommand::Quit));
     keymap.bind(KeyEvent::ctrl('s'), Command::Content(ContentCommand::Save));
@@ -506,7 +506,8 @@ mod tests {
     use crate::core::buffer::Buffer;
     use crate::core::content::{Content, ContentInput};
     use crate::core::content_store::ContentStore;
-    use crate::core::mode::{ModeName, ModeRegistry};
+    use crate::core::mode::ModeRegistry;
+    use crate::core::mode_name::ModeName;
     use crate::core::status_bar::StatusBar;
     use crate::protocol::ids::ContentId;
     use crate::protocol::viewport::{
@@ -739,7 +740,7 @@ mod tests {
                 &modes,
                 &ModeCommand {
                     mode: ModeName::new("vim"),
-                    action: crate::core::mode::ModeActionName::new("count-2"),
+                    action: crate::core::mode_name::ModeActionName::new("count-2"),
                 },
             ),
             Ok(None)

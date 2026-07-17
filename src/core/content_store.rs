@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::core::content::{Content, ContentChange, ContentResult};
 use crate::core::content_view_state::ContentViewState;
-use crate::core::mode::ModeName;
+use crate::core::mode_name::ModeName;
 use crate::protocol::content_query::{
     ContentData, ContentQuery, DocumentStatus, RowRange, StatusBarData,
 };

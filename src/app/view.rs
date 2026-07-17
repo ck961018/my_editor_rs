@@ -38,7 +38,7 @@ impl View {
     pub fn state_mut(&mut self) -> &mut ContentViewState {
         &mut self.state
     }
-    pub fn keymap(&self) -> Option<&Keymap> {
+    pub fn keymap(&self) -> Option<&Keymap<Command>> {
         self.mode.as_ref().map(ModeInstance::keymap)
     }
 

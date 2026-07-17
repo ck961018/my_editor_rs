@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use crate::core::command::{Command, ContentCommand, EditCommand};
 use crate::protocol::key_event::KeyEvent;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,7 +46,7 @@ impl<A> KeyNode<A> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Keymap<A = Command> {
+pub struct Keymap<A> {
     roots: HashMap<KeyEvent, KeyNode<A>>,
 }
 
@@ -112,20 +111,9 @@ fn node_is_empty<A>(node: &KeyNode<A>) -> bool {
     node.action.is_none() && node.children.is_empty()
 }
 
-impl Keymap<Command> {
-    pub fn bind_edit(
-        &mut self,
-        sequence: impl AsRef<[KeyEvent]>,
-        command: EditCommand,
-    ) -> Option<Command> {
-        self.bind(sequence, Command::Content(ContentCommand::Edit(command)))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::command::{Command, ContentCommand, EditCommand};
     use crate::protocol::key_event::{ArrowKey, KeyCode};
 
     #[test]
@@ -167,16 +155,14 @@ mod tests {
     }
 
     #[test]
-    fn edit_binding_wraps_the_command() {
+    fn generic_binding_preserves_the_action() {
         let mut keymap = Keymap::new();
         let enter = KeyEvent::plain(KeyCode::Enter);
-        keymap.bind_edit([enter], EditCommand::InsertText("\n".to_string()));
+        keymap.bind([enter], "insert-newline");
 
         assert_eq!(
             keymap.node(&[enter]).and_then(KeyNode::action),
-            Some(&Command::Content(ContentCommand::Edit(
-                EditCommand::InsertText("\n".to_string())
-            )))
+            Some(&"insert-newline")
         );
     }
 
@@ -201,10 +187,7 @@ mod tests {
     #[test]
     fn keymap_clone_eq() {
         let mut keymap = Keymap::new();
-        keymap.bind_edit(
-            [KeyEvent::arrow(ArrowKey::Left)],
-            EditCommand::MoveLeftBy(1),
-        );
+        keymap.bind([KeyEvent::arrow(ArrowKey::Left)], 1);
         assert_eq!(keymap, keymap.clone());
     }
 }

@@ -202,7 +202,8 @@ Ctrl、Alt、Shift 都是 modifiers，不编码进 `KeyCode`。GUI 或远程 Fro
 ### 7.2 固定序列
 
 `Keymap<A>` 是泛型 trie。每个 `KeyNode<A>` 可以同时拥有 action 和 children，因此单键动作与
-更长前缀可以共存。当前活动固定层只有：
+更长前缀可以共存。该模块只依赖泛型 action 与中立 `KeyEvent`，不认识具体 `Command`；
+Mode 构造 keymap 时负责把 `EditCommand` 包装为顶层命令。当前活动固定层只有：
 
 1. focused View 当前 Mode 的 keymap；
 2. global keymap。

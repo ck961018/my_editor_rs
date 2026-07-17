@@ -12,7 +12,8 @@ use crate::core::command::{Command, ContentCommand, EditCommand, ModeCommand};
 use crate::core::content::Content;
 use crate::core::content_view_state::ContentViewState;
 use crate::core::keymap::Keymap;
-use crate::core::mode::{Mode, ModeActionName, ModeError, ModeName, ModeState};
+use crate::core::mode::{Mode, ModeError, ModeState};
+use crate::core::mode_name::{ModeActionName, ModeName};
 use crate::frontend::Frontend;
 use crate::protocol::content_query::{
     ContentData, ContentQuery, CursorStyle, DocumentStatus, RenderQuery, RowRange,
@@ -42,7 +43,7 @@ struct ScriptedFrontend {
 struct LoopMode {
     name: ModeName,
     actions: Vec<ModeActionName>,
-    keymap: Keymap,
+    keymap: Keymap<Command>,
 }
 
 impl LoopMode {
@@ -68,7 +69,7 @@ impl Mode for LoopMode {
         Box::new(())
     }
 
-    fn keymap(&self, _state: &dyn ModeState) -> &Keymap {
+    fn keymap(&self, _state: &dyn ModeState) -> &Keymap<Command> {
         &self.keymap
     }
 

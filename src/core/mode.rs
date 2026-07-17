@@ -8,6 +8,7 @@ use crate::core::command::{
 };
 use crate::core::input::{InputContext, InputDecision, InputStatus, TimeoutPolicy};
 use crate::core::keymap::Keymap;
+use crate::core::mode_name::{ModeActionName, ModeName};
 use crate::core::motion::{OperatorCommand, TextMotion, TextOperator, TextTarget};
 use crate::protocol::content_query::{CursorStyle, SelectionShape};
 use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
@@ -15,30 +16,21 @@ use crate::protocol::viewport::{
     ViewportCommand, ViewportCursorBehavior, ViewportMoveAmount, ViewportMoveDirection,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ModeName(String);
-
-impl ModeName {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    #[allow(dead_code)] // Future script/protocol adapters read the owned symbolic name.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+trait CommandKeymapExt {
+    fn bind_edit(
+        &mut self,
+        sequence: impl AsRef<[KeyEvent]>,
+        command: EditCommand,
+    ) -> Option<Command>;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ModeActionName(String);
-
-impl ModeActionName {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
+impl CommandKeymapExt for Keymap<Command> {
+    fn bind_edit(
+        &mut self,
+        sequence: impl AsRef<[KeyEvent]>,
+        command: EditCommand,
+    ) -> Option<Command> {
+        self.bind(sequence, command.into())
     }
 }
 
@@ -111,7 +103,7 @@ pub trait Mode {
     fn name(&self) -> &ModeName;
     fn actions(&self) -> &[ModeActionName];
     fn new_state(&self) -> Box<dyn ModeState>;
-    fn keymap(&self, state: &dyn ModeState) -> &Keymap;
+    fn keymap(&self, state: &dyn ModeState) -> &Keymap<Command>;
     fn typing(&self, state: &dyn ModeState, key: KeyEvent) -> Option<Command>;
     fn input_status(&self, _state: &dyn ModeState) -> InputStatus {
         InputStatus::Ready
@@ -244,7 +236,7 @@ impl ModeInstance {
         self.registered.definition.name()
     }
 
-    pub(crate) fn keymap(&self) -> &Keymap {
+    pub(crate) fn keymap(&self) -> &Keymap<Command> {
         self.registered.definition.keymap(self.state.as_ref())
     }
 
@@ -376,7 +368,7 @@ impl ModeSet {
 struct PlainEditMode {
     name: ModeName,
     actions: Vec<ModeActionName>,
-    keymap: Keymap,
+    keymap: Keymap<Command>,
 }
 
 #[cfg(test)]
@@ -404,7 +396,7 @@ impl Mode for PlainEditMode {
         Box::new(())
     }
 
-    fn keymap(&self, _state: &dyn ModeState) -> &Keymap {
+    fn keymap(&self, _state: &dyn ModeState) -> &Keymap<Command> {
         &self.keymap
     }
 
@@ -460,9 +452,9 @@ enum VimPending {
 struct VimMode {
     name: ModeName,
     actions: Vec<ModeActionName>,
-    normal_keymap: Keymap,
-    insert_keymap: Keymap,
-    visual_keymap: Keymap,
+    normal_keymap: Keymap<Command>,
+    insert_keymap: Keymap<Command>,
+    visual_keymap: Keymap<Command>,
 }
 
 const VIM_ACTION_NAMES: [&str; 45] = [
@@ -589,7 +581,7 @@ impl Mode for VimMode {
         })
     }
 
-    fn keymap(&self, state: &dyn ModeState) -> &Keymap {
+    fn keymap(&self, state: &dyn ModeState) -> &Keymap<Command> {
         match self.state(state).state {
             VimState::Normal => &self.normal_keymap,
             VimState::Insert => &self.insert_keymap,
@@ -1126,11 +1118,11 @@ fn viewport_command(
 }
 
 #[cfg(test)]
-fn plain_edit_keymap() -> Keymap {
+fn plain_edit_keymap() -> Keymap<Command> {
     default_text_keymap(true)
 }
 
-fn vim_insert_keymap() -> Keymap {
+fn vim_insert_keymap() -> Keymap<Command> {
     let mut km = default_text_keymap(false);
     km.bind_edit(KeyEvent::ctrl('b'), EditCommand::MoveLeftBy(1));
     km.bind_edit(KeyEvent::ctrl('f'), EditCommand::MoveRightBy(1));
@@ -1149,7 +1141,7 @@ fn vim_insert_keymap() -> Keymap {
     km
 }
 
-fn default_text_keymap(bind_escape_to_collapse: bool) -> Keymap {
+fn default_text_keymap(bind_escape_to_collapse: bool) -> Keymap<Command> {
     let mut km = Keymap::new();
     km.bind_edit(
         KeyEvent::plain(KeyCode::Enter),
@@ -1193,7 +1185,7 @@ fn default_text_keymap(bind_escape_to_collapse: bool) -> Keymap {
     km
 }
 
-fn vim_normal_keymap() -> Keymap {
+fn vim_normal_keymap() -> Keymap<Command> {
     let mut km = Keymap::new();
     km.bind(KeyEvent::char('h'), vim_mode_command("move-left"));
     km.bind(KeyEvent::char('j'), vim_mode_command("move-down"));
@@ -1247,7 +1239,7 @@ fn vim_normal_keymap() -> Keymap {
     km
 }
 
-fn vim_visual_keymap() -> Keymap {
+fn vim_visual_keymap() -> Keymap<Command> {
     let mut km = Keymap::new();
     km.bind(KeyEvent::char('h'), vim_mode_command("move-left"));
     km.bind(KeyEvent::char('j'), vim_mode_command("move-down"));
@@ -1306,7 +1298,7 @@ fn vim_visual_keymap() -> Keymap {
     km
 }
 
-fn bind_vim_viewport_keys(keymap: &mut Keymap) {
+fn bind_vim_viewport_keys(keymap: &mut Keymap<Command>) {
     keymap.bind(KeyEvent::ctrl('u'), vim_mode_command("viewport-half-up"));
     keymap.bind(KeyEvent::ctrl('d'), vim_mode_command("viewport-half-down"));
     keymap.bind(KeyEvent::ctrl('b'), vim_mode_command("viewport-full-up"));
@@ -1329,7 +1321,7 @@ mod tests {
     struct DynamicMode {
         name: ModeName,
         actions: Vec<ModeActionName>,
-        keymap: Keymap,
+        keymap: Keymap<Command>,
     }
 
     impl DynamicMode {
@@ -1360,7 +1352,7 @@ mod tests {
             Box::new(())
         }
 
-        fn keymap(&self, _state: &dyn ModeState) -> &Keymap {
+        fn keymap(&self, _state: &dyn ModeState) -> &Keymap<Command> {
             &self.keymap
         }
 

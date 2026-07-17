@@ -158,7 +158,7 @@ ContentStore revision 不前进的状态。
 
 ### R04：消除 core 内部双向模块依赖
 
-**状态：** 待处理
+**状态：** 已完成（2026-07-17）
 
 当前主要依赖环包括：
 
@@ -178,6 +178,14 @@ command -> mode -> keymap -> command
 - 文本位置、词法和行边界辅助逻辑拥有中立归属；
 - Mode、Command、Motion 和 Buffer 的依赖方向可单向说明；
 - 不把 Vim grammar 移入 Buffer。
+
+处理结果：
+
+- 设计契约记录在 `docs/design/core-dependency-direction.md`；
+- `ModeName`/`ModeActionName` 移入中立 `mode_name` 模块，`command` 不再依赖 `mode`；
+- `Keymap<A>` 删除具体命令默认类型和 `bind_edit`，编辑命令包装只存在于 Mode 构造侧；
+- `forward_word_start` 与 `line_end_insert` 归属 Motion，`motion` 不再反向依赖 Buffer；
+- Vim grammar 仍完整归属 Mode，Buffer 只调用中立 motion/target API。
 
 ### R05：收紧 ContentStore 的存储不变量
 

@@ -4,7 +4,9 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::core::command::CharSearchDirection;
-use crate::core::motion::{TextRange, TextTarget, resolve_target};
+use crate::core::motion::{
+    TextRange, TextTarget, forward_word_start, line_end_insert, resolve_target,
+};
 use crate::core::transaction::{
     Affinity, TextChangeSet, TextEdit, TextStateId, TextTransactionError,
 };
@@ -1301,24 +1303,6 @@ fn backward_word_start(rope: &Rope, char_index: usize) -> usize {
     start
 }
 
-pub(crate) fn forward_word_start(rope: &Rope, char_index: usize) -> usize {
-    let len = rope.len_chars();
-    let mut pos = char_index.min(len);
-    if pos >= len {
-        return len;
-    }
-    // Skip current word/punct unit (same class as char at pos)
-    let start_class = char_class(rope.char(pos));
-    while pos < len && char_class(rope.char(pos)) == start_class {
-        pos += 1;
-    }
-    // Skip whitespace
-    while pos < len && rope.char(pos).is_whitespace() {
-        pos += 1;
-    }
-    pos
-}
-
 fn forward_word_end(rope: &Rope, char_index: usize) -> usize {
     let len = rope.len_chars();
     let mut pos = char_index.min(len);
@@ -1390,11 +1374,6 @@ fn line_end_char(rope: &Rope, row: usize) -> usize {
     }
 }
 
-pub(crate) fn line_end_insert(rope: &Rope, row: usize) -> usize {
-    let line_start = rope.line_to_char(row);
-    line_start + line_content_len(rope, row)
-}
-
 fn is_empty_line(rope: &Rope, row: usize) -> bool {
     line_content_len(rope, row) == 0
 }
@@ -1436,7 +1415,8 @@ fn is_word_char(ch: char) -> bool {
 mod tests {
     use super::*;
     use crate::core::command::{Command, ContentCommand, EditCommand};
-    use crate::core::mode::{ModeActionName, ModeName, ModeSet};
+    use crate::core::mode::ModeSet;
+    use crate::core::mode_name::{ModeActionName, ModeName};
     use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
     use crate::protocol::selection::{Selection, Selections};
     use tempfile::tempdir;
