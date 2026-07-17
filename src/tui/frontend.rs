@@ -1,4 +1,4 @@
-//! TUI 前端：SceneRenderer + Output<W>。Frontend::render 委托 SceneRenderer。
+//! TUI 的 Frontend 实现：SceneRenderer + Output<W>。
 
 use std::io;
 

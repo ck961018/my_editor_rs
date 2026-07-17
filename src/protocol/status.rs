@@ -6,14 +6,3 @@ pub enum StatusMessage {
     NewFile,
     OpenFailed,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn status_message_eq() {
-        assert_eq!(StatusMessage::Saved, StatusMessage::Saved);
-        assert_ne!(StatusMessage::Saved, StatusMessage::None);
-    }
-}

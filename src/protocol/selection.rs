@@ -101,19 +101,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn origin_is_zero() {
-        let c = TextOffset::origin();
-        assert_eq!(c.char_index, 0);
-    }
-
-    #[test]
-    fn copy_and_eq() {
-        let a = TextOffset { char_index: 3 };
-        let b = a;
-        assert_eq!(a, b);
-    }
-
-    #[test]
     fn collapsed_is_empty() {
         let s = Selection::collapsed(TextOffset::origin());
         assert!(s.is_empty());

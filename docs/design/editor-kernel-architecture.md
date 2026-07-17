@@ -303,8 +303,10 @@ TextPoint    Buffer 按当前内容派生的逻辑行列
 DisplayPoint TUI 结合布局和 viewport 计算的显示位置
 ```
 
-当前逻辑列与 terminal cell 列按一对一映射。tab stop、Unicode width、grapheme、emoji 和软换行
-尚未进入显示模型。
+`TextPoint.col` 仍是 Unicode scalar 的逻辑列；TUI 的 `text_cells` 使用 `unicode-width` 把可见
+scalar 映射为 terminal cell 宽度，宽字符的 viewport 跟随、裁剪、selection paint 和光标列都按
+cell 计算。CR/LF 不进入行内容，其他控制字符在输出前替换为 U+FFFD。tab stop、grapheme cluster、
+组合 emoji 序列和软换行尚未进入显示模型。
 
 ## 9. 保存与后台任务
 

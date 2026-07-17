@@ -32,29 +32,3 @@ pub(super) struct RenderItem {
 pub(super) struct ResolvedScene {
     pub(super) items: Vec<RenderItem>,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn render_item_holds_fields() {
-        let it = RenderItem {
-            space_id: SpaceId(1),
-            view_id: ViewId(0),
-            rect: Rect {
-                x: 0,
-                y: 0,
-                width: 80,
-                height: 23,
-            },
-            clip: None,
-            layer: Layer::Base,
-            z_index: 0,
-            order: 0,
-        };
-        assert_eq!(it.space_id, SpaceId(1));
-        assert_eq!(it.view_id, ViewId(0));
-        assert_eq!(it.rect.width, 80);
-    }
-}

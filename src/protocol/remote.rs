@@ -211,23 +211,4 @@ mod tests {
 
         assert_eq!(error.code, ProtocolErrorCode::MissingCapability);
     }
-
-    #[test]
-    fn messages_own_their_payloads() {
-        let message = ClientMessage::Request(Request {
-            id: RequestId(7),
-            data: RequestData::Content {
-                content: ContentId(3),
-                query: ContentQuery::StatusBarData,
-            },
-        });
-
-        assert!(matches!(
-            message,
-            ClientMessage::Request(Request {
-                id: RequestId(7),
-                ..
-            })
-        ));
-    }
 }

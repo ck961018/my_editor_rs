@@ -11,7 +11,7 @@ use app::App;
 use crossterm::terminal::size as term_size;
 use terminal::lifecycle::TerminalGuard;
 use terminal::output::Output;
-use tui::tui_frontend::TuiFrontend;
+use tui::TuiFrontend;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> io::Result<()> {

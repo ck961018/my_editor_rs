@@ -1,6 +1,6 @@
 # Codebase Cleanliness and Consistency Roadmap
 
-**状态：** 待逐项处理
+**状态：** 已完成（2026-07-17）
 **创建日期：** 2026-07-17
 **最近更新：** 2026-07-17
 
@@ -55,7 +55,7 @@
 | R09 | P2 | 已完成 | `dead_code` 抑制、可见性和阶段性注释失真 |
 | R10 | P2 | 已完成 | View presentation 通过 selection 是否存在进行隐式推断 |
 | R11 | P2 | 已完成 | Scene identity、ID 溢出策略和 Frontend View 生命周期不一致 |
-| R12 | P2 | 待处理 | 测试组织、模块命名和当前架构文档存在局部不一致 |
+| R12 | P2 | 已完成 | 测试组织、模块命名和当前架构文档存在局部不一致 |
 
 ## 4. 问题明细
 
@@ -367,7 +367,7 @@ keymap 构造代码中。`vim_mode_command(&str)` 还允许构造任意字符串
 
 ### R12：统一测试组织、模块命名和当前文档
 
-**状态：** 待处理
+**状态：** 已完成（2026-07-17）
 
 当前测试既有大型内联测试模块，也有 `tui/test_scene.rs` 形式的共享 fixture；部分 protocol
 测试只验证 derive、构造或字段保存，回归价值较低。模块命名还存在
@@ -382,6 +382,17 @@ keymap 构造代码中。`vim_mode_command(&str)` 还允许构造任意字符串
 - 消除明显的模块/type 名称重复，但不进行无关全仓改名；
 - `docs/design/editor-kernel-architecture.md` 始终描述当前实现，不混入已完成前的旧阶段语义。
 
+处理结果：
+
+- `tui_frontend.rs` 改为 `tui/frontend.rs`，TUI 根模块直接 re-export `TuiFrontend`；resolved、
+  renderer 和 Taffy adapter 保持 TUI 私有，`main.rs` 使用 `tui::TuiFrontend`；
+- App 集成流程继续统一放在 `app/tests.rs`，TUI 跨 renderer/layout 的共享 Scene fixture 继续放在
+  `tui/test_scene.rs`，紧邻私有实现的行为单测保持内联；
+- 删除仅验证 derive、枚举可构造或字段原样保存的 protocol/resolved 测试，保留 selection
+  变换、viewport、SceneBuilder、布局、协议协商和渲染等行为边界测试；
+- 架构文档改为描述当前 Unicode scalar 到 terminal cell 的映射、宽字符裁剪与控制字符清理，
+  并明确尚未支持的 grapheme/emoji sequence/soft wrap 边界。
+
 ## 5. 每项通用验收
 
 每个编号完成时至少满足：
@@ -395,7 +406,7 @@ keymap 构造代码中。`vim_mode_command(&str)` 还允许构造任意字符串
 - 运行 `git diff --check`；
 - 更新本文件对应条目的状态、结果和必要的后续项。
 
-## 6. 推荐起点
+## 6. 后续维护
 
-下一项建议处理 **R04：消除 core 内部双向模块依赖**。该项会调整 Command、Mode、Keymap、
-Motion 与 Buffer 的依赖方向，应先确认拆环边界，再进入实现。
+R01-R12 已全部完成。后续发现新的整洁性或一致性问题时，应新增独立编号并记录当前证据、目标
+与验收条件，不复用已完成条目承载新的重构范围。

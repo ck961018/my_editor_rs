@@ -98,12 +98,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn origin_is_zero() {
-        let v = Viewport::origin();
-        assert_eq!((v.top_row, v.left_col), (0, 0));
-    }
-
-    #[test]
     fn scroll_down_when_cursor_below() {
         let mut v = Viewport::origin();
         v.ensure_cursor_visible(25, 23);
