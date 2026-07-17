@@ -99,7 +99,8 @@ protocol -> std
 - 几何和布局 cell 单位使用整数；`f32` 只应出现在 Taffy adapter 边界。
 - `Content` 是静态闭合的内容集合；新增内容类型必须扩展 `Content` 枚举和 `ContentStore` 分派。
 - `ContentStore` 是唯一内容表；app 不得借出或识别 `Buffer`、`StatusBar` 等具体内容类型。
-- 内容执行通过 `Content::execute(ContentInput)`，渲染数据通过 `ContentStore::query`；不要向 Content 加入渲染方法。
+- 内容执行通过 `Content::execute(ContentInput)`，渲染数据通过 `ContentStore::query`；
+  不要向 Content 加入渲染方法。
 - `SceneRenderer` 负责布局、viewport 跟随、pull 可见行和画布输出。
 - app 测试用局部 `ScriptedFrontend`（impl `Frontend`，事件回放 + render
   计数）驱动集成流程；修改 `Frontend` trait 或 `SceneRenderer` 时要同步
@@ -107,6 +108,7 @@ protocol -> std
 - 仓库中存在一些为后续功能预留的 `#[allow(dead_code)]` 类型和变体。
   不要仅因未使用就删除，除非任务明确要求清理预留 API。
 - 注释应解释不明显的约束或跨层原因，避免复述代码。
+- 修改或新增 Markdown（`*.md`）文件时，所有行均不得超过 80 列。
 
 ## 测试重点
 
