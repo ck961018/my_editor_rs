@@ -13,6 +13,15 @@ use crate::core::transaction::{
 use crate::protocol::selection::{Selection, Selections, TextOffset, TextPoint};
 use crate::protocol::status::StatusMessage;
 
+mod navigation;
+mod ranges;
+
+use navigation::{
+    backward_word_start, first_non_blank_in_line, forward_word_end, line_break_width_before,
+    line_content_len, line_end_char, next_paragraph, prev_paragraph,
+};
+use ranges::merge_ranges;
+
 pub struct Buffer {
     rope: Rope,
     path: Option<PathBuf>,
@@ -1245,170 +1254,6 @@ impl Default for Buffer {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn merge_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
-    ranges.sort_unstable_by_key(|&(start, end)| (start, end));
-    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
-    for (start, end) in ranges {
-        if let Some((previous_start, previous_end)) = merged.last_mut()
-            && start <= *previous_end
-        {
-            *previous_start = (*previous_start).min(start);
-            *previous_end = (*previous_end).max(end);
-        } else {
-            merged.push((start, end));
-        }
-    }
-
-    merged
-}
-
-fn line_content_len(rope: &Rope, row: usize) -> usize {
-    let line = rope.line(row);
-    let len = line.len_chars();
-    if len >= 2 && line.char(len - 2) == '\r' && line.char(len - 1) == '\n' {
-        len - 2
-    } else if len >= 1 && line.char(len - 1) == '\n' {
-        len - 1
-    } else {
-        len
-    }
-}
-
-fn line_break_width_before(rope: &Rope, row: usize) -> usize {
-    let line_start = rope.line_to_char(row);
-    if line_start >= 2 && rope.char(line_start - 2) == '\r' && rope.char(line_start - 1) == '\n' {
-        2
-    } else {
-        usize::from(line_start > 0)
-    }
-}
-
-fn backward_word_start(rope: &Rope, char_index: usize) -> usize {
-    let mut start = char_index.min(rope.len_chars());
-    while start > 0 && rope.char(start - 1).is_whitespace() {
-        start -= 1;
-    }
-    if start == 0 {
-        return 0;
-    }
-    if is_word_char(rope.char(start - 1)) {
-        while start > 0 && is_word_char(rope.char(start - 1)) {
-            start -= 1;
-        }
-    } else {
-        start -= 1;
-    }
-    start
-}
-
-fn forward_word_end(rope: &Rope, char_index: usize) -> usize {
-    let len = rope.len_chars();
-    let mut pos = char_index.min(len);
-    if pos >= len {
-        return len;
-    }
-    // If on whitespace or at end of current unit, skip whitespace first
-    if rope.char(pos).is_whitespace() {
-        while pos < len && rope.char(pos).is_whitespace() {
-            pos += 1;
-        }
-        if pos >= len {
-            return len;
-        }
-    } else {
-        // If not at end of current unit, the loop below advances to end.
-        // If already at end of current unit, skip to next.
-        let start_class = char_class(rope.char(pos));
-        if pos + 1 < len && char_class(rope.char(pos + 1)) != start_class {
-            // Already at end of unit; step past it, then skip whitespace to next word
-            pos += 1;
-            while pos < len && rope.char(pos).is_whitespace() {
-                pos += 1;
-            }
-            if pos >= len {
-                return len;
-            }
-        }
-    }
-    // Advance to end of current word/punct unit
-    let end_class = char_class(rope.char(pos));
-    while pos + 1 < len && char_class(rope.char(pos + 1)) == end_class {
-        pos += 1;
-    }
-    pos
-}
-
-fn char_class(ch: char) -> u8 {
-    if ch.is_whitespace() {
-        0
-    } else if is_word_char(ch) {
-        1
-    } else {
-        2
-    }
-}
-
-fn first_non_blank_in_line(rope: &Rope, row: usize) -> usize {
-    let line_start = rope.line_to_char(row);
-    let line = rope.line(row);
-    for (i, ch) in line.chars().enumerate() {
-        if ch == '\n' {
-            break;
-        }
-        if !ch.is_whitespace() {
-            return line_start + i;
-        }
-    }
-    line_start
-}
-
-fn line_end_char(rope: &Rope, row: usize) -> usize {
-    let line_start = rope.line_to_char(row);
-    let content_len = line_content_len(rope, row);
-    if content_len == 0 {
-        line_start
-    } else {
-        line_start + content_len - 1
-    }
-}
-
-fn is_empty_line(rope: &Rope, row: usize) -> bool {
-    line_content_len(rope, row) == 0
-}
-
-fn prev_paragraph(rope: &Rope, char_index: usize) -> usize {
-    let cur_row = rope.char_to_line(char_index.min(rope.len_chars()));
-    if cur_row == 0 {
-        return 0;
-    }
-    let mut row = cur_row - 1;
-    loop {
-        if is_empty_line(rope, row) {
-            return rope.line_to_char(row);
-        }
-        if row == 0 {
-            break;
-        }
-        row -= 1;
-    }
-    0
-}
-
-fn next_paragraph(rope: &Rope, char_index: usize) -> usize {
-    let cur_row = rope.char_to_line(char_index.min(rope.len_chars()));
-    let max_row = rope.len_lines().saturating_sub(1);
-    for row in (cur_row + 1)..=max_row {
-        if is_empty_line(rope, row) {
-            return rope.line_to_char(row);
-        }
-    }
-    rope.line_to_char(max_row)
-}
-
-fn is_word_char(ch: char) -> bool {
-    ch.is_alphanumeric() || ch == '_'
 }
 
 #[cfg(test)]
