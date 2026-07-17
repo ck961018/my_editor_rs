@@ -230,7 +230,7 @@ command -> mode -> keymap -> command
 
 ### R07：为 Vim action 建立单一真相源
 
-**状态：** 待处理
+**状态：** 已完成（2026-07-17）
 
 Vim action 名称当前同时出现在 `VIM_ACTION_NAMES`、`Mode::execute` 的字符串 match 和
 keymap 构造代码中。`vim_mode_command(&str)` 还允许构造任意字符串，拼写错误只能在运行时
@@ -242,6 +242,13 @@ keymap 构造代码中。`vim_mode_command(&str)` 还允许构造任意字符串
 - 注册列表、keymap 和执行分派从同一组定义派生；
 - 只有跨动态边界时才转换为 owned `ModeActionName`；
 - 为 action 集合完整性提供集中测试，而不是依赖每个按键测试间接覆盖。
+
+处理结果：
+
+- 新增私有 `VimAction` 枚举和唯一的 `VIM_ACTIONS` catalog；
+- 注册名称、keymap 命令和 execute 分派均使用 `VimAction`，生产 keymap 不再接收任意字符串；
+- `ModeActionName` 只在 ModeRegistry 动态边界与内建 action 之间转换；
+- 集中测试验证 catalog 名称唯一、注册列表一致且每个 action 都能从动态名称往返解析。
 
 ### R08：拆分职责过密的大文件
 

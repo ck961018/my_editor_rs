@@ -156,6 +156,8 @@ View 对上游只暴露中立行为：当前 keymap、输入状态、动态 capt
 
 Mode 的私有语法只产生通用命令。例如 Vim 的 `f/F`、count 和 `dd` 最终产生
 `MoveToChar`、`MoveToLine` 或 `DeleteLines`，Buffer 不知道这些按键语法。
+内建 Vim action 由私有 `VimAction` 枚举统一定义；注册列表、keymap 构造和执行分派都从该
+枚举派生。只有进入通用 ModeRegistry 的动态名称边界时才转换为 owned `ModeActionName`。
 
 ### 6.2 命令层级
 
