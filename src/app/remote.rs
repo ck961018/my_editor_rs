@@ -5,7 +5,7 @@ use crate::protocol::remote::{
     ProtocolError, ProtocolErrorCode, Request, RequestData, Response, ResponseData,
 };
 
-use super::AppQuery;
+use super::query::AppQuery;
 
 pub(super) fn respond(query: &AppQuery<'_>, request: Request) -> Response {
     let result = match request.data {
