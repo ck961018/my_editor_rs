@@ -5,6 +5,7 @@
 //! 与前端查询适配。
 
 mod application;
+mod bootstrap;
 mod dispatcher;
 mod kernel;
 mod layout;

@@ -209,7 +209,7 @@ command -> mode -> keymap -> command
 
 ### R06：统一启动阶段的 ID 分配
 
-**状态：** 待处理
+**状态：** 已完成（2026-07-17）
 **前置：** 建议在 R05 后处理
 
 `App::new` 创建 editor/status Content 时使用 `ContentId(0/1)`，而
@@ -220,6 +220,13 @@ command -> mode -> keymap -> command
 - 由一个 bootstrap 过程分配并传递 ContentId/ViewId；
 - session 构造不重新猜测 ContentStore 中的角色 ID；
 - 不要求 App 长期保存 editor/status 角色字段，仍可从 Scene/View 关系推导运行时目标。
+
+处理结果：
+
+- 新增 `app::bootstrap`，统一分配初始 ContentId/ViewId 并构建 ContentStore、Kernel 与 Session；
+- `ClientSession::editor` 接收显式 `EditorSessionInit`，不再硬编码 ContentId/ViewId 或后续起点；
+- `App::new` 只负责打开初始 Buffer 并调用 bootstrap，不保存 editor/status 角色字段；
+- 使用非零 ContentId 的测试证明 Session 按传入角色绑定 View，而不是依赖约定编号。
 
 ### R07：为 Vim action 建立单一真相源
 

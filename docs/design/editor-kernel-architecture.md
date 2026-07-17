@@ -68,6 +68,10 @@ App<F: Frontend>
 session registry，也没有用 `Arc<Mutex<_>>` 提供并发共享。该拆分首先用于明确所有权，并为
 未来多 Frontend 保留自然扩展点。
 
+启动由 `app::bootstrap` 统一分配 editor/status 的 `ContentId` 与初始 `ViewId`，再把明确的
+View↔Content 绑定和下一个 ViewId 传给 `ClientSession`。Session 构造不读取约定编号来猜测
+Content 角色，`App` 也不长期保存 editor/status 角色字段。
+
 Viewport 属于具体 Frontend。TUI 的 `SceneRenderer` 按 `ViewId` 保存 viewport，后端
 `ClientSession` 不保存终端滚动位置。
 
@@ -101,7 +105,8 @@ enum Content {
 }
 ```
 
-`ContentStore` 是唯一 Content 表。除启动时构造内建 Content 外，App 的执行与查询路径不借出
+`ContentStore` 是唯一 Content 表，每个 `ContentEntry` 同时保存 Content 与 Revision，重复
+ContentId 会在不修改旧条目的前提下返回错误。除启动时构造内建 Content 外，App 的执行与查询路径不借出
 `Buffer`/`StatusBar`，而是通过 ContentStore 分派。Content 通过三类 `ContentInput` 接收行为：
 
 - `Command`：不依赖某个 View 的共享内容命令，例如保存；

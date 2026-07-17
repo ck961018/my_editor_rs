@@ -1,11 +1,11 @@
 use std::io;
 
 use super::App;
+use super::bootstrap::create_editor_session;
 use super::dispatcher::{DispatchCommand, Dispatcher, default_global_keymap};
 use super::layout::{LayoutError, resolve_focus, view_for_space};
 use super::message::AppMessage;
 use super::query::AppQuery;
-use super::session::ClientSession;
 use super::view::View;
 use crate::core::buffer::Buffer;
 use crate::core::command::{Command, ContentCommand, EditCommand, ModeCommand};
@@ -175,7 +175,14 @@ fn text_presentation(view: &ViewData) -> &TextPresentation {
 #[tokio::test(flavor = "multi_thread")]
 async fn sessions_sharing_one_kernel_keep_client_state_independent() {
     let mut app = make_app(vec![], None);
-    let mut second = ClientSession::editor(app.kernel.contents(), app.kernel.modes(), 80, 20);
+    let mut second = create_editor_session(
+        app.kernel.contents(),
+        app.kernel.modes(),
+        80,
+        20,
+        editor_cid(),
+        ContentId(1),
+    );
     let first_view = view_id(&app, app.session.focused());
     let second_view = view_for_space(second.scene(), second.focused()).unwrap();
 

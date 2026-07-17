@@ -31,31 +31,41 @@ pub(super) struct ClientSession {
     dispatcher: Dispatcher,
 }
 
+pub(super) struct InitialView {
+    pub view: ViewId,
+    pub content: ContentId,
+}
+
+pub(super) struct EditorSessionInit {
+    pub editor: InitialView,
+    pub status: InitialView,
+    pub next_view_id: u64,
+}
+
 impl ClientSession {
     pub(super) fn editor(
         contents: &ContentStore,
         modes: &ModeRegistry,
         width: usize,
         height: usize,
+        init: EditorSessionInit,
     ) -> Self {
-        let editor_view = ViewId(0);
-        let status_view = ViewId(1);
         let mut views = HashMap::new();
         views.insert(
-            editor_view,
-            create_view(ContentId(0), contents, modes).expect("editor content exists"),
+            init.editor.view,
+            create_view(init.editor.content, contents, modes).expect("editor content exists"),
         );
         views.insert(
-            status_view,
-            create_view(ContentId(1), contents, modes).expect("status content exists"),
+            init.status.view,
+            create_view(init.status.content, contents, modes).expect("status content exists"),
         );
         let mut scene_builder = SceneBuilder::new();
         let (scene, editor_space) = build_editor_scene(
             &mut scene_builder,
             width as i32,
             height as i32,
-            editor_view,
-            status_view,
+            init.editor.view,
+            init.status.view,
         )
         .expect("valid editor scene");
         let focused = resolve_focus(&scene, editor_space, Some(editor_space))
@@ -65,7 +75,7 @@ impl ClientSession {
             scene_builder,
             scene_revision: Revision::default(),
             views,
-            next_view_id: 2,
+            next_view_id: init.next_view_id,
             focused,
             dispatcher: Dispatcher::new(default_global_keymap()),
         }
