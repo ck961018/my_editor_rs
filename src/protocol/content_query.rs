@@ -47,6 +47,13 @@ pub enum ViewPresentation {
     StatusBar,
 }
 
+/// Content 声明的呈现类别；ViewPresentation 在此基础上附加会话状态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContentPresentation {
+    Text,
+    StatusBar,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewData {
     pub content: ContentId,

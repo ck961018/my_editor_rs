@@ -5,7 +5,7 @@ use crate::core::content::{Content, ContentChange, ContentResult};
 use crate::core::content_view_state::ContentViewState;
 use crate::core::mode_name::ModeName;
 use crate::protocol::content_query::{
-    ContentData, ContentQuery, DocumentStatus, RowRange, StatusBarData,
+    ContentData, ContentPresentation, ContentQuery, DocumentStatus, RowRange, StatusBarData,
 };
 use crate::protocol::ids::ContentId;
 use crate::protocol::revision::Revision;
@@ -49,6 +49,12 @@ impl ContentStore {
         self.entries
             .get(&id)
             .map(|entry| entry.content.create_view_state())
+    }
+
+    pub fn presentation(&self, id: ContentId) -> Option<ContentPresentation> {
+        self.entries
+            .get(&id)
+            .map(|entry| entry.content.presentation())
     }
 
     pub fn default_mode(&self, id: ContentId) -> Option<ModeName> {
@@ -173,7 +179,9 @@ mod tests {
     use crate::core::command::{ContentCommand, EditCommand};
     use crate::core::content::{Content, ContentEffect, ContentInput, ContentResult};
     use crate::core::status_bar::StatusBar;
-    use crate::protocol::content_query::{ContentData, ContentQuery, RowRange};
+    use crate::protocol::content_query::{
+        ContentData, ContentPresentation, ContentQuery, RowRange,
+    };
     use crate::protocol::ids::ContentId;
 
     #[test]
@@ -232,6 +240,29 @@ mod tests {
 
         assert!(store.contains(ContentId(4)));
         assert!(!store.contains(ContentId(5)));
+    }
+
+    #[test]
+    fn presentation_is_dispatched_by_content() {
+        let buffer_id = ContentId(4);
+        let status_bar_id = ContentId(5);
+        let mut store = ContentStore::default();
+        store
+            .insert(buffer_id, Content::Buffer(Buffer::new()))
+            .unwrap();
+        store
+            .insert(status_bar_id, Content::StatusBar(StatusBar::new(buffer_id)))
+            .unwrap();
+
+        assert_eq!(
+            store.presentation(buffer_id),
+            Some(ContentPresentation::Text)
+        );
+        assert_eq!(
+            store.presentation(status_bar_id),
+            Some(ContentPresentation::StatusBar)
+        );
+        assert_eq!(store.presentation(ContentId(99)), None);
     }
 
     #[test]

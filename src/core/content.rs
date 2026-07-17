@@ -7,6 +7,7 @@ use crate::core::edit::apply_edit;
 use crate::core::mode_name::ModeName;
 use crate::core::status_bar::StatusBar;
 use crate::core::transaction::{TextChangeSet, TextStateId, TextTransactionError};
+use crate::protocol::content_query::ContentPresentation;
 use crate::protocol::status::StatusMessage;
 
 pub enum ContentInput<'a> {
@@ -137,6 +138,13 @@ pub enum Content {
 }
 
 impl Content {
+    pub fn presentation(&self) -> ContentPresentation {
+        match self {
+            Self::Buffer(_) => ContentPresentation::Text,
+            Self::StatusBar(_) => ContentPresentation::StatusBar,
+        }
+    }
+
     pub fn create_view_state(&self) -> ContentViewState {
         match self {
             Self::Buffer(_) => ContentViewState::buffer(),
@@ -351,6 +359,7 @@ mod tests {
     #[test]
     fn buffer_creates_text_view_state_with_vim_default() {
         let content = Content::Buffer(Buffer::new());
+        assert_eq!(content.presentation(), ContentPresentation::Text);
         assert!(matches!(
             content.create_view_state(),
             ContentViewState::Buffer(_)
@@ -373,6 +382,7 @@ mod tests {
     #[test]
     fn status_bar_creates_stateless_view_without_mode() {
         let content = Content::StatusBar(StatusBar::new(ContentId(0)));
+        assert_eq!(content.presentation(), ContentPresentation::StatusBar);
         assert!(matches!(
             content.create_view_state(),
             ContentViewState::StatusBar

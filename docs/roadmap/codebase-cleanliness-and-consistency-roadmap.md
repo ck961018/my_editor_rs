@@ -53,7 +53,7 @@
 | R07 | P1 | 已完成 | Vim action 名称在注册、执行和 keymap 中重复为字符串 |
 | R08 | P1 | 已完成 | `buffer.rs`、`mode.rs`、`scene_renderer.rs` 等文件职责过密 |
 | R09 | P2 | 已完成 | `dead_code` 抑制、可见性和阶段性注释失真 |
-| R10 | P2 | 待处理 | View presentation 通过 selection 是否存在进行隐式推断 |
+| R10 | P2 | 已完成 | View presentation 通过 selection 是否存在进行隐式推断 |
 | R11 | P2 | 待处理 | Scene identity、ID 溢出策略和 Frontend View 生命周期不一致 |
 | R12 | P2 | 待处理 | 测试组织、模块命名和当前架构文档存在局部不一致 |
 
@@ -316,7 +316,7 @@ keymap 构造代码中。`vim_mode_command(&str)` 还允许构造任意字符串
 
 ### R10：显式表达 View presentation
 
-**状态：** 待处理
+**状态：** 已完成（2026-07-17）
 
 `AppQuery::view` 当前通过 `View::selections() -> Option<_>` 推断
 `ViewPresentation::Text/StatusBar`，把“没有 selection”隐式等价为“StatusBar”。以后出现
@@ -328,6 +328,15 @@ keymap 构造代码中。`vim_mode_command(&str)` 还允许构造任意字符串
 - App 不通过具体 Content 类型探测 presentation；
 - 新增 Content 类型时，编译器或集中分派能够提示必须补齐 presentation；
 - pull query 和 TUI 的显式 `ViewPresentation` 分派保持不变。
+
+处理结果：
+
+- protocol 新增无会话数据的 `ContentPresentation::{Text, StatusBar}`；
+- 闭合 `Content` 枚举通过穷尽 match 声明 presentation，`ContentStore::presentation` 是 App
+  唯一读取入口；新增 Content 变体时必须补齐该分派；
+- `AppQuery::view` 先按 `ContentPresentation` 决定 ViewPresentation，再读取 Text 所需的
+  selections、cursor style 和 selection shape；selection 不再承担类型判别职责；
+- TUI 继续只消费带完整会话数据的 `ViewPresentation`，pull query 模型未改变。
 
 ### R11：统一 Scene 和 View 生命周期细节
 
