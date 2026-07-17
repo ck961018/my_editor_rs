@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use crate::app::dispatcher::{
-    DispatchCommand, DispatchInput, DispatchOutcome, Dispatcher, default_global_keymap,
-};
+use crate::app::command_resolver::default_global_keymap;
+use crate::app::dispatcher::{DispatchCommand, DispatchInput, DispatchOutcome, Dispatcher};
 use crate::app::layout::{
     LayoutError, create_view, focusable_view_count, resolve_focus, scene_views, view_for_space,
     view_space_focusable,

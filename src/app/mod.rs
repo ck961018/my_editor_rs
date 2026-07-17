@@ -6,6 +6,7 @@
 
 mod application;
 mod bootstrap;
+mod command_resolver;
 mod dispatcher;
 mod kernel;
 mod layout;

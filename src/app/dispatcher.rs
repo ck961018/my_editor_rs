@@ -1,10 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use crate::app::command_resolver::{focused_view_id, resolve_command};
 use crate::app::view::View;
-use crate::core::command::{
-    AppCommand, Command, ContentCommand, ContentCommandContext, ModeCommand,
-};
+use crate::core::command::{AppCommand, Command, ContentCommand, ModeCommand};
 use crate::core::input::{
     AwaitingSource, InputCoordinator, InputDecision, InputStatus, KeySequenceConfig, KeymapLayer,
     PendingSequence, continuations, longest_complete, match_sequence,
@@ -13,7 +12,6 @@ use crate::core::keymap::Keymap;
 use crate::protocol::ids::{ContentId, SpaceId, ViewId};
 use crate::protocol::key_event::KeyEvent;
 use crate::protocol::scene::Scene;
-use crate::protocol::space::SpaceKind;
 use crate::protocol::viewport::ViewportCommand;
 
 const DEFAULT_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(1_000);
@@ -75,9 +73,18 @@ pub(crate) enum DispatchOutcome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CommandSource {
+pub(super) enum CommandSource {
     View(ViewId),
     Global,
+}
+
+impl CommandSource {
+    pub(super) fn view_or(self, focused_view: ViewId) -> ViewId {
+        match self {
+            Self::View(view) => view,
+            Self::Global => focused_view,
+        }
+    }
 }
 
 impl Dispatcher {
@@ -430,78 +437,10 @@ fn fallback(key: KeyEvent, focused_view: ViewId, views: &HashMap<ViewId, View>) 
     }
 }
 
-fn resolve_command(
-    command: Command,
-    source: CommandSource,
-    focused_view: ViewId,
-    views: &HashMap<ViewId, View>,
-) -> Option<DispatchCommand> {
-    match command {
-        Command::App(command) => Some(DispatchCommand::App(command)),
-        Command::Noop => Some(DispatchCommand::Noop),
-        Command::Content(command) if command.context() == ContentCommandContext::WithViewState => {
-            let view = match source {
-                CommandSource::View(view) => view,
-                CommandSource::Global => focused_view,
-            };
-            Some(DispatchCommand::ContentWithView {
-                command,
-                view,
-                content: views.get(&view)?.content(),
-            })
-        }
-        Command::Content(command) => {
-            let view = match source {
-                CommandSource::View(view) => view,
-                CommandSource::Global => focused_view,
-            };
-            Some(DispatchCommand::Content {
-                command,
-                content: views.get(&view)?.content(),
-            })
-        }
-        Command::Mode(command) => {
-            let view = match source {
-                CommandSource::View(view) => view,
-                CommandSource::Global => focused_view,
-            };
-            Some(DispatchCommand::Mode {
-                command,
-                view,
-                content: views.get(&view)?.content(),
-            })
-        }
-        Command::Viewport(command) => {
-            let view = match source {
-                CommandSource::View(view) => view,
-                CommandSource::Global => focused_view,
-            };
-            Some(DispatchCommand::Viewport {
-                command,
-                view,
-                content: views.get(&view)?.content(),
-            })
-        }
-    }
-}
-
-fn focused_view_id(scene: &Scene, focused: SpaceId) -> Option<ViewId> {
-    match &scene.node(focused).space.kind {
-        SpaceKind::Content { view, .. } => Some(*view),
-        SpaceKind::Container { .. } => None,
-    }
-}
-
-pub fn default_global_keymap() -> Keymap<Command> {
-    let mut keymap = Keymap::new();
-    keymap.bind(KeyEvent::ctrl('q'), Command::App(AppCommand::Quit));
-    keymap.bind(KeyEvent::ctrl('s'), Command::Content(ContentCommand::Save));
-    keymap
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::command_resolver::default_global_keymap;
     use crate::app::scene_model::{SceneBuilder, build_editor_scene};
     use crate::core::buffer::Buffer;
     use crate::core::content::{Content, ContentInput};

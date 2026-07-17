@@ -274,6 +274,8 @@ keymap 构造代码中。`vim_mode_command(&str)` 还允许构造任意字符串
 
 - `tui/scene_renderer.rs`：终端 cell/Unicode 映射已移入 `tui/text_cells.rs`，状态栏字符串
   格式化已移入 `tui/status_line.rs`；SceneRenderer 保留布局、viewport、查询和绘制编排。
+- `app/dispatcher.rs`：CommandSource 的目标解析与 global keymap 已移入
+  `app/command_resolver.rs`；Dispatcher 保留输入层叠、固定序列、Awaiting 和 replay 状态机。
 
 ### R09：清理 dead_code、可见性和阶段性注释
 

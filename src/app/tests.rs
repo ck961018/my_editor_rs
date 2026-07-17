@@ -2,7 +2,8 @@ use std::io;
 
 use super::App;
 use super::bootstrap::create_editor_session;
-use super::dispatcher::{DispatchCommand, Dispatcher, default_global_keymap};
+use super::command_resolver::default_global_keymap;
+use super::dispatcher::{DispatchCommand, Dispatcher};
 use super::layout::{LayoutError, resolve_focus, view_for_space};
 use super::message::AppMessage;
 use super::query::AppQuery;
