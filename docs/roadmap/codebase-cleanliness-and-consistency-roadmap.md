@@ -47,11 +47,11 @@
 | R01 | P0 | 已完成 | `app/mod.rs` 同时承担模块入口、核心实现和大型测试 |
 | R02 | P0 | 已完成 | `Kernel` / `ClientSession` 只有字段分组，没有封装所属行为 |
 | R03 | P0 | 已完成 | `ContentCommand` 分类与执行归属不一致，`Sequence` 可表达非法组合 |
-| R04 | P1 | 待处理 | `core` 内存在双向模块依赖，泛型模块被具体命令污染 |
-| R05 | P1 | 待处理 | `ContentStore` 使用并行表维护 Content 和 revision，重复 ID 静默覆盖 |
-| R06 | P1 | 待处理 | editor/status ContentId 在启动路径存在重复真相源 |
-| R07 | P1 | 待处理 | Vim action 名称在注册、执行和 keymap 中重复为字符串 |
-| R08 | P1 | 待处理 | `buffer.rs`、`mode.rs`、`scene_renderer.rs` 等文件职责过密 |
+| R04 | P1 | 已完成 | `core` 内存在双向模块依赖，泛型模块被具体命令污染 |
+| R05 | P1 | 已完成 | `ContentStore` 使用并行表维护 Content 和 revision，重复 ID 静默覆盖 |
+| R06 | P1 | 已完成 | editor/status ContentId 在启动路径存在重复真相源 |
+| R07 | P1 | 已完成 | Vim action 名称在注册、执行和 keymap 中重复为字符串 |
+| R08 | P1 | 已完成 | `buffer.rs`、`mode.rs`、`scene_renderer.rs` 等文件职责过密 |
 | R09 | P2 | 待处理 | `dead_code` 抑制、可见性和阶段性注释失真 |
 | R10 | P2 | 待处理 | View presentation 通过 selection 是否存在进行隐式推断 |
 | R11 | P2 | 待处理 | Scene identity、ID 溢出策略和 Frontend View 生命周期不一致 |
@@ -252,7 +252,7 @@ keymap 构造代码中。`vim_mode_command(&str)` 还允许构造任意字符串
 
 ### R08：拆分职责过密的大文件
 
-**状态：** 处理中
+**状态：** 已完成（2026-07-17）
 **说明：** 每个文件单独处理，不进行一次性全仓拆分
 
 候选文件和职责：
@@ -277,6 +277,8 @@ keymap 构造代码中。`vim_mode_command(&str)` 还允许构造任意字符串
   状态、事务以及对编辑行为的编排。
 - `core/mode.rs`：静态文本/Vim keymap 与 ModeCommand 构造已移入
   `core/mode/keymaps.rs`；Mode 本体保留 trait、registry、instance、Vim 状态和 action 执行。
+- `core/edit.rs`：selection 的“收缩到边界后移动”“移动后收缩”“仅扩展”和批量收缩策略已移入
+  `core/edit/selection_movement.rs`；`apply_edit` 保留对完整 `EditCommand` 的穷尽分派。
 - `tui/scene_renderer.rs`：终端 cell/Unicode 映射已移入 `tui/text_cells.rs`，状态栏字符串
   格式化已移入 `tui/status_line.rs`；SceneRenderer 保留布局、viewport、查询和绘制编排。
 - `app/dispatcher.rs`：CommandSource 的目标解析与 global keymap 已移入

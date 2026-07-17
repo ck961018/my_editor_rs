@@ -3,6 +3,10 @@ use crate::core::command::EditCommand;
 use crate::core::motion::TextOperator;
 use crate::protocol::selection::Selections;
 
+mod selection_movement;
+
+use selection_movement::{CollapseEdge, collapse_all, collapse_or_move, extend, move_and_collapse};
+
 /// 执行文本编辑命令。全局命令由 App 分流；多 selection 在 Buffer 内统一处理。
 pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: &mut Selections) {
     match command {
@@ -11,79 +15,60 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
         },
         // Left/Right：非空 selection 收缩到 min/max，collapsed 时移动 head。
         EditCommand::MoveLeftBy(n) => {
-            for sel in selections.all_mut() {
-                if sel.anchor != sel.head {
-                    sel.head = if sel.anchor.char_index < sel.head.char_index {
-                        sel.anchor
-                    } else {
-                        sel.head
-                    };
-                } else {
-                    buffer.move_head_left(sel, n);
-                }
-                Buffer::collapse_to_head(sel);
-            }
+            collapse_or_move(
+                buffer,
+                selections,
+                CollapseEdge::Lower,
+                |buffer, selection| {
+                    buffer.move_head_left(selection, n);
+                },
+            );
         }
         EditCommand::MoveRightBy(n) => {
-            for sel in selections.all_mut() {
-                if sel.anchor != sel.head {
-                    sel.head = if sel.anchor.char_index > sel.head.char_index {
-                        sel.anchor
-                    } else {
-                        sel.head
-                    };
-                } else {
-                    buffer.move_head_right(sel, n);
-                }
-                Buffer::collapse_to_head(sel);
-            }
+            collapse_or_move(
+                buffer,
+                selections,
+                CollapseEdge::Upper,
+                |buffer, selection| {
+                    buffer.move_head_right(selection, n);
+                },
+            );
         }
         EditCommand::MoveWithinLineLeftBy(n) => {
-            for sel in selections.all_mut() {
-                if sel.anchor != sel.head {
-                    sel.head = if sel.anchor.char_index < sel.head.char_index {
-                        sel.anchor
-                    } else {
-                        sel.head
-                    };
-                } else {
-                    buffer.move_head_within_line_left(sel, n);
-                }
-                Buffer::collapse_to_head(sel);
-            }
+            collapse_or_move(
+                buffer,
+                selections,
+                CollapseEdge::Lower,
+                |buffer, selection| {
+                    buffer.move_head_within_line_left(selection, n);
+                },
+            );
         }
         EditCommand::MoveWithinLineRightBy(n) => {
-            for sel in selections.all_mut() {
-                if sel.anchor != sel.head {
-                    sel.head = if sel.anchor.char_index > sel.head.char_index {
-                        sel.anchor
-                    } else {
-                        sel.head
-                    };
-                } else {
-                    buffer.move_head_within_line_right(sel, n);
-                }
-                Buffer::collapse_to_head(sel);
-            }
+            collapse_or_move(
+                buffer,
+                selections,
+                CollapseEdge::Upper,
+                |buffer, selection| {
+                    buffer.move_head_within_line_right(selection, n);
+                },
+            );
         }
         // Up/Down：移动 head 后 collapse，取消 selection 并继续垂直移动。
         EditCommand::MoveUpBy(n) => {
-            for sel in selections.all_mut() {
-                buffer.move_head_up(sel, n);
-                Buffer::collapse_to_head(sel);
-            }
+            move_and_collapse(buffer, selections, |buffer, selection| {
+                buffer.move_head_up(selection, n);
+            });
         }
         EditCommand::MoveDownBy(n) => {
-            for sel in selections.all_mut() {
-                buffer.move_head_down(sel, n);
-                Buffer::collapse_to_head(sel);
-            }
+            move_and_collapse(buffer, selections, |buffer, selection| {
+                buffer.move_head_down(selection, n);
+            });
         }
         EditCommand::MoveToLine { line_index } => {
-            for sel in selections.all_mut() {
-                buffer.move_head_to_line(sel, line_index);
-                Buffer::collapse_to_head(sel);
-            }
+            move_and_collapse(buffer, selections, |buffer, selection| {
+                buffer.move_head_to_line(selection, line_index);
+            });
         }
         EditCommand::MoveToChar {
             target,
@@ -97,186 +82,145 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
             }
         }
         EditCommand::MoveWordForward => {
-            for sel in selections.all_mut() {
-                if sel.anchor != sel.head {
-                    sel.head = if sel.anchor.char_index < sel.head.char_index {
-                        sel.anchor
-                    } else {
-                        sel.head
-                    };
-                } else {
-                    buffer.move_head_word_forward(sel);
-                }
-                Buffer::collapse_to_head(sel);
-            }
+            collapse_or_move(
+                buffer,
+                selections,
+                CollapseEdge::Lower,
+                |buffer, selection| {
+                    buffer.move_head_word_forward(selection);
+                },
+            );
         }
         EditCommand::MoveWordBackward => {
-            for sel in selections.all_mut() {
-                if sel.anchor != sel.head {
-                    sel.head = if sel.anchor.char_index > sel.head.char_index {
-                        sel.anchor
-                    } else {
-                        sel.head
-                    };
-                } else {
-                    buffer.move_head_word_backward(sel);
-                }
-                Buffer::collapse_to_head(sel);
-            }
+            collapse_or_move(
+                buffer,
+                selections,
+                CollapseEdge::Upper,
+                |buffer, selection| {
+                    buffer.move_head_word_backward(selection);
+                },
+            );
         }
         EditCommand::MoveWordEnd => {
-            for sel in selections.all_mut() {
-                if sel.anchor != sel.head {
-                    sel.head = if sel.anchor.char_index < sel.head.char_index {
-                        sel.anchor
-                    } else {
-                        sel.head
-                    };
-                } else {
-                    buffer.move_head_word_end(sel);
-                }
-                Buffer::collapse_to_head(sel);
-            }
+            collapse_or_move(
+                buffer,
+                selections,
+                CollapseEdge::Lower,
+                |buffer, selection| {
+                    buffer.move_head_word_end(selection);
+                },
+            );
         }
         EditCommand::MoveToLineStart => {
-            for sel in selections.all_mut() {
-                if sel.anchor != sel.head {
-                    sel.head = if sel.anchor.char_index < sel.head.char_index {
-                        sel.anchor
-                    } else {
-                        sel.head
-                    };
-                } else {
-                    buffer.move_head_to_line_start(sel);
-                }
-                Buffer::collapse_to_head(sel);
-            }
+            collapse_or_move(
+                buffer,
+                selections,
+                CollapseEdge::Lower,
+                |buffer, selection| {
+                    buffer.move_head_to_line_start(selection);
+                },
+            );
         }
         EditCommand::MoveToFirstNonBlank => {
-            for sel in selections.all_mut() {
-                if sel.anchor != sel.head {
-                    sel.head = if sel.anchor.char_index < sel.head.char_index {
-                        sel.anchor
-                    } else {
-                        sel.head
-                    };
-                } else {
-                    buffer.move_head_to_first_non_blank(sel);
-                }
-                Buffer::collapse_to_head(sel);
-            }
+            collapse_or_move(
+                buffer,
+                selections,
+                CollapseEdge::Lower,
+                |buffer, selection| {
+                    buffer.move_head_to_first_non_blank(selection);
+                },
+            );
         }
         EditCommand::MoveToLineEnd => {
-            for sel in selections.all_mut() {
-                if sel.anchor != sel.head {
-                    sel.head = if sel.anchor.char_index > sel.head.char_index {
-                        sel.anchor
-                    } else {
-                        sel.head
-                    };
-                } else {
-                    buffer.move_head_to_line_end(sel);
-                }
-                Buffer::collapse_to_head(sel);
-            }
+            collapse_or_move(
+                buffer,
+                selections,
+                CollapseEdge::Upper,
+                |buffer, selection| {
+                    buffer.move_head_to_line_end(selection);
+                },
+            );
         }
         EditCommand::MoveAfterLineEnd => {
-            for sel in selections.all_mut() {
-                if sel.anchor != sel.head {
-                    sel.head = if sel.anchor.char_index > sel.head.char_index {
-                        sel.anchor
-                    } else {
-                        sel.head
-                    };
-                } else {
-                    buffer.move_head_after_line_end(sel);
-                }
-                Buffer::collapse_to_head(sel);
-            }
+            collapse_or_move(
+                buffer,
+                selections,
+                CollapseEdge::Upper,
+                |buffer, selection| {
+                    buffer.move_head_after_line_end(selection);
+                },
+            );
         }
         EditCommand::MoveToLastLine => {
-            for sel in selections.all_mut() {
-                if sel.anchor != sel.head {
-                    sel.head = if sel.anchor.char_index > sel.head.char_index {
-                        sel.anchor
-                    } else {
-                        sel.head
-                    };
-                } else {
-                    buffer.move_head_to_last_line(sel);
-                }
-                Buffer::collapse_to_head(sel);
-            }
+            collapse_or_move(
+                buffer,
+                selections,
+                CollapseEdge::Upper,
+                |buffer, selection| {
+                    buffer.move_head_to_last_line(selection);
+                },
+            );
         }
         EditCommand::MoveToPrevParagraph => {
-            for sel in selections.all_mut() {
-                if sel.anchor != sel.head {
-                    sel.head = if sel.anchor.char_index < sel.head.char_index {
-                        sel.anchor
-                    } else {
-                        sel.head
-                    };
-                } else {
-                    buffer.move_head_to_prev_paragraph(sel);
-                }
-                Buffer::collapse_to_head(sel);
-            }
+            collapse_or_move(
+                buffer,
+                selections,
+                CollapseEdge::Lower,
+                |buffer, selection| {
+                    buffer.move_head_to_prev_paragraph(selection);
+                },
+            );
         }
         EditCommand::MoveToNextParagraph => {
-            for sel in selections.all_mut() {
-                if sel.anchor != sel.head {
-                    sel.head = if sel.anchor.char_index > sel.head.char_index {
-                        sel.anchor
-                    } else {
-                        sel.head
-                    };
-                } else {
-                    buffer.move_head_to_next_paragraph(sel);
-                }
-                Buffer::collapse_to_head(sel);
-            }
+            collapse_or_move(
+                buffer,
+                selections,
+                CollapseEdge::Upper,
+                |buffer, selection| {
+                    buffer.move_head_to_next_paragraph(selection);
+                },
+            );
         }
         EditCommand::MoveBy { chars, lines } => {
-            for sel in selections.all_mut() {
-                buffer.move_head_by(sel, chars, lines);
-                Buffer::collapse_to_head(sel);
-            }
+            move_and_collapse(buffer, selections, |buffer, selection| {
+                buffer.move_head_by(selection, chars, lines);
+            });
         }
         // Extend：只移动 head，不改变 anchor，也不 collapse。
         EditCommand::ExtendLeftBy(n) => {
-            for sel in selections.all_mut() {
-                buffer.move_head_left(sel, n);
-            }
+            extend(buffer, selections, |buffer, selection| {
+                buffer.move_head_left(selection, n);
+            });
         }
         EditCommand::ExtendRightBy(n) => {
-            for sel in selections.all_mut() {
-                buffer.move_head_right(sel, n);
-            }
+            extend(buffer, selections, |buffer, selection| {
+                buffer.move_head_right(selection, n);
+            });
         }
         EditCommand::ExtendWithinLineLeftBy(n) => {
-            for sel in selections.all_mut() {
-                buffer.move_head_within_line_left(sel, n);
-            }
+            extend(buffer, selections, |buffer, selection| {
+                buffer.move_head_within_line_left(selection, n);
+            });
         }
         EditCommand::ExtendWithinLineRightBy(n) => {
-            for sel in selections.all_mut() {
-                buffer.move_head_within_line_right(sel, n);
-            }
+            extend(buffer, selections, |buffer, selection| {
+                buffer.move_head_within_line_right(selection, n);
+            });
         }
         EditCommand::ExtendUpBy(n) => {
-            for sel in selections.all_mut() {
-                buffer.move_head_up(sel, n);
-            }
+            extend(buffer, selections, |buffer, selection| {
+                buffer.move_head_up(selection, n);
+            });
         }
         EditCommand::ExtendDownBy(n) => {
-            for sel in selections.all_mut() {
-                buffer.move_head_down(sel, n);
-            }
+            extend(buffer, selections, |buffer, selection| {
+                buffer.move_head_down(selection, n);
+            });
         }
         EditCommand::ExtendToLine { line_index } => {
-            for sel in selections.all_mut() {
-                buffer.move_head_to_line(sel, line_index);
-            }
+            extend(buffer, selections, |buffer, selection| {
+                buffer.move_head_to_line(selection, line_index);
+            });
         }
         EditCommand::ExtendToChar {
             target,
@@ -288,55 +232,35 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
             }
         }
         EditCommand::ExtendWordForward => {
-            for sel in selections.all_mut() {
-                buffer.move_head_word_forward(sel);
-            }
+            extend(buffer, selections, Buffer::move_head_word_forward);
         }
         EditCommand::ExtendWordBackward => {
-            for sel in selections.all_mut() {
-                buffer.move_head_word_backward(sel);
-            }
+            extend(buffer, selections, Buffer::move_head_word_backward);
         }
         EditCommand::ExtendWordEnd => {
-            for sel in selections.all_mut() {
-                buffer.move_head_word_end(sel);
-            }
+            extend(buffer, selections, Buffer::move_head_word_end);
         }
         EditCommand::ExtendToLineStart => {
-            for sel in selections.all_mut() {
-                buffer.move_head_to_line_start(sel);
-            }
+            extend(buffer, selections, Buffer::move_head_to_line_start);
         }
         EditCommand::ExtendToFirstNonBlank => {
-            for sel in selections.all_mut() {
-                buffer.move_head_to_first_non_blank(sel);
-            }
+            extend(buffer, selections, Buffer::move_head_to_first_non_blank);
         }
         EditCommand::ExtendToLineEnd => {
-            for sel in selections.all_mut() {
-                buffer.move_head_to_line_end(sel);
-            }
+            extend(buffer, selections, Buffer::move_head_to_line_end);
         }
         EditCommand::ExtendToLastLine => {
-            for sel in selections.all_mut() {
-                buffer.move_head_to_last_line(sel);
-            }
+            extend(buffer, selections, Buffer::move_head_to_last_line);
         }
         EditCommand::ExtendToPrevParagraph => {
-            for sel in selections.all_mut() {
-                buffer.move_head_to_prev_paragraph(sel);
-            }
+            extend(buffer, selections, Buffer::move_head_to_prev_paragraph);
         }
         EditCommand::ExtendToNextParagraph => {
-            for sel in selections.all_mut() {
-                buffer.move_head_to_next_paragraph(sel);
-            }
+            extend(buffer, selections, Buffer::move_head_to_next_paragraph);
         }
         // Escape：collapse 到 head，并仅保留 primary selection。
         EditCommand::CollapseSelections => {
-            for sel in selections.all_mut() {
-                Buffer::collapse_to_head(sel);
-            }
+            collapse_all(selections);
             selections.retain_primary();
         }
         EditCommand::MoveTo { char_idx, line_idx } => {
