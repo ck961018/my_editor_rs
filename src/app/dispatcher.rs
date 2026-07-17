@@ -525,8 +525,12 @@ mod tests {
         let editor = ContentId(0);
         let status = ContentId(1);
         let mut contents = ContentStore::default();
-        contents.insert(editor, Content::Buffer(Buffer::new()));
-        contents.insert(status, Content::StatusBar(StatusBar::new(editor)));
+        contents
+            .insert(editor, Content::Buffer(Buffer::new()))
+            .unwrap();
+        contents
+            .insert(status, Content::StatusBar(StatusBar::new(editor)))
+            .unwrap();
         let modes = ModeRegistry::builtin();
         let mut builder = SceneBuilder::new();
         let (scene, focused) =

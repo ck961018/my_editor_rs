@@ -445,7 +445,8 @@ async fn replace_content_rebuilds_view_from_origin() {
     let other = ContentId(9);
     app.kernel
         .contents_mut()
-        .insert(other, Content::Buffer(Buffer::new()));
+        .insert(other, Content::Buffer(Buffer::new()))
+        .unwrap();
     for key in ['i', 'a', 'b', 'c'] {
         app.handle_event(FrontendEvent::Key(KeyEvent::char(key)))
             .await
@@ -573,7 +574,8 @@ fn replacing_only_focusable_content_with_inert_space_is_rejected() {
     let other = ContentId(9);
     app.kernel
         .contents_mut()
-        .insert(other, Content::Buffer(Buffer::new()));
+        .insert(other, Content::Buffer(Buffer::new()))
+        .unwrap();
 
     assert_eq!(
         app.replace_space_content(focused, other, false),
@@ -885,7 +887,8 @@ fn multi_space_edit_targets_only_focused_content() {
     let other_cid = ContentId(9);
     app.kernel
         .contents_mut()
-        .insert(other_cid, Content::Buffer(Buffer::new()));
+        .insert(other_cid, Content::Buffer(Buffer::new()))
+        .unwrap();
     let other_sid = app
         .split_space(
             app.session.focused(),
@@ -940,7 +943,8 @@ fn content_with_view_rejects_mismatched_content_target() {
     let other_cid = ContentId(9);
     app.kernel
         .contents_mut()
-        .insert(other_cid, Content::Buffer(Buffer::new()));
+        .insert(other_cid, Content::Buffer(Buffer::new()))
+        .unwrap();
 
     app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("Z".to_string())),
@@ -1319,7 +1323,8 @@ async fn execute_save_uses_resolved_content_target() {
     other.insert_char(0, 'X');
     app.kernel
         .contents_mut()
-        .insert(other_cid, Content::Buffer(other));
+        .insert(other_cid, Content::Buffer(other))
+        .unwrap();
 
     app.execute_command(DispatchCommand::Content {
         command: ContentCommand::Save,

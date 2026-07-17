@@ -71,7 +71,9 @@ mod tests {
         fn new() -> Self {
             let content = ContentId(0);
             let mut contents = ContentStore::default();
-            contents.insert(content, Content::Buffer(Buffer::new()));
+            contents
+                .insert(content, Content::Buffer(Buffer::new()))
+                .unwrap();
             let view = View::new(content, contents.create_view_state(content).unwrap(), None);
             Self {
                 contents,

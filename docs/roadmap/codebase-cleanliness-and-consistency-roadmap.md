@@ -189,7 +189,7 @@ command -> mode -> keymap -> command
 
 ### R05：收紧 ContentStore 的存储不变量
 
-**状态：** 待处理
+**状态：** 已完成（2026-07-17）
 
 `ContentStore` 当前用两个 `HashMap` 分别保存 `Content` 和 `Revision`，依靠插入和
 执行路径人工保持同步；重复 `ContentId` 会静默覆盖旧 Content 并重置 revision。
@@ -199,6 +199,13 @@ command -> mode -> keymap -> command
 - 使用单一 `ContentEntry { content, revision }` 或等价结构；
 - 插入重复 ID 时显式返回错误或旧值，策略与 Mode/View/Scene identity 保持一致；
 - query、execute、revision 和 StatusBar target revision 行为不变。
+
+处理结果：
+
+- `ContentStore` 改为单一 `HashMap<ContentId, ContentEntry>`，Content 与 Revision 不再分表；
+- `insert` 返回 `Result<(), DuplicateContentId>`，重复 ID 不替换旧 Content，也不重置 revision；
+- 新增回归测试同时验证重复插入后的原内容和 revision 保持不变；
+- query、execute、View state 创建和 StatusBar target revision 均从同一 entry 表读取。
 
 ### R06：统一启动阶段的 ID 分配
 

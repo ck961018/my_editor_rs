@@ -26,8 +26,12 @@ impl<F: Frontend> App<F> {
         }
         let status_bar = StatusBar::new(editor_content);
         let mut contents = ContentStore::default();
-        contents.insert(editor_content, Content::Buffer(buffer));
-        contents.insert(status_content, Content::StatusBar(status_bar));
+        contents
+            .insert(editor_content, Content::Buffer(buffer))
+            .expect("editor content id is unique");
+        contents
+            .insert(status_content, Content::StatusBar(status_bar))
+            .expect("status content id is unique");
         let modes = ModeRegistry::builtin();
         let session = ClientSession::editor(&contents, &modes, width, height);
         let kernel = Kernel::new(contents, modes);
