@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use crate::app::dispatcher::{DispatchInput, DispatchOutcome, Dispatcher, default_global_keymap};
+use crate::app::dispatcher::{
+    DispatchCommand, DispatchInput, DispatchOutcome, Dispatcher, default_global_keymap,
+};
 use crate::app::layout::{
     LayoutError, create_view, focusable_view_count, resolve_focus, scene_views, view_for_space,
     view_space_focusable,
@@ -10,6 +12,7 @@ use crate::app::scene_model::{
     CloseResult, SceneBuilder, SceneError, SplitResult, build_editor_scene,
 };
 use crate::app::view::View;
+use crate::core::command::Command;
 use crate::core::content::ContentChange;
 use crate::core::content_store::ContentStore;
 use crate::core::mode::ModeRegistry;
@@ -110,6 +113,15 @@ impl ClientSession {
     pub(super) fn dispatch_timeout(&mut self, now: Instant) -> DispatchOutcome {
         self.dispatcher
             .dispatch_timeout(now, self.focused, &self.scene, &mut self.views)
+    }
+
+    pub(super) fn resolve_from_view(
+        &self,
+        command: Command,
+        view: ViewId,
+    ) -> Option<DispatchCommand> {
+        self.dispatcher
+            .resolve_from_view(command, view, &self.views)
     }
 
     pub(super) fn sync_focused_input(&mut self, now: Instant) {

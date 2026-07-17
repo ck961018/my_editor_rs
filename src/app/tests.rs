@@ -8,9 +8,11 @@ use super::query::AppQuery;
 use super::session::ClientSession;
 use super::view::View;
 use crate::core::buffer::Buffer;
-use crate::core::command::{Command, ContentCommand, EditCommand};
+use crate::core::command::{Command, ContentCommand, EditCommand, ModeCommand};
 use crate::core::content::Content;
 use crate::core::content_view_state::ContentViewState;
+use crate::core::keymap::Keymap;
+use crate::core::mode::{Mode, ModeActionName, ModeError, ModeName, ModeState};
 use crate::frontend::Frontend;
 use crate::protocol::content_query::{
     ContentData, ContentQuery, CursorStyle, DocumentStatus, RenderQuery, RowRange,
@@ -35,6 +37,59 @@ struct ScriptedFrontend {
     fail_render: bool,
     viewport_height: usize,
     viewport_commands: Vec<(ViewId, ViewportCommand)>,
+}
+
+struct LoopMode {
+    name: ModeName,
+    actions: Vec<ModeActionName>,
+    keymap: Keymap,
+}
+
+impl LoopMode {
+    fn new() -> Self {
+        Self {
+            name: ModeName::new("loop"),
+            actions: vec![ModeActionName::new("again")],
+            keymap: Keymap::new(),
+        }
+    }
+}
+
+impl Mode for LoopMode {
+    fn name(&self) -> &ModeName {
+        &self.name
+    }
+
+    fn actions(&self) -> &[ModeActionName] {
+        &self.actions
+    }
+
+    fn new_state(&self) -> Box<dyn ModeState> {
+        Box::new(())
+    }
+
+    fn keymap(&self, _state: &dyn ModeState) -> &Keymap {
+        &self.keymap
+    }
+
+    fn typing(&self, _state: &dyn ModeState, _key: KeyEvent) -> Option<Command> {
+        None
+    }
+
+    fn cursor_style(&self, _state: &dyn ModeState) -> CursorStyle {
+        CursorStyle::Default
+    }
+
+    fn execute(
+        &self,
+        _state: &mut dyn ModeState,
+        _action: &ModeActionName,
+    ) -> Result<Option<Command>, ModeError> {
+        Ok(Some(Command::Mode(ModeCommand {
+            mode: self.name.clone(),
+            action: self.actions[0].clone(),
+        })))
+    }
 }
 
 impl ScriptedFrontend {
@@ -222,7 +277,7 @@ fn document_status(app: &App<ScriptedFrontend>, content: ContentId) -> DocumentS
 fn content_query_reads_buffer_and_view() {
     let mut app = make_app(vec![], None);
     let focused_view = view_id(&app, app.session.focused());
-    app.execute_command(DispatchCommand::ViewContent {
+    app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("hi".to_string())),
         view: focused_view,
         content: editor_cid(),
@@ -243,6 +298,61 @@ fn content_query_reads_buffer_and_view() {
     let text = text_presentation(&view);
     assert_eq!(text.selections.primary().head().char_index, 2);
     assert_eq!(text.cursor_style, CursorStyle::Block);
+}
+
+#[test]
+fn unknown_mode_command_returns_a_diagnostic_error() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+
+    let error = app
+        .execute_command(DispatchCommand::Mode {
+            command: ModeCommand {
+                mode: ModeName::new("missing"),
+                action: ModeActionName::new("action"),
+            },
+            view,
+            content: editor_cid(),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("unknown mode 'missing'"));
+}
+
+#[test]
+fn recursive_mode_command_chain_stops_at_the_execution_limit() {
+    let mut app = make_app(vec![], None);
+    let mode_name = ModeName::new("loop");
+    let mode = {
+        let modes = app.kernel.modes_mut();
+        modes.register(LoopMode::new());
+        modes.instantiate(&mode_name).unwrap()
+    };
+    let state = app
+        .kernel
+        .contents()
+        .create_view_state(editor_cid())
+        .unwrap();
+    let focused = app.session.focused();
+    app.session
+        .replace_space_content(focused, View::new(editor_cid(), state, Some(mode)), true)
+        .unwrap();
+    let view = view_id(&app, focused);
+
+    let error = app
+        .execute_command(DispatchCommand::Mode {
+            command: ModeCommand {
+                mode: mode_name,
+                action: ModeActionName::new("again"),
+            },
+            view,
+            content: editor_cid(),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("exceeded the limit of 256"));
 }
 
 #[test]
@@ -787,7 +897,7 @@ fn multi_space_edit_targets_only_focused_content() {
         .new_space;
     let other_view = view_id(&app, other_sid);
 
-    app.execute_command(DispatchCommand::ViewContent {
+    app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("Z".to_string())),
         view: other_view,
         content: other_cid,
@@ -824,14 +934,14 @@ fn multi_space_edit_targets_only_focused_content() {
 
 #[test]
 #[should_panic(expected = "view/content target mismatch")]
-fn view_content_rejects_mismatched_view_content_target() {
+fn content_with_view_rejects_mismatched_content_target() {
     let mut app = make_app(vec![], None);
     let other_cid = ContentId(9);
     app.kernel
         .contents_mut()
         .insert(other_cid, Content::Buffer(Buffer::new()));
 
-    app.execute_command(DispatchCommand::ViewContent {
+    app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("Z".to_string())),
         view: view_id(&app, app.session.focused()),
         content: other_cid,
@@ -1071,7 +1181,7 @@ async fn prefix_key_sequence_saves() {
 #[test]
 fn save_completed_ok_marks_buffer_saved() {
     let mut app = make_app(vec![], None);
-    app.execute_command(DispatchCommand::ViewContent {
+    app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("x".to_string())),
         view: view_id(&app, app.session.focused()),
         content: editor_cid(),
@@ -1137,7 +1247,7 @@ async fn stale_save_completion_keeps_newer_edits_modified() {
         content: editor_cid(),
     })
     .unwrap();
-    app.execute_command(DispatchCommand::ViewContent {
+    app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("X".to_string())),
         view: view_id(&app, app.session.focused()),
         content: editor_cid(),
@@ -1158,7 +1268,7 @@ async fn save_during_pending_write_queues_latest_snapshot() {
     let path_str = path.to_str().unwrap().to_owned();
     let mut app = make_app(vec![], Some(&path_str));
 
-    app.execute_command(DispatchCommand::ViewContent {
+    app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("A".to_string())),
         view: view_id(&app, app.session.focused()),
         content: editor_cid(),
@@ -1169,7 +1279,7 @@ async fn save_during_pending_write_queues_latest_snapshot() {
         content: editor_cid(),
     })
     .unwrap();
-    app.execute_command(DispatchCommand::ViewContent {
+    app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("B".to_string())),
         view: view_id(&app, app.session.focused()),
         content: editor_cid(),
@@ -1385,7 +1495,7 @@ async fn vim_line_visual_ctrl_d_deletes_frontend_sized_line_range() {
         None,
     );
     let focused_view = view_id(&app, app.session.focused());
-    app.execute_command(DispatchCommand::ViewContent {
+    app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("one\ntwo\nthree\nfour".to_string())),
         view: focused_view,
         content: editor_cid(),
@@ -1630,7 +1740,7 @@ fn editing_shared_content_reconciles_other_view_selections() {
     let mut app = make_app(vec![], None);
     let left = app.session.focused();
     let left_view = view_id(&app, left);
-    app.execute_command(DispatchCommand::ViewContent {
+    app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("abc".to_string())),
         view: left_view,
         content: editor_cid(),
@@ -1659,7 +1769,7 @@ fn editing_shared_content_reconciles_other_view_selections() {
         _ => unreachable!(),
     }
 
-    app.execute_command(DispatchCommand::ViewContent {
+    app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::Delete(-1)),
         view: left_view,
         content: editor_cid(),
@@ -1683,7 +1793,7 @@ fn shared_view_positions_follow_text_change_affinity() {
     let mut app = make_app(vec![], None);
     let left = app.session.focused();
     let left_view = view_id(&app, left);
-    app.execute_command(DispatchCommand::ViewContent {
+    app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("abc".to_string())),
         view: left_view,
         content: editor_cid(),
@@ -1703,7 +1813,7 @@ fn shared_view_positions_follow_text_change_affinity() {
             Selections::single(Selection::collapsed(TextOffset { char_index: 1 }));
     }
 
-    app.execute_command(DispatchCommand::ViewContent {
+    app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("X".to_string())),
         view: left_view,
         content: editor_cid(),
@@ -1727,7 +1837,7 @@ fn shared_view_positions_follow_undo_and_redo_changes() {
     let mut app = make_app(vec![], None);
     let left = app.session.focused();
     let left_view = view_id(&app, left);
-    app.execute_command(DispatchCommand::ViewContent {
+    app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("abc".to_string())),
         view: left_view,
         content: editor_cid(),
@@ -1745,7 +1855,7 @@ fn shared_view_positions_follow_undo_and_redo_changes() {
     *state.selections_mut() =
         Selections::single(Selection::collapsed(TextOffset { char_index: 3 }));
 
-    app.execute_command(DispatchCommand::ViewContent {
+    app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Undo,
         view: left_view,
         content: editor_cid(),
@@ -1763,7 +1873,7 @@ fn shared_view_positions_follow_undo_and_redo_changes() {
         );
     }
 
-    app.execute_command(DispatchCommand::ViewContent {
+    app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Redo,
         view: left_view,
         content: editor_cid(),
@@ -1813,7 +1923,7 @@ fn no_op_edit_does_not_advance_content_or_view_revision() {
     let view_revision = app.session.views()[&view].revision();
     let content_revision = app.kernel.contents().revision(editor_cid()).unwrap();
 
-    app.execute_command(DispatchCommand::ViewContent {
+    app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::MoveLeftBy(1)),
         view,
         content: editor_cid(),
@@ -1834,7 +1944,7 @@ async fn frontend_error_still_waits_for_pending_save() {
     std::fs::write(&path, "old").unwrap();
     let mut app = make_app(vec![], path.to_str());
     let view = view_id(&app, app.session.focused());
-    app.execute_command(DispatchCommand::ViewContent {
+    app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("new".to_string())),
         view,
         content: editor_cid(),
@@ -1860,7 +1970,7 @@ async fn render_error_still_waits_for_pending_save() {
     std::fs::write(&path, "old").unwrap();
     let mut app = make_app(vec![], path.to_str());
     let view = view_id(&app, app.session.focused());
-    app.execute_command(DispatchCommand::ViewContent {
+    app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("new".to_string())),
         view,
         content: editor_cid(),

@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::app::view::View;
-use crate::core::command::{AppCommand, Command, ContentCommand};
+use crate::core::command::{
+    AppCommand, Command, ContentCommand, ContentCommandContext, ModeCommand,
+};
 use crate::core::input::{
     AwaitingSource, InputCoordinator, InputDecision, InputStatus, KeySequenceConfig, KeymapLayer,
     PendingSequence, continuations, longest_complete, match_sequence,
@@ -12,6 +14,7 @@ use crate::protocol::ids::{ContentId, SpaceId, ViewId};
 use crate::protocol::key_event::KeyEvent;
 use crate::protocol::scene::Scene;
 use crate::protocol::space::SpaceKind;
+use crate::protocol::viewport::ViewportCommand;
 
 const DEFAULT_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(1_000);
 
@@ -28,8 +31,18 @@ pub(crate) enum DispatchCommand {
         command: ContentCommand,
         content: ContentId,
     },
-    ViewContent {
+    ContentWithView {
         command: ContentCommand,
+        view: ViewId,
+        content: ContentId,
+    },
+    Mode {
+        command: ModeCommand,
+        view: ViewId,
+        content: ContentId,
+    },
+    Viewport {
+        command: ViewportCommand,
         view: ViewId,
         content: ContentId,
     },
@@ -81,6 +94,15 @@ impl Dispatcher {
             coordinator: InputCoordinator::default(),
             sequence_config,
         }
+    }
+
+    pub(crate) fn resolve_from_view(
+        &self,
+        command: Command,
+        view: ViewId,
+        views: &HashMap<ViewId, View>,
+    ) -> Option<DispatchCommand> {
+        resolve_command(command, CommandSource::View(view), view, views)
     }
 
     #[cfg(test)]
@@ -417,32 +439,46 @@ fn resolve_command(
     match command {
         Command::App(command) => Some(DispatchCommand::App(command)),
         Command::Noop => Some(DispatchCommand::Noop),
-        Command::Content(
-            command @ (ContentCommand::Edit(_)
-            | ContentCommand::Mode { .. }
-            | ContentCommand::Transaction(_)
-            | ContentCommand::Undo
-            | ContentCommand::Redo
-            | ContentCommand::Viewport(_)
-            | ContentCommand::Sequence(_)),
-        ) => {
+        Command::Content(command) if command.context() == ContentCommandContext::WithViewState => {
             let view = match source {
                 CommandSource::View(view) => view,
                 CommandSource::Global => focused_view,
             };
-            Some(DispatchCommand::ViewContent {
+            Some(DispatchCommand::ContentWithView {
                 command,
                 view,
                 content: views.get(&view)?.content(),
             })
         }
-        Command::Content(command @ ContentCommand::Save) => {
+        Command::Content(command) => {
             let view = match source {
                 CommandSource::View(view) => view,
                 CommandSource::Global => focused_view,
             };
             Some(DispatchCommand::Content {
                 command,
+                content: views.get(&view)?.content(),
+            })
+        }
+        Command::Mode(command) => {
+            let view = match source {
+                CommandSource::View(view) => view,
+                CommandSource::Global => focused_view,
+            };
+            Some(DispatchCommand::Mode {
+                command,
+                view,
+                content: views.get(&view)?.content(),
+            })
+        }
+        Command::Viewport(command) => {
+            let view = match source {
+                CommandSource::View(view) => view,
+                CommandSource::Global => focused_view,
+            };
+            Some(DispatchCommand::Viewport {
+                command,
+                view,
                 content: views.get(&view)?.content(),
             })
         }
@@ -473,6 +509,9 @@ mod tests {
     use crate::core::mode::{ModeName, ModeRegistry};
     use crate::core::status_bar::StatusBar;
     use crate::protocol::ids::ContentId;
+    use crate::protocol::viewport::{
+        ViewportCursorBehavior, ViewportMoveAmount, ViewportMoveDirection,
+    };
 
     fn fixture() -> (
         Dispatcher,
@@ -534,6 +573,38 @@ mod tests {
     }
 
     #[test]
+    fn global_viewport_command_resolves_to_the_focused_view() {
+        let (mut dispatcher, scene, focused, mut views, _, _) = fixture();
+        let key = KeyEvent::ctrl('v');
+        let viewport = ViewportCommand::new(
+            ViewportMoveDirection::Down,
+            ViewportMoveAmount::FullPage,
+            ViewportCursorBehavior::Move,
+        );
+        dispatcher
+            .global_keymap
+            .bind(key, Command::Viewport(viewport));
+
+        assert_eq!(
+            dispatcher.dispatch(
+                DispatchInput::Normal(key),
+                Instant::now(),
+                focused,
+                &scene,
+                &mut views,
+            ),
+            DispatchOutcome::Emit {
+                command: DispatchCommand::Viewport {
+                    command: viewport,
+                    view: ViewId(0),
+                    content: ContentId(0),
+                },
+                replay: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
     fn vim_gg_waits_then_resolves_to_the_view() {
         let (mut dispatcher, scene, focused, mut views, _, _) = fixture();
         let now = Instant::now();
@@ -558,8 +629,8 @@ mod tests {
         assert!(matches!(
             outcome,
             DispatchOutcome::Emit {
-                command: DispatchCommand::ViewContent {
-                    command: ContentCommand::Mode { .. },
+                command: DispatchCommand::Mode {
+                    command: ModeCommand { .. },
                     view: ViewId(0),
                     content: ContentId(0),
                 },
@@ -663,14 +734,16 @@ mod tests {
             DispatchOutcome::Waiting
         );
         let view = views.get_mut(&ViewId(0)).unwrap();
-        assert!(matches!(
+        assert_eq!(
             view.execute_mode_command(
                 &modes,
-                &ModeName::new("vim"),
-                &crate::core::mode::ModeActionName::new("count-2"),
+                &ModeCommand {
+                    mode: ModeName::new("vim"),
+                    action: crate::core::mode::ModeActionName::new("count-2"),
+                },
             ),
-            crate::app::view::ModeCommandResult::Handled(None)
-        ));
+            Ok(None)
+        );
         dispatcher.sync_view(ViewId(0), view.input_status(), true, now);
 
         dispatcher.invalidate_view(ViewId(0), &mut views);
@@ -709,7 +782,7 @@ mod tests {
                 &mut views,
             ),
             DispatchOutcome::Emit {
-                command: DispatchCommand::ViewContent {
+                command: DispatchCommand::Mode {
                     view: ViewId(0),
                     content: ContentId(0),
                     ..
@@ -731,7 +804,7 @@ mod tests {
         );
         let DispatchOutcome::Emit {
             command:
-                DispatchCommand::ViewContent {
+                DispatchCommand::ContentWithView {
                     command,
                     view,
                     content,

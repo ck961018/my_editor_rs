@@ -1,9 +1,10 @@
 use std::any::Any;
 use std::collections::HashMap;
+use std::fmt;
 use std::rc::Rc;
 
 use crate::core::command::{
-    CharSearchDirection, Command, ContentCommand, EditCommand, TransactionCommand,
+    CharSearchDirection, Command, ContentCommand, EditCommand, ModeCommand, TransactionCommand,
 };
 use crate::core::input::{InputContext, InputDecision, InputStatus, TimeoutPolicy};
 use crate::core::keymap::Keymap;
@@ -47,6 +48,50 @@ pub struct ModeId(u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ModeActionId(u32);
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModeError {
+    UnknownMode {
+        mode: ModeName,
+    },
+    UnknownAction {
+        mode: ModeName,
+        action: ModeActionName,
+    },
+    InactiveMode {
+        requested: ModeName,
+        active: Option<ModeName>,
+    },
+}
+
+impl fmt::Display for ModeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownMode { mode } => write!(formatter, "unknown mode '{}'", mode.as_str()),
+            Self::UnknownAction { mode, action } => write!(
+                formatter,
+                "unknown action '{}' for mode '{}'",
+                action.as_str(),
+                mode.as_str()
+            ),
+            Self::InactiveMode { requested, active } => match active {
+                Some(active) => write!(
+                    formatter,
+                    "mode '{}' is not active; active mode is '{}'",
+                    requested.as_str(),
+                    active.as_str()
+                ),
+                None => write!(
+                    formatter,
+                    "mode '{}' cannot execute because the view has no active mode",
+                    requested.as_str()
+                ),
+            },
+        }
+    }
+}
+
+impl std::error::Error for ModeError {}
+
 pub trait ModeState: Any {
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
@@ -80,8 +125,11 @@ pub trait Mode {
     fn selection_shape(&self, _state: &dyn ModeState) -> SelectionShape {
         SelectionShape::Character
     }
-    fn execute(&self, state: &mut dyn ModeState, action: &ModeActionName)
-    -> Option<ContentCommand>;
+    fn execute(
+        &self,
+        state: &mut dyn ModeState,
+        action: &ModeActionName,
+    ) -> Result<Option<Command>, ModeError>;
 }
 
 pub(crate) struct ModeRegistry {
@@ -164,13 +212,21 @@ impl ModeRegistry {
         self.definitions.get(&mode)?.actions.get(name).copied()
     }
 
-    pub(crate) fn resolve_command(
+    pub(crate) fn resolve_command_checked(
         &self,
         mode: &ModeName,
         action: &ModeActionName,
-    ) -> Option<(ModeId, ModeActionId)> {
-        let mode = self.resolve_mode(mode)?;
-        Some((mode, self.resolve_action(mode, action)?))
+    ) -> Result<(ModeId, ModeActionId), ModeError> {
+        let mode_id = self
+            .resolve_mode(mode)
+            .ok_or_else(|| ModeError::UnknownMode { mode: mode.clone() })?;
+        let action_id =
+            self.resolve_action(mode_id, action)
+                .ok_or_else(|| ModeError::UnknownAction {
+                    mode: mode.clone(),
+                    action: action.clone(),
+                })?;
+        Ok((mode_id, action_id))
     }
 
     pub(crate) fn instantiate(&self, name: &ModeName) -> Option<ModeInstance> {
@@ -184,6 +240,10 @@ impl ModeRegistry {
 }
 
 impl ModeInstance {
+    pub(crate) fn name(&self) -> &ModeName {
+        self.registered.definition.name()
+    }
+
     pub(crate) fn keymap(&self) -> &Keymap {
         self.registered.definition.keymap(self.state.as_ref())
     }
@@ -210,8 +270,12 @@ impl ModeInstance {
             .selection_shape(self.state.as_ref())
     }
 
-    pub(crate) fn execute(&mut self, mode: ModeId, action: ModeActionId) -> Option<ContentCommand> {
-        assert_eq!(self.registered.id, mode, "mode command targets active mode");
+    pub(crate) fn execute(
+        &mut self,
+        mode: ModeId,
+        action: ModeActionId,
+    ) -> Result<Option<Command>, ModeError> {
+        assert_eq!(self.registered.id, mode, "resolved mode must be active");
         let action = self
             .registered
             .action_names
@@ -283,18 +347,27 @@ impl ModeSet {
         mode: ModeName,
         action: ModeActionName,
     ) -> Option<EditCommand> {
-        let (mode, action) = self.registry.resolve_command(&mode, &action)?;
-        match instance.execute(mode, action) {
-            Some(ContentCommand::Edit(edit)) => Some(edit),
-            Some(ContentCommand::Sequence(commands)) => commands.into_iter().find_map(|command| {
-                if let ContentCommand::Edit(edit) = command {
-                    Some(edit)
-                } else {
-                    None
-                }
-            }),
-            None | Some(ContentCommand::Transaction(_)) | Some(ContentCommand::Viewport(_)) => None,
-            Some(command) => panic!("test helper expected edit command, got {command:?}"),
+        let (mode, action) = self.registry.resolve_command_checked(&mode, &action).ok()?;
+        match instance.execute(mode, action).ok().flatten() {
+            Some(Command::Content(ContentCommand::Edit(edit))) => Some(edit),
+            Some(Command::Content(ContentCommand::Sequence(commands))) => {
+                commands.into_commands().into_iter().find_map(|command| {
+                    if let ContentCommand::Edit(edit) = command {
+                        Some(edit)
+                    } else {
+                        None
+                    }
+                })
+            }
+            None
+            | Some(Command::Content(ContentCommand::Transaction(_)))
+            | Some(Command::Viewport(_))
+            | Some(Command::App(_))
+            | Some(Command::Mode(_))
+            | Some(Command::Noop) => None,
+            Some(Command::Content(command)) => {
+                panic!("test helper expected edit command, got {command:?}")
+            }
         }
     }
 }
@@ -347,9 +420,12 @@ impl Mode for PlainEditMode {
     fn execute(
         &self,
         _state: &mut dyn ModeState,
-        _action: &ModeActionName,
-    ) -> Option<ContentCommand> {
-        None
+        action: &ModeActionName,
+    ) -> Result<Option<Command>, ModeError> {
+        Err(ModeError::UnknownAction {
+            mode: self.name.clone(),
+            action: action.clone(),
+        })
     }
 }
 
@@ -490,7 +566,11 @@ fn repeat_edit_command(command: EditCommand, count: usize) -> ContentCommand {
     if count == 1 {
         return command.into();
     }
-    ContentCommand::Sequence((0..count).map(|_| command.clone().into()).collect())
+    content_sequence((0..count).map(|_| command.clone().into()).collect())
+}
+
+fn content_sequence(commands: Vec<ContentCommand>) -> ContentCommand {
+    ContentCommand::try_sequence(commands).expect("built-in mode sequence must be valid")
 }
 
 impl Mode for VimMode {
@@ -670,8 +750,8 @@ impl Mode for VimMode {
         &self,
         state: &mut dyn ModeState,
         action: &ModeActionName,
-    ) -> Option<ContentCommand> {
-        match action.as_str() {
+    ) -> Result<Option<Command>, ModeError> {
+        let command = match action.as_str() {
             "enter-insert" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
                 Some(ContentCommand::Transaction(TransactionCommand::Begin))
@@ -721,7 +801,7 @@ impl Mode for VimMode {
                 let state = self.state_mut(state);
                 let linewise = state.state == VimState::VisualLine;
                 Self::set_editor_state(state, VimState::Insert);
-                Some(ContentCommand::Sequence(vec![
+                Some(content_sequence(vec![
                     ContentCommand::Transaction(TransactionCommand::Begin),
                     if linewise {
                         EditCommand::DeleteSelectedLines
@@ -733,56 +813,56 @@ impl Mode for VimMode {
             }
             "append" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
-                Some(ContentCommand::Sequence(vec![
+                Some(content_sequence(vec![
                     EditCommand::MoveRightBy(1).into(),
                     ContentCommand::Transaction(TransactionCommand::Begin),
                 ]))
             }
             "open-below" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
-                Some(ContentCommand::Sequence(vec![
+                Some(content_sequence(vec![
                     ContentCommand::Transaction(TransactionCommand::Begin),
                     EditCommand::InsertNewLineBelow.into(),
                 ]))
             }
             "open-above" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
-                Some(ContentCommand::Sequence(vec![
+                Some(content_sequence(vec![
                     ContentCommand::Transaction(TransactionCommand::Begin),
                     EditCommand::InsertNewLineAbove.into(),
                 ]))
             }
             "insert-at-first-non-blank" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
-                Some(ContentCommand::Sequence(vec![
+                Some(content_sequence(vec![
                     EditCommand::MoveToFirstNonBlank.into(),
                     ContentCommand::Transaction(TransactionCommand::Begin),
                 ]))
             }
             "append-at-line-end" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
-                Some(ContentCommand::Sequence(vec![
+                Some(content_sequence(vec![
                     EditCommand::MoveAfterLineEnd.into(),
                     ContentCommand::Transaction(TransactionCommand::Begin),
                 ]))
             }
             "substitute-char" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
-                Some(ContentCommand::Sequence(vec![
+                Some(content_sequence(vec![
                     ContentCommand::Transaction(TransactionCommand::Begin),
                     EditCommand::Delete(1).into(),
                 ]))
             }
             "change-to-line-end" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
-                Some(ContentCommand::Sequence(vec![
+                Some(content_sequence(vec![
                     ContentCommand::Transaction(TransactionCommand::Begin),
                     EditCommand::DeleteToLineEnd.into(),
                 ]))
             }
             "substitute-line" => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
-                Some(ContentCommand::Sequence(vec![
+                Some(content_sequence(vec![
                     ContentCommand::Transaction(TransactionCommand::Begin),
                     EditCommand::DeleteLineContent.into(),
                 ]))
@@ -977,26 +1057,34 @@ impl Mode for VimMode {
                 });
                 None
             }
-            "viewport-half-up" => Some(viewport_command(
-                self.state_mut(state),
-                ViewportMoveDirection::Up,
-                ViewportMoveAmount::HalfPage,
-            )),
-            "viewport-half-down" => Some(viewport_command(
-                self.state_mut(state),
-                ViewportMoveDirection::Down,
-                ViewportMoveAmount::HalfPage,
-            )),
-            "viewport-full-up" => Some(viewport_command(
-                self.state_mut(state),
-                ViewportMoveDirection::Up,
-                ViewportMoveAmount::FullPage,
-            )),
-            "viewport-full-down" => Some(viewport_command(
-                self.state_mut(state),
-                ViewportMoveDirection::Down,
-                ViewportMoveAmount::FullPage,
-            )),
+            "viewport-half-up" => {
+                return Ok(Some(Command::Viewport(viewport_command(
+                    self.state_mut(state),
+                    ViewportMoveDirection::Up,
+                    ViewportMoveAmount::HalfPage,
+                ))));
+            }
+            "viewport-half-down" => {
+                return Ok(Some(Command::Viewport(viewport_command(
+                    self.state_mut(state),
+                    ViewportMoveDirection::Down,
+                    ViewportMoveAmount::HalfPage,
+                ))));
+            }
+            "viewport-full-up" => {
+                return Ok(Some(Command::Viewport(viewport_command(
+                    self.state_mut(state),
+                    ViewportMoveDirection::Up,
+                    ViewportMoveAmount::FullPage,
+                ))));
+            }
+            "viewport-full-down" => {
+                return Ok(Some(Command::Viewport(viewport_command(
+                    self.state_mut(state),
+                    ViewportMoveDirection::Down,
+                    ViewportMoveAmount::FullPage,
+                ))));
+            }
             name if name
                 .strip_prefix("count-")
                 .and_then(|digit| digit.parse::<usize>().ok())
@@ -1009,8 +1097,14 @@ impl Mode for VimMode {
                 self.state_mut(state).pending = Some(VimPending::Count(digit));
                 None
             }
-            _ => None,
-        }
+            _ => {
+                return Err(ModeError::UnknownAction {
+                    mode: self.name.clone(),
+                    action: action.clone(),
+                });
+            }
+        };
+        Ok(command.map(Command::Content))
     }
 }
 
@@ -1018,9 +1112,9 @@ fn viewport_command(
     state: &mut VimModeState,
     direction: ViewportMoveDirection,
     amount: ViewportMoveAmount,
-) -> ContentCommand {
+) -> ViewportCommand {
     VimMode::take_count(state);
-    ContentCommand::Viewport(ViewportCommand::new(
+    ViewportCommand::new(
         direction,
         amount,
         if matches!(state.state, VimState::Visual | VimState::VisualLine) {
@@ -1028,7 +1122,7 @@ fn viewport_command(
         } else {
             ViewportCursorBehavior::Move
         },
-    ))
+    )
 }
 
 #[cfg(test)]
@@ -1220,7 +1314,7 @@ fn bind_vim_viewport_keys(keymap: &mut Keymap) {
 }
 
 fn vim_mode_command(action: &str) -> Command {
-    Command::Content(ContentCommand::Mode {
+    Command::Mode(ModeCommand {
         mode: ModeName::new("vim"),
         action: ModeActionName::new(action),
     })
@@ -1229,7 +1323,7 @@ fn vim_mode_command(action: &str) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::command::{ContentCommand, EditCommand};
+    use crate::core::command::{AppCommand, ContentCommand, EditCommand};
     use crate::core::input::{InputContext, InputDecision, InputStatus, TimeoutPolicy};
 
     struct DynamicMode {
@@ -1281,9 +1375,15 @@ mod tests {
         fn execute(
             &self,
             _state: &mut dyn ModeState,
-            _action: &ModeActionName,
-        ) -> Option<ContentCommand> {
-            None
+            action: &ModeActionName,
+        ) -> Result<Option<Command>, ModeError> {
+            if action.as_str() == "focus-next" {
+                return Ok(Some(Command::App(AppCommand::FocusNext)));
+            }
+            Err(ModeError::UnknownAction {
+                mode: self.name.clone(),
+                action: action.clone(),
+            })
         }
     }
 
@@ -1318,6 +1418,67 @@ mod tests {
         assert_eq!(
             registry.resolve_action(id, &ModeActionName::new("missing")),
             None
+        );
+    }
+
+    #[test]
+    fn registry_reports_unknown_mode_and_action() {
+        let mut registry = ModeRegistry::new();
+        registry.register(DynamicMode::new("script-mode", ["known"]));
+
+        assert_eq!(
+            registry
+                .resolve_command_checked(&ModeName::new("missing"), &ModeActionName::new("known")),
+            Err(ModeError::UnknownMode {
+                mode: ModeName::new("missing")
+            })
+        );
+        assert_eq!(
+            registry.resolve_command_checked(
+                &ModeName::new("script-mode"),
+                &ModeActionName::new("missing")
+            ),
+            Err(ModeError::UnknownAction {
+                mode: ModeName::new("script-mode"),
+                action: ModeActionName::new("missing")
+            })
+        );
+    }
+
+    #[test]
+    fn registered_but_unimplemented_action_is_an_error() {
+        let mut registry = ModeRegistry::new();
+        registry.register(DynamicMode::new("script-mode", ["declared"]));
+        let mode_name = ModeName::new("script-mode");
+        let action_name = ModeActionName::new("declared");
+        let mut instance = registry.instantiate(&mode_name).unwrap();
+        let (mode, action) = registry
+            .resolve_command_checked(&mode_name, &action_name)
+            .unwrap();
+
+        assert_eq!(
+            instance.execute(mode, action),
+            Err(ModeError::UnknownAction {
+                mode: mode_name,
+                action: action_name,
+            })
+        );
+    }
+
+    #[test]
+    fn mode_action_can_return_an_app_command() {
+        let mut registry = ModeRegistry::new();
+        registry.register(DynamicMode::new("script-mode", ["focus-next"]));
+        let mode_name = ModeName::new("script-mode");
+        let action_name = ModeActionName::new("focus-next");
+        let mut instance = registry.instantiate(&mode_name).unwrap();
+        let (mode, action) = registry
+            .resolve_command_checked(&mode_name, &action_name)
+            .unwrap();
+
+        assert_eq!(
+            instance.execute(mode, action),
+            Ok(Some(Command::App(AppCommand::FocusNext)))
         );
     }
 
@@ -1357,10 +1518,7 @@ mod tests {
         );
         assert_eq!(
             modes.resolve_key(&second, KeyEvent::char('a')),
-            Some(Command::Content(ContentCommand::Mode {
-                mode: ModeName::new("vim"),
-                action: ModeActionName::new("append"),
-            }))
+            Some(vim_mode_command("append"))
         );
     }
 
@@ -1520,15 +1678,15 @@ mod tests {
                 Some(vim_mode_command(action_name)),
             );
             let (mode, action) = registry
-                .resolve_command(&mode_name, &ModeActionName::new(action_name))
+                .resolve_command_checked(&mode_name, &ModeActionName::new(action_name))
                 .unwrap();
             assert_eq!(
                 runtime.execute(mode, action),
-                Some(ContentCommand::Viewport(ViewportCommand::new(
+                Ok(Some(Command::Viewport(ViewportCommand::new(
                     direction,
                     amount,
                     ViewportCursorBehavior::Move,
-                ))),
+                )))),
             );
         }
     }
@@ -1692,14 +1850,16 @@ mod tests {
         let mode_name = ModeName::new("vim");
         let action_name = ModeActionName::new("append");
         let mut instance = registry.instantiate(&mode_name).unwrap();
-        let (mode, action) = registry.resolve_command(&mode_name, &action_name).unwrap();
+        let (mode, action) = registry
+            .resolve_command_checked(&mode_name, &action_name)
+            .unwrap();
 
         assert_eq!(
             instance.execute(mode, action),
-            Some(ContentCommand::Sequence(vec![
+            Ok(Some(Command::Content(content_sequence(vec![
                 ContentCommand::Edit(EditCommand::MoveRightBy(1)),
                 ContentCommand::Transaction(TransactionCommand::Begin),
-            ]))
+            ]))))
         );
     }
 
@@ -1959,10 +2119,7 @@ mod tests {
         let runtime = modes.create_runtime();
         assert_eq!(
             modes.resolve_key(&runtime, KeyEvent::char('o')),
-            Some(Command::Content(ContentCommand::Mode {
-                mode: ModeName::new("vim"),
-                action: ModeActionName::new("open-below"),
-            })),
+            Some(vim_mode_command("open-below")),
         );
     }
 
@@ -1972,10 +2129,7 @@ mod tests {
         let runtime = modes.create_runtime();
         assert_eq!(
             modes.resolve_key(&runtime, KeyEvent::char('O')),
-            Some(Command::Content(ContentCommand::Mode {
-                mode: ModeName::new("vim"),
-                action: ModeActionName::new("open-above"),
-            })),
+            Some(vim_mode_command("open-above")),
         );
     }
 
@@ -1985,10 +2139,7 @@ mod tests {
         let runtime = modes.create_runtime();
         assert_eq!(
             modes.resolve_key(&runtime, KeyEvent::char('I')),
-            Some(Command::Content(ContentCommand::Mode {
-                mode: ModeName::new("vim"),
-                action: ModeActionName::new("insert-at-first-non-blank"),
-            })),
+            Some(vim_mode_command("insert-at-first-non-blank")),
         );
     }
 
@@ -1998,10 +2149,7 @@ mod tests {
         let runtime = modes.create_runtime();
         assert_eq!(
             modes.resolve_key(&runtime, KeyEvent::char('A')),
-            Some(Command::Content(ContentCommand::Mode {
-                mode: ModeName::new("vim"),
-                action: ModeActionName::new("append-at-line-end"),
-            })),
+            Some(vim_mode_command("append-at-line-end")),
         );
     }
 
@@ -2011,10 +2159,7 @@ mod tests {
         let runtime = modes.create_runtime();
         assert_eq!(
             modes.resolve_key(&runtime, KeyEvent::char('s')),
-            Some(Command::Content(ContentCommand::Mode {
-                mode: ModeName::new("vim"),
-                action: ModeActionName::new("substitute-char"),
-            })),
+            Some(vim_mode_command("substitute-char")),
         );
     }
 
@@ -2024,10 +2169,7 @@ mod tests {
         let runtime = modes.create_runtime();
         assert_eq!(
             modes.resolve_key(&runtime, KeyEvent::char('C')),
-            Some(Command::Content(ContentCommand::Mode {
-                mode: ModeName::new("vim"),
-                action: ModeActionName::new("change-to-line-end"),
-            })),
+            Some(vim_mode_command("change-to-line-end")),
         );
     }
 
@@ -2037,10 +2179,7 @@ mod tests {
         let runtime = modes.create_runtime();
         assert_eq!(
             modes.resolve_key(&runtime, KeyEvent::char('S')),
-            Some(Command::Content(ContentCommand::Mode {
-                mode: ModeName::new("vim"),
-                action: ModeActionName::new("substitute-line"),
-            })),
+            Some(vim_mode_command("substitute-line")),
         );
     }
 

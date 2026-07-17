@@ -143,7 +143,7 @@ View 对上游只暴露中立行为：当前 keymap、输入状态、动态 capt
 - 为每个 View 创建私有 `ModeState`；
 - 根据状态提供 keymap、typing fallback 和 cursor style；
 - 实现通用 `InputContext<Command>` 所需的等待、capture、timeout 与 cancel 行为；
-- 将 mode action 转换为 `ContentCommand`。
+- 执行 `ModeCommand`，原地更新私有状态，并按需产生普通顶层 `Command`。
 
 `ModeRegistry` 按名称注册定义，并在进程内分配稳定的 `ModeId`/`ModeActionId`。`ModeInstance`
 通过 `Rc` 共享已注册定义，同时独占 `Box<dyn ModeState>`。当前生产 registry 只注册内建 Vim；
@@ -159,14 +159,29 @@ Command
 ├── App(AppCommand)
 ├── Content(ContentCommand)
 │   ├── Edit(EditCommand)
-│   ├── Save
-│   └── Mode { mode, action }
+│   ├── Transaction / Undo / Redo
+│   ├── Sequence(ContentSequence)
+│   └── Save
+├── Mode(ModeCommand)
+├── Viewport(ViewportCommand)
 └── Noop
 ```
 
 `Dispatcher` 再将 `Command` 解析为带实际目标的 App 内部 `DispatchCommand`。App command 由 App
-执行；Mode command 交给目标 View 的 ModeInstance；其他 Content command 交给目标
-`ContentStore` 条目，并在需要时借用该 View 的 `ContentViewState`。
+执行；Mode command 交给目标 View 的 ModeInstance；Content command 交给目标 `ContentStore`
+条目。`Save` 只需要 `ContentId`，其他 Content command 同时借用目标 View 的
+`ContentViewState`。这是同一命令类型的两种执行上下文，不形成第二套 view-content 命令。
+
+`ContentSequence` 是验证后的有序 Content 命令容器，只接受需要 `ContentViewState` 的命令，
+不能包含 `Save`。它保证所有成员使用同一个执行上下文，但不代替 Content transaction 的回滚
+与 undo 语义。
+
+Mode action 返回 `Option<Command>`，并以原始 View 为来源重新进入与 keymap 相同的 Dispatcher
+目标解析入口。因此 Mode 可以产生 Content、Viewport 或 App 命令；全局 keymap 也可以直接
+绑定 `Command::Viewport`，并解析到 focused View。Viewport 由 Frontend 根据实际 pane 高度
+解析，再降低为 `ContentCommand::Edit`。命令链使用有固定上限的迭代执行，避免用户 Mode
+通过 `Mode -> Mode` 造成递归溢出或无限循环。unknown mode/action 返回 `ModeError`，不再被
+App 静默吞掉。
 
 Mode action 先更新 Mode 私有状态，再执行后续 replay。这样按键导致 Normal/Insert 切换后，
 同一输入队列中的下一个键立即使用新状态。

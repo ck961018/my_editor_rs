@@ -6,13 +6,16 @@ use std::time::Instant;
 use crate::app::application::App;
 use crate::app::dispatcher::{DispatchCommand, DispatchInput, DispatchOutcome};
 use crate::app::query::AppQuery;
-use crate::app::view::ModeCommandResult;
 use crate::core::command::{AppCommand, ContentCommand, EditCommand};
 use crate::core::content::{ContentInput, ContentResult};
 use crate::frontend::Frontend;
 use crate::protocol::content_query::RenderQuery;
 use crate::protocol::frontend_event::FrontendEvent;
+use crate::protocol::ids::ViewId;
+use crate::protocol::revision::Revision;
 use crate::protocol::viewport::{ViewportCommand, ViewportCursorBehavior, ViewportMoveDirection};
+
+const MAX_COMMAND_CHAIN: usize = 256;
 
 async fn wait_for_input_deadline(deadline: Option<Instant>) {
     match deadline {
@@ -143,102 +146,135 @@ impl<F: Frontend> App<F> {
     }
 
     pub(super) fn execute_command(&mut self, command: DispatchCommand) -> io::Result<()> {
-        match command {
-            DispatchCommand::App(command) => match command {
-                AppCommand::Quit => self.kernel.cancel(),
-                AppCommand::FocusNext | AppCommand::FocusPrev => {}
-            },
-            DispatchCommand::Content { command, content } => {
-                let result = self.kernel.execute(content, ContentInput::Command(command));
-                self.handle_content_result(content, result);
-            }
-            DispatchCommand::ViewContent {
-                command,
-                view,
-                content,
-            } => {
-                let (command, mode_changed) = {
-                    let target_view = self.session.view_mut(view).expect("target view exists");
-                    assert_eq!(
-                        target_view.content(),
-                        content,
-                        "view/content target mismatch"
-                    );
+        let mut command = command;
+        let mut mode_revisions: Vec<(ViewId, Revision)> = Vec::new();
+
+        for _ in 0..MAX_COMMAND_CHAIN {
+            let next = match command {
+                DispatchCommand::App(command) => {
                     match command {
-                        ContentCommand::Mode { mode, action } => {
-                            match target_view.execute_mode_command(
-                                self.kernel.modes(),
-                                &mode,
-                                &action,
-                            ) {
-                                ModeCommandResult::Unknown => return Ok(()),
-                                ModeCommandResult::Handled(Some(command)) => (command, true),
-                                ModeCommandResult::Handled(None) => {
-                                    target_view.touch();
-                                    return Ok(());
-                                }
-                            }
-                        }
-                        command => (command, false),
+                        AppCommand::Quit => self.kernel.cancel(),
+                        AppCommand::FocusNext | AppCommand::FocusPrev => {}
                     }
-                };
-                let command = match command {
-                    ContentCommand::Viewport(command) => {
-                        let lines = self.frontend.execute_viewport_command(
-                            self.session.scene(),
-                            self.session.scene_revision(),
-                            view,
-                            command,
-                        )?;
-                        if lines == 0 {
-                            if mode_changed {
-                                self.session
-                                    .view_mut(view)
-                                    .expect("target view exists")
-                                    .touch();
-                            }
-                            return Ok(());
-                        }
-                        ContentCommand::Edit(viewport_cursor_edit(command, lines))
-                    }
-                    command => command,
-                };
-                let result = {
-                    let target_view = self.session.view_mut(view).expect("target view exists");
-                    assert_eq!(
-                        target_view.content(),
-                        content,
-                        "view/content target mismatch"
-                    );
-                    let result = self.kernel.execute(
-                        content,
-                        ContentInput::View {
-                            command,
-                            state: target_view.state_mut(),
-                        },
-                    );
-                    if mode_changed
-                        || matches!(&result, ContentResult::Handled(outcome) if outcome.view_changed)
-                    {
-                        target_view.touch();
-                    }
-                    result
-                };
-                if let ContentResult::Handled(outcome) = &result
-                    && let Some(change) = &outcome.change
-                {
-                    self.session.transform_content_views(
-                        self.kernel.contents(),
-                        content,
-                        Some(view),
-                        change,
-                    );
+                    None
                 }
-                self.handle_content_result(content, result);
-            }
-            DispatchCommand::Noop => {}
+                DispatchCommand::Content { command, content } => {
+                    let result = self.kernel.execute(content, ContentInput::Command(command));
+                    self.handle_content_result(content, result);
+                    None
+                }
+                DispatchCommand::ContentWithView {
+                    command,
+                    view,
+                    content,
+                } => {
+                    let result = {
+                        let target_view = self.session.view_mut(view).expect("target view exists");
+                        assert_eq!(
+                            target_view.content(),
+                            content,
+                            "view/content target mismatch"
+                        );
+                        let result = self.kernel.execute(
+                            content,
+                            ContentInput::View {
+                                command,
+                                state: target_view.state_mut(),
+                            },
+                        );
+                        if matches!(&result, ContentResult::Handled(outcome) if outcome.view_changed)
+                        {
+                            target_view.touch();
+                        }
+                        result
+                    };
+                    if let ContentResult::Handled(outcome) = &result
+                        && let Some(change) = &outcome.change
+                    {
+                        self.session.transform_content_views(
+                            self.kernel.contents(),
+                            content,
+                            Some(view),
+                            change,
+                        );
+                    }
+                    self.handle_content_result(content, result);
+                    None
+                }
+                DispatchCommand::Mode {
+                    command,
+                    view,
+                    content,
+                } => {
+                    let (output, revision_before) = {
+                        let target_view = self.session.view_mut(view).expect("target view exists");
+                        assert_eq!(
+                            target_view.content(),
+                            content,
+                            "view/content target mismatch"
+                        );
+                        let output = target_view
+                            .execute_mode_command(self.kernel.modes(), &command)
+                            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                        (output, target_view.revision())
+                    };
+                    if !mode_revisions.iter().any(|(recorded, _)| *recorded == view) {
+                        mode_revisions.push((view, revision_before));
+                    }
+                    output
+                        .map(|command| {
+                            self.session
+                                .resolve_from_view(command, view)
+                                .ok_or_else(|| {
+                                    io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        format!("mode emitted a command for missing view {view:?}"),
+                                    )
+                                })
+                        })
+                        .transpose()?
+                }
+                DispatchCommand::Viewport {
+                    command,
+                    view,
+                    content,
+                } => {
+                    let lines = self.frontend.execute_viewport_command(
+                        self.session.scene(),
+                        self.session.scene_revision(),
+                        view,
+                        command,
+                    )?;
+                    (lines != 0).then(|| DispatchCommand::ContentWithView {
+                        command: ContentCommand::Edit(viewport_cursor_edit(command, lines)),
+                        view,
+                        content,
+                    })
+                }
+                DispatchCommand::Noop => None,
+            };
+
+            let Some(next) = next else {
+                self.touch_unchanged_mode_views(&mode_revisions);
+                return Ok(());
+            };
+            command = next;
         }
-        Ok(())
+
+        self.touch_unchanged_mode_views(&mode_revisions);
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("command chain exceeded the limit of {MAX_COMMAND_CHAIN} commands"),
+        ))
+    }
+
+    fn touch_unchanged_mode_views(&mut self, revisions: &[(ViewId, Revision)]) {
+        for &(view, revision_before) in revisions {
+            let target_view = self.session.view_mut(view).expect("target view exists");
+            if target_view.revision() == revision_before {
+                target_view.touch();
+            }
+        }
     }
 
     pub(super) fn render(&mut self) -> io::Result<()> {

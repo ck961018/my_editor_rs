@@ -47,6 +47,11 @@ impl Kernel {
         &self.modes
     }
 
+    #[cfg(test)]
+    pub(super) fn modes_mut(&mut self) -> &mut ModeRegistry {
+        &mut self.modes
+    }
+
     pub(super) fn execute(&mut self, content: ContentId, input: ContentInput<'_>) -> ContentResult {
         self.contents.execute(content, input)
     }

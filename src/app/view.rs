@@ -1,11 +1,11 @@
 //! 视图实例的交互会话：绑定一个 content，并持有独立 mode 与 content view state。
 //! 按 ViewId 索引（App.views），同一 Content 可被多个独立 View 绑定。
 
-use crate::core::command::{Command, ContentCommand};
+use crate::core::command::{Command, ModeCommand};
 use crate::core::content_view_state::ContentViewState;
 use crate::core::input::{InputContext, InputDecision, InputStatus};
 use crate::core::keymap::Keymap;
-use crate::core::mode::{ModeActionName, ModeInstance, ModeName, ModeRegistry};
+use crate::core::mode::{ModeError, ModeInstance, ModeRegistry};
 use crate::protocol::content_query::{CursorStyle, SelectionShape};
 use crate::protocol::ids::ContentId;
 use crate::protocol::key_event::KeyEvent;
@@ -18,11 +18,6 @@ pub struct View {
     state: ContentViewState,
     mode: Option<ModeInstance>,
     revision: Revision,
-}
-
-pub(crate) enum ModeCommandResult {
-    Unknown,
-    Handled(Option<ContentCommand>),
 }
 
 impl View {
@@ -90,16 +85,22 @@ impl View {
     pub(crate) fn execute_mode_command(
         &mut self,
         registry: &ModeRegistry,
-        mode: &ModeName,
-        action: &ModeActionName,
-    ) -> ModeCommandResult {
-        let Some((mode, action)) = registry.resolve_command(mode, action) else {
-            return ModeCommandResult::Unknown;
-        };
+        command: &ModeCommand,
+    ) -> Result<Option<Command>, ModeError> {
+        let (mode, action) = registry.resolve_command_checked(&command.mode, &command.action)?;
         let Some(instance) = self.mode.as_mut() else {
-            return ModeCommandResult::Unknown;
+            return Err(ModeError::InactiveMode {
+                requested: command.mode.clone(),
+                active: None,
+            });
         };
-        ModeCommandResult::Handled(instance.execute(mode, action))
+        if instance.name() != &command.mode {
+            return Err(ModeError::InactiveMode {
+                requested: command.mode.clone(),
+                active: Some(instance.name().clone()),
+            });
+        }
+        instance.execute(mode, action)
     }
     pub fn revision(&self) -> Revision {
         self.revision

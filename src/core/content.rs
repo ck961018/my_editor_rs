@@ -262,10 +262,12 @@ fn execute_buffer_view(
 ) -> ContentResult {
     if let ContentCommand::Sequence(commands) = command {
         let mut combined = ContentOutcome::new(ContentEffect::None, false, false);
-        for command in commands {
+        for command in commands.into_commands() {
             match execute_buffer_view(buffer, state, command) {
                 ContentResult::Handled(outcome) => combined.merge(outcome),
-                ContentResult::NotHandled => return ContentResult::NotHandled,
+                ContentResult::NotHandled => {
+                    unreachable!("validated content sequence contains only view-state commands")
+                }
             }
         }
         return ContentResult::Handled(combined);
@@ -318,10 +320,7 @@ fn execute_buffer_view(
                 );
             }
         }
-        ContentCommand::Mode { .. } => {
-            panic!("mode commands must be executed by the view mode instance")
-        }
-        ContentCommand::Save | ContentCommand::Sequence(_) | ContentCommand::Viewport(_) => {
+        ContentCommand::Save | ContentCommand::Sequence(_) => {
             return ContentResult::NotHandled;
         }
     }
