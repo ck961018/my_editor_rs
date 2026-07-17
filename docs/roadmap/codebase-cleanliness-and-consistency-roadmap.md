@@ -275,6 +275,8 @@ keymap 构造代码中。`vim_mode_command(&str)` 还允许构造任意字符串
 - `core/buffer.rs`：不依赖 Buffer 状态的行/词/段落导航计算已移入
   `core/buffer/navigation.rs`，编辑区间归并已移入 `core/buffer/ranges.rs`；Buffer 本体保留
   状态、事务以及对编辑行为的编排。
+- `core/mode.rs`：静态文本/Vim keymap 与 ModeCommand 构造已移入
+  `core/mode/keymaps.rs`；Mode 本体保留 trait、registry、instance、Vim 状态和 action 执行。
 - `tui/scene_renderer.rs`：终端 cell/Unicode 映射已移入 `tui/text_cells.rs`，状态栏字符串
   格式化已移入 `tui/status_line.rs`；SceneRenderer 保留布局、viewport、查询和绘制编排。
 - `app/dispatcher.rs`：CommandSource 的目标解析与 global keymap 已移入
