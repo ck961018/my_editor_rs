@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::core::buffer::Buffer;
+use crate::core::buffer::{Buffer, TextHistoryTraversal};
 use crate::core::command::{ContentCommand, TransactionCommand};
 use crate::core::content_view_state::ContentViewState;
 use crate::core::edit::apply_edit;
@@ -8,6 +8,7 @@ use crate::core::mode_name::ModeName;
 use crate::core::status_bar::StatusBar;
 use crate::core::transaction::{TextChangeSet, TextStateId, TextTransactionError};
 use crate::protocol::content_query::ContentPresentation;
+use crate::protocol::selection::Selections;
 use crate::protocol::status::StatusMessage;
 
 pub enum ContentInput<'a> {
@@ -85,39 +86,46 @@ impl ContentOutcome {
     }
 }
 
-pub trait TransactionalContent {
+pub(crate) trait TransactionalContent {
     type Transaction;
     type Change;
+    type Traversal;
 
-    fn begin_transaction(&mut self);
+    fn begin_transaction(&mut self, selections: &Selections);
+    fn update_transaction_selections(&mut self, selections: &Selections);
     fn commit_transaction(&mut self) -> Result<bool, TextTransactionError>;
-    fn rollback_transaction(&mut self) -> Result<bool, TextTransactionError>;
-    fn undo(&mut self) -> Result<bool, TextTransactionError>;
-    fn redo(&mut self) -> Result<bool, TextTransactionError>;
+    fn rollback_transaction(&mut self) -> Result<Option<Self::Traversal>, TextTransactionError>;
+    fn undo(&mut self) -> Result<Option<Self::Traversal>, TextTransactionError>;
+    fn redo(&mut self) -> Result<Option<Self::Traversal>, TextTransactionError>;
     fn take_change(&mut self) -> Option<Self::Change>;
 }
 
 impl TransactionalContent for Buffer {
     type Transaction = TextChangeSet;
     type Change = TextChangeSet;
+    type Traversal = TextHistoryTraversal;
 
-    fn begin_transaction(&mut self) {
-        Buffer::begin_transaction(self);
+    fn begin_transaction(&mut self, selections: &Selections) {
+        Buffer::begin_transaction_with_selections(self, selections);
+    }
+
+    fn update_transaction_selections(&mut self, selections: &Selections) {
+        Buffer::update_transaction_selections(self, selections);
     }
 
     fn commit_transaction(&mut self) -> Result<bool, TextTransactionError> {
         Buffer::commit_transaction(self)
     }
 
-    fn rollback_transaction(&mut self) -> Result<bool, TextTransactionError> {
+    fn rollback_transaction(&mut self) -> Result<Option<Self::Traversal>, TextTransactionError> {
         Buffer::rollback_transaction(self)
     }
 
-    fn undo(&mut self) -> Result<bool, TextTransactionError> {
+    fn undo(&mut self) -> Result<Option<Self::Traversal>, TextTransactionError> {
         Buffer::undo(self)
     }
 
-    fn redo(&mut self) -> Result<bool, TextTransactionError> {
+    fn redo(&mut self) -> Result<Option<Self::Traversal>, TextTransactionError> {
         Buffer::redo(self)
     }
 
@@ -208,13 +216,9 @@ impl Content {
                 },
             ) => ContentResult::NotHandled,
             (Self::Buffer(buffer), ContentInput::Command(ContentCommand::Save)) => {
-                let transaction_was_active = buffer.transaction_active();
                 buffer
-                    .commit_transaction()
+                    .checkpoint_transaction()
                     .expect("active text transaction must be valid");
-                if transaction_was_active {
-                    buffer.begin_transaction();
-                }
                 match buffer.path().cloned() {
                     Some(path) => ContentResult::Handled(
                         ContentEffect::Save(SaveSnapshot {
@@ -284,18 +288,32 @@ fn execute_buffer_view(
     let content_revision = buffer.revision();
     let selections = state.selections().clone();
     match command {
-        ContentCommand::Edit(command) => apply_edit(command, buffer, state.selections_mut()),
+        ContentCommand::Edit(command) => {
+            let implicit = !buffer.transaction_active();
+            if implicit {
+                TransactionalContent::begin_transaction(buffer, state.selections());
+            }
+            apply_edit(command, buffer, state.selections_mut());
+            TransactionalContent::update_transaction_selections(buffer, state.selections());
+            if implicit {
+                TransactionalContent::commit_transaction(buffer)
+                    .expect("implicit text transaction must be valid");
+            }
+        }
         ContentCommand::Transaction(command) => match command {
-            TransactionCommand::Begin => TransactionalContent::begin_transaction(buffer),
+            TransactionCommand::Begin => {
+                TransactionalContent::begin_transaction(buffer, state.selections())
+            }
             TransactionCommand::Commit => {
+                TransactionalContent::update_transaction_selections(buffer, state.selections());
                 TransactionalContent::commit_transaction(buffer)
                     .expect("active text transaction must be valid");
             }
             TransactionCommand::Rollback => {
-                TransactionalContent::rollback_transaction(buffer)
-                    .expect("active text transaction must be valid");
-                if let Some(change) = TransactionalContent::take_change(buffer) {
-                    buffer.transform_selections(state.selections_mut(), &change);
+                if let Some(traversal) = TransactionalContent::rollback_transaction(buffer)
+                    .expect("active text transaction must be valid")
+                {
+                    let change = apply_history_traversal(buffer, state, traversal);
                     return ContentResult::Handled(
                         ContentOutcome::new(
                             ContentEffect::None,
@@ -308,16 +326,15 @@ fn execute_buffer_view(
             }
         },
         ContentCommand::Undo | ContentCommand::Redo => {
-            let changed = if matches!(command, ContentCommand::Undo) {
+            TransactionalContent::update_transaction_selections(buffer, state.selections());
+            let traversal = if matches!(command, ContentCommand::Undo) {
                 TransactionalContent::undo(buffer)
             } else {
                 TransactionalContent::redo(buffer)
             }
             .expect("text history transaction must be valid");
-            if changed {
-                let change = TransactionalContent::take_change(buffer)
-                    .expect("history change accompanies a successful traversal");
-                buffer.transform_selections(state.selections_mut(), &change);
+            if let Some(traversal) = traversal {
+                let change = apply_history_traversal(buffer, state, traversal);
                 return ContentResult::Handled(
                     ContentOutcome::new(
                         ContentEffect::None,
@@ -344,6 +361,21 @@ fn execute_buffer_view(
     )
 }
 
+fn apply_history_traversal(
+    buffer: &Buffer,
+    state: &mut crate::core::content_view_state::BufferViewState,
+    traversal: TextHistoryTraversal,
+) -> TextChangeSet {
+    let TextHistoryTraversal { change, selections } = traversal;
+    if let Some(selections) = selections {
+        *state.selections_mut() = selections;
+        buffer.reconcile_selections(state.selections_mut());
+    } else {
+        buffer.transform_selections(state.selections_mut(), &change);
+    }
+    change
+}
+
 impl From<ContentEffect> for ContentOutcome {
     fn from(effect: ContentEffect) -> Self {
         Self::new(effect, false, false)
@@ -355,6 +387,7 @@ mod tests {
     use super::*;
     use crate::core::command::{ContentCommand, EditCommand, TransactionCommand};
     use crate::protocol::ids::ContentId;
+    use crate::protocol::selection::{Selection, TextOffset};
 
     #[test]
     fn buffer_creates_text_view_state_with_vim_default() {
@@ -415,6 +448,66 @@ mod tests {
     }
 
     #[test]
+    fn undo_and_redo_restore_full_selection_snapshots() {
+        let mut content = Content::Buffer(Buffer::new());
+        let mut state = content.create_view_state();
+        content.execute(ContentInput::View {
+            command: ContentCommand::Edit(EditCommand::InsertText("abcd".to_string())),
+            state: &mut state,
+        });
+
+        let before = Selections::from_parts(
+            vec![
+                Selection::collapsed(TextOffset { char_index: 1 }),
+                Selection::collapsed(TextOffset { char_index: 3 }),
+            ],
+            1,
+        );
+        let ContentViewState::Buffer(buffer_state) = &mut state else {
+            unreachable!()
+        };
+        *buffer_state.selections_mut() = before.clone();
+
+        for command in [
+            ContentCommand::Transaction(TransactionCommand::Begin),
+            ContentCommand::Edit(EditCommand::InsertText("X".to_string())),
+            ContentCommand::Transaction(TransactionCommand::Commit),
+        ] {
+            content.execute(ContentInput::View {
+                command,
+                state: &mut state,
+            });
+        }
+        let ContentViewState::Buffer(buffer_state) = &state else {
+            unreachable!()
+        };
+        let after = buffer_state.selections().clone();
+        let ContentViewState::Buffer(buffer_state) = &mut state else {
+            unreachable!()
+        };
+        *buffer_state.selections_mut() =
+            Selections::single(Selection::collapsed(TextOffset::origin()));
+
+        content.execute(ContentInput::View {
+            command: ContentCommand::Undo,
+            state: &mut state,
+        });
+        let ContentViewState::Buffer(buffer_state) = &state else {
+            unreachable!()
+        };
+        assert_eq!(buffer_state.selections(), &before);
+
+        content.execute(ContentInput::View {
+            command: ContentCommand::Redo,
+            state: &mut state,
+        });
+        let ContentViewState::Buffer(buffer_state) = &state else {
+            unreachable!()
+        };
+        assert_eq!(buffer_state.selections(), &after);
+    }
+
+    #[test]
     fn save_checkpoints_an_insert_transaction_and_reopens_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("checkpoint.txt");
@@ -462,5 +555,26 @@ mod tests {
             unreachable!()
         };
         assert_eq!(buffer.slice().to_string(), "a");
+        let ContentViewState::Buffer(buffer_state) = &state else {
+            unreachable!()
+        };
+        assert_eq!(
+            buffer_state.selections().primary().head().char_index,
+            1,
+            "undo must restore the selection at the save checkpoint"
+        );
+
+        content.execute(ContentInput::View {
+            command: ContentCommand::Redo,
+            state: &mut state,
+        });
+        let Content::Buffer(buffer) = &content else {
+            unreachable!()
+        };
+        assert_eq!(buffer.slice().to_string(), "ab");
+        let ContentViewState::Buffer(buffer_state) = &state else {
+            unreachable!()
+        };
+        assert_eq!(buffer_state.selections().primary().head().char_index, 2);
     }
 }

@@ -1654,6 +1654,57 @@ async fn vim_insert_session_is_one_undo_unit_and_ctrl_r_redoes_it() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn vim_undo_restores_edit_start_and_redo_restores_edit_end() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("abcdef".to_string())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    let ContentViewState::Buffer(state) = app.session.view_mut(view).unwrap().state_mut() else {
+        unreachable!()
+    };
+    *state.selections_mut() =
+        Selections::single(Selection::collapsed(TextOffset { char_index: 1 }));
+
+    for key in [
+        KeyEvent::char('i'),
+        KeyEvent::char('X'),
+        KeyEvent::plain(KeyCode::Escape),
+        KeyEvent::char('$'),
+        KeyEvent::char('u'),
+    ] {
+        app.handle_event(FrontendEvent::Key(key)).await.unwrap();
+    }
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["abcdef"]);
+    assert_eq!(
+        app.session.views()[&view]
+            .selections()
+            .unwrap()
+            .primary()
+            .head(),
+        TextOffset { char_index: 1 }
+    );
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::ctrl('r')))
+        .await
+        .unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["aXbcdef"]);
+    assert_eq!(
+        app.session.views()[&view]
+            .selections()
+            .unwrap()
+            .primary()
+            .head(),
+        TextOffset { char_index: 2 }
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn vim_insert_mode_u_is_text_not_undo() {
     let mut app = make_app(
         vec![

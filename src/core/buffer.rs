@@ -29,7 +29,7 @@ pub struct Buffer {
     current_state: TextStateId,
     saved_state: TextStateId,
     next_state: u64,
-    active_transaction: Option<ActiveTextTransaction>,
+    active_transaction: Option<Box<ActiveTextTransaction>>,
     history: Vec<TextHistoryEntry>,
     history_cursor: usize,
     last_change: Option<TextChangeSet>,
@@ -40,6 +40,12 @@ struct ActiveTextTransaction {
     original: Rope,
     changes: TextChangeSet,
     before_state: TextStateId,
+    selection_snapshots: Option<SelectionSnapshots>,
+}
+
+struct SelectionSnapshots {
+    before: Selections,
+    after: Selections,
 }
 
 struct TextHistoryEntry {
@@ -47,6 +53,12 @@ struct TextHistoryEntry {
     inverse: TextChangeSet,
     before_state: TextStateId,
     after_state: TextStateId,
+    selection_snapshots: Option<SelectionSnapshots>,
+}
+
+pub(crate) struct TextHistoryTraversal {
+    pub(crate) change: TextChangeSet,
+    pub(crate) selections: Option<Selections>,
 }
 
 impl Buffer {
@@ -147,12 +159,35 @@ impl Buffer {
     }
 
     pub fn begin_transaction(&mut self) {
+        self.begin_transaction_at(None);
+    }
+
+    pub fn begin_transaction_with_selections(&mut self, selections: &Selections) {
+        self.begin_transaction_at(Some(selections.clone()));
+    }
+
+    fn begin_transaction_at(&mut self, selections: Option<Selections>) {
         if self.active_transaction.is_none() {
-            self.active_transaction = Some(ActiveTextTransaction {
+            let selection_snapshots = selections.map(|after| SelectionSnapshots {
+                before: after.clone(),
+                after,
+            });
+            self.active_transaction = Some(Box::new(ActiveTextTransaction {
                 original: self.rope.clone(),
                 changes: TextChangeSet::empty(self.rope.len_chars()),
                 before_state: self.current_state,
-            });
+                selection_snapshots,
+            }));
+        }
+    }
+
+    pub fn update_transaction_selections(&mut self, selections: &Selections) {
+        if let Some(snapshots) = self
+            .active_transaction
+            .as_mut()
+            .and_then(|active| active.selection_snapshots.as_mut())
+        {
+            snapshots.after = selections.clone();
         }
     }
 
@@ -176,56 +211,90 @@ impl Buffer {
             inverse,
             before_state: active.before_state,
             after_state,
+            selection_snapshots: active.selection_snapshots,
         });
         self.history_cursor = self.history.len();
         self.current_state = after_state;
         Ok(true)
     }
 
-    pub fn rollback_transaction(&mut self) -> Result<bool, TextTransactionError> {
+    pub fn checkpoint_transaction(&mut self) -> Result<bool, TextTransactionError> {
+        let continuation = self
+            .active_transaction
+            .as_ref()
+            .and_then(|active| active.selection_snapshots.as_ref())
+            .map(|snapshots| snapshots.after.clone());
+        let was_active = self.active_transaction.is_some();
+        let changed = self.commit_transaction()?;
+        if was_active {
+            self.begin_transaction_at(continuation);
+        }
+        Ok(changed)
+    }
+
+    pub fn rollback_transaction(
+        &mut self,
+    ) -> Result<Option<TextHistoryTraversal>, TextTransactionError> {
         let Some(active) = self.active_transaction.take() else {
-            return Ok(false);
+            return Ok(None);
         };
         if active.changes.is_empty() {
             self.current_state = active.before_state;
-            return Ok(false);
+            return Ok(None);
         }
         let inverse = active.changes.invert(&active.original)?;
         inverse.apply(&mut self.rope)?;
         self.advance_revision();
         self.current_state = active.before_state;
-        self.last_change = Some(inverse);
-        Ok(true)
+        self.last_change = None;
+        Ok(Some(TextHistoryTraversal {
+            change: inverse,
+            selections: active.selection_snapshots.map(|snapshots| snapshots.before),
+        }))
     }
 
-    pub fn undo(&mut self) -> Result<bool, TextTransactionError> {
+    pub fn undo(&mut self) -> Result<Option<TextHistoryTraversal>, TextTransactionError> {
         self.commit_transaction()?;
         if self.history_cursor == 0 {
-            return Ok(false);
+            return Ok(None);
         }
         let index = self.history_cursor - 1;
         let inverse = self.history[index].inverse.clone();
+        let selections = self.history[index]
+            .selection_snapshots
+            .as_ref()
+            .map(|snapshots| snapshots.before.clone());
         inverse.apply(&mut self.rope)?;
         self.history_cursor = index;
         self.current_state = self.history[index].before_state;
         self.advance_revision();
-        self.last_change = Some(inverse);
-        Ok(true)
+        self.last_change = None;
+        Ok(Some(TextHistoryTraversal {
+            change: inverse,
+            selections,
+        }))
     }
 
-    pub fn redo(&mut self) -> Result<bool, TextTransactionError> {
+    pub fn redo(&mut self) -> Result<Option<TextHistoryTraversal>, TextTransactionError> {
         self.commit_transaction()?;
         if self.history_cursor >= self.history.len() {
-            return Ok(false);
+            return Ok(None);
         }
         let index = self.history_cursor;
         let forward = self.history[index].forward.clone();
+        let selections = self.history[index]
+            .selection_snapshots
+            .as_ref()
+            .map(|snapshots| snapshots.after.clone());
         forward.apply(&mut self.rope)?;
         self.history_cursor += 1;
         self.current_state = self.history[index].after_state;
         self.advance_revision();
-        self.last_change = Some(forward);
-        Ok(true)
+        self.last_change = None;
+        Ok(Some(TextHistoryTraversal {
+            change: forward,
+            selections,
+        }))
     }
 
     pub fn take_last_change(&mut self) -> Option<TextChangeSet> {
@@ -1344,9 +1413,9 @@ mod tests {
         assert_eq!(buffer.slice().to_string(), "ab");
 
         assert!(buffer.commit_transaction().unwrap());
-        assert!(buffer.undo().unwrap());
+        assert!(buffer.undo().unwrap().is_some());
         assert_eq!(buffer.slice().to_string(), "");
-        assert!(buffer.redo().unwrap());
+        assert!(buffer.redo().unwrap().is_some());
         assert_eq!(buffer.slice().to_string(), "ab");
     }
 
@@ -1355,11 +1424,11 @@ mod tests {
         let mut buffer = Buffer::new();
         buffer.insert_char(0, 'a');
         buffer.insert_char(1, 'b');
-        assert!(buffer.undo().unwrap());
+        assert!(buffer.undo().unwrap().is_some());
         buffer.insert_char(1, 'c');
 
         assert_eq!(buffer.slice().to_string(), "ac");
-        assert!(!buffer.redo().unwrap());
+        assert!(buffer.redo().unwrap().is_none());
     }
 
     #[test]
@@ -1371,9 +1440,9 @@ mod tests {
         buffer.insert_char(1, 'b');
         assert!(buffer.modified());
 
-        assert!(buffer.undo().unwrap());
+        assert!(buffer.undo().unwrap().is_some());
         assert!(!buffer.modified());
-        assert!(buffer.redo().unwrap());
+        assert!(buffer.redo().unwrap().is_some());
         assert!(buffer.modified());
     }
 
@@ -1384,9 +1453,9 @@ mod tests {
         buffer.begin_transaction();
         buffer.insert_char(1, 'b');
 
-        assert!(buffer.rollback_transaction().unwrap());
+        assert!(buffer.rollback_transaction().unwrap().is_some());
         assert_eq!(buffer.slice().to_string(), "a");
-        assert!(buffer.undo().unwrap());
+        assert!(buffer.undo().unwrap().is_some());
         assert_eq!(buffer.slice().to_string(), "");
     }
 
