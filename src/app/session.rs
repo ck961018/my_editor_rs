@@ -164,7 +164,13 @@ impl ClientSession {
         }
     }
 
-    #[allow(dead_code)] // 本轮只提供后端入口，不接入按键或 UI。
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "layout mutation is retained behind the application boundary"
+        )
+    )]
     pub(super) fn split_space(
         &mut self,
         target: SpaceId,
@@ -203,7 +209,13 @@ impl ClientSession {
         Ok(result)
     }
 
-    #[allow(dead_code)] // 本轮只提供后端入口，不接入按键或 UI。
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "layout mutation is retained behind the application boundary"
+        )
+    )]
     pub(super) fn close_space(&mut self, target: SpaceId) -> Result<CloseResult, LayoutError> {
         if view_space_focusable(&self.scene, target) == Some(true)
             && focusable_view_count(&self.scene) == 1
@@ -223,7 +235,13 @@ impl ClientSession {
         Ok(result)
     }
 
-    #[allow(dead_code)] // 本轮只提供后端入口，不接入按键或 UI。
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "layout mutation is retained behind the application boundary"
+        )
+    )]
     pub(super) fn replace_space_content(
         &mut self,
         target: SpaceId,
@@ -256,7 +274,13 @@ impl ClientSession {
         Ok(())
     }
 
-    #[allow(dead_code)] // 本轮只提供后端入口，不接入按键或 UI。
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "layout mutation is retained behind the application boundary"
+        )
+    )]
     pub(super) fn set_space_sizing(
         &mut self,
         target: SpaceId,

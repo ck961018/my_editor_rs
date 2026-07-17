@@ -31,8 +31,13 @@ impl AppTasks {
         self.cancel.clone()
     }
 
-    // 预留：detached 任务（语法解析/搜索预计算等）超出当前范围，仅 tasks.rs 测试覆盖。
-    #[allow(dead_code)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "detached tasks are retained for cancellable background work"
+        )
+    )]
     pub(crate) fn spawn_detached<F>(&self, task: F)
     where
         F: Future<Output = ()> + Send + 'static,

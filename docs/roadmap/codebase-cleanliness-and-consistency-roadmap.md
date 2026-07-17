@@ -52,7 +52,7 @@
 | R06 | P1 | 已完成 | editor/status ContentId 在启动路径存在重复真相源 |
 | R07 | P1 | 已完成 | Vim action 名称在注册、执行和 keymap 中重复为字符串 |
 | R08 | P1 | 已完成 | `buffer.rs`、`mode.rs`、`scene_renderer.rs` 等文件职责过密 |
-| R09 | P2 | 待处理 | `dead_code` 抑制、可见性和阶段性注释失真 |
+| R09 | P2 | 已完成 | `dead_code` 抑制、可见性和阶段性注释失真 |
 | R10 | P2 | 待处理 | View presentation 通过 selection 是否存在进行隐式推断 |
 | R11 | P2 | 待处理 | Scene identity、ID 溢出策略和 Frontend View 生命周期不一致 |
 | R12 | P2 | 待处理 | 测试组织、模块命名和当前架构文档存在局部不一致 |
@@ -286,7 +286,7 @@ keymap 构造代码中。`vim_mode_command(&str)` 还允许构造任意字符串
 
 ### R09：清理 dead_code、可见性和阶段性注释
 
-**状态：** 待处理
+**状态：** 已完成（2026-07-17）
 
 当前源码有大量 `#[allow(dead_code)]`，其中部分已经失效，例如生产路径正在使用但仍标记为
 预留或 Test helper。另有较多仅 crate 内使用的类型和方法采用宽泛 `pub`，降低了可见性对
@@ -301,6 +301,18 @@ keymap 构造代码中。`vim_mode_command(&str)` 还允许构造任意字符串
 - 将“v0.1/v0.2/本轮”等易过期描述改为当前语义或关联 roadmap 条目。
 
 本项不授权仅因未使用就删除 AGENTS.md 明确保留的预留 API。
+
+处理结果：
+
+- 删除生产路径已经使用的失效抑制，包括 Viewport command、ModeName、ContentQuery 和
+  ContentStore 查询契约；
+- 仓库不再使用无条件 `#[allow(dead_code)]`，真正预留的契约改为带语义原因的
+  `#[expect(dead_code, reason = ...)]`；仅非测试构建未使用的扩展缝使用
+  `cfg_attr(not(test), expect(...))`，启用后会暴露失效 expectation；
+- 测试专用 Buffer 原语改为 `#[cfg(test)]`，Dispatcher continuation 查询、TUI resolved
+  类型和 Taffy layout 接口收紧到所属模块需要的可见范围；
+- 删除“v0.1/v0.2/本轮”等阶段性注释，改为描述当前契约与保留原因；
+- `cargo clippy --all-targets --all-features` 已无 warning。
 
 ### R10：显式表达 View presentation
 

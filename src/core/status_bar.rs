@@ -11,7 +11,6 @@ impl StatusBar {
         Self { target_content_id }
     }
 
-    #[allow(dead_code)] // Test helper.
     pub fn target_content_id(&self) -> ContentId {
         self.target_content_id
     }

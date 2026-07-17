@@ -9,7 +9,13 @@ use crate::protocol::scene::Scene;
 use crate::protocol::space::{Sizing, SpaceKind, SplitDirection};
 
 impl<F: Frontend> App<F> {
-    #[allow(dead_code)] // 本轮只提供后端入口，不接入按键或 UI。
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "layout mutation is exposed as an application backend operation"
+        )
+    )]
     pub(super) fn split_space(
         &mut self,
         target: SpaceId,
@@ -24,12 +30,24 @@ impl<F: Frontend> App<F> {
             .split_space(target, view, focusable, direction, focus_new)
     }
 
-    #[allow(dead_code)] // 本轮只提供后端入口，不接入按键或 UI。
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "layout mutation is exposed as an application backend operation"
+        )
+    )]
     pub(super) fn close_space(&mut self, target: SpaceId) -> Result<CloseResult, LayoutError> {
         self.session.close_space(target)
     }
 
-    #[allow(dead_code)] // 本轮只提供后端入口，不接入按键或 UI。
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "layout mutation is exposed as an application backend operation"
+        )
+    )]
     pub(super) fn replace_space_content(
         &mut self,
         target: SpaceId,
@@ -41,7 +59,13 @@ impl<F: Frontend> App<F> {
         self.session.replace_space_content(target, view, focusable)
     }
 
-    #[allow(dead_code)] // 本轮只提供后端入口，不接入按键或 UI。
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "layout mutation is exposed as an application backend operation"
+        )
+    )]
     pub(super) fn set_space_sizing(
         &mut self,
         target: SpaceId,
@@ -51,7 +75,6 @@ impl<F: Frontend> App<F> {
     }
 }
 
-#[allow(dead_code)] // 伴随尚未接入 UI 的布局入口。
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum LayoutError {
     MissingContent(ContentId),
@@ -125,7 +148,6 @@ pub(super) fn view_space_focusable(scene: &Scene, space: SpaceId) -> Option<bool
     }
 }
 
-#[allow(dead_code)] // 由尚未接入 UI 的 close/replace 预检使用。
 pub(super) fn focusable_view_count(scene: &Scene) -> usize {
     scene_views(scene)
         .into_iter()

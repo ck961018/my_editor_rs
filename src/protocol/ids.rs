@@ -1,4 +1,7 @@
-#[allow(dead_code)] // 预留 id 类型，v0.2+ 多场景时启用
+#[expect(
+    dead_code,
+    reason = "scene identity is reserved for multi-scene sessions"
+)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct SceneId(pub u64);
 

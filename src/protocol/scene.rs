@@ -8,7 +8,13 @@ use crate::protocol::space::Space;
 
 #[derive(Clone)]
 pub struct SpaceNode {
-    #[allow(dead_code)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "scene identity validation reads this structural field"
+        )
+    )]
     pub id: SpaceId,
     pub parent: Option<SpaceId>,
     pub children: Vec<SpaceId>,

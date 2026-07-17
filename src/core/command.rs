@@ -9,7 +9,6 @@ pub enum Command {
     App(AppCommand),
     Content(ContentCommand),
     Mode(ModeCommand),
-    #[allow(dead_code)] // 预留给可配置的全局 viewport keymap；当前内置绑定由 Vim mode 产生。
     Viewport(ViewportCommand),
     Noop,
 }
@@ -23,9 +22,18 @@ pub struct ModeCommand {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppCommand {
     Quit,
-    #[allow(dead_code)] // 预留：v0.2 焦点切换（仅 dispatcher 单测构造，生产 keymap 未绑）
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "focus commands are not bound by the built-in keymap"
+        )
+    )]
     FocusNext,
-    #[allow(dead_code)] // 预留：v0.2 焦点切换（仅 dispatcher 单测构造，生产 keymap 未绑）
+    #[expect(
+        dead_code,
+        reason = "focus commands are not bound by the built-in keymap"
+    )]
     FocusPrev,
 }
 
@@ -100,15 +108,20 @@ impl std::error::Error for ContentSequenceError {}
 pub enum TransactionCommand {
     Begin,
     Commit,
-    #[allow(dead_code)] // 为取消复合编辑预留；当前 Vim Escape 提交而非回滚。
+    #[expect(
+        dead_code,
+        reason = "transaction rollback is reserved for cancelling compound edits"
+    )]
     Rollback,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EditCommand {
     Operate(OperatorCommand),
-    #[allow(dead_code)]
-    // 预留：仅 executor 单测构造，生产 keymap 用 MoveLeftBy/RightBy/UpBy/DownBy
+    #[expect(
+        dead_code,
+        reason = "generic relative motion is an executor-level extension seam"
+    )]
     MoveBy {
         chars: isize,
         lines: isize,
@@ -127,8 +140,13 @@ pub enum EditCommand {
         direction: CharSearchDirection,
         occurrence: usize,
     },
-    #[allow(dead_code)]
-    // 预留：仅 executor 单测构造，生产 keymap 用 MoveLeftBy/RightBy/UpBy/DownBy
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "absolute motion is an executor-level extension seam"
+        )
+    )]
     MoveTo {
         char_idx: usize,
         line_idx: usize,
@@ -158,7 +176,10 @@ pub enum EditCommand {
     ExtendToNextParagraph,
     InsertText(String),
     Delete(isize),
-    #[allow(dead_code)] // 兼容直接编辑命令；Vim dd 已走 operator + linewise target。
+    #[expect(
+        dead_code,
+        reason = "direct line deletion remains part of the content editing command contract"
+    )]
     DeleteLines {
         lines: usize,
     },

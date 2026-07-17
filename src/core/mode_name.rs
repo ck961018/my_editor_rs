@@ -6,7 +6,6 @@ impl ModeName {
         Self(value.into())
     }
 
-    #[allow(dead_code)] // Future script/protocol adapters read the owned symbolic name.
     pub fn as_str(&self) -> &str {
         &self.0
     }

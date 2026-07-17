@@ -230,8 +230,11 @@ impl Dispatcher {
         }
     }
 
-    #[allow(dead_code)] // Query seam for a future which-key frontend.
-    pub fn pending_continuations(
+    #[expect(
+        dead_code,
+        reason = "pending continuations are retained for key-hint frontends"
+    )]
+    pub(super) fn pending_continuations(
         &self,
         focused: SpaceId,
         scene: &Scene,

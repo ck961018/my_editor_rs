@@ -335,14 +335,18 @@ impl Buffer {
         self.status.clone()
     }
 
-    #[allow(dead_code)] // 测试辅助：生产路径走 executor::execute→insert_at_selections
-    pub fn insert_char(&mut self, char_idx: usize, ch: char) {
+    #[cfg(test)]
+    pub(crate) fn insert_char(&mut self, char_idx: usize, ch: char) {
         self.apply_text_edits(vec![TextEdit::new(char_idx..char_idx, ch.to_string())])
             .expect("valid character insertion");
     }
 
-    #[allow(dead_code)] // v0.2 预留：生产路径走 delete_at_selections
-    pub fn delete_backward(&mut self, char_idx: usize) -> bool {
+    #[cfg(test)]
+    #[expect(
+        dead_code,
+        reason = "direct backward deletion is retained as a buffer test primitive"
+    )]
+    pub(crate) fn delete_backward(&mut self, char_idx: usize) -> bool {
         if char_idx == 0 {
             return false;
         }
@@ -485,7 +489,6 @@ impl Buffer {
     // ——编辑原语：selection 层（pub，head/anchor 独立，守恒由调用方决定）——
 
     /// 将 head 与 anchor 钳制到当前文档范围，不缓存逻辑行列。
-    #[allow(dead_code)] // 多 selection 批量校验入口；当前编辑路径逐点钳制。
     pub fn clamp_selection(&self, sel: &mut Selection) {
         self.clamp_offset(&mut sel.head);
         self.clamp_offset(&mut sel.anchor);

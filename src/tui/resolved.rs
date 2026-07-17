@@ -3,22 +3,34 @@ use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::space::Layer;
 
 #[derive(Clone)]
-pub struct RenderItem {
-    pub space_id: SpaceId,
-    pub view_id: ViewId,
-    pub rect: Rect,
-    #[allow(dead_code)] // 预留布局原语，v0.2 renderer 不做 clip
-    pub clip: Option<Rect>,
-    #[allow(dead_code)] // 预留布局原语，v0.2 renderer 不读 layer/z/order
-    pub layer: Layer,
-    #[allow(dead_code)]
-    pub z_index: i32,
-    #[allow(dead_code)]
-    pub order: u64,
+pub(super) struct RenderItem {
+    pub(super) space_id: SpaceId,
+    pub(super) view_id: ViewId,
+    pub(super) rect: Rect,
+    #[expect(
+        dead_code,
+        reason = "clipping metadata is retained at the layout-render boundary"
+    )]
+    pub(super) clip: Option<Rect>,
+    #[expect(
+        dead_code,
+        reason = "layer metadata is retained at the layout-render boundary"
+    )]
+    pub(super) layer: Layer,
+    #[expect(
+        dead_code,
+        reason = "stacking metadata is retained at the layout-render boundary"
+    )]
+    pub(super) z_index: i32,
+    #[expect(
+        dead_code,
+        reason = "stable layout order is retained at the layout-render boundary"
+    )]
+    pub(super) order: u64,
 }
 
-pub struct ResolvedScene {
-    pub items: Vec<RenderItem>,
+pub(super) struct ResolvedScene {
+    pub(super) items: Vec<RenderItem>,
 }
 
 #[cfg(test)]

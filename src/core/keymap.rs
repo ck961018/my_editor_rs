@@ -3,13 +3,25 @@ use std::collections::HashMap;
 use crate::protocol::key_event::KeyEvent;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // Configuration-facing leader alias; production config loading is deferred.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "leader aliases are retained for runtime keymap configuration"
+    )
+)]
 pub enum KeyStroke {
     Key(KeyEvent),
     Leader,
 }
 
-#[allow(dead_code)] // Bindings are expanded during definition; current built-ins do not use leader.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "leader expansion is retained for runtime keymap configuration"
+    )
+)]
 pub fn expand_key_sequence(sequence: &[KeyStroke], leader: KeyEvent) -> Vec<KeyEvent> {
     sequence
         .iter()
@@ -84,7 +96,13 @@ impl<A> Keymap<A> {
         node.action.replace(action)
     }
 
-    #[allow(dead_code)] // Public mutation seam for future runtime/script configuration.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "unbind is retained for runtime keymap configuration"
+        )
+    )]
     pub fn unbind(&mut self, sequence: impl AsRef<[KeyEvent]>) -> Option<A> {
         let sequence = sequence.as_ref();
         let (first, rest) = sequence.split_first()?;

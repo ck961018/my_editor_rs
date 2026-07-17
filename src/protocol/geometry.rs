@@ -34,6 +34,10 @@ impl Rect {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[expect(
+    dead_code,
+    reason = "integer point is a neutral geometry primitive reserved for frontend adapters"
+)]
 pub struct Point {
     pub x: i32,
     pub y: i32,

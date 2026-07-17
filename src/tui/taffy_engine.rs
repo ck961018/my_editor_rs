@@ -29,7 +29,7 @@ impl TaffyEngine {
         }
     }
 
-    pub fn layout(&mut self, scene: &Scene, revision: Revision) -> &ResolvedScene {
+    pub(super) fn layout(&mut self, scene: &Scene, revision: Revision) -> &ResolvedScene {
         if self.cached_revision != Some(revision) {
             self.tree = TaffyTree::new();
             let mut map: HashMap<SpaceId, NodeId> = HashMap::new();

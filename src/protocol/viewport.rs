@@ -76,8 +76,14 @@ impl Viewport {
         self.top_row = self.top_row.saturating_sub(n);
     }
 
-    /// 按 lines 滚动（负向上、正向下）。v0.2 不绑键，预留 executor 路径。
-    #[allow(dead_code)] // v0.2 预留滚动 API
+    /// 按 lines 滚动（负向上、正向下）。
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "signed scrolling is retained as a viewport executor seam"
+        )
+    )]
     pub fn scroll_by(&mut self, lines: isize) {
         if lines >= 0 {
             self.top_row = self.top_row.saturating_add(lines as usize);

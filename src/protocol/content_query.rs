@@ -57,7 +57,6 @@ pub struct ViewData {
 pub enum ContentQuery {
     TextRows(RowRange),
     TextPoints(Vec<TextOffset>),
-    #[allow(dead_code)]
     DocumentStatus,
     StatusBarData,
 }
@@ -68,7 +67,6 @@ pub enum ContentData {
     TextPoints(Vec<TextPoint>),
     DocumentStatus(DocumentStatus),
     StatusBarData(StatusBarData),
-    #[allow(dead_code)]
     Unsupported,
 }
 

@@ -16,7 +16,10 @@ impl KeyModifiers {
             shift: false,
         }
     }
-    #[allow(dead_code)] // 通用修饰键模型 API（spec §10：Ctrl+Alt / Ctrl+Shift 等未来键位预留）
+    #[expect(
+        dead_code,
+        reason = "Alt-only bindings are supported by the neutral key protocol"
+    )]
     pub fn alt() -> Self {
         Self {
             ctrl: false,
@@ -31,7 +34,10 @@ impl KeyModifiers {
             shift: true,
         }
     }
-    #[allow(dead_code)] // 通用修饰键模型 API（spec §10：Ctrl+Shift+Arrow 等未来键位预留）
+    #[expect(
+        dead_code,
+        reason = "combined modifiers are supported by the neutral key protocol"
+    )]
     pub fn ctrl_shift() -> Self {
         Self {
             ctrl: true,
@@ -79,9 +85,6 @@ impl KeyEvent {
             modifiers: KeyModifiers::none(),
         }
     }
-    // 以下两个构造器当前仅测试使用（binary crate 测试用方法仍触发 dead_code），
-    // 保留为通用修饰键模型 API surface（spec §8）。
-    #[allow(dead_code)]
     pub fn char(c: char) -> Self {
         Self::plain(KeyCode::Char(c))
     }
@@ -97,7 +100,10 @@ impl KeyEvent {
     pub fn modified(code: KeyCode, modifiers: KeyModifiers) -> Self {
         Self { code, modifiers }
     }
-    #[allow(dead_code)] // 同上：仅测试使用，保留 API surface
+    #[expect(
+        dead_code,
+        reason = "unknown keys are representable at the terminal protocol boundary"
+    )]
     pub fn unknown() -> Self {
         Self::plain(KeyCode::Unknown)
     }

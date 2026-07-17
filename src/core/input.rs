@@ -44,7 +44,13 @@ impl KeySequenceConfig {
         }
     }
 
-    #[allow(dead_code)] // Runtime configuration seam; current built-ins use only the global default.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "per-prefix timeouts are retained for runtime keymap configuration"
+        )
+    )]
     pub fn set_override(&mut self, sequence: impl AsRef<[KeyEvent]>, timeout: TimeoutPolicy) {
         let sequence = sequence.as_ref();
         assert!(!sequence.is_empty(), "timeout prefix must not be empty");

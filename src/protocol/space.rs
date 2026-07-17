@@ -4,7 +4,10 @@ use crate::protocol::ids::{SpaceId, ViewId};
 
 #[derive(Clone)]
 pub struct Space {
-    #[allow(dead_code)] // 结构性 identity 字段
+    #[expect(
+        dead_code,
+        reason = "space identity is retained for scene consistency validation"
+    )]
     pub id: SpaceId,
     pub kind: SpaceKind,
     pub sizing: Sizing,
@@ -17,12 +20,33 @@ pub enum SpaceKind {
     Content { view: ViewId, focusable: bool },
 }
 
-#[allow(dead_code)] // 完整方向契约；当前接线尚未暴露所有 split 操作
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitDirection {
+    #[expect(
+        dead_code,
+        reason = "all split directions belong to the layout mutation contract"
+    )]
     Left,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "all split directions belong to the layout mutation contract"
+        )
+    )]
     Right,
+    #[expect(
+        dead_code,
+        reason = "all split directions belong to the layout mutation contract"
+    )]
     Up,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "all split directions belong to the layout mutation contract"
+        )
+    )]
     Down,
 }
 
@@ -48,19 +72,29 @@ pub enum Arrangement {
     },
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Axis {
     Horizontal,
     Vertical,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Align {
     Stretch,
+    #[expect(
+        dead_code,
+        reason = "alignment variants belong to the neutral layout contract"
+    )]
     Start,
+    #[expect(
+        dead_code,
+        reason = "alignment variants belong to the neutral layout contract"
+    )]
     Center,
+    #[expect(
+        dead_code,
+        reason = "alignment variants belong to the neutral layout contract"
+    )]
     End,
 }
 
@@ -71,12 +105,32 @@ pub enum Sizing {
 }
 
 #[repr(i32)]
-#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Layer {
     Base = 0,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "layer variants belong to the neutral scene contract"
+        )
+    )]
     Overlay = 10,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "layer variants belong to the neutral scene contract"
+        )
+    )]
     Modal = 20,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "layer variants belong to the neutral scene contract"
+        )
+    )]
     Debug = 100,
 }
 

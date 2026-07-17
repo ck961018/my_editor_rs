@@ -10,9 +10,14 @@ pub struct ResizeEvent {
 pub enum FrontendEvent {
     Key(KeyEvent),
     Resize(ResizeEvent),
-    /// 前端请求退出（如 GUI 窗口关闭按钮）。v0.1 退出走 Ctrl+Q（Key 路径），
-    /// 此变体从未构造；保留为前端事件模型的语义完整部分，供未来 GUI 前端使用。
-    #[allow(dead_code)]
+    /// 前端请求退出，例如窗口式前端的关闭按钮。
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the terminal frontend exits through its configured key path"
+        )
+    )]
     QuitRequest,
 }
 

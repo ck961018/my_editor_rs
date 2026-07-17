@@ -35,7 +35,13 @@ impl Selection {
             head: at,
         }
     }
-    #[allow(dead_code)] // v0.3：仅供测试/未来选区判空；生产路径直接用 anchor!=head 比较
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "selection predicates are part of the neutral selection contract"
+        )
+    )]
     pub fn is_empty(&self) -> bool {
         self.anchor == self.head
     }
@@ -72,14 +78,14 @@ impl Selections {
         self.ranges.iter_mut()
     }
 
-    /// 清除 secondary ranges，仅保留 primary（v0.2 noop：ranges 本就 len==1）。
+    /// 清除 secondary ranges，仅保留 primary。
     pub fn retain_primary(&mut self) {
         let primary = self.ranges[self.primary_index];
         self.ranges = vec![primary];
         self.primary_index = 0;
     }
 
-    /// 测试构造器：多 ranges + 指定 primary_index。非 v0.2 正常路径使用。
+    /// 测试构造器：多 ranges + 指定 primary_index。
     #[cfg(test)]
     pub(crate) fn from_parts(ranges: Vec<Selection>, primary_index: usize) -> Self {
         assert!(primary_index < ranges.len());
