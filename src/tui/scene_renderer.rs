@@ -1,7 +1,7 @@
 //! 前端核心：layout（TaffyEngine）+ viewport 跟随 + pull 可见行 + paint 到 Canvas。
 //! TuiFrontend 经此渲染；单元测试用 StubQuery + Output<Vec<u8>> 断言 VT 字节。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 
 use crate::protocol::content_query::{
@@ -52,6 +52,8 @@ impl SceneRenderer {
         canvas: &mut dyn Canvas,
     ) -> io::Result<()> {
         let resolved: &ResolvedScene = self.engine.layout(scene, scene_revision);
+        let live_views: HashSet<ViewId> = resolved.items.iter().map(|item| item.view_id).collect();
+        self.viewports.retain(|view, _| live_views.contains(view));
         let views: HashMap<ViewId, ViewData> = resolved
             .items
             .iter()
@@ -709,6 +711,38 @@ mod tests {
                 .unwrap()
                 .contains("line1")
         );
+    }
+
+    #[test]
+    fn rendering_drops_viewports_for_views_removed_from_the_scene() {
+        let (scene, editor) = editor_scene(20, 2, ViewId(2), ViewId(1));
+        let mut renderer = SceneRenderer::new();
+        renderer.viewports.insert(
+            ViewId(0),
+            Viewport {
+                top_row: 7,
+                left_col: 3,
+            },
+        );
+        let query = StubQuery {
+            editor_cid: ContentId(0),
+            lines: vec!["line0".to_string()],
+            selections: Selections::single(Selection::collapsed(TextOffset::origin())),
+        };
+        let mut out = Output::new(Vec::new());
+
+        renderer
+            .render(
+                &scene,
+                Revision(0),
+                &query,
+                editor,
+                &mut out as &mut dyn Canvas,
+            )
+            .unwrap();
+
+        assert!(!renderer.viewports.contains_key(&ViewId(0)));
+        assert!(renderer.viewports.contains_key(&ViewId(2)));
     }
 
     #[test]

@@ -54,7 +54,7 @@
 | R08 | P1 | 已完成 | `buffer.rs`、`mode.rs`、`scene_renderer.rs` 等文件职责过密 |
 | R09 | P2 | 已完成 | `dead_code` 抑制、可见性和阶段性注释失真 |
 | R10 | P2 | 已完成 | View presentation 通过 selection 是否存在进行隐式推断 |
-| R11 | P2 | 待处理 | Scene identity、ID 溢出策略和 Frontend View 生命周期不一致 |
+| R11 | P2 | 已完成 | Scene identity、ID 溢出策略和 Frontend View 生命周期不一致 |
 | R12 | P2 | 待处理 | 测试组织、模块命名和当前架构文档存在局部不一致 |
 
 ## 4. 问题明细
@@ -340,7 +340,7 @@ keymap 构造代码中。`vim_mode_command(&str)` 还允许构造任意字符串
 
 ### R11：统一 Scene 和 View 生命周期细节
 
-**状态：** 待处理
+**状态：** 已完成（2026-07-17）
 
 待处理的小型一致性问题：
 
@@ -355,6 +355,15 @@ keymap 构造代码中。`vim_mode_command(&str)` 还允许构造任意字符串
 - ID 分配使用统一的溢出策略；
 - Frontend 在保留移动 View viewport 的同时清理真正消失的 View 状态；
 - 不把 viewport 所有权移回 App。
+
+处理结果：
+
+- 删除 `SpaceNode.id` 与 `Space.id`，`Scene::nodes` 的 HashMap key 成为 Space identity 的
+  唯一真相源，fixture 和 builder 均显式构造 `(SpaceId, SpaceNode)`；
+- `SceneBuilder::alloc` 改用 `checked_add` 并提供统一的 `space id overflow` 失败语义；
+- `SceneRenderer` 每次根据 resolved scene 保留 live ViewId 的 viewport，清理真正消失的
+  View，同时继续按 ViewId 保留移动到其他 Space 的 viewport；
+- 回归测试分别覆盖 ID 溢出、removed View 清理和 moved View 保留。
 
 ### R12：统一测试组织、模块命名和当前文档
 

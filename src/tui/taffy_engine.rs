@@ -200,36 +200,42 @@ mod tests {
         let right = SpaceId(2);
         let row = SpaceId(3);
         let root = SpaceId(4);
-        let content = |id, parent, view, sizing| SpaceNode {
-            id,
-            parent: Some(parent),
-            children: Vec::new(),
-            space: Space {
+        let content = |id, parent, view, sizing| {
+            (
                 id,
-                kind: SpaceKind::Content {
-                    view,
-                    focusable: true,
-                },
-                sizing,
-                layer: Layer::Base,
-            },
-        };
-        let container = |id, parent, direction, children, sizing| SpaceNode {
-            id,
-            parent,
-            children,
-            space: Space {
-                id,
-                kind: SpaceKind::Container {
-                    arrangement: Arrangement::Flex {
-                        direction,
-                        gap: 0,
-                        align: Align::Stretch,
+                SpaceNode {
+                    parent: Some(parent),
+                    children: Vec::new(),
+                    space: Space {
+                        kind: SpaceKind::Content {
+                            view,
+                            focusable: true,
+                        },
+                        sizing,
+                        layer: Layer::Base,
                     },
                 },
-                sizing,
-                layer: Layer::Base,
-            },
+            )
+        };
+        let container = |id, parent, direction, children, sizing| {
+            (
+                id,
+                SpaceNode {
+                    parent,
+                    children,
+                    space: Space {
+                        kind: SpaceKind::Container {
+                            arrangement: Arrangement::Flex {
+                                direction,
+                                gap: 0,
+                                align: Align::Stretch,
+                            },
+                        },
+                        sizing,
+                        layer: Layer::Base,
+                    },
+                },
+            )
         };
         Scene::from_parts(
             root,
@@ -251,7 +257,6 @@ mod tests {
                 container(root, None, Axis::Vertical, vec![top, row], Sizing::Grow(1)),
             ]
             .into_iter()
-            .map(|node| (node.id, node))
             .collect(),
         )
     }

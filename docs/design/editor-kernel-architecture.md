@@ -269,6 +269,9 @@ App 在每轮事件循环中向 Dispatcher 查询最近 input deadline，并与 
 - split、close、replace view、set sizing；
 - 校验父子关系、Content leaf 和 View 唯一挂载不变量。
 
+`Scene::nodes` 的 HashMap key 是 Space identity 的唯一真相源，`SpaceNode` 与 `Space` 不再
+重复保存 SpaceId。SceneBuilder 的 SpaceId 分配与其他 ID/Revision 一样使用 checked add。
+
 每个 `ClientSession` 持有唯一 builder。成功修改 Scene 后递增 scene revision，并同步创建、
 移除或保留对应 View。
 
@@ -289,7 +292,8 @@ Scene snapshot
 `TaffyTree` 并重新计算布局；它不会在每一帧无条件创建新树，也尚未消费 Scene diff 做增量更新。
 
 `SceneRenderer` 按 `ViewPresentation::{Text, StatusBar}` 显式分派，不通过不支持的 query 猜测
-Content 类型。它只拉取可见文本行，并在前端计算 `DisplayPoint`、viewport 和光标位置。
+Content 类型。它只拉取可见文本行，并在前端计算 `DisplayPoint`、viewport 和光标位置；每帧
+按 resolved ViewId 清理已离开 Scene 的 viewport，移动到其他 Space 的 View 状态仍会保留。
 
 ### 8.3 文本位置
 

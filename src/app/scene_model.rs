@@ -88,7 +88,10 @@ impl SceneBuilder {
 
     fn alloc(&mut self) -> SpaceId {
         let id = SpaceId(self.next_space_id);
-        self.next_space_id += 1;
+        self.next_space_id = self
+            .next_space_id
+            .checked_add(1)
+            .expect("space id overflow");
         id
     }
 
@@ -116,11 +119,9 @@ impl SceneBuilder {
         scene.nodes.insert(
             id,
             SpaceNode {
-                id,
                 parent: None,
                 children: Vec::new(),
                 space: Space {
-                    id,
                     kind,
                     sizing,
                     layer: Layer::Base,
@@ -446,6 +447,16 @@ pub fn build_editor_scene(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "space id overflow")]
+    fn space_id_allocation_has_an_explicit_overflow_policy() {
+        let mut builder = SceneBuilder {
+            next_space_id: u64::MAX,
+        };
+
+        builder.alloc();
+    }
 
     #[test]
     fn standard_scene_marks_editor_focusable_and_status_inert() {

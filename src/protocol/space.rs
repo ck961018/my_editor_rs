@@ -1,14 +1,9 @@
 //! 空间节点：布局意图。纯数据，前后端共享。不含 viewport/cursor（前端持）。
 
-use crate::protocol::ids::{SpaceId, ViewId};
+use crate::protocol::ids::ViewId;
 
 #[derive(Clone)]
 pub struct Space {
-    #[expect(
-        dead_code,
-        reason = "space identity is retained for scene consistency validation"
-    )]
-    pub id: SpaceId,
     pub kind: SpaceKind,
     pub sizing: Sizing,
     pub layer: Layer,

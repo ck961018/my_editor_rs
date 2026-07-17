@@ -8,14 +8,6 @@ use crate::protocol::space::Space;
 
 #[derive(Clone)]
 pub struct SpaceNode {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "scene identity validation reads this structural field"
-        )
-    )]
-    pub id: SpaceId,
     pub parent: Option<SpaceId>,
     pub children: Vec<SpaceId>,
     pub space: Space,
@@ -29,7 +21,7 @@ pub struct Scene {
 }
 
 impl Scene {
-    /// 从一份完整快照数据构造 Scene；调用者负责保证树引用一致。
+    /// 从完整快照数据构造 Scene；nodes 的 HashMap key 是 Space identity 的唯一真相源。
     pub fn from_parts(root: SpaceId, size: Size, nodes: HashMap<SpaceId, SpaceNode>) -> Self {
         Self { root, size, nodes }
     }
@@ -57,11 +49,9 @@ mod tests {
     fn snapshot_exposes_root_size_and_nodes() {
         let root = SpaceId(7);
         let node = SpaceNode {
-            id: root,
             parent: None,
             children: Vec::new(),
             space: Space {
-                id: root,
                 kind: SpaceKind::Content {
                     view: ViewId(3),
                     focusable: true,
@@ -88,6 +78,12 @@ mod tests {
             }
         );
         assert!(scene.contains(root));
-        assert_eq!(scene.node(root).id, root);
+        assert!(matches!(
+            scene.node(root).space.kind,
+            SpaceKind::Content {
+                view: ViewId(3),
+                ..
+            }
+        ));
     }
 }
