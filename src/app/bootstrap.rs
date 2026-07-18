@@ -47,6 +47,10 @@ pub(super) fn bootstrap_editor(buffer: Buffer, width: usize, height: usize) -> E
     let status_content = ids.content();
     let editor_view = ids.view();
     let status_view = ids.view();
+    let mut editor_modes = vec![ModeName::new("vim")];
+    if buffer.path().and_then(|path| path.extension()) == Some(std::ffi::OsStr::new("rs")) {
+        editor_modes.push(ModeName::new("tree-sitter-rust"));
+    }
 
     let mut contents = ContentStore::default();
     contents
@@ -62,7 +66,7 @@ pub(super) fn bootstrap_editor(buffer: Buffer, width: usize, height: usize) -> E
     let mut kernel = Kernel::new(
         contents,
         modes,
-        HashMap::from([(editor_content, ModeName::new("vim"))]),
+        HashMap::from([(editor_content, editor_modes.clone())]),
     );
     let (contents, modes, mode_contents) = kernel.mode_attachment_parts();
     let session = ClientSession::editor(
@@ -75,12 +79,12 @@ pub(super) fn bootstrap_editor(buffer: Buffer, width: usize, height: usize) -> E
             editor: InitialView {
                 view: editor_view,
                 content: editor_content,
-                mode: Some(ModeName::new("vim")),
+                modes: editor_modes,
             },
             status: InitialView {
                 view: status_view,
                 content: status_content,
-                mode: None,
+                modes: Vec::new(),
             },
             next_view_id: ids.next_view,
         },
@@ -111,12 +115,12 @@ pub(super) fn create_editor_session(
             editor: InitialView {
                 view: editor_view,
                 content: editor_content,
-                mode: Some(ModeName::new("vim")),
+                modes: vec![ModeName::new("vim")],
             },
             status: InitialView {
                 view: status_view,
                 content: status_content,
-                mode: None,
+                modes: Vec::new(),
             },
             next_view_id: ids.next_view,
         },

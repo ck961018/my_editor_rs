@@ -39,7 +39,7 @@ pub(super) struct ClientSession {
 pub(super) struct InitialView {
     pub view: ViewId,
     pub content: ContentId,
-    pub mode: Option<crate::app::mode_name::ModeName>,
+    pub modes: Vec<crate::app::mode_name::ModeName>,
 }
 
 pub(super) struct EditorSessionInit {
@@ -57,20 +57,10 @@ impl ClientSession {
         height: usize,
         init: EditorSessionInit,
     ) -> Self {
-        let editor = create_view(
-            init.editor.content,
-            contents,
-            modes,
-            &init.editor.mode.iter().cloned().collect::<Vec<_>>(),
-        )
-        .expect("editor content exists");
-        let status = create_view(
-            init.status.content,
-            contents,
-            modes,
-            &init.status.mode.iter().cloned().collect::<Vec<_>>(),
-        )
-        .expect("status content exists");
+        let editor = create_view(init.editor.content, contents, modes, &init.editor.modes)
+            .expect("editor content exists");
+        let status = create_view(init.status.content, contents, modes, &init.status.modes)
+            .expect("status content exists");
         let mut views = HashMap::new();
         let mut view_modes = ModeViewStore::default();
         let mut faces = FaceRegistry::default();
@@ -176,6 +166,14 @@ impl ClientSession {
 
     pub(super) fn view(&self, view: ViewId) -> Option<&View> {
         self.views.get(&view)
+    }
+
+    pub(super) fn touch_content_views(&mut self, content: ContentId) {
+        for view in self.views.values_mut() {
+            if view.content() == content {
+                view.touch();
+            }
+        }
     }
 
     pub(super) fn cursor_domain(

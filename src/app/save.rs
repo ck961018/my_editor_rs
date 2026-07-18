@@ -22,6 +22,16 @@ impl<F: Frontend> App<F> {
                     self.kernel.queue_save(content, snapshot);
                 }
             }
+            AppMessage::ModeJobCompleted {
+                key,
+                version,
+                result,
+            } => {
+                let content = key.content;
+                if self.kernel.complete_mode_job(key, version, result) {
+                    self.session.touch_content_views(content);
+                }
+            }
         }
         Ok(())
     }

@@ -4,6 +4,8 @@ use std::fmt;
 use std::rc::Rc;
 use std::sync::LazyLock;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::app::action::{TransactionIntent, ViewAction};
 use crate::app::command::{
     AppCommand, Command, ContentCommand, ModeCommand, ModeValue, TransactionCommand,
@@ -30,6 +32,9 @@ use crate::protocol::viewport::{
 };
 
 mod keymaps;
+mod tree_sitter;
+
+use tree_sitter::TreeSitterMode;
 
 static EMPTY_KEYMAP: LazyLock<Keymap<Command>> = LazyLock::new(Keymap::new);
 
@@ -123,6 +128,40 @@ pub trait ModeState: Any {
     fn clone_box(&self) -> Box<dyn ModeState>;
 }
 
+pub type ModeJobResult = Result<Box<dyn Any + Send>, String>;
+pub(crate) type ModeJobRunner = Box<dyn FnOnce(CancellationToken) -> ModeJobResult + Send>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ModeJobKey {
+    pub(crate) mode: ModeId,
+    pub(crate) content: ContentId,
+    pub(crate) slot: String,
+}
+
+pub struct ModeJobRequest {
+    slot: String,
+    version: u64,
+    run: ModeJobRunner,
+}
+
+impl ModeJobRequest {
+    pub fn new(
+        slot: impl Into<String>,
+        version: u64,
+        run: impl FnOnce(CancellationToken) -> ModeJobResult + Send + 'static,
+    ) -> Self {
+        Self {
+            slot: slot.into(),
+            version,
+            run: Box::new(run),
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (String, u64, ModeJobRunner) {
+        (self.slot, self.version, self.run)
+    }
+}
+
 impl<T: Any + Clone> ModeState for T {
     fn as_any(&self) -> &dyn Any {
         self
@@ -192,6 +231,10 @@ impl<'a> ModeContentContext<'a> {
 
     pub fn content_revision(&self) -> Option<Revision> {
         self.contents.revision(self.content_id)
+    }
+
+    pub fn text_snapshot(&self) -> Option<crate::core::text_snapshot::TextSnapshot> {
+        self.contents.text_snapshot(self.content_id)
     }
 }
 
@@ -476,6 +519,22 @@ pub trait Mode {
     ) -> Result<(), ModeError> {
         Ok(())
     }
+    fn take_background_job(
+        &self,
+        _state: &mut dyn ModeState,
+        _context: &ModeContentContext<'_>,
+    ) -> Option<ModeJobRequest> {
+        None
+    }
+    fn apply_background_job(
+        &self,
+        _state: &mut dyn ModeState,
+        _context: &ModeContentContext<'_>,
+        _version: u64,
+        _result: ModeJobResult,
+    ) -> Result<bool, ModeError> {
+        Ok(false)
+    }
     fn on_view_content_changed(
         &self,
         _content_state: &mut dyn ModeState,
@@ -641,6 +700,7 @@ impl ModeRegistry {
     pub(crate) fn builtin() -> Self {
         let mut registry = Self::new();
         registry.register(VimMode::new());
+        registry.register(TreeSitterMode::rust());
         registry
     }
 
@@ -822,6 +882,42 @@ impl ModeContentInstance {
             self.faulted = true;
         }
     }
+
+    fn take_background_job(&mut self, contents: &ContentStore) -> Option<ModeJobRequest> {
+        if self.faulted {
+            return None;
+        }
+        let context = ModeContentContext::new(self.content, contents);
+        self.registered
+            .mode()
+            .take_background_job(self.state.as_mut(), &context)
+    }
+
+    fn apply_background_job(
+        &mut self,
+        contents: &ContentStore,
+        version: u64,
+        result: ModeJobResult,
+    ) -> bool {
+        if self.faulted {
+            return false;
+        }
+        let snapshot = self.snapshot();
+        let context = ModeContentContext::new(self.content, contents);
+        match self.registered.mode().apply_background_job(
+            self.state.as_mut(),
+            &context,
+            version,
+            result,
+        ) {
+            Ok(changed) => changed,
+            Err(_) => {
+                self.restore(snapshot);
+                self.faulted = true;
+                false
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -830,6 +926,32 @@ pub(crate) struct ModeContentStore {
 }
 
 impl ModeContentStore {
+    pub(crate) fn take_background_jobs(
+        &mut self,
+        contents: &ContentStore,
+    ) -> Vec<(ModeId, ContentId, ModeJobRequest)> {
+        self.instances
+            .iter_mut()
+            .filter_map(|(&(mode, content), instance)| {
+                instance
+                    .take_background_job(contents)
+                    .map(|job| (mode, content, job))
+            })
+            .collect()
+    }
+
+    pub(crate) fn apply_background_job(
+        &mut self,
+        mode: ModeId,
+        content: ContentId,
+        contents: &ContentStore,
+        version: u64,
+        result: ModeJobResult,
+    ) -> bool {
+        self.instance_mut(mode, content)
+            .is_some_and(|instance| instance.apply_background_job(contents, version, result))
+    }
+
     pub(crate) fn snapshots(
         &self,
         content: ContentId,

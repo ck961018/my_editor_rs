@@ -7,7 +7,8 @@ use tokio::sync::mpsc;
 use crate::app::command::ModeCommand;
 use crate::app::message::AppMessage;
 use crate::app::mode::{
-    ModeContentStore, ModeError, ModeId, ModeRegistry, ModeResult, ModeStateSnapshot,
+    ModeContentStore, ModeError, ModeId, ModeJobKey, ModeJobRequest, ModeJobResult, ModeJobRunner,
+    ModeRegistry, ModeResult, ModeStateSnapshot,
 };
 use crate::app::mode_name::ModeName;
 use crate::app::tasks::AppTasks;
@@ -29,10 +30,11 @@ pub(super) struct Kernel {
     modes: ModeRegistry,
     content_modes: ModeContentStore,
     transactions: TransactionManager,
-    new_view_modes: HashMap<ContentId, ModeName>,
+    new_view_modes: HashMap<ContentId, Vec<ModeName>>,
     message_tx: mpsc::UnboundedSender<AppMessage>,
     message_rx: mpsc::UnboundedReceiver<AppMessage>,
     tasks: AppTasks,
+    mode_jobs: HashMap<ModeJobKey, ModeJobSlot>,
     pending_saves: HashMap<ContentId, PendingSave>,
     command_transaction: Option<CommandTransaction>,
 }
@@ -41,7 +43,7 @@ impl Kernel {
     pub(super) fn new(
         contents: ContentStore,
         modes: ModeRegistry,
-        new_view_modes: HashMap<ContentId, ModeName>,
+        new_view_modes: HashMap<ContentId, Vec<ModeName>>,
     ) -> Self {
         let (message_tx, message_rx) = mpsc::unbounded_channel();
         Self {
@@ -53,6 +55,7 @@ impl Kernel {
             message_tx,
             message_rx,
             tasks: AppTasks::new(),
+            mode_jobs: HashMap::new(),
             pending_saves: HashMap::new(),
             command_transaction: None,
         }
@@ -83,8 +86,7 @@ impl Kernel {
         self.new_view_modes
             .get(&content)
             .cloned()
-            .into_iter()
-            .collect()
+            .unwrap_or_default()
     }
 
     pub(super) fn content_modes(&self) -> &ModeContentStore {
@@ -258,6 +260,80 @@ impl Kernel {
         self.tasks.cancellation_token()
     }
 
+    pub(super) fn schedule_mode_jobs(&mut self) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let jobs = self.content_modes.take_background_jobs(&self.contents);
+        for (mode, content, request) in jobs {
+            self.queue_mode_job(mode, content, request);
+        }
+    }
+
+    fn queue_mode_job(&mut self, mode: ModeId, content: ContentId, request: ModeJobRequest) {
+        let (slot, version, run) = request.into_parts();
+        let key = ModeJobKey {
+            mode,
+            content,
+            slot,
+        };
+        let pending = PendingModeJob { version, run };
+        let entry = self.mode_jobs.entry(key.clone()).or_default();
+        if entry.running.is_some() {
+            if entry.running == Some(version) {
+                return;
+            }
+            entry.queued = Some(pending);
+            return;
+        }
+        entry.running = Some(version);
+        self.spawn_mode_job(key, pending);
+    }
+
+    fn spawn_mode_job(&self, key: ModeJobKey, pending: PendingModeJob) {
+        let tx = self.message_tx.clone();
+        let cancellation = self.tasks.cancellation_token();
+        self.tasks.spawn_detached(async move {
+            let version = pending.version;
+            let result = tokio::task::spawn_blocking(move || (pending.run)(cancellation))
+                .await
+                .unwrap_or_else(|error| Err(format!("mode job panicked: {error}")));
+            let _ = tx.send(AppMessage::ModeJobCompleted {
+                key,
+                version,
+                result,
+            });
+        });
+    }
+
+    pub(super) fn complete_mode_job(
+        &mut self,
+        key: ModeJobKey,
+        version: u64,
+        result: ModeJobResult,
+    ) -> bool {
+        let Some(slot) = self.mode_jobs.get_mut(&key) else {
+            return false;
+        };
+        if slot.running != Some(version) {
+            return false;
+        }
+        slot.running = None;
+        let changed = self.content_modes.apply_background_job(
+            key.mode,
+            key.content,
+            &self.contents,
+            version,
+            result,
+        );
+        let queued = slot.queued.take();
+        if let Some(pending) = queued {
+            slot.running = Some(pending.version);
+            self.spawn_mode_job(key, pending);
+        }
+        changed
+    }
+
     pub(super) async fn receive_message(&mut self) -> Option<AppMessage> {
         self.message_rx.recv().await
     }
@@ -386,6 +462,17 @@ struct PendingSave {
 struct CommandTransaction {
     target: ContentId,
     snapshot: Option<TransactionSnapshot>,
+}
+
+#[derive(Default)]
+struct ModeJobSlot {
+    running: Option<u64>,
+    queued: Option<PendingModeJob>,
+}
+
+struct PendingModeJob {
+    version: u64,
+    run: ModeJobRunner,
 }
 
 async fn atomic_write(snapshot: SaveSnapshot) -> io::Result<()> {

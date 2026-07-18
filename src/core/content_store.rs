@@ -8,6 +8,7 @@ use crate::core::content::{
     ContentTransactionError,
 };
 use crate::core::content_view_state::ContentViewState;
+use crate::core::text_snapshot::TextSnapshot;
 use crate::core::transaction::TransactionDirection;
 use crate::protocol::content_query::{
     ContentData, ContentPresentation, ContentQuery, DocumentStatus, RowRange, StatusBarData,
@@ -162,6 +163,13 @@ impl ContentStore {
                     .map_or(entry.revision, |target| entry.revision.max(target.revision)),
             ),
             Content::Buffer(_) => Some(entry.revision),
+        }
+    }
+
+    pub fn text_snapshot(&self, id: ContentId) -> Option<TextSnapshot> {
+        match &self.entries.get(&id)?.content {
+            Content::Buffer(buffer) => Some(TextSnapshot::new(buffer.slice())),
+            Content::StatusBar(_) => None,
         }
     }
 

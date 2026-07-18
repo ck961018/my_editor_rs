@@ -60,6 +60,7 @@ impl<F: Frontend> App<F> {
     }
 
     async fn run_loop(&mut self) -> io::Result<()> {
+        self.kernel.schedule_mode_jobs();
         self.render()?;
         loop {
             let input_deadline = self
@@ -256,6 +257,7 @@ impl<F: Frontend> App<F> {
         self.kernel.finish_command_transaction(result.is_ok());
         if result.is_ok() {
             self.publish_deferred_effects(deferred_effects);
+            self.kernel.schedule_mode_jobs();
             outer_queue.extend(queue);
         }
         result
@@ -422,6 +424,7 @@ impl<F: Frontend> App<F> {
         self.kernel.finish_command_transaction(result.is_ok());
         if result.is_ok() {
             self.publish_deferred_effects(deferred_effects);
+            self.kernel.schedule_mode_jobs();
         }
         result
     }

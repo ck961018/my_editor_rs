@@ -31,13 +31,6 @@ impl AppTasks {
         self.cancel.clone()
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "detached tasks are retained for cancellable background work"
-        )
-    )]
     pub(crate) fn spawn_detached<F>(&self, task: F)
     where
         F: Future<Output = ()> + Send + 'static,

@@ -37,12 +37,11 @@ effective Mode binding 和 presentation 独占相关的规则。
 第一阶段不包含：
 
 - 具体脚本语言或 VM 的选择；
-- Tree-sitter parser、grammar 和 query 的接入；
 - 自动迁移热重载前后的脚本状态；
 - 跨 Content 原子命令；
 - 跨进程 Mode state；
 - virtual text、gutter、浮窗和 widget 系统；
-- 任意异步 callback；
+- 可产生宿主 effect 的任意异步 callback；
 - Mode state 的 undo/redo 历史；
 - 同一 Mode 在同一 View 中附加多次。
 
@@ -474,16 +473,28 @@ trait ModeState {
 input、action、content change、view policy 和 decoration callback 必须同步
 完成。Mode 不得在 callback 中 await 或保存 Context。
 
-未来异步工作使用独立消息：
+Mode 可以从 content state 产生 owned 后台任务。任务只读取不可变快照，
+不得保存 Context，也不得直接修改 Content、View 或 Mode state。
 
 ```text
-Mode action 启动后台任务
+content change 同步更新 Mode 私有状态
 -> 当前执行帧成功结束
--> 后台完成并投递 ModeCommand
--> App 创建新的执行帧
+-> Kernel 启动或合并 Mode 后台任务
+-> 后台完成并投递带版本的 AppMessage
+-> 主循环调用所属 Mode 安装结果
+-> 相关 View touch 并重绘
 ```
 
-完成消息携带发起时的 Content revision。Mode 负责丢弃或重新计算过期结果。
+后台任务按 `(ModeId, ContentId, slot)` 标识。同一个 slot 最多运行一个任务；
+运行期间的新请求只保留最新版本。CPU 密集任务使用 blocking worker，不能阻塞
+Tokio 主循环。
+
+完成消息携带 Mode generation 和 Content revision。Mode 负责拒绝过期结果。
+完成回调只能更新所属 Mode 的 content state 并请求重绘，不能发出编辑、View
+操作或任意 command。需要修改内容的分析器操作必须由显式命令读取当前快照，
+再进入正常事务路径。
+
+后台失败保留上一份有效状态，不回滚用户文本，也不进入 undo/redo 历史。
 
 ## 18. 呈现策略
 
