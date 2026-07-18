@@ -32,7 +32,7 @@ use crate::protocol::ids::{ContentId, SpaceId, ViewId};
 use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
 use crate::protocol::revision::Revision;
 use crate::protocol::scene::Scene;
-use crate::protocol::selection::{Selection, Selections, TextOffset};
+use crate::protocol::selection::{Selection, Selections, TextOffset, TextPoint};
 use crate::protocol::space::{Sizing, SpaceKind, SplitDirection};
 use crate::protocol::status::StatusMessage;
 use crate::protocol::viewport::{ViewportCommand, ViewportCursorBehavior};
@@ -1546,6 +1546,38 @@ async fn vim_normal_w_moves_to_next_word() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn vim_normal_w_stops_on_an_empty_line() {
+    let mut app = make_app(
+        vec![
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('w')),
+            FrontendEvent::Key(KeyEvent::ctrl('q')),
+        ],
+        None,
+    );
+    let focused_view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("one\n\nthree".to_string())),
+        view: focused_view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    app.run().await.unwrap();
+
+    let head = view_at(&app, app.session.focused())
+        .selections()
+        .unwrap()
+        .primary()
+        .head();
+    assert_eq!(
+        text_point(&app, editor_cid(), head),
+        TextPoint { row: 1, col: 0 }
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn vim_counted_word_motions_advance_for_each_repetition() {
     let text = [
         'o', 'n', 'e', ' ', 't', 'w', 'o', ' ', 't', 'h', 'r', 'e', 'e',
@@ -2531,7 +2563,7 @@ async fn vim_visual_counted_motion_then_delete_removes_selected_range() {
 
     app.run().await.unwrap();
 
-    assert_eq!(text_rows(&app, editor_cid()), vec!["cd"]);
+    assert_eq!(text_rows(&app, editor_cid()), vec!["d"]);
     let selection = view_at(&app, app.session.focused())
         .selections()
         .unwrap()
@@ -2559,6 +2591,30 @@ async fn vim_visual_delete_without_motion_removes_current_char() {
     app.run().await.unwrap();
 
     assert_eq!(text_rows(&app, editor_cid()), vec!["b"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_visual_left_includes_the_original_cursor_character() {
+    let mut app = make_app(
+        vec![
+            FrontendEvent::Key(KeyEvent::char('i')),
+            FrontendEvent::Key(KeyEvent::char('a')),
+            FrontendEvent::Key(KeyEvent::char('b')),
+            FrontendEvent::Key(KeyEvent::char('c')),
+            FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+            FrontendEvent::Key(KeyEvent::char('0')),
+            FrontendEvent::Key(KeyEvent::char('l')),
+            FrontendEvent::Key(KeyEvent::char('v')),
+            FrontendEvent::Key(KeyEvent::char('h')),
+            FrontendEvent::Key(KeyEvent::char('d')),
+            FrontendEvent::Key(KeyEvent::ctrl('q')),
+        ],
+        None,
+    );
+
+    app.run().await.unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["c"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

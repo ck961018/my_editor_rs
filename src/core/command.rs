@@ -88,6 +88,7 @@ pub enum EditCommand {
     InsertNewLineAbove,
     MoveAfterLineEnd,
     DeleteLineContent,
+    DeleteInclusiveSelection,
     DeleteSelectedLines,
 }
 

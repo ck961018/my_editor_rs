@@ -293,6 +293,9 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
         EditCommand::DeleteLineContent => {
             buffer.delete_line_content_at_selections(selections);
         }
+        EditCommand::DeleteInclusiveSelection => {
+            buffer.delete_inclusive_selection_at_selections(selections);
+        }
         EditCommand::DeleteSelectedLines => {
             buffer.delete_selected_lines_at_selections(selections);
         }

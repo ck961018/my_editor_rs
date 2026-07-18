@@ -1733,10 +1733,10 @@ impl ViewMode for VimMode {
         state: &dyn ModeState,
         _context: &ViewModeContext<'_>,
     ) -> SelectionShape {
-        if self.state(state).state == VimState::VisualLine {
-            SelectionShape::Line
-        } else {
-            SelectionShape::Character
+        match self.state(state).state {
+            VimState::Visual => SelectionShape::CharacterInclusive,
+            VimState::VisualLine => SelectionShape::Line,
+            VimState::Normal | VimState::Insert => SelectionShape::Character,
         }
     }
 
@@ -1793,7 +1793,7 @@ impl ViewMode for VimMode {
                 let command = if linewise {
                     EditCommand::DeleteSelectedLines
                 } else {
-                    EditCommand::Delete(1)
+                    EditCommand::DeleteInclusiveSelection
                 };
                 let result =
                     ViewModeResult::from_command(context, Some(Command::Content(command.into())));
@@ -1807,7 +1807,7 @@ impl ViewMode for VimMode {
                     if linewise {
                         EditCommand::DeleteSelectedLines
                     } else {
-                        EditCommand::Delete(1)
+                        EditCommand::DeleteInclusiveSelection
                     }
                     .into(),
                 ]);
@@ -2658,6 +2658,10 @@ mod tests {
         );
         assert_eq!(modes.cursor_style(&runtime), CursorStyle::Block);
         assert_eq!(
+            runtime.selection_shape_for_test(),
+            SelectionShape::CharacterInclusive
+        );
+        assert_eq!(
             modes.resolve_key(&runtime, KeyEvent::char('l')),
             Some(vim_mode_command(VimAction::MoveRight)),
         );
@@ -2699,7 +2703,7 @@ mod tests {
                 ModeName::new("vim"),
                 ModeActionName::new("delete-selection"),
             ),
-            Some(EditCommand::Delete(1)),
+            Some(EditCommand::DeleteInclusiveSelection),
         );
         assert_eq!(
             modes.resolve_key(&runtime, KeyEvent::char('v')),

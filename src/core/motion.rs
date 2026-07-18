@@ -45,13 +45,33 @@ pub(crate) fn forward_word_start(rope: &Rope, char_index: usize) -> usize {
         return len;
     }
     let start_class = char_class(rope.char(pos));
-    while pos < len && char_class(rope.char(pos)) == start_class {
-        pos += 1;
+    if start_class == 0 {
+        pos = next_char(rope, pos);
+    } else {
+        while pos < len && char_class(rope.char(pos)) == start_class {
+            pos += 1;
+        }
     }
     while pos < len && rope.char(pos).is_whitespace() {
-        pos += 1;
+        if is_empty_line_start(rope, pos) {
+            break;
+        }
+        pos = next_char(rope, pos);
     }
     pos
+}
+
+fn next_char(rope: &Rope, pos: usize) -> usize {
+    if pos + 1 < rope.len_chars() && rope.char(pos) == '\r' && rope.char(pos + 1) == '\n' {
+        pos + 2
+    } else {
+        pos + 1
+    }
+}
+
+fn is_empty_line_start(rope: &Rope, pos: usize) -> bool {
+    let row = rope.char_to_line(pos);
+    pos == rope.line_to_char(row) && line_content_len(rope, row) == 0
 }
 
 pub(crate) fn line_end_insert(rope: &Rope, row: usize) -> usize {
@@ -149,6 +169,22 @@ mod tests {
             forward_word_start(&rope, rope.len_chars()),
             rope.len_chars()
         );
+    }
+
+    #[test]
+    fn word_start_treats_each_empty_line_as_a_word() {
+        let rope = Rope::from_str("foo\n\n\nbar");
+
+        assert_eq!(forward_word_start(&rope, 0), 4);
+        assert_eq!(forward_word_start(&rope, 4), 5);
+        assert_eq!(forward_word_start(&rope, 5), 6);
+
+        let whitespace_only = Rope::from_str("foo\n   \nbar");
+        assert_eq!(forward_word_start(&whitespace_only, 0), 8);
+
+        let crlf = Rope::from_str("foo\r\n\r\nbar");
+        assert_eq!(forward_word_start(&crlf, 0), 5);
+        assert_eq!(forward_word_start(&crlf, 5), 7);
     }
 
     #[test]

@@ -278,6 +278,13 @@ fn paint_text_item(
                 (primary.head, primary.anchor)
             }
         }),
+        SelectionShape::CharacterInclusive => {
+            Some(if primary.anchor.char_index <= primary.head.char_index {
+                (primary.anchor, primary.head)
+            } else {
+                (primary.head, primary.anchor)
+            })
+        }
         SelectionShape::Line => Some((primary.anchor, primary.head)),
     };
     let selection = selection_offsets.map(|(start, end)| {
@@ -307,7 +314,10 @@ fn paint_text_item(
         )?;
         let hi = if linewise_highlight {
             Some((0, usize::MAX))
-        } else if text.selection_shape == SelectionShape::Character {
+        } else if matches!(
+            text.selection_shape,
+            SelectionShape::Character | SelectionShape::CharacterInclusive
+        ) {
             selection.and_then(|(sel_start, sel_end)| {
                 (buf_row >= sel_start.row && buf_row <= sel_end.row).then(|| {
                     let start = if buf_row == sel_start.row {
@@ -317,6 +327,9 @@ fn paint_text_item(
                     };
                     let end = if buf_row == sel_end.row {
                         sel_end.col
+                            + usize::from(
+                                text.selection_shape == SelectionShape::CharacterInclusive,
+                            )
                     } else {
                         usize::MAX
                     };
@@ -909,6 +922,41 @@ mod tests {
             .unwrap();
         let s = String::from_utf8(out.into_inner()).unwrap();
         assert!(!s.contains("\x1b[7m"), "collapsed should not reverse: {s}");
+    }
+
+    #[test]
+    fn backward_inclusive_selection_highlights_both_endpoint_characters() {
+        let (scene, editor) = editor_scene(40, 5, ViewId(0), ViewId(1));
+        let query = MultiSpaceQuery {
+            lines: vec!["hello".to_string()],
+            selections: HashMap::from([(
+                ViewId(0),
+                text_view_with_shape(
+                    ContentId(0),
+                    Selections::single(Selection {
+                        anchor: TextOffset { char_index: 1 },
+                        head: TextOffset { char_index: 0 },
+                    }),
+                    CursorStyle::Block,
+                    SelectionShape::CharacterInclusive,
+                ),
+            )]),
+        };
+        let mut renderer = SceneRenderer::new();
+        let mut out = Output::new(Vec::new());
+
+        renderer
+            .render(
+                &scene,
+                Revision(0),
+                &query,
+                editor,
+                &mut out as &mut dyn Canvas,
+            )
+            .unwrap();
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert!(output.contains("\x1b[7mhe\x1b[27mllo"), "output: {output}");
     }
 
     #[test]

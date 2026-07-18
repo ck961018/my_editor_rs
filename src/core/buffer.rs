@@ -708,6 +708,19 @@ impl Buffer {
         }
     }
 
+    pub fn delete_inclusive_selection_at_selections(&mut self, selections: &mut Selections) {
+        self.reconcile_selections(selections);
+        for selection in selections.all_mut() {
+            let end = if selection.anchor.char_index > selection.head.char_index {
+                &mut selection.anchor
+            } else {
+                &mut selection.head
+            };
+            self.move_cursor_right(end, 1);
+        }
+        self.delete_at_selections(selections, 1);
+    }
+
     pub fn delete_word_backward_at_selections(&mut self, selections: &mut Selections) {
         self.reconcile_selections(selections);
         let starts: Vec<usize> = selections

@@ -31,6 +31,7 @@ pub enum CursorStyle {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectionShape {
     Character,
+    CharacterInclusive,
     Line,
 }
 
