@@ -1,8 +1,8 @@
 use super::{CommandKeymapExt, VimAction};
 use crate::app::command::{Command, ContentCommand, ModeCommand};
+use crate::app::mode_name::{ModeActionName, ModeName};
 use crate::core::command::EditCommand;
 use crate::core::keymap::Keymap;
-use crate::core::mode_name::{ModeActionName, ModeName};
 use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
 
 #[cfg(test)]
@@ -213,8 +213,8 @@ fn bind_counts(keymap: &mut Keymap<Command>) {
 }
 
 pub(super) fn vim_mode_command(action: VimAction) -> Command {
-    Command::Mode(ModeCommand {
-        mode: ModeName::new("vim"),
-        action: ModeActionName::new(action.name()),
-    })
+    Command::Mode(ModeCommand::new(
+        ModeName::new("vim"),
+        ModeActionName::new(action.name()),
+    ))
 }

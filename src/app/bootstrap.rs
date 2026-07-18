@@ -2,11 +2,11 @@ use std::collections::HashMap;
 
 use crate::app::kernel::Kernel;
 use crate::app::mode::ModeRegistry;
+use crate::app::mode_name::ModeName;
 use crate::app::session::{ClientSession, EditorSessionInit, InitialView};
 use crate::core::buffer::Buffer;
 use crate::core::content::Content;
 use crate::core::content_store::ContentStore;
-use crate::core::mode_name::ModeName;
 use crate::core::status_bar::StatusBar;
 use crate::protocol::ids::{ContentId, ViewId};
 
@@ -59,9 +59,16 @@ pub(super) fn bootstrap_editor(buffer: Buffer, width: usize, height: usize) -> E
         )
         .expect("bootstrap allocates unique content ids");
     let modes = ModeRegistry::builtin();
+    let mut kernel = Kernel::new(
+        contents,
+        modes,
+        HashMap::from([(editor_content, ModeName::new("vim"))]),
+    );
+    let (contents, modes, mode_contents) = kernel.mode_attachment_parts();
     let session = ClientSession::editor(
-        &contents,
-        &modes,
+        contents,
+        modes,
+        mode_contents,
         width,
         height,
         EditorSessionInit {
@@ -78,11 +85,6 @@ pub(super) fn bootstrap_editor(buffer: Buffer, width: usize, height: usize) -> E
             next_view_id: ids.next_view,
         },
     );
-    let kernel = Kernel::new(
-        contents,
-        modes,
-        HashMap::from([(editor_content, ModeName::new("vim"))]),
-    );
     EditorBootstrap { kernel, session }
 }
 
@@ -90,6 +92,7 @@ pub(super) fn bootstrap_editor(buffer: Buffer, width: usize, height: usize) -> E
 pub(super) fn create_editor_session(
     contents: &ContentStore,
     modes: &ModeRegistry,
+    mode_contents: &mut crate::app::mode::ModeContentStore,
     width: usize,
     height: usize,
     editor_content: ContentId,
@@ -101,6 +104,7 @@ pub(super) fn create_editor_session(
     ClientSession::editor(
         contents,
         modes,
+        mode_contents,
         width,
         height,
         EditorSessionInit {
@@ -135,8 +139,10 @@ mod tests {
             .insert(status, Content::StatusBar(StatusBar::new(editor)))
             .unwrap();
         let modes = ModeRegistry::builtin();
+        let mut mode_contents = crate::app::mode::ModeContentStore::default();
 
-        let session = create_editor_session(&contents, &modes, 40, 5, editor, status);
+        let session =
+            create_editor_session(&contents, &modes, &mut mode_contents, 40, 5, editor, status);
 
         assert_eq!(session.views()[&ViewId(0)].content(), editor);
         assert_eq!(session.views()[&ViewId(1)].content(), status);

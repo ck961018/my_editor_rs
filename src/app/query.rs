@@ -1,18 +1,20 @@
 use std::collections::HashMap;
 
-use crate::app::mode::ViewModeInstances;
+use crate::app::mode::{FaceRegistry, ModeContentStore, ModeViewStore};
 use crate::app::view::View;
 use crate::core::content_store::ContentStore;
 use crate::protocol::content_query::{
-    ContentData, ContentPresentation, ContentQuery, RenderQuery, TextPresentation, ViewData,
-    ViewPresentation,
+    ContentData, ContentPresentation, ContentQuery, CursorStyle, RenderQuery, RowRange,
+    SelectionShape, TextDecoration, TextPresentation, ViewData, ViewPresentation,
 };
 use crate::protocol::ids::{ContentId, ViewId};
 
 pub(super) struct AppQuery<'a> {
     pub(super) contents: &'a ContentStore,
     pub(super) views: &'a HashMap<ViewId, View>,
-    pub(super) view_modes: &'a ViewModeInstances,
+    pub(super) view_modes: &'a ModeViewStore,
+    pub(super) mode_contents: &'a ModeContentStore,
+    pub(super) faces: &'a FaceRegistry,
 }
 
 impl RenderQuery for AppQuery<'_> {
@@ -29,14 +31,22 @@ impl RenderQuery for AppQuery<'_> {
             .expect("view references existing content")
         {
             ContentPresentation::Text => {
-                let context = crate::app::mode::ViewModeContext::new(id, view, self.contents);
+                let context = crate::app::mode::ModeViewContext::new(id, view, self.contents);
                 let selections = view
                     .selections()
                     .expect("text content creates selection-backed view state");
+                let policy = self
+                    .view_modes
+                    .view_policy(id, &context, self.mode_contents);
                 ViewPresentation::Text(TextPresentation {
                     selections: selections.clone(),
-                    cursor_style: self.view_modes.cursor_style(id, &context),
-                    selection_shape: self.view_modes.selection_shape(id, &context),
+                    cursor_style: policy.cursor_style.unwrap_or(CursorStyle::Default),
+                    selection_shape: policy.selection_shape.unwrap_or(SelectionShape::Character),
+                    selection_face: policy
+                        .selection_face
+                        .as_ref()
+                        .map(|face| self.faces.resolve(face))
+                        .unwrap_or_default(),
                 })
             }
             ContentPresentation::StatusBar => {
@@ -48,5 +58,14 @@ impl RenderQuery for AppQuery<'_> {
             content,
             presentation,
         }
+    }
+
+    fn decorations(&self, id: ViewId, visible_rows: RowRange) -> Vec<TextDecoration> {
+        let Some(view) = self.views.get(&id) else {
+            return Vec::new();
+        };
+        let context = crate::app::mode::ModeViewContext::new(id, view, self.contents);
+        self.view_modes
+            .decorations(id, &context, self.mode_contents, self.faces, visible_rows)
     }
 }

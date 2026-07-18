@@ -7,8 +7,9 @@ use tokio::sync::mpsc;
 use crate::app::command::ModeCommand;
 use crate::app::message::AppMessage;
 use crate::app::mode::{
-    ContentModeInstances, ContentModeOperation, ModeError, ModeRegistry, ModeStateSnapshot,
+    ModeContentStore, ModeError, ModeId, ModeRegistry, ModeResult, ModeStateSnapshot,
 };
+use crate::app::mode_name::ModeName;
 use crate::app::tasks::AppTasks;
 use crate::app::transaction::{
     TransactionManager, TransactionManagerError, TransactionRecord, TransactionSnapshot,
@@ -19,7 +20,6 @@ use crate::core::content::{
     ContentTransactionError, SaveSnapshot,
 };
 use crate::core::content_store::{ContentSnapshot, ContentStore};
-use crate::core::mode_name::ModeName;
 use crate::core::transaction::{TextStateId, TransactionDirection};
 use crate::protocol::ids::{ContentId, ViewId};
 use crate::protocol::selection::Selections;
@@ -27,7 +27,7 @@ use crate::protocol::selection::Selections;
 pub(super) struct Kernel {
     contents: ContentStore,
     modes: ModeRegistry,
-    content_modes: ContentModeInstances,
+    content_modes: ModeContentStore,
     transactions: TransactionManager,
     new_view_modes: HashMap<ContentId, ModeName>,
     message_tx: mpsc::UnboundedSender<AppMessage>,
@@ -47,7 +47,7 @@ impl Kernel {
         Self {
             contents,
             modes,
-            content_modes: ContentModeInstances::default(),
+            content_modes: ModeContentStore::default(),
             transactions: TransactionManager::default(),
             new_view_modes,
             message_tx,
@@ -79,48 +79,52 @@ impl Kernel {
         &self.modes
     }
 
-    pub(super) fn view_mode_for_new_view(&self, content: ContentId) -> Option<&ModeName> {
-        (!self.has_content_mode(content))
-            .then(|| self.new_view_modes.get(&content))
-            .flatten()
+    pub(super) fn mode_chain_for_new_view(&self, content: ContentId) -> Vec<ModeName> {
+        self.new_view_modes
+            .get(&content)
+            .cloned()
+            .into_iter()
+            .collect()
     }
 
-    pub(super) fn has_content_mode(&self, content: ContentId) -> bool {
-        self.content_modes.is_active(content)
-    }
-
-    pub(super) fn content_modes(&self) -> &ContentModeInstances {
+    pub(super) fn content_modes(&self) -> &ModeContentStore {
         &self.content_modes
     }
 
-    pub(super) fn mode_runtime_parts(&mut self) -> (&ContentStore, &mut ContentModeInstances) {
+    pub(super) fn mode_runtime_parts(&mut self) -> (&ContentStore, &mut ModeContentStore) {
         (&self.contents, &mut self.content_modes)
     }
 
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "ContentMode binding is an app extension seam")
-    )]
-    pub(super) fn bind_content_mode(&mut self, content: ContentId, mode: &ModeName) -> bool {
-        self.content_modes
-            .bind(&self.modes, content, mode, &self.contents)
+    pub(super) fn mode_attachment_parts(
+        &mut self,
+    ) -> (&ContentStore, &ModeRegistry, &mut ModeContentStore) {
+        (&self.contents, &self.modes, &mut self.content_modes)
     }
 
-    pub(super) fn execute_content_mode(
+    pub(super) fn execute_mode_content_action(
         &mut self,
         content: ContentId,
         command: &ModeCommand,
-    ) -> Result<Vec<ContentModeOperation>, ModeError> {
+    ) -> Result<ModeResult, ModeError> {
         self.content_modes
             .execute(&self.modes, &self.contents, content, command)
     }
 
-    pub(super) fn snapshot_content_mode(&self, content: ContentId) -> Option<ModeStateSnapshot> {
-        self.content_modes.snapshot(content)
+    pub(super) fn snapshot_mode_content_for(
+        &self,
+        mode: ModeId,
+        content: ContentId,
+    ) -> Option<ModeStateSnapshot> {
+        self.content_modes.snapshot_for(mode, content)
     }
 
-    pub(super) fn restore_content_mode(&mut self, content: ContentId, snapshot: ModeStateSnapshot) {
-        self.content_modes.restore(content, snapshot);
+    pub(super) fn restore_mode_content_for(
+        &mut self,
+        mode: ModeId,
+        content: ContentId,
+        snapshot: ModeStateSnapshot,
+    ) {
+        self.content_modes.restore_for(mode, content, snapshot);
     }
 
     #[cfg(test)]

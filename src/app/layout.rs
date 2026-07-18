@@ -1,5 +1,5 @@
 use crate::app::application::App;
-use crate::app::mode::{ModeRegistry, ViewModeInstance};
+use crate::app::mode::{ModeRegistry, ModeViewInstance};
 use crate::app::scene_model::{CloseResult, SceneError, SplitResult};
 use crate::app::view::View;
 use crate::core::content_store::ContentStore;
@@ -24,11 +24,21 @@ impl<F: Frontend> App<F> {
         direction: SplitDirection,
         focus_new: bool,
     ) -> Result<SplitResult, LayoutError> {
+        let mode_names = self
+            .session
+            .view_for_space(target)
+            .filter(|view| {
+                self.session
+                    .view(*view)
+                    .is_some_and(|view| view.content() == content)
+            })
+            .map(|view| self.session.view_modes().mode_names(view))
+            .unwrap_or_else(|| self.kernel.mode_chain_for_new_view(content));
         let view = create_view(
             content,
             self.kernel.contents(),
             self.kernel.modes(),
-            self.kernel.view_mode_for_new_view(content),
+            &mode_names,
         )
         .ok_or(LayoutError::MissingContent(content))?;
         let (contents, content_modes) = self.kernel.mode_runtime_parts();
@@ -78,11 +88,21 @@ impl<F: Frontend> App<F> {
         content: ContentId,
         focusable: bool,
     ) -> Result<(), LayoutError> {
+        let mode_names = self
+            .session
+            .view_for_space(target)
+            .filter(|view| {
+                self.session
+                    .view(*view)
+                    .is_some_and(|view| view.content() == content)
+            })
+            .map(|view| self.session.view_modes().mode_names(view))
+            .unwrap_or_else(|| self.kernel.mode_chain_for_new_view(content));
         let view = create_view(
             content,
             self.kernel.contents(),
             self.kernel.modes(),
-            self.kernel.view_mode_for_new_view(content),
+            &mode_names,
         )
         .ok_or(LayoutError::MissingContent(content))?;
         let removed = self
@@ -134,7 +154,7 @@ pub(super) fn create_view(
     content: ContentId,
     contents: &ContentStore,
     modes: &ModeRegistry,
-    view_mode: Option<&crate::core::mode_name::ModeName>,
+    mode_names: &[crate::app::mode_name::ModeName],
 ) -> Option<NewView> {
     if !contents.contains(content) {
         return None;
@@ -142,20 +162,23 @@ pub(super) fn create_view(
     let state = contents
         .create_view_state(content)
         .expect("existing content creates view state");
-    let mode = view_mode.map(|name| {
-        modes
-            .instantiate(name)
-            .expect("new-view mode must be a registered ViewMode")
-    });
+    let modes = mode_names
+        .iter()
+        .map(|name| {
+            modes
+                .instantiate(name)
+                .expect("new-view mode must be registered")
+        })
+        .collect();
     Some(NewView {
         view: View::new(content, state),
-        mode,
+        modes,
     })
 }
 
 pub(super) struct NewView {
     pub(super) view: View,
-    pub(super) mode: Option<ViewModeInstance>,
+    pub(super) modes: Vec<ModeViewInstance>,
 }
 
 fn collect_view_spaces(scene: &Scene, sid: SpaceId, out: &mut Vec<(SpaceId, ViewId)>) {

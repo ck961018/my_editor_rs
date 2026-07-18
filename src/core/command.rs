@@ -70,6 +70,7 @@ pub enum EditCommand {
     },
     DeleteWordBackward,
     CollapseSelections,
+    ClampCursorToCharacter,
     // Vim 基础编辑与移动操作。
     DeleteToLineStart,
     DeleteToLineEnd,

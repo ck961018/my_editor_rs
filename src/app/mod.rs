@@ -14,6 +14,7 @@ mod kernel;
 mod layout;
 mod message;
 pub(crate) mod mode;
+pub(crate) mod mode_name;
 mod query;
 mod remote;
 mod runtime;

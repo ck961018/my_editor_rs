@@ -263,6 +263,9 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
             collapse_all(selections);
             selections.retain_primary();
         }
+        EditCommand::ClampCursorToCharacter => {
+            buffer.clamp_cursor_to_character(selections);
+        }
         EditCommand::MoveTo { char_idx, line_idx } => {
             buffer.set_head(selections.primary_mut(), char_idx, line_idx);
             Buffer::collapse_to_head(selections.primary_mut());

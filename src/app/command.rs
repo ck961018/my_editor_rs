@@ -1,8 +1,8 @@
+use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::app::mode::ContentModeOperation;
+use crate::app::mode_name::{ModeActionName, ModeName};
 use crate::core::command::EditCommand;
-use crate::core::mode_name::{ModeActionName, ModeName};
 use crate::protocol::viewport::ViewportCommand;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -11,7 +11,6 @@ pub enum Command {
     Content(ContentCommand),
     Mode(ModeCommand),
     Viewport(ViewportCommand),
-    ContentMode(ContentModeOperation),
     Noop,
 }
 
@@ -19,6 +18,41 @@ pub enum Command {
 pub struct ModeCommand {
     pub mode: ModeName,
     pub action: ModeActionName,
+    pub arguments: ModeValue,
+}
+
+#[allow(
+    dead_code,
+    reason = "non-string values are reserved for script mode arguments"
+)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ModeValue {
+    #[default]
+    Null,
+    Bool(bool),
+    Integer(i64),
+    String(String),
+    List(Vec<Self>),
+    Map(BTreeMap<String, Self>),
+}
+
+impl ModeCommand {
+    pub fn new(mode: ModeName, action: ModeActionName) -> Self {
+        Self {
+            mode,
+            action,
+            arguments: ModeValue::Null,
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "script adapters attach arguments to mode commands"
+    )]
+    pub fn with_arguments(mut self, arguments: ModeValue) -> Self {
+        self.arguments = arguments;
+        self
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

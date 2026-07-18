@@ -3,9 +3,9 @@ use std::time::Instant;
 
 use crate::app::bootstrap::bootstrap_editor;
 use crate::app::kernel::Kernel;
+use crate::app::mode_name::ModeName;
 use crate::app::session::ClientSession;
 use crate::core::buffer::Buffer;
-use crate::core::mode_name::ModeName;
 use crate::frontend::Frontend;
 use crate::protocol::ids::ContentId;
 
@@ -31,19 +31,18 @@ impl<F: Frontend> App<F> {
 
     #[cfg_attr(
         not(test),
-        allow(dead_code, reason = "ContentMode binding is an app extension seam")
+        allow(dead_code, reason = "Mode attachment is an app extension seam")
     )]
-    pub(super) fn bind_content_mode(&mut self, content: ContentId, mode: &ModeName) -> bool {
-        if !self.kernel.bind_content_mode(content, mode) {
+    pub(super) fn attach_mode_to_content(&mut self, content: ContentId, mode: &ModeName) -> bool {
+        let (contents, modes, mode_contents) = self.kernel.mode_attachment_parts();
+        if !self
+            .session
+            .attach_mode_to_content_views(content, mode, modes, mode_contents, contents)
+        {
             return false;
         }
         self.session
-            .remove_view_modes_for_content(content, self.kernel.contents());
-        self.session.sync_focused_input(
-            Instant::now(),
-            self.kernel.content_modes(),
-            self.kernel.contents(),
-        );
+            .sync_focused_input(Instant::now(), mode_contents, contents);
         true
     }
 }

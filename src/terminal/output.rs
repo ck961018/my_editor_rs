@@ -1,7 +1,10 @@
 use std::io::{self, Write};
 
-use crate::protocol::content_query::CursorStyle;
-use crossterm::style::{Attribute, SetAttribute};
+use crate::protocol::content_query::{Color, CursorStyle, Face};
+use crossterm::style::{
+    Attribute, Color as TerminalColor, ResetColor, SetAttribute, SetBackgroundColor,
+    SetForegroundColor,
+};
 use crossterm::{cursor, queue, terminal};
 
 /// 绘图画布抽象：SceneRenderer 经 &mut dyn Canvas 输出。
@@ -14,6 +17,7 @@ pub trait Canvas {
     fn show_cursor(&mut self) -> io::Result<()>;
     fn set_cursor_style(&mut self, style: CursorStyle) -> io::Result<()>;
     fn set_reverse(&mut self, on: bool) -> io::Result<()>;
+    fn set_face(&mut self, face: &Face) -> io::Result<()>;
     fn flush(&mut self) -> io::Result<()>;
 }
 
@@ -35,6 +39,9 @@ impl<W: Write> Canvas for Output<W> {
     }
     fn set_reverse(&mut self, on: bool) -> io::Result<()> {
         Output::set_reverse(self, on)
+    }
+    fn set_face(&mut self, face: &Face) -> io::Result<()> {
+        Output::set_face(self, face)
     }
     fn flush(&mut self) -> io::Result<()> {
         Output::flush(self)
@@ -80,6 +87,26 @@ impl<W: Write> Output<W> {
         queue!(self.out, SetAttribute(attr))
     }
 
+    pub fn set_face(&mut self, face: &Face) -> io::Result<()> {
+        queue!(self.out, ResetColor, SetAttribute(Attribute::Reset))?;
+        if let Some(color) = face.foreground {
+            queue!(self.out, SetForegroundColor(terminal_color(color)))?;
+        }
+        if let Some(color) = face.background {
+            queue!(self.out, SetBackgroundColor(terminal_color(color)))?;
+        }
+        for (enabled, attribute) in [
+            (face.bold, Attribute::Bold),
+            (face.italic, Attribute::Italic),
+            (face.underline, Attribute::Underlined),
+        ] {
+            if enabled == Some(true) {
+                queue!(self.out, SetAttribute(attribute))?;
+            }
+        }
+        Ok(())
+    }
+
     /// 内部 0-based；crossterm MoveTo 也是 0-based，参数顺序为 (col, row)。
     pub fn move_cursor(&mut self, row: usize, col: usize) -> io::Result<()> {
         queue!(self.out, cursor::MoveTo(col as u16, row as u16))
@@ -111,6 +138,17 @@ impl<W: Write> Output<W> {
     )]
     pub fn into_inner(self) -> W {
         self.out
+    }
+}
+
+fn terminal_color(color: Color) -> TerminalColor {
+    match color {
+        Color::Ansi(value) => TerminalColor::AnsiValue(value),
+        Color::Rgb { red, green, blue } => TerminalColor::Rgb {
+            r: red,
+            g: green,
+            b: blue,
+        },
     }
 }
 

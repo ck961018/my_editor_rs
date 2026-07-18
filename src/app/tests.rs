@@ -9,23 +9,24 @@ use super::message::AppMessage;
 use super::query::AppQuery;
 use super::view::View;
 use crate::app::action::{TransactionIntent, ViewAction};
-use crate::app::command::{AppCommand, Command, ContentCommand, ModeCommand, TransactionCommand};
-use crate::app::mode::{
-    ContentMode, ContentModeBinding, ContentModeContext, ContentModeOperation, ContentModeResult,
-    ModeError, ModeState, ResolvedViewEdit, ViewMode, ViewModeContext, ViewModeOperation,
-    ViewModeResult,
+use crate::app::command::{
+    AppCommand, Command, ContentCommand, ModeCommand, ModeValue, TransactionCommand,
 };
+use crate::app::mode::{
+    Mode, ModeActionScope, ModeContentContext, ModeEffect, ModeError, ModeResult, ModeState,
+    ModeViewContext, ModeViewInstance, ModeViewPolicy, ResolvedViewEdit,
+};
+use crate::app::mode_name::{ModeActionName, ModeName};
 use crate::core::action::ContentAction;
 use crate::core::buffer::Buffer;
 use crate::core::command::EditCommand;
-use crate::core::content::Content;
+use crate::core::content::{Content, ContentChange};
 use crate::core::keymap::Keymap;
-use crate::core::mode_name::{ModeActionName, ModeName};
 use crate::core::transaction::{TextChangeSet, TextEdit};
 use crate::frontend::Frontend;
 use crate::protocol::content_query::{
-    ContentData, ContentQuery, CursorStyle, DocumentStatus, RenderQuery, RowRange,
-    TextPresentation, ViewData, ViewPresentation,
+    Color, ContentData, ContentQuery, CursorStyle, DocumentStatus, Face, FaceName,
+    NamedTextDecoration, RenderQuery, RowRange, TextPresentation, ViewData, ViewPresentation,
 };
 use crate::protocol::frontend_event::{FrontendEvent, ResizeEvent};
 use crate::protocol::ids::{ContentId, SpaceId, ViewId};
@@ -66,14 +67,315 @@ struct PresentationMutationMode {
 
 struct ContentAwareKeymapMode {
     name: ModeName,
-    empty_keymap: Keymap<ContentModeBinding>,
-    nonempty_keymap: Keymap<ContentModeBinding>,
+    actions: Vec<ModeActionName>,
+    empty_keymap: Keymap<Command>,
+    nonempty_keymap: Keymap<Command>,
 }
 
 struct SharedContentMode {
     name: ModeName,
     actions: Vec<ModeActionName>,
-    keymap: Keymap<ContentModeBinding>,
+    keymap: Keymap<Command>,
+}
+
+#[derive(Clone)]
+struct SharedContentState {
+    executions: u8,
+}
+
+#[derive(Clone)]
+struct SharedViewState {
+    awaiting: bool,
+}
+
+struct ChainProbeMode {
+    name: ModeName,
+    actions: Vec<ModeActionName>,
+    keymap: Keymap<Command>,
+    effects: Vec<ModeEffect>,
+    continue_input: bool,
+}
+
+struct HighlightMode {
+    name: ModeName,
+}
+
+struct FaultingHighlightMode {
+    name: ModeName,
+}
+
+struct FactoryFaultMode {
+    name: ModeName,
+    fail_content: bool,
+}
+
+struct ArgumentProbeMode {
+    name: ModeName,
+    actions: Vec<ModeActionName>,
+}
+
+impl Mode for HighlightMode {
+    fn name(&self) -> &ModeName {
+        &self.name
+    }
+
+    fn actions(&self) -> &[ModeActionName] {
+        &[]
+    }
+
+    fn create_content_state(
+        &self,
+        context: &ModeContentContext<'_>,
+    ) -> Result<Box<dyn ModeState>, ModeError> {
+        assert_eq!(context.content_id(), editor_cid());
+        assert_eq!(
+            context.query_content(ContentQuery::Text),
+            ContentData::Text(String::new())
+        );
+        assert_eq!(context.content_revision(), Some(Revision(0)));
+        Ok(Box::new(true))
+    }
+
+    fn create_view_state(
+        &self,
+        content_state: &dyn ModeState,
+        context: &ModeViewContext<'_>,
+    ) -> Result<Box<dyn ModeState>, ModeError> {
+        assert_eq!(content_state.as_any().downcast_ref::<bool>(), Some(&true));
+        assert_eq!(context.content_id(), editor_cid());
+        assert_eq!(context.content_revision(), Some(Revision(0)));
+        Ok(Box::new(()))
+    }
+
+    fn faces(&self) -> Vec<(FaceName, Face)> {
+        vec![
+            (
+                FaceName::new("syntax.test"),
+                Face {
+                    foreground: Some(Color::Rgb {
+                        red: 1,
+                        green: 2,
+                        blue: 3,
+                    }),
+                    ..Face::default()
+                },
+            ),
+            (
+                FaceName::new("selection.test"),
+                Face {
+                    background: Some(Color::Ansi(4)),
+                    ..Face::default()
+                },
+            ),
+        ]
+    }
+
+    fn view_policy(
+        &self,
+        _content_state: &dyn ModeState,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) -> ModeViewPolicy {
+        ModeViewPolicy {
+            selection_face: Some(FaceName::new("selection.test")),
+            ..ModeViewPolicy::default()
+        }
+    }
+
+    fn decorations(
+        &self,
+        _content_state: &dyn ModeState,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+        _visible_rows: RowRange,
+    ) -> Vec<NamedTextDecoration> {
+        vec![NamedTextDecoration {
+            start: TextOffset { char_index: 0 },
+            end: TextOffset { char_index: 1 },
+            face: FaceName::new("syntax.test"),
+        }]
+    }
+}
+
+impl Mode for FaultingHighlightMode {
+    fn name(&self) -> &ModeName {
+        &self.name
+    }
+
+    fn actions(&self) -> &[ModeActionName] {
+        &[]
+    }
+
+    fn decorations(
+        &self,
+        _content_state: &dyn ModeState,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+        _visible_rows: RowRange,
+    ) -> Vec<NamedTextDecoration> {
+        vec![NamedTextDecoration {
+            start: TextOffset { char_index: 0 },
+            end: TextOffset { char_index: 1 },
+            face: FaceName::new("fault.test"),
+        }]
+    }
+
+    fn on_content_changed(
+        &self,
+        _state: &mut dyn ModeState,
+        _context: &ModeContentContext<'_>,
+        _change: &ContentChange,
+    ) -> Result<(), ModeError> {
+        Err(ModeError::UnknownAction {
+            mode: self.name.clone(),
+            action: ModeActionName::new("content-changed"),
+        })
+    }
+}
+
+impl Mode for FactoryFaultMode {
+    fn name(&self) -> &ModeName {
+        &self.name
+    }
+
+    fn actions(&self) -> &[ModeActionName] {
+        &[]
+    }
+
+    fn create_content_state(
+        &self,
+        _context: &ModeContentContext<'_>,
+    ) -> Result<Box<dyn ModeState>, ModeError> {
+        if self.fail_content {
+            return Err(ModeError::CallbackFailed {
+                mode: self.name.clone(),
+                message: "content factory".to_string(),
+            });
+        }
+        Ok(Box::new(()))
+    }
+
+    fn create_view_state(
+        &self,
+        _content_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) -> Result<Box<dyn ModeState>, ModeError> {
+        Err(ModeError::CallbackFailed {
+            mode: self.name.clone(),
+            message: "view factory".to_string(),
+        })
+    }
+
+    fn decorations(
+        &self,
+        _content_state: &dyn ModeState,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+        _visible_rows: RowRange,
+    ) -> Vec<NamedTextDecoration> {
+        vec![NamedTextDecoration {
+            start: TextOffset { char_index: 0 },
+            end: TextOffset { char_index: 1 },
+            face: FaceName::new("unexpected.factory-decoration"),
+        }]
+    }
+}
+
+impl Mode for ArgumentProbeMode {
+    fn name(&self) -> &ModeName {
+        &self.name
+    }
+
+    fn actions(&self) -> &[ModeActionName] {
+        &self.actions
+    }
+
+    fn execute_view_with_arguments(
+        &self,
+        _content_state: &mut dyn ModeState,
+        _view_state: &mut dyn ModeState,
+        _context: &ModeViewContext<'_>,
+        action: &ModeActionName,
+        arguments: &ModeValue,
+    ) -> Result<ModeResult, ModeError> {
+        if action != &self.actions[0] {
+            return Err(ModeError::UnknownAction {
+                mode: self.name.clone(),
+                action: action.clone(),
+            });
+        }
+        let ModeValue::String(text) = arguments else {
+            return Ok(ModeResult::none());
+        };
+        Ok(ModeResult::operations(vec![ModeEffect::DeferredEdit(
+            EditCommand::InsertText(text.clone()),
+        )]))
+    }
+}
+
+impl ChainProbeMode {
+    fn new(name: &str, effects: Vec<ModeEffect>, continue_input: bool) -> Self {
+        Self::with_sequence(name, vec![KeyEvent::char('q')], effects, continue_input)
+    }
+
+    fn with_sequence(
+        name: &str,
+        sequence: Vec<KeyEvent>,
+        effects: Vec<ModeEffect>,
+        continue_input: bool,
+    ) -> Self {
+        let name = ModeName::new(name);
+        let actions = vec![ModeActionName::new("run")];
+        let mut keymap = Keymap::new();
+        keymap.bind(
+            sequence,
+            Command::Mode(ModeCommand {
+                mode: name.clone(),
+                action: actions[0].clone(),
+                arguments: Default::default(),
+            }),
+        );
+        Self {
+            name,
+            actions,
+            keymap,
+            effects,
+            continue_input,
+        }
+    }
+}
+
+impl Mode for ChainProbeMode {
+    fn name(&self) -> &ModeName {
+        &self.name
+    }
+
+    fn actions(&self) -> &[ModeActionName] {
+        &self.actions
+    }
+
+    fn keymap(&self, _state: &dyn ModeState, _context: &ModeViewContext<'_>) -> &Keymap<Command> {
+        &self.keymap
+    }
+
+    fn execute_view(
+        &self,
+        _state: &mut dyn ModeState,
+        _context: &ModeViewContext<'_>,
+        action: &ModeActionName,
+    ) -> Result<ModeResult, ModeError> {
+        if action != &self.actions[0] {
+            return Err(ModeError::UnknownAction {
+                mode: self.name.clone(),
+                action: action.clone(),
+            });
+        }
+        Ok(if self.continue_input {
+            ModeResult::continue_with(self.effects.clone())
+        } else {
+            ModeResult::operations(self.effects.clone())
+        })
+    }
 }
 
 impl SharedContentMode {
@@ -83,9 +385,10 @@ impl SharedContentMode {
         let mut keymap = Keymap::new();
         keymap.bind(
             KeyEvent::char('z'),
-            ContentModeBinding::Mode(ModeCommand {
+            Command::Mode(ModeCommand {
                 mode: name.clone(),
                 action: actions[0].clone(),
+                arguments: Default::default(),
             }),
         );
         Self {
@@ -96,7 +399,7 @@ impl SharedContentMode {
     }
 }
 
-impl ContentMode for SharedContentMode {
+impl Mode for SharedContentMode {
     fn name(&self) -> &ModeName {
         &self.name
     }
@@ -105,37 +408,48 @@ impl ContentMode for SharedContentMode {
         &self.actions
     }
 
-    fn new_state(&self) -> Box<dyn ModeState> {
-        Box::new(0_u8)
+    fn action_scope(&self, _action: &ModeActionName) -> ModeActionScope {
+        ModeActionScope::Content
     }
 
-    fn keymap(
-        &self,
-        _state: &dyn ModeState,
-        _context: &ContentModeContext<'_>,
-    ) -> &Keymap<ContentModeBinding> {
+    fn new_content_state(&self) -> Box<dyn ModeState> {
+        Box::new(SharedContentState { executions: 0 })
+    }
+
+    fn new_view_state(&self) -> Box<dyn ModeState> {
+        Box::new(SharedViewState { awaiting: false })
+    }
+
+    fn input_keymap<'a>(
+        &'a self,
+        _content_state: &dyn ModeState,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) -> &'a Keymap<Command> {
         &self.keymap
     }
 
-    fn typing(
+    fn input_typing(
         &self,
-        _state: &dyn ModeState,
-        _context: &ContentModeContext<'_>,
+        _content_state: &dyn ModeState,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
         _key: KeyEvent,
-    ) -> Option<ContentModeBinding> {
+    ) -> Option<Command> {
         None
     }
 
-    fn input_status(
+    fn mode_input_status(
         &self,
-        state: &dyn ModeState,
-        _context: &ContentModeContext<'_>,
+        _content_state: &dyn ModeState,
+        view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
     ) -> crate::core::input::InputStatus {
-        if *state
+        if view_state
             .as_any()
-            .downcast_ref::<u8>()
-            .expect("shared content mode owns its state")
-            == 1
+            .downcast_ref::<SharedViewState>()
+            .expect("shared mode owns its view state")
+            .awaiting
         {
             crate::core::input::InputStatus::Awaiting(crate::core::input::TimeoutPolicy::Never)
         } else {
@@ -143,45 +457,53 @@ impl ContentMode for SharedContentMode {
         }
     }
 
-    fn capture(
+    fn input_capture(
         &self,
-        state: &mut dyn ModeState,
-        _context: &ContentModeContext<'_>,
+        _content_state: &mut dyn ModeState,
+        view_state: &mut dyn ModeState,
+        _context: &ModeViewContext<'_>,
         key: KeyEvent,
-    ) -> crate::core::input::InputDecision<ContentModeBinding> {
+    ) -> crate::core::input::InputDecision<Command> {
         if key != KeyEvent::char('x') {
             return crate::core::input::InputDecision::Pass;
         }
-        *state
+        view_state
             .as_any_mut()
-            .downcast_mut::<u8>()
-            .expect("shared content mode owns its state") = 2;
+            .downcast_mut::<SharedViewState>()
+            .expect("shared mode owns its view state")
+            .awaiting = true;
         crate::core::input::InputDecision::Consumed
     }
 
-    fn cancel(&self, state: &mut dyn ModeState, _context: &ContentModeContext<'_>) {
-        *state
+    fn input_cancel(
+        &self,
+        _content_state: &mut dyn ModeState,
+        view_state: &mut dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) {
+        view_state
             .as_any_mut()
-            .downcast_mut::<u8>()
-            .expect("shared content mode owns its state") = 0;
+            .downcast_mut::<SharedViewState>()
+            .expect("shared mode owns its view state")
+            .awaiting = false;
     }
 
-    fn execute(
+    fn execute_content(
         &self,
         state: &mut dyn ModeState,
-        context: &ContentModeContext<'_>,
+        context: &ModeContentContext<'_>,
         _action: &ModeActionName,
-    ) -> Result<ContentModeResult, ModeError> {
+    ) -> Result<ModeResult, ModeError> {
         assert_eq!(context.content_id(), editor_cid());
         let count = state
             .as_any_mut()
-            .downcast_mut::<u8>()
-            .expect("shared content mode owns its state");
-        *count += 1;
-        Ok(ContentModeResult::operations(vec![match *count {
-            1 => ContentModeOperation::Transaction(TransactionIntent::Undo),
-            2 => ContentModeOperation::Transaction(TransactionIntent::Redo),
-            _ => ContentModeOperation::Save,
+            .downcast_mut::<SharedContentState>()
+            .expect("shared mode owns its content state");
+        count.executions += 1;
+        Ok(ModeResult::operations(vec![match count.executions {
+            1 => ModeEffect::Transaction(TransactionIntent::Undo),
+            2 => ModeEffect::Transaction(TransactionIntent::Redo),
+            _ => ModeEffect::Save,
         }]))
     }
 }
@@ -216,24 +538,29 @@ impl PresentationMutationMode {
 
 impl ContentAwareKeymapMode {
     fn new() -> Self {
+        let name = ModeName::new("content-aware-keymap");
+        let actions = vec![ModeActionName::new("insert")];
         let mut empty_keymap = Keymap::new();
         empty_keymap.bind(
-            KeyEvent::char('x'),
-            ContentModeBinding::Operation(ContentModeOperation::Content(ContentAction::Text(
-                TextChangeSet::from_edits(0, vec![TextEdit::new(0..0, "a")]).unwrap(),
-            ))),
+            KeyEvent::char('z'),
+            Command::Mode(ModeCommand {
+                mode: name.clone(),
+                action: actions[0].clone(),
+                arguments: Default::default(),
+            }),
         );
         let mut nonempty_keymap = Keymap::new();
-        nonempty_keymap.bind(KeyEvent::char('x'), ContentModeBinding::Noop);
+        nonempty_keymap.bind(KeyEvent::char('z'), Command::Noop);
         Self {
-            name: ModeName::new("content-aware-keymap"),
+            name,
+            actions,
             empty_keymap,
             nonempty_keymap,
         }
     }
 }
 
-impl ViewMode for PresentationMutationMode {
+impl Mode for PresentationMutationMode {
     fn name(&self) -> &ModeName {
         &self.name
     }
@@ -242,18 +569,18 @@ impl ViewMode for PresentationMutationMode {
         &[]
     }
 
-    fn new_state(&self) -> Box<dyn ModeState> {
+    fn new_view_state(&self) -> Box<dyn ModeState> {
         Box::new(false)
     }
 
-    fn keymap(&self, _state: &dyn ModeState, _context: &ViewModeContext<'_>) -> &Keymap<Command> {
+    fn keymap(&self, _state: &dyn ModeState, _context: &ModeViewContext<'_>) -> &Keymap<Command> {
         &self.keymap
     }
 
     fn typing(
         &self,
         _state: &dyn ModeState,
-        _context: &ViewModeContext<'_>,
+        _context: &ModeViewContext<'_>,
         _key: KeyEvent,
     ) -> Option<Command> {
         None
@@ -262,7 +589,7 @@ impl ViewMode for PresentationMutationMode {
     fn input_status(
         &self,
         state: &dyn ModeState,
-        _context: &ViewModeContext<'_>,
+        _context: &ModeViewContext<'_>,
     ) -> crate::core::input::InputStatus {
         if *state.as_any().downcast_ref::<bool>().unwrap() {
             crate::core::input::InputStatus::Ready
@@ -276,7 +603,7 @@ impl ViewMode for PresentationMutationMode {
     fn capture(
         &self,
         state: &mut dyn ModeState,
-        _context: &ViewModeContext<'_>,
+        _context: &ModeViewContext<'_>,
         key: KeyEvent,
     ) -> crate::core::input::InputDecision<Command> {
         if key != KeyEvent::char('x') {
@@ -286,29 +613,33 @@ impl ViewMode for PresentationMutationMode {
         crate::core::input::InputDecision::Consumed
     }
 
-    fn on_timeout(
-        &self,
-        state: &mut dyn ModeState,
-        _context: &ViewModeContext<'_>,
-    ) -> ViewModeResult {
+    fn on_timeout(&self, state: &mut dyn ModeState, _context: &ModeViewContext<'_>) -> ModeResult {
         *state.as_any_mut().downcast_mut::<bool>().unwrap() = true;
-        ViewModeResult::none()
+        ModeResult::none()
     }
 
-    fn cursor_style(&self, state: &dyn ModeState, _context: &ViewModeContext<'_>) -> CursorStyle {
-        if *state.as_any().downcast_ref::<bool>().unwrap() {
-            CursorStyle::Bar
-        } else {
-            CursorStyle::Default
+    fn view_policy(
+        &self,
+        _content_state: &dyn ModeState,
+        view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) -> ModeViewPolicy {
+        ModeViewPolicy {
+            cursor_style: Some(if *view_state.as_any().downcast_ref::<bool>().unwrap() {
+                CursorStyle::Bar
+            } else {
+                CursorStyle::Default
+            }),
+            ..ModeViewPolicy::default()
         }
     }
 
-    fn execute(
+    fn execute_view(
         &self,
         _state: &mut dyn ModeState,
-        _context: &ViewModeContext<'_>,
+        _context: &ModeViewContext<'_>,
         action: &ModeActionName,
-    ) -> Result<ViewModeResult, ModeError> {
+    ) -> Result<ModeResult, ModeError> {
         Err(ModeError::UnknownAction {
             mode: self.name.clone(),
             action: action.clone(),
@@ -316,24 +647,29 @@ impl ViewMode for PresentationMutationMode {
     }
 }
 
-impl ContentMode for ContentAwareKeymapMode {
+impl Mode for ContentAwareKeymapMode {
     fn name(&self) -> &ModeName {
         &self.name
     }
 
     fn actions(&self) -> &[ModeActionName] {
-        &[]
+        &self.actions
     }
 
-    fn new_state(&self) -> Box<dyn ModeState> {
+    fn action_scope(&self, _action: &ModeActionName) -> ModeActionScope {
+        ModeActionScope::Content
+    }
+
+    fn new_content_state(&self) -> Box<dyn ModeState> {
         Box::new(())
     }
 
-    fn keymap(
-        &self,
-        _state: &dyn ModeState,
-        context: &ContentModeContext<'_>,
-    ) -> &Keymap<ContentModeBinding> {
+    fn input_keymap<'a>(
+        &'a self,
+        _content_state: &dyn ModeState,
+        _view_state: &dyn ModeState,
+        context: &ModeViewContext<'_>,
+    ) -> &'a Keymap<Command> {
         match context.query_content(ContentQuery::TextRows(RowRange { start: 0, end: 1 })) {
             ContentData::TextRows(rows) if rows.first().is_some_and(String::is_empty) => {
                 &self.empty_keymap
@@ -343,29 +679,37 @@ impl ContentMode for ContentAwareKeymapMode {
         }
     }
 
-    fn typing(
+    fn input_typing(
         &self,
-        _state: &dyn ModeState,
-        _context: &ContentModeContext<'_>,
+        _content_state: &dyn ModeState,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
         _key: KeyEvent,
-    ) -> Option<ContentModeBinding> {
+    ) -> Option<Command> {
         None
     }
 
-    fn execute(
+    fn execute_content(
         &self,
         _state: &mut dyn ModeState,
-        _context: &ContentModeContext<'_>,
+        _context: &ModeContentContext<'_>,
         action: &ModeActionName,
-    ) -> Result<ContentModeResult, ModeError> {
-        Err(ModeError::UnknownAction {
-            mode: self.name.clone(),
-            action: action.clone(),
-        })
+    ) -> Result<ModeResult, ModeError> {
+        if action != &self.actions[0] {
+            return Err(ModeError::UnknownAction {
+                mode: self.name.clone(),
+                action: action.clone(),
+            });
+        }
+        Ok(ModeResult::operations(vec![ModeEffect::Content(
+            ContentAction::Text(
+                TextChangeSet::from_edits(0, vec![TextEdit::new(0..0, "a")]).unwrap(),
+            ),
+        )]))
     }
 }
 
-impl ViewMode for CaptureFailureMode {
+impl Mode for CaptureFailureMode {
     fn name(&self) -> &ModeName {
         &self.name
     }
@@ -374,11 +718,11 @@ impl ViewMode for CaptureFailureMode {
         &[]
     }
 
-    fn new_state(&self) -> Box<dyn ModeState> {
+    fn new_view_state(&self) -> Box<dyn ModeState> {
         Box::new(0_u8)
     }
 
-    fn keymap(&self, _state: &dyn ModeState, context: &ViewModeContext<'_>) -> &Keymap<Command> {
+    fn keymap(&self, _state: &dyn ModeState, context: &ModeViewContext<'_>) -> &Keymap<Command> {
         assert_eq!(context.content_id(), editor_cid());
         &self.keymap
     }
@@ -386,7 +730,7 @@ impl ViewMode for CaptureFailureMode {
     fn typing(
         &self,
         _state: &dyn ModeState,
-        _context: &ViewModeContext<'_>,
+        _context: &ModeViewContext<'_>,
         _key: KeyEvent,
     ) -> Option<Command> {
         None
@@ -395,7 +739,7 @@ impl ViewMode for CaptureFailureMode {
     fn input_status(
         &self,
         _state: &dyn ModeState,
-        _context: &ViewModeContext<'_>,
+        _context: &ModeViewContext<'_>,
     ) -> crate::core::input::InputStatus {
         crate::core::input::InputStatus::Awaiting(crate::core::input::TimeoutPolicy::After(
             std::time::Duration::ZERO,
@@ -405,7 +749,7 @@ impl ViewMode for CaptureFailureMode {
     fn capture(
         &self,
         state: &mut dyn ModeState,
-        context: &ViewModeContext<'_>,
+        context: &ModeViewContext<'_>,
         _key: KeyEvent,
     ) -> crate::core::input::InputDecision<Command> {
         assert_eq!(context.view_id(), ViewId(0));
@@ -416,44 +760,52 @@ impl ViewMode for CaptureFailureMode {
         crate::core::input::InputDecision::Emit(Command::Mode(ModeCommand {
             mode: ModeName::new("missing"),
             action: ModeActionName::new("missing"),
+            arguments: Default::default(),
         }))
     }
 
-    fn on_timeout(
-        &self,
-        state: &mut dyn ModeState,
-        context: &ViewModeContext<'_>,
-    ) -> ViewModeResult {
+    fn on_timeout(&self, state: &mut dyn ModeState, context: &ModeViewContext<'_>) -> ModeResult {
         assert_eq!(context.view_id(), ViewId(0));
         *state
             .as_any_mut()
             .downcast_mut::<u8>()
             .expect("capture failure mode owns its state") = 1;
-        ViewModeResult::operations(vec![ViewModeOperation::Mode(ModeCommand {
+        ModeResult::operations(vec![ModeEffect::Mode(ModeCommand {
             mode: ModeName::new("missing"),
             action: ModeActionName::new("missing"),
+            arguments: Default::default(),
         })])
     }
 
-    fn cursor_style(&self, state: &dyn ModeState, _context: &ViewModeContext<'_>) -> CursorStyle {
-        if *state
-            .as_any()
-            .downcast_ref::<u8>()
-            .expect("capture failure mode owns its state")
-            == 0
-        {
-            CursorStyle::Default
-        } else {
-            CursorStyle::Bar
+    fn view_policy(
+        &self,
+        _content_state: &dyn ModeState,
+        view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) -> ModeViewPolicy {
+        ModeViewPolicy {
+            cursor_style: Some(
+                if *view_state
+                    .as_any()
+                    .downcast_ref::<u8>()
+                    .expect("capture failure mode owns its state")
+                    == 0
+                {
+                    CursorStyle::Default
+                } else {
+                    CursorStyle::Bar
+                },
+            ),
+            ..ModeViewPolicy::default()
         }
     }
 
-    fn execute(
+    fn execute_view(
         &self,
         _state: &mut dyn ModeState,
-        _context: &ViewModeContext<'_>,
+        _context: &ModeViewContext<'_>,
         action: &ModeActionName,
-    ) -> Result<ViewModeResult, ModeError> {
+    ) -> Result<ModeResult, ModeError> {
         Err(ModeError::UnknownAction {
             mode: self.name.clone(),
             action: action.clone(),
@@ -461,7 +813,7 @@ impl ViewMode for CaptureFailureMode {
     }
 }
 
-impl ViewMode for LoopMode {
+impl Mode for LoopMode {
     fn name(&self) -> &ModeName {
         &self.name
     }
@@ -470,42 +822,52 @@ impl ViewMode for LoopMode {
         &self.actions
     }
 
-    fn new_state(&self) -> Box<dyn ModeState> {
+    fn new_view_state(&self) -> Box<dyn ModeState> {
         Box::new(0_u16)
     }
 
-    fn keymap(&self, _state: &dyn ModeState, _context: &ViewModeContext<'_>) -> &Keymap<Command> {
+    fn keymap(&self, _state: &dyn ModeState, _context: &ModeViewContext<'_>) -> &Keymap<Command> {
         &self.keymap
     }
 
     fn typing(
         &self,
         _state: &dyn ModeState,
-        _context: &ViewModeContext<'_>,
+        _context: &ModeViewContext<'_>,
         _key: KeyEvent,
     ) -> Option<Command> {
         None
     }
 
-    fn cursor_style(&self, state: &dyn ModeState, _context: &ViewModeContext<'_>) -> CursorStyle {
-        if *state
-            .as_any()
-            .downcast_ref::<u16>()
-            .expect("loop mode owns its state")
-            == 0
-        {
-            CursorStyle::Default
-        } else {
-            CursorStyle::Bar
+    fn view_policy(
+        &self,
+        _content_state: &dyn ModeState,
+        view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) -> ModeViewPolicy {
+        ModeViewPolicy {
+            cursor_style: Some(
+                if *view_state
+                    .as_any()
+                    .downcast_ref::<u16>()
+                    .expect("loop mode owns its state")
+                    == 0
+                {
+                    CursorStyle::Default
+                } else {
+                    CursorStyle::Bar
+                },
+            ),
+            ..ModeViewPolicy::default()
         }
     }
 
-    fn execute(
+    fn execute_view(
         &self,
         state: &mut dyn ModeState,
-        context: &ViewModeContext<'_>,
+        context: &ModeViewContext<'_>,
         _action: &ModeActionName,
-    ) -> Result<ViewModeResult, ModeError> {
+    ) -> Result<ModeResult, ModeError> {
         *state
             .as_any_mut()
             .downcast_mut::<u16>()
@@ -522,11 +884,12 @@ impl ViewMode for LoopMode {
         let offset = rows[0].chars().count();
         let change = TextChangeSet::from_edits(offset, vec![TextEdit::new(offset..offset, "x")])
             .expect("loop mode creates a valid insertion");
-        Ok(ViewModeResult::operations(vec![
-            ViewModeOperation::Content(ContentAction::Text(change)),
-            ViewModeOperation::Mode(ModeCommand {
+        Ok(ModeResult::operations(vec![
+            ModeEffect::Content(ContentAction::Text(change)),
+            ModeEffect::Mode(ModeCommand {
                 mode: self.name.clone(),
                 action: self.actions[0].clone(),
+                arguments: Default::default(),
             }),
         ]))
     }
@@ -607,6 +970,22 @@ fn view_at(app: &App<ScriptedFrontend>, space: SpaceId) -> &View {
     &app.session.views()[&view_id(app, space)]
 }
 
+fn replace_view_mode_for_test(
+    app: &mut App<ScriptedFrontend>,
+    view: ViewId,
+    mode: ModeViewInstance,
+) {
+    let content = app.session.views()[&view].content();
+    let removed = app.session.view_modes_mut_for_test().remove(view);
+    let (contents, mode_contents) = app.kernel.mode_runtime_parts();
+    let _ = contents;
+    for mode_id in removed {
+        mode_contents.detach_view(content, mode_id);
+    }
+    mode_contents.attach_view(content, &mode);
+    app.session.view_modes_mut_for_test().insert(view, mode);
+}
+
 fn text_presentation(view: &ViewData) -> &TextPresentation {
     match &view.presentation {
         ViewPresentation::Text(text) => text,
@@ -617,9 +996,11 @@ fn text_presentation(view: &ViewData) -> &TextPresentation {
 #[tokio::test(flavor = "multi_thread")]
 async fn sessions_sharing_one_kernel_keep_client_state_independent() {
     let mut app = make_app(vec![], None);
+    let (contents, modes, mode_contents) = app.kernel.mode_attachment_parts();
     let mut second = create_editor_session(
-        app.kernel.contents(),
-        app.kernel.modes(),
+        contents,
+        modes,
+        mode_contents,
         80,
         20,
         editor_cid(),
@@ -752,6 +1133,8 @@ fn content_query_reads_buffer_and_view() {
         contents: app.kernel.contents(),
         views: app.session.views(),
         view_modes: app.session.view_modes(),
+        mode_contents: app.kernel.content_modes(),
+        faces: app.session.faces(),
     };
     assert_eq!(
         query.content(
@@ -776,6 +1159,7 @@ fn unknown_mode_command_returns_a_diagnostic_error() {
             command: ModeCommand {
                 mode: ModeName::new("missing"),
                 action: ModeActionName::new("action"),
+                arguments: Default::default(),
             },
             view,
             content: editor_cid(),
@@ -792,7 +1176,7 @@ fn recursive_mode_command_chain_stops_at_the_execution_limit() {
     let mode_name = ModeName::new("loop");
     let mode = {
         let modes = app.kernel.modes_mut();
-        modes.register_view(LoopMode::new());
+        modes.register(LoopMode::new());
         modes.instantiate(&mode_name).unwrap()
     };
     let state = app
@@ -807,7 +1191,7 @@ fn recursive_mode_command_chain_stops_at_the_execution_limit() {
             focused,
             NewView {
                 view: View::new(editor_cid(), state),
-                mode: Some(mode),
+                modes: vec![mode],
             },
             true,
             content_modes,
@@ -823,6 +1207,7 @@ fn recursive_mode_command_chain_stops_at_the_execution_limit() {
             command: ModeCommand {
                 mode: mode_name,
                 action: ModeActionName::new("again"),
+                arguments: Default::default(),
             },
             view,
             content: editor_cid(),
@@ -847,6 +1232,8 @@ fn recursive_mode_command_chain_stops_at_the_execution_limit() {
         contents: app.kernel.contents(),
         views: app.session.views(),
         view_modes: app.session.view_modes(),
+        mode_contents: app.kernel.content_modes(),
+        faces: app.session.faces(),
     };
     assert_eq!(
         text_presentation(&query.view(view)).cursor_style,
@@ -869,12 +1256,13 @@ async fn failed_ordered_result_does_not_start_an_earlier_save() {
     .unwrap();
 
     let error = app
-        .execute_command(DispatchCommand::ViewModeOperations {
+        .execute_command(DispatchCommand::ModeEffects {
             operations: vec![
-                ViewModeOperation::Save,
-                ViewModeOperation::Mode(ModeCommand {
+                ModeEffect::Save,
+                ModeEffect::Mode(ModeCommand {
                     mode: ModeName::new("missing"),
                     action: ModeActionName::new("missing"),
+                    arguments: Default::default(),
                 }),
             ],
             view,
@@ -894,12 +1282,13 @@ fn failed_ordered_result_does_not_apply_an_earlier_quit() {
     let view = view_id(&app, app.session.focused());
 
     let error = app
-        .execute_command(DispatchCommand::ViewModeOperations {
+        .execute_command(DispatchCommand::ModeEffects {
             operations: vec![
-                ViewModeOperation::App(AppCommand::Quit),
-                ViewModeOperation::Mode(ModeCommand {
+                ModeEffect::App(AppCommand::Quit),
+                ModeEffect::Mode(ModeCommand {
                     mode: ModeName::new("missing"),
                     action: ModeActionName::new("missing"),
+                    arguments: Default::default(),
                 }),
             ],
             view,
@@ -922,12 +1311,13 @@ fn failed_ordered_result_does_not_apply_an_earlier_viewport_move() {
     );
 
     let error = app
-        .execute_command(DispatchCommand::ViewModeOperations {
+        .execute_command(DispatchCommand::ModeEffects {
             operations: vec![
-                ViewModeOperation::Viewport(command),
-                ViewModeOperation::Mode(ModeCommand {
+                ModeEffect::Viewport(command),
+                ModeEffect::Mode(ModeCommand {
                     mode: ModeName::new("missing"),
                     action: ModeActionName::new("missing"),
+                    arguments: Default::default(),
                 }),
             ],
             view,
@@ -952,13 +1342,14 @@ fn failed_history_branch_restores_records_truncated_after_undo() {
         .unwrap();
     }
 
-    app.execute_command(DispatchCommand::ViewModeOperations {
+    app.execute_command(DispatchCommand::ModeEffects {
         operations: vec![
-            ViewModeOperation::Transaction(TransactionIntent::Undo),
-            ViewModeOperation::DeferredEdit(EditCommand::InsertText("c".to_string())),
-            ViewModeOperation::Mode(ModeCommand {
+            ModeEffect::Transaction(TransactionIntent::Undo),
+            ModeEffect::DeferredEdit(EditCommand::InsertText("c".to_string())),
+            ModeEffect::Mode(ModeCommand {
                 mode: ModeName::new("missing"),
                 action: ModeActionName::new("missing"),
+                arguments: Default::default(),
             }),
         ],
         view,
@@ -981,15 +1372,14 @@ async fn failed_capture_output_restores_the_pre_input_mode_state() {
     let mut app = make_app(vec![], None);
     let mode = {
         let modes = app.kernel.modes_mut();
-        modes.register_view(CaptureFailureMode::new());
+        modes.register(CaptureFailureMode::new());
         modes
             .instantiate(&ModeName::new("capture-failure"))
             .unwrap()
     };
     let focused = app.session.focused();
     let view = view_id(&app, focused);
-    app.session.view_modes_mut_for_test().remove(view);
-    app.session.view_modes_mut_for_test().insert(view, mode);
+    replace_view_mode_for_test(&mut app, view, mode);
     app.session.sync_focused_input(
         std::time::Instant::now(),
         app.kernel.content_modes(),
@@ -1006,6 +1396,8 @@ async fn failed_capture_output_restores_the_pre_input_mode_state() {
         contents: app.kernel.contents(),
         views: app.session.views(),
         view_modes: app.session.view_modes(),
+        mode_contents: app.kernel.content_modes(),
+        faces: app.session.faces(),
     };
     assert_eq!(
         text_presentation(&query.view(view)).cursor_style,
@@ -1018,14 +1410,13 @@ fn failed_timeout_output_restores_the_pre_timeout_mode_state() {
     let mut app = make_app(vec![], None);
     let mode = {
         let modes = app.kernel.modes_mut();
-        modes.register_view(CaptureFailureMode::new());
+        modes.register(CaptureFailureMode::new());
         modes
             .instantiate(&ModeName::new("capture-failure"))
             .unwrap()
     };
     let view = view_id(&app, app.session.focused());
-    app.session.view_modes_mut_for_test().remove(view);
-    app.session.view_modes_mut_for_test().insert(view, mode);
+    replace_view_mode_for_test(&mut app, view, mode);
     app.session.sync_focused_input(
         std::time::Instant::now(),
         app.kernel.content_modes(),
@@ -1039,6 +1430,8 @@ fn failed_timeout_output_restores_the_pre_timeout_mode_state() {
         contents: app.kernel.contents(),
         views: app.session.views(),
         view_modes: app.session.view_modes(),
+        mode_contents: app.kernel.content_modes(),
+        faces: app.session.faces(),
     };
     assert_eq!(
         text_presentation(&query.view(view)).cursor_style,
@@ -1052,14 +1445,13 @@ async fn mutable_view_mode_callbacks_advance_revision_after_success() {
         let mut app = make_app(vec![], None);
         let mode = {
             let modes = app.kernel.modes_mut();
-            modes.register_view(PresentationMutationMode::new());
+            modes.register(PresentationMutationMode::new());
             modes
                 .instantiate(&ModeName::new("presentation-mutation"))
                 .unwrap()
         };
         let view = view_id(&app, app.session.focused());
-        app.session.view_modes_mut_for_test().remove(view);
-        app.session.view_modes_mut_for_test().insert(view, mode);
+        replace_view_mode_for_test(&mut app, view, mode);
         app.session.sync_focused_input(
             std::time::Instant::now(),
             app.kernel.content_modes(),
@@ -1095,6 +1487,8 @@ fn status_bar_view_data_has_no_text_selection_or_mode_cursor() {
         contents: app.kernel.contents(),
         views: app.session.views(),
         view_modes: app.session.view_modes(),
+        mode_contents: app.kernel.content_modes(),
+        faces: app.session.faces(),
     };
 
     let view = query.view(status_view);
@@ -1124,6 +1518,8 @@ async fn two_views_of_one_buffer_keep_independent_mode_instances() {
         contents: app.kernel.contents(),
         views: app.session.views(),
         view_modes: app.session.view_modes(),
+        mode_contents: app.kernel.content_modes(),
+        faces: app.session.faces(),
     };
     let right_id = view_id(&app, right);
     let left_view = query.view(left_id);
@@ -1147,15 +1543,13 @@ async fn two_views_of_one_buffer_keep_independent_mode_instances() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn content_mode_binding_is_shared_and_excludes_view_modes() {
+async fn content_mode_binding_is_shared_and_coexists_with_view_modes() {
     let mut app = make_app(vec![], None);
     let mode = ModeName::new("shared-content");
-    app.kernel
-        .modes_mut()
-        .register_content(SharedContentMode::new());
+    app.kernel.modes_mut().register(SharedContentMode::new());
     let existing_view = view_id(&app, app.session.focused());
     let existing_revision = app.session.views()[&existing_view].revision();
-    assert!(app.bind_content_mode(editor_cid(), &mode));
+    assert!(app.attach_mode_to_content(editor_cid(), &mode));
     assert!(app.session.views()[&existing_view].revision() > existing_revision);
 
     let left = app.session.focused();
@@ -1167,32 +1561,35 @@ async fn content_mode_binding_is_shared_and_excludes_view_modes() {
         contents: app.kernel.contents(),
         views: app.session.views(),
         view_modes: app.session.view_modes(),
+        mode_contents: app.kernel.content_modes(),
+        faces: app.session.faces(),
     };
     for space in [left, right] {
         let view = query.view(view_id(&app, space));
-        assert_eq!(text_presentation(&view).cursor_style, CursorStyle::Default);
+        assert_eq!(text_presentation(&view).cursor_style, CursorStyle::Block);
     }
 
     let command = ModeCommand {
         mode: mode.clone(),
         action: ModeActionName::new("advance"),
+        arguments: Default::default(),
     };
     app.handle_event(FrontendEvent::Key(KeyEvent::char('z')))
         .await
         .unwrap();
     assert_eq!(
         app.kernel
-            .execute_content_mode(editor_cid(), &command)
+            .execute_mode_content_action(editor_cid(), &command)
             .unwrap(),
-        vec![ContentModeOperation::Transaction(TransactionIntent::Redo)]
+        ModeResult::operations(vec![ModeEffect::Transaction(TransactionIntent::Redo)])
     );
 
     app.close_space(left).unwrap();
     assert_eq!(
         app.kernel
-            .execute_content_mode(editor_cid(), &command)
+            .execute_mode_content_action(editor_cid(), &command)
             .unwrap(),
-        vec![ContentModeOperation::Save]
+        ModeResult::operations(vec![ModeEffect::Save])
     );
 }
 
@@ -1202,13 +1599,13 @@ async fn content_mode_keymap_tracks_current_content() {
     let mode = ModeName::new("content-aware-keymap");
     app.kernel
         .modes_mut()
-        .register_content(ContentAwareKeymapMode::new());
-    assert!(app.bind_content_mode(editor_cid(), &mode));
+        .register(ContentAwareKeymapMode::new());
+    assert!(app.attach_mode_to_content(editor_cid(), &mode));
 
-    app.handle_event(FrontendEvent::Key(KeyEvent::char('x')))
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('z')))
         .await
         .unwrap();
-    app.handle_event(FrontendEvent::Key(KeyEvent::char('x')))
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('z')))
         .await
         .unwrap();
 
@@ -1216,13 +1613,271 @@ async fn content_mode_keymap_tracks_current_content() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn shared_content_mode_awaiting_follows_the_focused_view() {
+async fn mode_can_handle_input_then_continue_to_the_next_mode() {
     let mut app = make_app(vec![], None);
-    let mode = ModeName::new("shared-content");
+    app.kernel.modes_mut().register(ChainProbeMode::new(
+        "first-probe",
+        vec![ModeEffect::DeferredEdit(EditCommand::InsertText(
+            "a".to_string(),
+        ))],
+        true,
+    ));
+    app.kernel.modes_mut().register(ChainProbeMode::new(
+        "second-probe",
+        vec![ModeEffect::DeferredEdit(EditCommand::InsertText(
+            "b".to_string(),
+        ))],
+        false,
+    ));
+    assert!(app.attach_mode_to_content(editor_cid(), &ModeName::new("first-probe")));
+    assert!(app.attach_mode_to_content(editor_cid(), &ModeName::new("second-probe")));
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('q')))
+        .await
+        .unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["ab"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn later_mode_prefix_does_not_delay_an_earlier_exact_binding() {
+    let mut app = make_app(vec![], None);
+    app.kernel.modes_mut().register(ChainProbeMode::new(
+        "first-probe",
+        vec![ModeEffect::DeferredEdit(EditCommand::InsertText(
+            "a".to_string(),
+        ))],
+        true,
+    ));
     app.kernel
         .modes_mut()
-        .register_content(SharedContentMode::new());
-    assert!(app.bind_content_mode(editor_cid(), &mode));
+        .register(ChainProbeMode::with_sequence(
+            "second-probe",
+            vec![KeyEvent::char('q'), KeyEvent::char('z')],
+            vec![ModeEffect::DeferredEdit(EditCommand::InsertText(
+                "b".to_string(),
+            ))],
+            false,
+        ));
+    assert!(app.attach_mode_to_content(editor_cid(), &ModeName::new("first-probe")));
+    assert!(app.attach_mode_to_content(editor_cid(), &ModeName::new("second-probe")));
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('q')))
+        .await
+        .unwrap();
+    assert_eq!(text_rows(&app, editor_cid()), vec!["a"]);
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('z')))
+        .await
+        .unwrap();
+    assert_eq!(text_rows(&app, editor_cid()), vec!["ba"]);
+}
+
+#[test]
+fn mode_decorations_are_resolved_through_named_faces() {
+    let mut app = make_app(vec![], None);
+    app.kernel.modes_mut().register(HighlightMode {
+        name: ModeName::new("highlight-probe"),
+    });
+    assert!(app.attach_mode_to_content(editor_cid(), &ModeName::new("highlight-probe"),));
+    let view = view_id(&app, app.session.focused());
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        view_modes: app.session.view_modes(),
+        mode_contents: app.kernel.content_modes(),
+        faces: app.session.faces(),
+    };
+
+    let view_data = query.view(view);
+    let presentation = text_presentation(&view_data);
+    let decorations = query.decorations(view, RowRange { start: 0, end: 1 });
+
+    assert_eq!(decorations.len(), 1);
+    assert_eq!(
+        decorations[0].face.foreground,
+        Some(Color::Rgb {
+            red: 1,
+            green: 2,
+            blue: 3,
+        })
+    );
+    assert_eq!(presentation.selection_face.background, Some(Color::Ansi(4)));
+}
+
+#[test]
+fn passive_mode_failure_does_not_rollback_text_and_suspends_presentation() {
+    let mut app = make_app(vec![], None);
+    let mode = ModeName::new("faulting-highlight");
+    app.kernel
+        .modes_mut()
+        .register(FaultingHighlightMode { name: mode.clone() });
+    assert!(app.attach_mode_to_content(editor_cid(), &mode));
+    let view = view_id(&app, app.session.focused());
+    {
+        let query = AppQuery {
+            contents: app.kernel.contents(),
+            views: app.session.views(),
+            view_modes: app.session.view_modes(),
+            mode_contents: app.kernel.content_modes(),
+            faces: app.session.faces(),
+        };
+        assert_eq!(
+            query.decorations(view, RowRange { start: 0, end: 1 }).len(),
+            1
+        );
+    }
+
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("x".to_string())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["x"]);
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        view_modes: app.session.view_modes(),
+        mode_contents: app.kernel.content_modes(),
+        faces: app.session.faces(),
+    };
+    assert!(
+        query
+            .decorations(view, RowRange { start: 0, end: 1 })
+            .is_empty()
+    );
+}
+
+#[test]
+fn mode_factory_failures_suspend_only_the_failed_attachments() {
+    let mut app = make_app(vec![], None);
+    for (name, fail_content) in [
+        ("content-factory-fault", true),
+        ("view-factory-fault", false),
+    ] {
+        let mode = ModeName::new(name);
+        app.kernel.modes_mut().register(FactoryFaultMode {
+            name: mode.clone(),
+            fail_content,
+        });
+        assert!(app.attach_mode_to_content(editor_cid(), &mode));
+    }
+    let view = view_id(&app, app.session.focused());
+
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("x".to_string())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["x"]);
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        view_modes: app.session.view_modes(),
+        mode_contents: app.kernel.content_modes(),
+        faces: app.session.faces(),
+    };
+    assert!(
+        query
+            .decorations(view, RowRange { start: 0, end: 1 })
+            .is_empty()
+    );
+}
+
+#[test]
+fn mode_command_delivers_owned_language_neutral_arguments() {
+    let mut app = make_app(vec![], None);
+    let mode = ModeName::new("argument-probe");
+    let action = ModeActionName::new("insert");
+    app.kernel.modes_mut().register(ArgumentProbeMode {
+        name: mode.clone(),
+        actions: vec![action.clone()],
+    });
+    assert!(app.attach_mode_to_content(editor_cid(), &mode));
+    let view = view_id(&app, app.session.focused());
+
+    app.execute_command(DispatchCommand::Mode {
+        command: ModeCommand::new(mode, action)
+            .with_arguments(ModeValue::String("script".to_string())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["script"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failure_in_a_later_mode_rolls_back_the_whole_input() {
+    let mut app = make_app(vec![], None);
+    app.kernel.modes_mut().register(ChainProbeMode::new(
+        "first-probe",
+        vec![ModeEffect::DeferredEdit(EditCommand::InsertText(
+            "a".to_string(),
+        ))],
+        true,
+    ));
+    app.kernel.modes_mut().register(ChainProbeMode::new(
+        "failing-probe",
+        vec![ModeEffect::Mode(ModeCommand {
+            mode: ModeName::new("missing"),
+            action: ModeActionName::new("run"),
+            arguments: Default::default(),
+        })],
+        false,
+    ));
+    assert!(app.attach_mode_to_content(editor_cid(), &ModeName::new("first-probe")));
+    assert!(app.attach_mode_to_content(editor_cid(), &ModeName::new("failing-probe")));
+
+    let error = app
+        .handle_event(FrontendEvent::Key(KeyEvent::char('q')))
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("unknown mode 'missing'"));
+    assert_eq!(text_rows(&app, editor_cid()), vec![""]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_sequence_action_restores_the_modes_pending_prefix() {
+    let mut app = make_app(vec![], None);
+    app.kernel
+        .modes_mut()
+        .register(ChainProbeMode::with_sequence(
+            "failing-sequence",
+            vec![KeyEvent::char('q'), KeyEvent::char('z')],
+            vec![ModeEffect::Mode(ModeCommand::new(
+                ModeName::new("missing"),
+                ModeActionName::new("run"),
+            ))],
+            false,
+        ));
+    assert!(app.attach_mode_to_content(editor_cid(), &ModeName::new("failing-sequence"),));
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('q')))
+        .await
+        .unwrap();
+    assert!(app.session.input_is_pending_for_test());
+
+    let error = app
+        .handle_event(FrontendEvent::Key(KeyEvent::char('z')))
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("unknown mode 'missing'"));
+    assert!(app.session.input_is_pending_for_test());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mode_input_state_is_per_view_while_content_state_is_shared() {
+    let mut app = make_app(vec![], None);
+    let mode = ModeName::new("shared-content");
+    app.kernel.modes_mut().register(SharedContentMode::new());
+    assert!(app.attach_mode_to_content(editor_cid(), &mode));
 
     let left = app.session.focused();
     let right = app
@@ -1240,23 +1895,22 @@ async fn shared_content_mode_awaiting_follows_the_focused_view() {
     let command = ModeCommand {
         mode,
         action: ModeActionName::new("advance"),
+        arguments: Default::default(),
     };
     assert_eq!(
         app.kernel
-            .execute_content_mode(editor_cid(), &command)
+            .execute_mode_content_action(editor_cid(), &command)
             .unwrap(),
-        vec![ContentModeOperation::Save]
+        ModeResult::operations(vec![ModeEffect::Transaction(TransactionIntent::Redo)])
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn leaving_content_cancels_its_detached_content_mode_awaiting() {
+async fn leaving_content_cancels_view_input_without_resetting_content_state() {
     let mut app = make_app(vec![], None);
     let mode = ModeName::new("shared-content");
-    app.kernel
-        .modes_mut()
-        .register_content(SharedContentMode::new());
-    assert!(app.bind_content_mode(editor_cid(), &mode));
+    app.kernel.modes_mut().register(SharedContentMode::new());
+    assert!(app.attach_mode_to_content(editor_cid(), &mode));
     app.handle_event(FrontendEvent::Key(KeyEvent::char('z')))
         .await
         .unwrap();
@@ -1278,12 +1932,13 @@ async fn leaving_content_cancels_its_detached_content_mode_awaiting() {
     let command = ModeCommand {
         mode,
         action: ModeActionName::new("advance"),
+        arguments: Default::default(),
     };
     assert_eq!(
         app.kernel
-            .execute_content_mode(editor_cid(), &command)
+            .execute_mode_content_action(editor_cid(), &command)
             .unwrap(),
-        vec![ContentModeOperation::Transaction(TransactionIntent::Undo)]
+        ModeResult::operations(vec![ModeEffect::Transaction(TransactionIntent::Redo)])
     );
 }
 
@@ -1495,7 +2150,7 @@ async fn default_vim_a_appends_after_cursor_and_enters_insert() {
 
     app.run().await.unwrap();
 
-    assert_eq!(text_rows(&app, editor_cid()), vec!["abx"]);
+    assert_eq!(text_rows(&app, editor_cid()), vec!["axb"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2202,7 +2857,7 @@ async fn vim_capital_f_searches_backward_on_the_current_line() {
 
     app.run().await.unwrap();
 
-    assert_eq!(text_rows(&app, editor_cid()), vec!["abXa"]);
+    assert_eq!(text_rows(&app, editor_cid()), vec!["Xaba"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2270,14 +2925,14 @@ async fn prefix_key_sequence_saves() {
     let mut app = make_app(
         vec![
             FrontendEvent::Key(KeyEvent::char('z')),
-            FrontendEvent::Key(KeyEvent::char('s')),
+            FrontendEvent::Key(KeyEvent::char('z')),
             FrontendEvent::Key(KeyEvent::ctrl('q')),
         ],
         Some(&path_str),
     );
     let mut global = default_global_keymap();
     global.bind(
-        [KeyEvent::char('z'), KeyEvent::char('s')],
+        [KeyEvent::char('z'), KeyEvent::char('z')],
         Command::Content(ContentCommand::Save),
     );
     app.session
@@ -2494,7 +3149,7 @@ async fn shift_arrow_builds_selection_then_input_replaces() {
         .unwrap()
         .primary()
         .head();
-    assert_eq!(head.char_index, 3);
+    assert_eq!(head.char_index, 2);
     assert_eq!(
         view_at(&app, app.session.focused())
             .selections()
@@ -2618,6 +3273,42 @@ async fn vim_visual_left_includes_the_original_cursor_character() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn leaving_multiline_visual_selection_clamps_normal_cursor_to_a_character() {
+    let mut app = make_app(
+        vec![
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('3')),
+            FrontendEvent::Key(KeyEvent::char('l')),
+            FrontendEvent::Key(KeyEvent::char('v')),
+            FrontendEvent::Key(KeyEvent::char('j')),
+            FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+            FrontendEvent::Key(KeyEvent::ctrl('q')),
+        ],
+        None,
+    );
+    let focused_view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("abcd\nx".to_string())),
+        view: focused_view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    app.run().await.unwrap();
+
+    let head = view_at(&app, app.session.focused())
+        .selections()
+        .unwrap()
+        .primary()
+        .head();
+    assert_eq!(
+        text_point(&app, editor_cid(), head),
+        TextPoint { row: 1, col: 0 }
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn vim_line_visual_ctrl_d_deletes_frontend_sized_line_range() {
     let mut app = make_app(
         vec![
@@ -2704,7 +3395,7 @@ async fn vim_normal_h_moves_left_after_insert() {
         .unwrap()
         .primary()
         .head();
-    assert_eq!(head.char_index, 1);
+    assert_eq!(head.char_index, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2898,7 +3589,7 @@ async fn vim_delete_operator_accepts_word_line_end_and_line_start_motions() {
         None,
     );
     line_start.run().await.unwrap();
-    assert_eq!(text_rows(&line_start, editor_cid()), vec![""]);
+    assert_eq!(text_rows(&line_start, editor_cid()), vec!["c"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3122,8 +3813,8 @@ fn content_action_without_view_participant_is_undoable() {
     let view = view_id(&app, app.session.focused());
     let change = TextChangeSet::from_edits(0, vec![TextEdit::new(0..0, "x")]).unwrap();
 
-    app.execute_command(DispatchCommand::ContentMode {
-        operation: ContentModeOperation::Content(ContentAction::Text(change)),
+    app.execute_command(DispatchCommand::ModeContentEffects {
+        effects: vec![ModeEffect::Content(ContentAction::Text(change))],
         content: editor_cid(),
     })
     .unwrap();
@@ -3150,8 +3841,8 @@ fn raw_view_mode_content_action_maps_its_source_view() {
     .unwrap();
     let change = TextChangeSet::from_edits(3, vec![TextEdit::new(0..3, "")]).unwrap();
 
-    app.execute_command(DispatchCommand::ViewModeOperations {
-        operations: vec![ViewModeOperation::Content(ContentAction::Text(change))],
+    app.execute_command(DispatchCommand::ModeEffects {
+        operations: vec![ModeEffect::Content(ContentAction::Text(change))],
         view,
         content: editor_cid(),
     })
@@ -3173,8 +3864,8 @@ fn mode_operations_reject_invalid_or_stale_view_state() {
     let mut invalid = make_app(vec![], None);
     let invalid_view = view_id(&invalid, invalid.session.focused());
     let error = invalid
-        .execute_command(DispatchCommand::ViewModeOperations {
-            operations: vec![ViewModeOperation::View(ViewAction::SetSelections(
+        .execute_command(DispatchCommand::ModeEffects {
+            operations: vec![ModeEffect::View(ViewAction::SetSelections(
                 Selections::single(Selection::collapsed(TextOffset { char_index: 99 })),
             ))],
             view: invalid_view,
@@ -3201,8 +3892,8 @@ fn mode_operations_reject_invalid_or_stale_view_state() {
         })
         .unwrap();
     let error = stale
-        .execute_command(DispatchCommand::ViewModeOperations {
-            operations: vec![ViewModeOperation::Edit(ResolvedViewEdit {
+        .execute_command(DispatchCommand::ModeEffects {
+            operations: vec![ModeEffect::Edit(ResolvedViewEdit {
                 content: None,
                 view: Some(ViewAction::SetSelections(Selections::single(
                     Selection::collapsed(TextOffset::origin()),
@@ -3240,10 +3931,10 @@ fn deferred_mode_edits_plan_after_history_operations() {
     };
 
     let (mut undo, undo_view) = setup();
-    undo.execute_command(DispatchCommand::ViewModeOperations {
+    undo.execute_command(DispatchCommand::ModeEffects {
         operations: vec![
-            ViewModeOperation::Transaction(TransactionIntent::Undo),
-            ViewModeOperation::DeferredEdit(EditCommand::InsertText("b".to_string())),
+            ModeEffect::Transaction(TransactionIntent::Undo),
+            ModeEffect::DeferredEdit(EditCommand::InsertText("b".to_string())),
         ],
         view: undo_view,
         content: editor_cid(),
@@ -3258,10 +3949,10 @@ fn deferred_mode_edits_plan_after_history_operations() {
         content: editor_cid(),
     })
     .unwrap();
-    redo.execute_command(DispatchCommand::ViewModeOperations {
+    redo.execute_command(DispatchCommand::ModeEffects {
         operations: vec![
-            ViewModeOperation::Transaction(TransactionIntent::Redo),
-            ViewModeOperation::DeferredEdit(EditCommand::InsertText("b".to_string())),
+            ModeEffect::Transaction(TransactionIntent::Redo),
+            ModeEffect::DeferredEdit(EditCommand::InsertText("b".to_string())),
         ],
         view: redo_view,
         content: editor_cid(),
@@ -3283,10 +3974,10 @@ fn deferred_mode_edits_plan_after_history_operations() {
             .unwrap();
     }
     rollback
-        .execute_command(DispatchCommand::ViewModeOperations {
+        .execute_command(DispatchCommand::ModeEffects {
             operations: vec![
-                ViewModeOperation::Transaction(TransactionIntent::Rollback),
-                ViewModeOperation::DeferredEdit(EditCommand::InsertText("c".to_string())),
+                ModeEffect::Transaction(TransactionIntent::Rollback),
+                ModeEffect::DeferredEdit(EditCommand::InsertText("c".to_string())),
             ],
             view: rollback_view,
             content: editor_cid(),

@@ -7,7 +7,6 @@ pub mod content_view_state;
 pub mod edit;
 pub mod input;
 pub mod keymap;
-pub mod mode_name;
 pub mod motion;
 pub mod status_bar;
 pub mod transaction;

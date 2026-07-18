@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 
 use crate::protocol::content_query::{
-    ContentData, ContentQuery, RenderQuery, RowRange, SelectionShape, TextPresentation, ViewData,
-    ViewPresentation,
+    ContentData, ContentQuery, Face, RenderQuery, RowRange, SelectionShape, TextPresentation,
+    ViewData, ViewPresentation,
 };
 use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::revision::Revision;
@@ -33,6 +33,18 @@ pub struct SceneRenderer {
 struct DisplayPoint {
     row: usize,
     col: usize,
+}
+
+struct DisplayDecoration {
+    start: TextPoint,
+    end: TextPoint,
+    face: Face,
+}
+
+struct RowDecoration {
+    start: usize,
+    end: usize,
+    face: Face,
 }
 
 impl SceneRenderer {
@@ -296,6 +308,36 @@ fn paint_text_item(
         assert_eq!(points.len(), 2, "two offsets must produce two text points");
         (points[0], points[1])
     });
+    let text_decorations = query.decorations(
+        vid,
+        RowRange {
+            start,
+            end: start + height,
+        },
+    );
+    let decoration_offsets: Vec<_> = text_decorations
+        .iter()
+        .flat_map(|decoration| [decoration.start, decoration.end])
+        .collect();
+    let decoration_points = if decoration_offsets.is_empty() {
+        Vec::new()
+    } else {
+        let ContentData::TextPoints(points) =
+            query.content(content, ContentQuery::TextPoints(decoration_offsets))
+        else {
+            panic!("text presentation must answer TextPoints")
+        };
+        points
+    };
+    let decorations: Vec<_> = text_decorations
+        .iter()
+        .zip(decoration_points.chunks_exact(2))
+        .map(|(decoration, points)| DisplayDecoration {
+            start: points[0],
+            end: points[1],
+            face: decoration.face.clone(),
+        })
+        .collect();
     for (row, line) in lines.iter().enumerate() {
         let buf_row = start + row;
         let screen_row = (item.rect.y + row as i32) as usize;
@@ -311,6 +353,7 @@ fn paint_text_item(
             item.rect.x as usize,
             width,
             linewise_highlight,
+            &text.selection_face,
         )?;
         let hi = if linewise_highlight {
             Some((0, usize::MAX))
@@ -339,7 +382,32 @@ fn paint_text_item(
         } else {
             None
         };
-        paint_line_with_highlight(canvas, line, vp.left_col, width, hi)?;
+        let row_decorations: Vec<_> = decorations
+            .iter()
+            .filter(|decoration| buf_row >= decoration.start.row && buf_row <= decoration.end.row)
+            .map(|decoration| RowDecoration {
+                start: if buf_row == decoration.start.row {
+                    decoration.start.col
+                } else {
+                    0
+                },
+                end: if buf_row == decoration.end.row {
+                    decoration.end.col
+                } else {
+                    usize::MAX
+                },
+                face: decoration.face.clone(),
+            })
+            .collect();
+        paint_line_with_highlight(
+            canvas,
+            line,
+            vp.left_col,
+            width,
+            hi,
+            &text.selection_face,
+            &row_decorations,
+        )?;
     }
     for row in lines.len()..height {
         let screen_row = (item.rect.y + row as i32) as usize;
@@ -369,7 +437,7 @@ fn paint_status_bar(
 }
 
 fn clear_item_row(canvas: &mut dyn Canvas, row: usize, col: usize, width: usize) -> io::Result<()> {
-    clear_item_row_with_highlight(canvas, row, col, width, false)
+    clear_item_row_with_highlight(canvas, row, col, width, false, &Face::default())
 }
 
 fn clear_item_row_with_highlight(
@@ -378,15 +446,22 @@ fn clear_item_row_with_highlight(
     col: usize,
     width: usize,
     highlighted: bool,
+    selection_face: &Face,
 ) -> io::Result<()> {
     canvas.move_cursor(row, col)?;
     if width > 0 {
+        if highlighted && selection_face != &Face::default() {
+            canvas.set_face(selection_face)?;
+        }
         if highlighted {
-            canvas.set_reverse(true)?;
+            canvas.set_reverse(selection_face == &Face::default())?;
         }
         canvas.write_str(&" ".repeat(width))?;
-        if highlighted {
+        if highlighted && selection_face == &Face::default() {
             canvas.set_reverse(false)?;
+        }
+        if highlighted && selection_face != &Face::default() {
+            canvas.set_face(&Face::default())?;
         }
         canvas.move_cursor(row, col)?;
     }
@@ -402,6 +477,8 @@ fn paint_line_with_highlight(
     left_col: usize,
     width: usize,
     hi: Option<(usize, usize)>,
+    selection_face: &Face,
+    decorations: &[RowDecoration],
 ) -> io::Result<()> {
     if width == 0 {
         return Ok(());
@@ -410,6 +487,7 @@ fn paint_line_with_highlight(
     let visible_end = left_col.saturating_add(width);
     let mut cell_col: usize = 0;
     let mut reverse_on = false;
+    let mut active_face = Face::default();
     let mut previous_char_was_visible = false;
 
     for (logical_col, source) in content.chars().enumerate() {
@@ -443,9 +521,26 @@ fn paint_line_with_highlight(
         }
 
         let highlighted = hi.is_some_and(|(start, end)| logical_col >= start && logical_col < end);
-        if highlighted != reverse_on {
-            canvas.set_reverse(highlighted)?;
-            reverse_on = highlighted;
+        let reverse_highlighted = highlighted && selection_face == &Face::default();
+        let mut face = Face::default();
+        for decoration in decorations {
+            if logical_col >= decoration.start && logical_col < decoration.end {
+                face.overlay(&decoration.face);
+            }
+        }
+        if highlighted {
+            face.overlay(selection_face);
+        }
+        if face != active_face {
+            canvas.set_face(&face)?;
+            active_face = face;
+            if reverse_highlighted {
+                canvas.set_reverse(true)?;
+            }
+        }
+        if reverse_highlighted != reverse_on {
+            canvas.set_reverse(reverse_highlighted)?;
+            reverse_on = reverse_highlighted;
         }
         let mut encoded = [0; 4];
         canvas.write_str(ch.encode_utf8(&mut encoded))?;
@@ -453,6 +548,9 @@ fn paint_line_with_highlight(
     }
     if reverse_on {
         canvas.set_reverse(false)?;
+    }
+    if active_face != Face::default() {
+        canvas.set_face(&Face::default())?;
     }
     Ok(())
 }
@@ -515,6 +613,7 @@ mod tests {
                 selections,
                 cursor_style,
                 selection_shape,
+                selection_face: Face::default(),
             }),
         }
     }
@@ -539,6 +638,7 @@ mod tests {
                 message: StatusMessage::None,
             };
             match query {
+                ContentQuery::Text => ContentData::Text(self.lines.join("\n")),
                 ContentQuery::TextRows(range) => {
                     assert_eq!(cid, self.editor_cid, "only editor content has lines");
                     ContentData::TextRows(
@@ -591,6 +691,7 @@ mod tests {
                 message: StatusMessage::None,
             };
             match query {
+                ContentQuery::Text => ContentData::Text(self.lines.join("\n")),
                 ContentQuery::TextRows(range) => {
                     assert_eq!(cid, ContentId(0));
                     ContentData::TextRows(
@@ -1152,7 +1253,8 @@ mod tests {
     fn selection_highlight_uses_logical_columns_with_wide_unicode() {
         let mut out = Output::new(Vec::new());
 
-        paint_line_with_highlight(&mut out, "中文a", 0, 5, Some((1, 2))).unwrap();
+        paint_line_with_highlight(&mut out, "中文a", 0, 5, Some((1, 2)), &Face::default(), &[])
+            .unwrap();
 
         let output = String::from_utf8(out.into_inner()).unwrap();
         assert_eq!(output, "中\x1b[7m文\x1b[27ma");
@@ -1263,12 +1365,69 @@ mod tests {
     fn document_control_characters_are_sanitized_before_terminal_output() {
         let mut out = Output::new(Vec::new());
 
-        paint_line_with_highlight(&mut out, "safe\x1b]52;payload\u{0007}", 0, 40, None).unwrap();
+        paint_line_with_highlight(
+            &mut out,
+            "safe\x1b]52;payload\u{0007}",
+            0,
+            40,
+            None,
+            &Face::default(),
+            &[],
+        )
+        .unwrap();
 
         let output = String::from_utf8(out.into_inner()).unwrap();
         assert_eq!(output, "safe�]52;payload�");
         assert!(!output.contains('\x1b'));
         assert!(!output.contains('\u{0007}'));
+    }
+
+    #[test]
+    fn decorations_apply_face_without_hiding_selection_reverse() {
+        let mut out = Output::new(Vec::new());
+        paint_line_with_highlight(
+            &mut out,
+            "ab",
+            0,
+            2,
+            Some((0, 1)),
+            &Face::default(),
+            &[RowDecoration {
+                start: 0,
+                end: 1,
+                face: Face {
+                    foreground: Some(crate::protocol::content_query::Color::Ansi(1)),
+                    ..Face::default()
+                },
+            }],
+        )
+        .unwrap();
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert!(output.contains("\x1b[38;5;1m"), "got: {output:?}");
+        assert!(output.contains("\x1b[7m"), "got: {output:?}");
+    }
+
+    #[test]
+    fn named_selection_face_replaces_reverse_fallback() {
+        let mut out = Output::new(Vec::new());
+        paint_line_with_highlight(
+            &mut out,
+            "ab",
+            0,
+            2,
+            Some((0, 1)),
+            &Face {
+                background: Some(crate::protocol::content_query::Color::Ansi(4)),
+                ..Face::default()
+            },
+            &[],
+        )
+        .unwrap();
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert!(output.contains("\x1b[48;5;4m"), "got: {output:?}");
+        assert!(!output.contains("\x1b[7m"), "got: {output:?}");
     }
 
     #[test]

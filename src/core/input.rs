@@ -198,6 +198,7 @@ impl<S> Default for InputCoordinator<S> {
 }
 
 impl<S: Clone + PartialEq> InputCoordinator<S> {
+    #[cfg(test)]
     pub fn sources_top_down(&self) -> Vec<AwaitingSource<S>> {
         self.awaiting
             .iter()
@@ -238,6 +239,13 @@ impl<S: Clone + PartialEq> InputCoordinator<S> {
         self.awaiting.retain(
             |entry| !matches!(entry, AwaitingEntry::Context { source: item, .. } if item == source),
         );
+    }
+
+    pub fn remove_contexts(&mut self, mut remove: impl FnMut(&S) -> bool) {
+        self.awaiting.retain(|entry| match entry {
+            AwaitingEntry::Context { source, .. } => !remove(source),
+            AwaitingEntry::KeySequence(_) => true,
+        });
     }
 
     pub fn push_sequence(&mut self, pending: PendingSequence<S>) {

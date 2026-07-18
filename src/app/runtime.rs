@@ -8,7 +8,7 @@ use crate::app::application::App;
 use crate::app::command::{AppCommand, ContentCommand, TransactionCommand};
 use crate::app::dispatcher::{DispatchCommand, DispatchInput, DispatchOutcome, InputModeSnapshot};
 use crate::app::mode::{
-    ContentModeOperation, ModeStateSnapshot, ResolvedViewEdit, ViewModeOperation,
+    CursorDomain, InputFlow, ModeEffect, ModeId, ModeStateSnapshot, ResolvedViewEdit,
 };
 use crate::app::query::AppQuery;
 use crate::app::transaction::{TransactionData, TransactionRecord, ViewTransactionData};
@@ -27,12 +27,13 @@ use crate::protocol::viewport::{ViewportCommand, ViewportCursorBehavior, Viewpor
 const MAX_COMMAND_CHAIN: usize = 256;
 
 enum ModeRollback {
-    Content(ContentId, ModeStateSnapshot),
-    View(ViewId, ModeStateSnapshot),
+    Content(ModeId, ContentId, ModeStateSnapshot),
+    View(ModeId, ViewId, ModeStateSnapshot),
     Text(TransactionRecord, TransactionDirection),
 }
 
 enum DeferredEffect {
+    HistoryCommit(ContentId),
     Save(ContentId, SaveSnapshot),
     Viewport(ViewId, ViewportCommand, usize),
     Quit,
@@ -126,17 +127,155 @@ impl<F: Frontend> App<F> {
             let Some(input) = queue.pop_front() else {
                 break;
             };
-            let now = Instant::now();
-            let (contents, content_modes) = self.kernel.mode_runtime_parts();
-            let (outcome, mode_snapshots, mode_revisions) =
-                self.session.dispatch(input, now, content_modes, contents);
-            if let Err(error) = self.apply_dispatch_outcome(outcome, &mut queue, now) {
-                self.restore_input_modes(mode_snapshots);
-                return Err(error);
-            }
-            self.touch_unchanged_mode_views(&mode_revisions);
+            self.process_input_frame(input, &mut queue)?;
         }
         Ok(())
+    }
+
+    fn process_input_frame(
+        &mut self,
+        input: DispatchInput,
+        outer_queue: &mut VecDeque<DispatchInput>,
+    ) -> io::Result<()> {
+        let input_snapshot = self.session.snapshot_input();
+        let view = self.session.view_for_space(self.session.focused());
+        let content = view.and_then(|view| self.session.view(view).map(|view| view.content()));
+        let mode_snapshots = view.map_or_else(Vec::new, |view| {
+            let content = self.session.views()[&view].content();
+            let modes = self.session.view_modes().mode_ids(view);
+            let mut snapshots: Vec<_> = self
+                .kernel
+                .content_modes()
+                .snapshots(content, modes)
+                .into_iter()
+                .map(|(mode, snapshot)| InputModeSnapshot::Content(mode, content, snapshot))
+                .collect();
+            snapshots.extend(
+                self.session
+                    .view_modes()
+                    .snapshots(view)
+                    .into_iter()
+                    .map(|(mode, snapshot)| InputModeSnapshot::View(mode, view, snapshot)),
+            );
+            snapshots
+        });
+        let content_snapshot = content.and_then(|content| self.kernel.snapshot_content(content));
+        let selection_snapshot = content.map(|content| self.session.snapshot_selections(content));
+        let mut rollbacks = Vec::new();
+        let mut deferred_effects = Vec::new();
+        let mut budget = MAX_COMMAND_CHAIN;
+        let mut queue = VecDeque::from([input]);
+        self.kernel.start_command_transaction(content);
+
+        let mut result = Ok(());
+        while result.is_ok() && !self.kernel.is_cancelled() {
+            let Some(input) = queue.pop_front() else {
+                break;
+            };
+            let now = Instant::now();
+            let (contents, mode_contents) = self.kernel.mode_runtime_parts();
+            let (outcome, _, mode_revisions) =
+                self.session.dispatch(input, now, mode_contents, contents);
+            match outcome {
+                DispatchOutcome::Waiting | DispatchOutcome::Consumed => {}
+                DispatchOutcome::Replay(replay) => prepend_inputs(&mut queue, replay),
+                DispatchOutcome::Emit {
+                    command,
+                    replay,
+                    continuation,
+                } => match self.execute_command_inner(
+                    command,
+                    &mut rollbacks,
+                    &mut deferred_effects,
+                    &mut budget,
+                ) {
+                    Ok(flow) => {
+                        self.session.sync_focused_input(
+                            now,
+                            self.kernel.content_modes(),
+                            self.kernel.contents(),
+                        );
+                        prepend_inputs(&mut queue, replay);
+                        if flow == InputFlow::Continue
+                            && let Some(continuation) = continuation
+                        {
+                            queue.push_front(continuation);
+                        }
+                    }
+                    Err(error) => result = Err(error),
+                },
+            }
+            if result.is_ok() {
+                self.touch_unchanged_mode_views(&mode_revisions);
+            }
+        }
+
+        if result.is_ok()
+            && let (Some(view), Some(content)) = (view, content)
+            && self
+                .session
+                .cursor_domain(view, self.kernel.content_modes(), self.kernel.contents())
+                == CursorDomain::Character
+        {
+            result = self.execute_edit(
+                EditCommand::ClampCursorToCharacter,
+                view,
+                content,
+                &mut rollbacks,
+            );
+        }
+        if result.is_err() {
+            for rollback in rollbacks.into_iter().rev() {
+                match rollback {
+                    ModeRollback::Content(mode, content, snapshot) => self
+                        .kernel
+                        .restore_mode_content_for(mode, content, snapshot),
+                    ModeRollback::View(mode, view, snapshot) => {
+                        self.session.restore_mode_view_for(mode, view, snapshot)
+                    }
+                    ModeRollback::Text(record, direction) => {
+                        let inverse = match direction {
+                            TransactionDirection::Forward => TransactionDirection::Inverse,
+                            TransactionDirection::Inverse => TransactionDirection::Forward,
+                        };
+                        self.kernel
+                            .apply_transaction_record(&record, inverse)
+                            .expect("runtime rollback data was already validated");
+                    }
+                }
+            }
+            if let Some(snapshot) = content_snapshot {
+                self.kernel.restore_content(snapshot);
+            }
+            if let Some(snapshot) = selection_snapshot {
+                self.session.restore_selections(snapshot);
+            }
+            self.restore_input_modes(mode_snapshots);
+            self.session.restore_input(input_snapshot);
+        }
+        self.kernel.finish_command_transaction(result.is_ok());
+        if result.is_ok() {
+            self.publish_deferred_effects(deferred_effects);
+            outer_queue.extend(queue);
+        }
+        result
+    }
+
+    fn publish_deferred_effects(&mut self, effects: Vec<DeferredEffect>) {
+        for effect in effects {
+            match effect {
+                DeferredEffect::HistoryCommit(content) => {
+                    self.kernel.commit_transaction(content);
+                }
+                DeferredEffect::Save(content, snapshot) => {
+                    self.kernel.queue_save(content, snapshot);
+                }
+                DeferredEffect::Viewport(view, command, lines) => {
+                    self.frontend.apply_viewport_command(view, command, lines);
+                }
+                DeferredEffect::Quit => self.kernel.cancel(),
+            }
+        }
     }
 
     fn apply_dispatch_outcome(
@@ -148,14 +287,23 @@ impl<F: Frontend> App<F> {
         match outcome {
             DispatchOutcome::Waiting | DispatchOutcome::Consumed => {}
             DispatchOutcome::Replay(replay) => prepend_inputs(queue, replay),
-            DispatchOutcome::Emit { command, replay } => {
-                self.execute_command(command)?;
+            DispatchOutcome::Emit {
+                command,
+                replay,
+                continuation,
+            } => {
+                let flow = self.execute_input_command(command)?;
                 self.session.sync_focused_input(
                     now,
                     self.kernel.content_modes(),
                     self.kernel.contents(),
                 );
                 prepend_inputs(queue, replay);
+                if flow == InputFlow::Continue
+                    && let Some(continuation) = continuation
+                {
+                    queue.push_front(continuation);
+                }
             }
         }
         Ok(())
@@ -171,12 +319,14 @@ impl<F: Frontend> App<F> {
             {
                 return Ok(());
             }
+            let input_snapshot = self.session.snapshot_input();
             let (contents, content_modes) = self.kernel.mode_runtime_parts();
             let (outcome, mode_snapshots, mode_revisions) =
                 self.session.dispatch_timeout(now, content_modes, contents);
             let mut replay = VecDeque::new();
             if let Err(error) = self.apply_dispatch_outcome(outcome, &mut replay, now) {
                 self.restore_input_modes(mode_snapshots);
+                self.session.restore_input(input_snapshot);
                 return Err(error);
             }
             self.touch_unchanged_mode_views(&mode_revisions);
@@ -187,34 +337,69 @@ impl<F: Frontend> App<F> {
     fn restore_input_modes(&mut self, snapshots: Vec<InputModeSnapshot>) {
         for snapshot in snapshots.into_iter().rev() {
             match snapshot {
-                InputModeSnapshot::Content(content, snapshot) => {
-                    self.kernel.restore_content_mode(content, snapshot);
+                InputModeSnapshot::Content(mode, content, snapshot) => {
+                    self.kernel
+                        .restore_mode_content_for(mode, content, snapshot);
                 }
-                InputModeSnapshot::View(view, snapshot) => {
-                    self.session.restore_view_mode(view, snapshot);
+                InputModeSnapshot::View(mode, view, snapshot) => {
+                    self.session.restore_mode_view_for(mode, view, snapshot);
                 }
             }
         }
     }
 
+    #[cfg(test)]
     pub(super) fn execute_command(&mut self, command: DispatchCommand) -> io::Result<()> {
+        self.execute_command_with_cursor_domain(command, false)
+            .map(|_| ())
+    }
+
+    fn execute_input_command(&mut self, command: DispatchCommand) -> io::Result<InputFlow> {
+        self.execute_command_with_cursor_domain(command, true)
+    }
+
+    fn execute_command_with_cursor_domain(
+        &mut self,
+        command: DispatchCommand,
+        enforce_cursor_domain: bool,
+    ) -> io::Result<InputFlow> {
         let mut rollbacks = Vec::new();
         let mut deferred_effects = Vec::new();
         let mut budget = MAX_COMMAND_CHAIN;
         let content = command.content();
+        let view = command.view();
         let content_snapshot = content.and_then(|content| self.kernel.snapshot_content(content));
         let selection_snapshot = content.map(|content| self.session.snapshot_selections(content));
         self.kernel.start_command_transaction(content);
-        let result =
+        let mut result =
             self.execute_command_inner(command, &mut rollbacks, &mut deferred_effects, &mut budget);
+        if enforce_cursor_domain
+            && result.is_ok()
+            && let (Some(view), Some(content)) = (view, content)
+            && self
+                .session
+                .cursor_domain(view, self.kernel.content_modes(), self.kernel.contents())
+                == CursorDomain::Character
+        {
+            let flow = *result.as_ref().expect("checked successful result");
+            result = self
+                .execute_edit(
+                    EditCommand::ClampCursorToCharacter,
+                    view,
+                    content,
+                    &mut rollbacks,
+                )
+                .map(|_| flow);
+        }
         if result.is_err() {
             for rollback in rollbacks.into_iter().rev() {
                 match rollback {
-                    ModeRollback::Content(content, snapshot) => {
-                        self.kernel.restore_content_mode(content, snapshot);
+                    ModeRollback::Content(mode, content, snapshot) => {
+                        self.kernel
+                            .restore_mode_content_for(mode, content, snapshot);
                     }
-                    ModeRollback::View(view, snapshot) => {
-                        self.session.restore_view_mode(view, snapshot);
+                    ModeRollback::View(mode, view, snapshot) => {
+                        self.session.restore_mode_view_for(mode, view, snapshot);
                     }
                     ModeRollback::Text(record, direction) => {
                         let inverse = match direction {
@@ -236,17 +421,7 @@ impl<F: Frontend> App<F> {
         }
         self.kernel.finish_command_transaction(result.is_ok());
         if result.is_ok() {
-            for effect in deferred_effects {
-                match effect {
-                    DeferredEffect::Save(content, snapshot) => {
-                        self.kernel.queue_save(content, snapshot);
-                    }
-                    DeferredEffect::Viewport(view, command, lines) => {
-                        self.frontend.apply_viewport_command(view, command, lines);
-                    }
-                    DeferredEffect::Quit => self.kernel.cancel(),
-                }
-            }
+            self.publish_deferred_effects(deferred_effects);
         }
         result
     }
@@ -257,9 +432,10 @@ impl<F: Frontend> App<F> {
         rollbacks: &mut Vec<ModeRollback>,
         deferred_effects: &mut Vec<DeferredEffect>,
         budget: &mut usize,
-    ) -> io::Result<()> {
+    ) -> io::Result<InputFlow> {
         let mut command = command;
         let mut mode_revisions: Vec<(ViewId, Revision)> = Vec::new();
+        let mut input_flow = InputFlow::Stop;
 
         while *budget > 0 {
             *budget -= 1;
@@ -294,7 +470,13 @@ impl<F: Frontend> App<F> {
                     view,
                     content,
                 } => {
-                    self.execute_view_content_command(command, view, content, rollbacks)?;
+                    self.execute_view_content_command(
+                        command,
+                        view,
+                        content,
+                        rollbacks,
+                        deferred_effects,
+                    )?;
                     None
                 }
                 DispatchCommand::Mode {
@@ -302,20 +484,33 @@ impl<F: Frontend> App<F> {
                     view,
                     content,
                 } => {
-                    if self.kernel.has_content_mode(content) {
+                    let scope = self
+                        .kernel
+                        .modes()
+                        .command_scope(&command.mode, &command.action)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                    let mode = self
+                        .kernel
+                        .modes()
+                        .resolve_mode(&command.mode)
+                        .expect("validated mode exists");
+                    if scope == crate::app::mode::ModeActionScope::Content {
                         if !rollbacks.iter().any(|rollback| {
-                            matches!(rollback, ModeRollback::Content(id, _) if *id == content)
-                        }) && let Some(snapshot) = self.kernel.snapshot_content_mode(content)
+                            matches!(rollback, ModeRollback::Content(id, target, _) if *id == mode && *target == content)
+                        }) && let Some(snapshot) = self.kernel.snapshot_mode_content_for(mode, content)
                         {
-                            rollbacks.push(ModeRollback::Content(content, snapshot));
+                            rollbacks.push(ModeRollback::Content(mode, content, snapshot));
                         }
-                        let operations = self
+                        let result = self
                             .kernel
-                            .execute_content_mode(content, &command)
+                            .execute_mode_content_action(content, &command)
                             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                        self.execute_content_mode_operations(
+                        let (flow, operations) = result.into_parts();
+                        input_flow = flow;
+                        self.execute_mode_content_effects(
                             operations,
                             content,
+                            Some(view),
                             rollbacks,
                             deferred_effects,
                             budget,
@@ -323,10 +518,10 @@ impl<F: Frontend> App<F> {
                         None
                     } else {
                         if !rollbacks.iter().any(
-                            |rollback| matches!(rollback, ModeRollback::View(id, _) if *id == view),
-                        ) && let Some(snapshot) = self.session.snapshot_view_mode(view)
+                            |rollback| matches!(rollback, ModeRollback::View(id, target, _) if *id == mode && *target == view),
+                        ) && let Some(snapshot) = self.session.snapshot_mode_view_for(mode, view)
                         {
-                            rollbacks.push(ModeRollback::View(view, snapshot));
+                            rollbacks.push(ModeRollback::View(mode, view, snapshot));
                         }
                         let target_view = self.session.view(view).expect("target view exists");
                         assert_eq!(
@@ -335,15 +530,13 @@ impl<F: Frontend> App<F> {
                             "view/content target mismatch"
                         );
                         let revision_before = target_view.revision();
-                        let operations = self
+                        let (contents, modes, mode_contents) = self.kernel.mode_attachment_parts();
+                        let result = self
                             .session
-                            .execute_mode(
-                                view,
-                                self.kernel.modes(),
-                                self.kernel.contents(),
-                                &command,
-                            )
+                            .execute_mode(view, modes, contents, &command, mode_contents)
                             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                        let (flow, operations) = result.into_parts();
+                        input_flow = flow;
                         if !mode_revisions.iter().any(|(recorded, _)| *recorded == view) {
                             mode_revisions.push((view, revision_before));
                         }
@@ -380,30 +573,18 @@ impl<F: Frontend> App<F> {
                         })
                     }
                 }
-                DispatchCommand::ContentMode { operation, content } => {
-                    self.execute_content_mode_operations(
-                        vec![operation],
+                DispatchCommand::ModeContentEffects { effects, content } => {
+                    self.execute_mode_content_effects(
+                        effects,
                         content,
+                        None,
                         rollbacks,
                         deferred_effects,
                         budget,
                     )?;
                     None
                 }
-                DispatchCommand::ContentModeOperations {
-                    operations,
-                    content,
-                } => {
-                    self.execute_content_mode_operations(
-                        operations,
-                        content,
-                        rollbacks,
-                        deferred_effects,
-                        budget,
-                    )?;
-                    None
-                }
-                DispatchCommand::ViewModeOperations {
+                DispatchCommand::ModeEffects {
                     operations,
                     view,
                     content,
@@ -423,7 +604,7 @@ impl<F: Frontend> App<F> {
 
             let Some(next) = next else {
                 self.touch_unchanged_mode_views(&mode_revisions);
-                return Ok(());
+                return Ok(input_flow);
             };
             command = next;
         }
@@ -441,10 +622,17 @@ impl<F: Frontend> App<F> {
         view: ViewId,
         content: ContentId,
         rollbacks: &mut Vec<ModeRollback>,
+        deferred_effects: &mut Vec<DeferredEffect>,
     ) -> io::Result<()> {
         if let ContentCommand::Sequence(commands) = command {
             for command in commands.into_commands() {
-                self.execute_view_content_command(command, view, content, rollbacks)?;
+                self.execute_view_content_command(
+                    command,
+                    view,
+                    content,
+                    rollbacks,
+                    deferred_effects,
+                )?;
             }
             return Ok(());
         }
@@ -464,7 +652,7 @@ impl<F: Frontend> App<F> {
                         self.kernel.begin_transaction(content, Some(view));
                     }
                     TransactionCommand::Commit => {
-                        self.kernel.commit_transaction(content);
+                        deferred_effects.push(DeferredEffect::HistoryCommit(content));
                     }
                     TransactionCommand::Rollback => {
                         if let Some(record) = self.kernel.rollback_transaction(content) {
@@ -592,6 +780,9 @@ impl<F: Frontend> App<F> {
                 }
             }
         }
+        if let Some(change) = &outcome.change {
+            self.notify_mode_content_changed(content, change);
+        }
         if let Some(transaction) = transaction {
             let after = self
                 .session
@@ -630,7 +821,7 @@ impl<F: Frontend> App<F> {
 
     fn execute_view_mode_operations(
         &mut self,
-        operations: Vec<ViewModeOperation>,
+        operations: Vec<ModeEffect>,
         view: ViewId,
         content: ContentId,
         rollbacks: &mut Vec<ModeRollback>,
@@ -639,16 +830,16 @@ impl<F: Frontend> App<F> {
     ) -> io::Result<()> {
         for operation in operations {
             match operation {
-                ViewModeOperation::Edit(edit) => {
+                ModeEffect::Edit(edit) => {
                     self.apply_resolved_view_edit(edit, view, content, rollbacks)?;
                 }
-                ViewModeOperation::DeferredEdit(command) => {
+                ModeEffect::DeferredEdit(command) => {
                     self.execute_edit(command, view, content, rollbacks)?;
                 }
-                ViewModeOperation::View(action) => {
+                ModeEffect::View(action) => {
                     self.apply_view_action(view, action)?;
                 }
-                ViewModeOperation::Content(action) => {
+                ModeEffect::Content(action) => {
                     let selections = self
                         .session
                         .view(view)
@@ -666,10 +857,16 @@ impl<F: Frontend> App<F> {
                         rollbacks,
                     )?;
                 }
-                ViewModeOperation::Transaction(intent) => {
-                    self.execute_transaction_intent(intent, Some(view), content, rollbacks)?;
+                ModeEffect::Transaction(intent) => {
+                    self.execute_transaction_intent(
+                        intent,
+                        Some(view),
+                        content,
+                        rollbacks,
+                        deferred_effects,
+                    )?;
                 }
-                ViewModeOperation::App(command) => {
+                ModeEffect::App(command) => {
                     self.execute_command_inner(
                         DispatchCommand::App(command),
                         rollbacks,
@@ -677,7 +874,7 @@ impl<F: Frontend> App<F> {
                         budget,
                     )?;
                 }
-                ViewModeOperation::Mode(command) => {
+                ModeEffect::Mode(command) => {
                     self.execute_command_inner(
                         DispatchCommand::Mode {
                             command,
@@ -689,7 +886,7 @@ impl<F: Frontend> App<F> {
                         budget,
                     )?;
                 }
-                ViewModeOperation::Viewport(command) => {
+                ModeEffect::Viewport(command) => {
                     self.execute_command_inner(
                         DispatchCommand::Viewport {
                             command,
@@ -701,7 +898,7 @@ impl<F: Frontend> App<F> {
                         budget,
                     )?;
                 }
-                ViewModeOperation::Save => {
+                ModeEffect::Save => {
                     self.execute_command_inner(
                         DispatchCommand::Content {
                             command: ContentCommand::Save,
@@ -712,29 +909,35 @@ impl<F: Frontend> App<F> {
                         budget,
                     )?;
                 }
-                ViewModeOperation::Noop => {}
             }
         }
         Ok(())
     }
 
-    fn execute_content_mode_operations(
+    fn execute_mode_content_effects(
         &mut self,
-        operations: Vec<ContentModeOperation>,
+        effects: Vec<ModeEffect>,
         content: ContentId,
+        source_view: Option<ViewId>,
         rollbacks: &mut Vec<ModeRollback>,
         deferred_effects: &mut Vec<DeferredEffect>,
         budget: &mut usize,
     ) -> io::Result<()> {
-        for operation in operations {
-            match operation {
-                ContentModeOperation::Content(action) => {
+        for effect in effects {
+            match effect {
+                ModeEffect::Content(action) => {
                     self.execute_content_action(action, content, rollbacks)?;
                 }
-                ContentModeOperation::Transaction(intent) => {
-                    self.execute_transaction_intent(intent, None, content, rollbacks)?;
+                ModeEffect::Transaction(intent) => {
+                    self.execute_transaction_intent(
+                        intent,
+                        None,
+                        content,
+                        rollbacks,
+                        deferred_effects,
+                    )?;
                 }
-                ContentModeOperation::Save => {
+                ModeEffect::Save => {
                     self.execute_command_inner(
                         DispatchCommand::Content {
                             command: ContentCommand::Save,
@@ -744,6 +947,41 @@ impl<F: Frontend> App<F> {
                         deferred_effects,
                         budget,
                     )?;
+                }
+                ModeEffect::Mode(command) => {
+                    let view = source_view.ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "content-scoped mode command needs a source view",
+                        )
+                    })?;
+                    self.execute_command_inner(
+                        DispatchCommand::Mode {
+                            command,
+                            view,
+                            content,
+                        },
+                        rollbacks,
+                        deferred_effects,
+                        budget,
+                    )?;
+                }
+                ModeEffect::App(command) => {
+                    self.execute_command_inner(
+                        DispatchCommand::App(command),
+                        rollbacks,
+                        deferred_effects,
+                        budget,
+                    )?;
+                }
+                ModeEffect::Edit(_)
+                | ModeEffect::DeferredEdit(_)
+                | ModeEffect::View(_)
+                | ModeEffect::Viewport(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "content-scoped mode emitted a view-scoped effect",
+                    ));
                 }
             }
         }
@@ -773,6 +1011,7 @@ impl<F: Frontend> App<F> {
         if let Some(change) = &outcome.change {
             self.session
                 .transform_content_views(self.kernel.contents(), content, None, change);
+            self.notify_mode_content_changed(content, change);
         }
         if let Some(transaction) = transaction {
             let record = TransactionRecord {
@@ -806,13 +1045,14 @@ impl<F: Frontend> App<F> {
         owner: Option<ViewId>,
         content: ContentId,
         rollbacks: &mut Vec<ModeRollback>,
+        deferred_effects: &mut Vec<DeferredEffect>,
     ) -> io::Result<()> {
         match intent {
             TransactionIntent::Begin => {
                 self.kernel.begin_transaction(content, owner);
             }
             TransactionIntent::Commit => {
-                self.kernel.commit_transaction(content);
+                deferred_effects.push(DeferredEffect::HistoryCommit(content));
             }
             TransactionIntent::Rollback => {
                 if let Some(record) = self.kernel.rollback_transaction(content) {
@@ -884,8 +1124,20 @@ impl<F: Frontend> App<F> {
                 source.as_ref().map(|(view, _)| *view),
                 change,
             );
+            self.notify_mode_content_changed(record.target, change);
         }
         Ok(())
+    }
+
+    fn notify_mode_content_changed(
+        &mut self,
+        content: ContentId,
+        change: &crate::core::content::ContentChange,
+    ) {
+        let (contents, mode_contents) = self.kernel.mode_runtime_parts();
+        mode_contents.notify_changed(content, contents, change);
+        self.session
+            .notify_mode_content_changed(content, mode_contents, contents, change);
     }
 
     fn apply_view_action(&mut self, view: ViewId, action: ViewAction) -> io::Result<()> {
@@ -909,6 +1161,8 @@ impl<F: Frontend> App<F> {
             contents: self.kernel.contents(),
             views: self.session.views(),
             view_modes: self.session.view_modes(),
+            mode_contents: self.kernel.content_modes(),
+            faces: self.session.faces(),
         };
         self.frontend.render(
             self.session.scene(),

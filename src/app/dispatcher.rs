@@ -4,13 +4,13 @@ use std::time::{Duration, Instant};
 use crate::app::command::{AppCommand, Command, ContentCommand, ModeCommand};
 use crate::app::command_resolver::{focused_view_id, resolve_command};
 use crate::app::mode::{
-    ContentModeBinding, ContentModeInstances, ModeStateSnapshot, ViewModeContext, ViewModeInstances,
+    ModeContentStore, ModeId, ModeStateSnapshot, ModeViewContext, ModeViewStore,
 };
 use crate::app::view::View;
 use crate::core::content_store::ContentStore;
 use crate::core::input::{
     AwaitingSource, InputCoordinator, InputDecision, InputStatus, KeySequenceConfig, KeymapLayer,
-    KeymapLookup, PendingSequence, continuations, longest_complete, match_sequence,
+    PendingSequence, continuations, longest_complete, match_sequence,
 };
 use crate::core::keymap::Keymap;
 use crate::protocol::ids::{ContentId, SpaceId, ViewId};
@@ -29,9 +29,14 @@ pub struct Dispatcher {
     view_mode_revisions: Vec<(ViewId, Revision)>,
 }
 
+#[derive(Clone)]
+pub(crate) struct DispatcherInputSnapshot {
+    coordinator: InputCoordinator<CommandSource>,
+}
+
 pub(crate) enum InputModeSnapshot {
-    Content(ContentId, ModeStateSnapshot),
-    View(ViewId, ModeStateSnapshot),
+    Content(ModeId, ContentId, ModeStateSnapshot),
+    View(ModeId, ViewId, ModeStateSnapshot),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,38 +61,23 @@ pub(crate) enum DispatchCommand {
         view: ViewId,
         content: ContentId,
     },
-    ContentMode {
-        operation: crate::app::mode::ContentModeOperation,
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "extension callbacks can emit content-scoped effects"
+        )
+    )]
+    ModeContentEffects {
+        effects: Vec<crate::app::mode::ModeEffect>,
         content: ContentId,
     },
-    ContentModeOperations {
-        operations: Vec<crate::app::mode::ContentModeOperation>,
-        content: ContentId,
-    },
-    ViewModeOperations {
-        operations: Vec<crate::app::mode::ViewModeOperation>,
+    ModeEffects {
+        operations: Vec<crate::app::mode::ModeEffect>,
         view: ViewId,
         content: ContentId,
     },
     Noop,
-}
-
-struct ContentCommandKeymap<'a>(&'a Keymap<ContentModeBinding>);
-
-impl KeymapLookup<Command> for ContentCommandKeymap<'_> {
-    fn lookup(&self, sequence: &[KeyEvent]) -> Option<(Option<Command>, bool)> {
-        let node = self.0.node(sequence)?;
-        Some((
-            node.action().cloned().map(Command::from),
-            !node.children().is_empty(),
-        ))
-    }
-
-    fn extend_continuations(&self, sequence: &[KeyEvent], continuations: &mut HashSet<KeyEvent>) {
-        if let Some(node) = self.0.node(sequence) {
-            continuations.extend(node.children().keys().copied());
-        }
-    }
 }
 
 impl DispatchCommand {
@@ -97,10 +87,21 @@ impl DispatchCommand {
             | Self::ContentWithView { content, .. }
             | Self::Mode { content, .. }
             | Self::Viewport { content, .. }
-            | Self::ContentMode { content, .. }
-            | Self::ContentModeOperations { content, .. }
-            | Self::ViewModeOperations { content, .. } => Some(*content),
+            | Self::ModeContentEffects { content, .. }
+            | Self::ModeEffects { content, .. } => Some(*content),
             Self::App(_) | Self::Noop => None,
+        }
+    }
+
+    pub(crate) fn view(&self) -> Option<ViewId> {
+        match self {
+            Self::ContentWithView { view, .. }
+            | Self::Mode { view, .. }
+            | Self::Viewport { view, .. }
+            | Self::ModeEffects { view, .. } => Some(*view),
+            Self::App(_) | Self::Content { .. } | Self::ModeContentEffects { .. } | Self::Noop => {
+                None
+            }
         }
     }
 }
@@ -109,14 +110,7 @@ impl DispatchCommand {
 pub(crate) enum DispatchInput {
     Normal(KeyEvent),
     Unmapped(KeyEvent),
-}
-
-impl DispatchInput {
-    fn key(self) -> KeyEvent {
-        match self {
-            Self::Normal(key) | Self::Unmapped(key) => key,
-        }
-    }
+    Continue { key: KeyEvent, mode_index: usize },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,19 +121,20 @@ pub(crate) enum DispatchOutcome {
     Emit {
         command: DispatchCommand,
         replay: Vec<DispatchInput>,
+        continuation: Option<DispatchInput>,
     },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CommandSource {
-    View(ViewId),
+    Mode { view: ViewId, index: usize },
     Global,
 }
 
 impl CommandSource {
     pub(super) fn view_or(self, focused_view: ViewId) -> ViewId {
         match self {
-            Self::View(view) => view,
+            Self::Mode { view, .. } => view,
             Self::Global => focused_view,
         }
     }
@@ -163,6 +158,16 @@ impl Dispatcher {
         }
     }
 
+    pub(crate) fn snapshot_input(&self) -> DispatcherInputSnapshot {
+        DispatcherInputSnapshot {
+            coordinator: self.coordinator.clone(),
+        }
+    }
+
+    pub(crate) fn restore_input(&mut self, snapshot: DispatcherInputSnapshot) {
+        self.coordinator = snapshot.coordinator;
+    }
+
     #[cfg(test)]
     pub fn is_pending(&self) -> bool {
         self.coordinator.pending_sequence().is_some()
@@ -179,8 +184,8 @@ impl Dispatcher {
         focused: SpaceId,
         scene: &Scene,
         views: &HashMap<ViewId, View>,
-        modes: &mut ViewModeInstances,
-        content_modes: &mut ContentModeInstances,
+        modes: &mut ModeViewStore,
+        content_modes: &mut ModeContentStore,
         contents: &ContentStore,
     ) -> DispatchOutcome {
         self.input_mode_snapshots.clear();
@@ -189,61 +194,10 @@ impl Dispatcher {
             Some(view) => view,
             None => return DispatchOutcome::Consumed,
         };
-        let key = input.key();
-
-        for source in self.coordinator.sources_top_down() {
-            match source {
-                AwaitingSource::Context(source) => {
-                    if let Some(snapshot) =
-                        snapshot_context_mode(views, modes, content_modes, source)
-                    {
-                        self.record_input_mode_snapshot(snapshot);
-                    }
-                    if let CommandSource::View(view) = source
-                        && let Some(view_data) = views.get(&view)
-                        && !content_modes.is_active(view_data.content())
-                        && modes.is_active(view)
-                    {
-                        self.record_view_mode_revision(view, view_data.revision());
-                    }
-                    let (decision, status) =
-                        capture_context(views, modes, content_modes, contents, source, key);
-                    let handled = !matches!(decision, InputDecision::Pass);
-                    self.coordinator.sync_context(source, status, handled, now);
-                    match decision {
-                        InputDecision::Pass => continue,
-                        InputDecision::Consumed => return DispatchOutcome::Consumed,
-                        InputDecision::Emit(action) => {
-                            let Some(command) =
-                                resolve_command(action, source, focused_view, views)
-                            else {
-                                return DispatchOutcome::Consumed;
-                            };
-                            return DispatchOutcome::Emit {
-                                command,
-                                replay: Vec::new(),
-                            };
-                        }
-                    }
-                }
-                AwaitingSource::KeySequence if matches!(input, DispatchInput::Normal(_)) => {
-                    return self.continue_sequence(
-                        key,
-                        now,
-                        focused_view,
-                        views,
-                        modes,
-                        content_modes,
-                        contents,
-                    );
-                }
-                AwaitingSource::KeySequence => continue,
-            }
-        }
-
         match input {
             DispatchInput::Normal(key) => self.start_sequence(
                 key,
+                0,
                 now,
                 focused_view,
                 views,
@@ -252,14 +206,31 @@ impl Dispatcher {
                 contents,
             ),
             DispatchInput::Unmapped(key) => {
-                fallback(key, focused_view, views, modes, content_modes, contents)
+                fallback(key, 0, focused_view, views, modes, content_modes, contents)
             }
+            DispatchInput::Continue { key, mode_index } => self.start_sequence(
+                key,
+                mode_index,
+                now,
+                focused_view,
+                views,
+                modes,
+                content_modes,
+                contents,
+            ),
         }
     }
 
-    pub fn sync_view(&mut self, view: ViewId, status: InputStatus, handled: bool, now: Instant) {
+    pub fn sync_mode(
+        &mut self,
+        view: ViewId,
+        index: usize,
+        status: InputStatus,
+        handled: bool,
+        now: Instant,
+    ) {
         self.coordinator
-            .sync_context(CommandSource::View(view), status, handled, now);
+            .sync_context(CommandSource::Mode { view, index }, status, handled, now);
     }
 
     pub fn take_view_mode_revisions(&mut self) -> Vec<(ViewId, Revision)> {
@@ -276,12 +247,13 @@ impl Dispatcher {
                 .iter()
                 .any(|current| match (current, &snapshot) {
                     (
-                        InputModeSnapshot::Content(current, _),
-                        InputModeSnapshot::Content(next, _),
-                    ) => current == next,
-                    (InputModeSnapshot::View(current, _), InputModeSnapshot::View(next, _)) => {
-                        current == next
-                    }
+                        InputModeSnapshot::Content(current_mode, current, _),
+                        InputModeSnapshot::Content(next_mode, next, _),
+                    ) => current_mode == next_mode && current == next,
+                    (
+                        InputModeSnapshot::View(current_mode, current, _),
+                        InputModeSnapshot::View(next_mode, next, _),
+                    ) => current_mode == next_mode && current == next,
                     _ => false,
                 });
         if !already_recorded {
@@ -303,52 +275,46 @@ impl Dispatcher {
         &mut self,
         view: ViewId,
         view_data: &View,
-        content: ContentId,
-        modes: &mut ViewModeInstances,
-        content_modes: &mut ContentModeInstances,
+        _content: ContentId,
+        modes: &mut ModeViewStore,
+        content_modes: &mut ModeContentStore,
         contents: &ContentStore,
     ) -> bool {
-        let cancelled_view_mode = !content_modes.is_active(content) && modes.is_active(view);
+        let cancelled_view_mode = modes.is_active(view);
         if cancelled_view_mode {
-            let context = ViewModeContext::new(view, view_data, contents);
-            modes.cancel(view, &context);
+            let context = ModeViewContext::new(view, view_data, contents);
+            modes.cancel_chain(view, &context, content_modes, contents);
         }
         self.invalidate_view_binding(view);
         cancelled_view_mode
     }
 
-    pub fn invalidate_view_mode(
-        &mut self,
-        view: ViewId,
-        view_data: &View,
-        modes: &mut ViewModeInstances,
-        contents: &ContentStore,
-    ) -> bool {
-        let removed_view_mode = modes.is_active(view);
-        if removed_view_mode {
-            let context = ViewModeContext::new(view, view_data, contents);
-            modes.cancel(view, &context);
-        }
-        self.invalidate_view_binding(view);
-        removed_view_mode
-    }
-
     fn invalidate_view_binding(&mut self, view: ViewId) {
-        self.coordinator.remove_context(&CommandSource::View(view));
+        self.coordinator.remove_contexts(|source| match source {
+            CommandSource::Mode { view: owner, .. } => *owner == view,
+            CommandSource::Global => false,
+        });
         if self
             .coordinator
             .pending_sequence()
-            .is_some_and(|pending| pending.owner == CommandSource::View(view))
+            .is_some_and(|pending| match pending.owner {
+                CommandSource::Mode { view: owner, .. } => owner == view,
+                CommandSource::Global => false,
+            })
         {
             self.coordinator.discard_sequence();
         }
     }
 
+    pub(crate) fn invalidate_mode_chain(&mut self, view: ViewId) {
+        self.invalidate_view_binding(view);
+    }
+
     pub fn next_deadline(
         &self,
         views: &HashMap<ViewId, View>,
-        modes: &ViewModeInstances,
-        content_modes: &ContentModeInstances,
+        modes: &ModeViewStore,
+        content_modes: &ModeContentStore,
         contents: &ContentStore,
     ) -> Option<Instant> {
         self.coordinator
@@ -365,8 +331,8 @@ impl Dispatcher {
         focused: SpaceId,
         scene: &Scene,
         views: &HashMap<ViewId, View>,
-        modes: &mut ViewModeInstances,
-        content_modes: &mut ContentModeInstances,
+        modes: &mut ModeViewStore,
+        content_modes: &mut ModeContentStore,
         contents: &crate::core::content_store::ContentStore,
     ) -> DispatchOutcome {
         self.input_mode_snapshots.clear();
@@ -382,48 +348,35 @@ impl Dispatcher {
         };
         match due {
             AwaitingSource::Context(source) => {
-                if let CommandSource::View(view) = source {
+                if let CommandSource::Mode { view, index } = source {
                     let content = views.get(&view).map(View::content);
-                    let command = if let Some(content) = content
-                        && content_modes.is_active(content)
-                    {
-                        if let Some(snapshot) = content_modes.snapshot(content) {
-                            self.record_input_mode_snapshot(InputModeSnapshot::Content(
-                                content, snapshot,
-                            ));
-                        }
-                        Some(DispatchCommand::ContentModeOperations {
-                            operations: content_modes.on_timeout(content, contents),
-                            content,
-                        })
-                    } else if let Some(content) = content {
-                        if let Some(snapshot) = modes.snapshot(view) {
-                            self.record_input_mode_snapshot(InputModeSnapshot::View(
-                                view, snapshot,
-                            ));
-                        }
-                        if modes.is_active(view) {
-                            self.record_view_mode_revision(view, views[&view].revision());
-                        }
-                        let context = crate::app::mode::ViewModeContext::new(
+                    for snapshot in snapshot_context_modes(views, modes, content_modes, source) {
+                        self.record_input_mode_snapshot(snapshot);
+                    }
+                    let command = content.and_then(|content| {
+                        let context = ModeViewContext::new(
                             view,
                             views.get(&view).expect("timeout view exists"),
                             contents,
                         );
-                        Some(DispatchCommand::ViewModeOperations {
-                            operations: modes.on_timeout(view, &context),
-                            view,
-                            content,
-                        })
-                    } else {
-                        None
-                    };
+                        modes
+                            .timeout_at(view, index, &context, content_modes)
+                            .map(|operations| {
+                                self.record_view_mode_revision(view, views[&view].revision());
+                                DispatchCommand::ModeEffects {
+                                    operations,
+                                    view,
+                                    content,
+                                }
+                            })
+                    });
                     let status = context_status(views, modes, content_modes, contents, source);
                     self.coordinator.sync_context(source, status, true, now);
                     if let Some(command) = command {
                         return DispatchOutcome::Emit {
                             command,
                             replay: Vec::new(),
+                            continuation: None,
                         };
                     }
                 } else {
@@ -437,6 +390,7 @@ impl Dispatcher {
                     .take_sequence()
                     .expect("due sequence exists");
                 self.resolve_aborted_sequence(
+                    pending.owner,
                     pending.keys,
                     None,
                     focused_view,
@@ -458,8 +412,8 @@ impl Dispatcher {
         focused: SpaceId,
         scene: &Scene,
         views: &HashMap<ViewId, View>,
-        modes: &ViewModeInstances,
-        content_modes: &ContentModeInstances,
+        modes: &ModeViewStore,
+        content_modes: &ModeContentStore,
         contents: &ContentStore,
     ) -> HashSet<KeyEvent> {
         let Some(view) = focused_view_id(scene, focused) else {
@@ -468,9 +422,16 @@ impl Dispatcher {
         let Some(pending) = self.coordinator.pending_sequence() else {
             return HashSet::new();
         };
-        self.with_layers(view, views, modes, content_modes, contents, |layers| {
-            continuations(layers, &pending.keys)
-        })
+        self.with_sequence_layer(
+            pending.owner,
+            view,
+            views,
+            modes,
+            content_modes,
+            contents,
+            |layer| continuations(std::slice::from_ref(layer), &pending.keys),
+        )
+        .unwrap_or_default()
     }
 
     #[allow(
@@ -480,44 +441,150 @@ impl Dispatcher {
     fn start_sequence(
         &mut self,
         key: KeyEvent,
+        start_mode: usize,
         now: Instant,
         focused_view: ViewId,
         views: &HashMap<ViewId, View>,
-        modes: &ViewModeInstances,
-        content_modes: &ContentModeInstances,
+        modes: &mut ModeViewStore,
+        content_modes: &mut ModeContentStore,
         contents: &ContentStore,
     ) -> DispatchOutcome {
-        let matched = self.with_layers(
-            focused_view,
-            views,
-            modes,
-            content_modes,
-            contents,
-            |layers| match_sequence(layers, &[key]),
-        );
-        let Some(matched) = matched else {
-            return fallback(key, focused_view, views, modes, content_modes, contents);
+        let Some(view) = views.get(&focused_view) else {
+            return DispatchOutcome::Consumed;
+        };
+        let context = ModeViewContext::new(focused_view, view, contents);
+        for index in start_mode..modes.mode_ids(focused_view).len() {
+            let source = CommandSource::Mode {
+                view: focused_view,
+                index,
+            };
+            let status = modes.status_at(focused_view, index, &context, content_modes);
+            if !matches!(status, InputStatus::Ready) {
+                let mode = modes.mode_ids(focused_view)[index];
+                if let Some(snapshot) = content_modes.snapshot_for(mode, context.content_id()) {
+                    self.record_input_mode_snapshot(InputModeSnapshot::Content(
+                        mode,
+                        context.content_id(),
+                        snapshot,
+                    ));
+                }
+                if let Some(snapshot) = modes.snapshot_for(mode, focused_view) {
+                    self.record_input_mode_snapshot(InputModeSnapshot::View(
+                        mode,
+                        focused_view,
+                        snapshot,
+                    ));
+                }
+                let decision = modes.capture_at(focused_view, index, &context, content_modes, key);
+                let handled = !matches!(decision, InputDecision::Pass);
+                let status = modes.status_at(focused_view, index, &context, content_modes);
+                self.coordinator.sync_context(source, status, handled, now);
+                if handled {
+                    self.record_view_mode_revision(focused_view, view.revision());
+                }
+                match decision {
+                    InputDecision::Pass => {}
+                    InputDecision::Consumed => return DispatchOutcome::Consumed,
+                    InputDecision::Emit(action) => {
+                        let Some(command) = resolve_command(action, source, focused_view, views)
+                        else {
+                            return DispatchOutcome::Consumed;
+                        };
+                        return DispatchOutcome::Emit {
+                            command,
+                            replay: Vec::new(),
+                            continuation: Some(DispatchInput::Continue {
+                                key,
+                                mode_index: index + 1,
+                            }),
+                        };
+                    }
+                }
+            }
+            if self
+                .coordinator
+                .pending_sequence()
+                .is_some_and(|pending| pending.owner == source)
+            {
+                return self.continue_sequence(
+                    key,
+                    now,
+                    focused_view,
+                    views,
+                    modes,
+                    content_modes,
+                    contents,
+                );
+            }
+            if let Some(keymap) = modes.keymap_at(focused_view, index, &context, content_modes) {
+                let layer = [KeymapLayer { source, keymap }];
+                if let Some(matched) = match_sequence(&layer, &[key]) {
+                    if matched.has_children {
+                        let keys = vec![key];
+                        self.coordinator.push_sequence(PendingSequence {
+                            owner: source,
+                            deadline: self.sequence_config.deadline(&keys, now),
+                            keys,
+                        });
+                        return DispatchOutcome::Waiting;
+                    }
+                    if let Some(resolved) = matched.exact {
+                        return emit_resolved(resolved, key, focused_view, views);
+                    }
+                }
+            }
+            if let Some(action) =
+                modes.fallback_at(focused_view, index, &context, content_modes, key)
+            {
+                let Some(command) = resolve_command(action, source, focused_view, views) else {
+                    return DispatchOutcome::Consumed;
+                };
+                return DispatchOutcome::Emit {
+                    command,
+                    replay: Vec::new(),
+                    continuation: Some(DispatchInput::Continue {
+                        key,
+                        mode_index: index + 1,
+                    }),
+                };
+            }
+        }
+
+        if self
+            .coordinator
+            .pending_sequence()
+            .is_some_and(|pending| pending.owner == CommandSource::Global)
+        {
+            return self.continue_sequence(
+                key,
+                now,
+                focused_view,
+                views,
+                modes,
+                content_modes,
+                contents,
+            );
+        }
+        let layer = [KeymapLayer {
+            source: CommandSource::Global,
+            keymap: &self.global_keymap,
+        }];
+        let Some(matched) = match_sequence(&layer, &[key]) else {
+            return DispatchOutcome::Consumed;
         };
         if matched.has_children {
             let keys = vec![key];
             self.coordinator.push_sequence(PendingSequence {
-                owner: CommandSource::View(focused_view),
+                owner: CommandSource::Global,
                 deadline: self.sequence_config.deadline(&keys, now),
                 keys,
             });
             return DispatchOutcome::Waiting;
         }
         let Some(resolved) = matched.exact else {
-            return fallback(key, focused_view, views, modes, content_modes, contents);
-        };
-        let Some(command) = resolve_command(resolved.action, resolved.source, focused_view, views)
-        else {
             return DispatchOutcome::Consumed;
         };
-        DispatchOutcome::Emit {
-            command,
-            replay: Vec::new(),
-        }
+        emit_resolved(resolved, key, focused_view, views)
     }
 
     #[allow(
@@ -530,25 +597,28 @@ impl Dispatcher {
         now: Instant,
         focused_view: ViewId,
         views: &HashMap<ViewId, View>,
-        modes: &ViewModeInstances,
-        content_modes: &ContentModeInstances,
+        modes: &ModeViewStore,
+        content_modes: &ModeContentStore,
         contents: &ContentStore,
     ) -> DispatchOutcome {
-        let mut keys = self
+        let pending = self
             .coordinator
             .pending_sequence()
-            .expect("sequence source has pending data")
-            .keys
-            .clone();
+            .expect("sequence source has pending data");
+        let owner = pending.owner;
+        let mut keys = pending.keys.clone();
         keys.push(key);
-        let matched = self.with_layers(
-            focused_view,
-            views,
-            modes,
-            content_modes,
-            contents,
-            |layers| match_sequence(layers, &keys),
-        );
+        let matched = self
+            .with_sequence_layer(
+                owner,
+                focused_view,
+                views,
+                modes,
+                content_modes,
+                contents,
+                |layer| match_sequence(std::slice::from_ref(layer), &keys),
+            )
+            .flatten();
         match matched {
             Some(matched) if matched.has_children => {
                 let deadline = self.sequence_config.deadline(&keys, now);
@@ -565,15 +635,7 @@ impl Dispatcher {
                 let Some(resolved) = matched.exact else {
                     return DispatchOutcome::Consumed;
                 };
-                let Some(command) =
-                    resolve_command(resolved.action, resolved.source, focused_view, views)
-                else {
-                    return DispatchOutcome::Consumed;
-                };
-                DispatchOutcome::Emit {
-                    command,
-                    replay: Vec::new(),
-                }
+                emit_resolved(resolved, key, focused_view, views)
             }
             None => {
                 let pending = self
@@ -581,6 +643,7 @@ impl Dispatcher {
                     .take_sequence()
                     .expect("mismatched sequence exists");
                 self.resolve_aborted_sequence(
+                    pending.owner,
                     pending.keys,
                     Some(DispatchInput::Normal(key)),
                     focused_view,
@@ -599,22 +662,26 @@ impl Dispatcher {
     )]
     fn resolve_aborted_sequence(
         &self,
+        owner: CommandSource,
         keys: Vec<KeyEvent>,
         trailing: Option<DispatchInput>,
         focused_view: ViewId,
         views: &HashMap<ViewId, View>,
-        modes: &ViewModeInstances,
-        content_modes: &ContentModeInstances,
+        modes: &ModeViewStore,
+        content_modes: &ModeContentStore,
         contents: &ContentStore,
     ) -> DispatchOutcome {
-        let complete = self.with_layers(
-            focused_view,
-            views,
-            modes,
-            content_modes,
-            contents,
-            |layers| longest_complete(layers, &keys),
-        );
+        let complete = self
+            .with_sequence_layer(
+                owner,
+                focused_view,
+                views,
+                modes,
+                content_modes,
+                contents,
+                |layer| longest_complete(std::slice::from_ref(layer), &keys),
+            )
+            .flatten();
         match complete {
             Some(complete) => {
                 let mut replay: Vec<_> = keys[complete.consumed..]
@@ -631,7 +698,15 @@ impl Dispatcher {
                 ) else {
                     return DispatchOutcome::Replay(replay);
                 };
-                DispatchOutcome::Emit { command, replay }
+                let continuation = keys
+                    .get(complete.consumed.saturating_sub(1))
+                    .copied()
+                    .and_then(|key| mode_continuation(complete.resolved.source, key));
+                DispatchOutcome::Emit {
+                    command,
+                    replay,
+                    continuation,
+                }
             }
             None => {
                 let mut replay: Vec<_> = keys.into_iter().map(DispatchInput::Unmapped).collect();
@@ -641,146 +716,132 @@ impl Dispatcher {
         }
     }
 
-    fn with_layers<R>(
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "sequence lookup borrows split runtime stores"
+    )]
+    fn with_sequence_layer<R>(
         &self,
-        focused_view: ViewId,
+        source: CommandSource,
+        _focused_view: ViewId,
         views: &HashMap<ViewId, View>,
-        modes: &ViewModeInstances,
-        content_modes: &ContentModeInstances,
+        modes: &ModeViewStore,
+        content_modes: &ModeContentStore,
         contents: &ContentStore,
-        query: impl FnOnce(&[KeymapLayer<'_, Command, CommandSource>]) -> R,
-    ) -> R {
-        let mut layers = Vec::with_capacity(2);
-        let content_keymap = views
-            .get(&focused_view)
-            .and_then(|view| content_modes.keymap(view.content(), contents))
-            .map(ContentCommandKeymap);
-        let view_keymap = content_keymap
-            .is_none()
-            .then(|| {
-                let view = views.get(&focused_view)?;
-                let context = ViewModeContext::new(focused_view, view, contents);
-                modes.keymap(focused_view, &context)
-            })
-            .flatten();
-        if let Some(keymap) = content_keymap.as_ref() {
-            layers.push(KeymapLayer {
-                source: CommandSource::View(focused_view),
-                keymap,
-            });
-        } else if let Some(keymap) = view_keymap {
-            layers.push(KeymapLayer {
-                source: CommandSource::View(focused_view),
-                keymap,
-            });
-        }
-        layers.push(KeymapLayer {
-            source: CommandSource::Global,
-            keymap: &self.global_keymap,
-        });
-        query(&layers)
-    }
-}
-
-fn snapshot_context_mode(
-    views: &HashMap<ViewId, View>,
-    modes: &ViewModeInstances,
-    content_modes: &ContentModeInstances,
-    source: CommandSource,
-) -> Option<InputModeSnapshot> {
-    let CommandSource::View(view) = source else {
-        return None;
-    };
-    let content = views.get(&view)?.content();
-    if content_modes.is_active(content) {
-        content_modes
-            .snapshot(content)
-            .map(|snapshot| InputModeSnapshot::Content(content, snapshot))
-    } else {
-        modes
-            .snapshot(view)
-            .map(|snapshot| InputModeSnapshot::View(view, snapshot))
-    }
-}
-
-fn capture_context(
-    views: &HashMap<ViewId, View>,
-    modes: &mut ViewModeInstances,
-    content_modes: &mut ContentModeInstances,
-    contents: &ContentStore,
-    source: CommandSource,
-    key: KeyEvent,
-) -> (InputDecision<Command>, InputStatus) {
-    match source {
-        CommandSource::View(view) => {
-            let Some(content) = views.get(&view).map(View::content) else {
-                return (InputDecision::Pass, InputStatus::Ready);
-            };
-            if content_modes.is_active(content) {
-                let decision = content_modes.capture(content, contents, key);
-                (decision, content_modes.input_status(content, contents))
-            } else {
-                let context = ViewModeContext::new(
-                    view,
-                    views.get(&view).expect("captured view exists"),
-                    contents,
-                );
-                let decision = modes.capture(view, &context, key);
-                (decision, modes.input_status(view, &context))
+        query: impl FnOnce(&KeymapLayer<'_, Command, CommandSource>) -> R,
+    ) -> Option<R> {
+        match source {
+            CommandSource::Mode { view, index } => {
+                let view_data = views.get(&view)?;
+                let context = ModeViewContext::new(view, view_data, contents);
+                let keymap = modes.keymap_at(view, index, &context, content_modes)?;
+                Some(query(&KeymapLayer { source, keymap }))
             }
+            CommandSource::Global => Some(query(&KeymapLayer {
+                source,
+                keymap: &self.global_keymap,
+            })),
         }
-        CommandSource::Global => (InputDecision::Pass, InputStatus::Ready),
     }
+}
+
+fn emit_resolved(
+    resolved: crate::core::input::ResolvedAction<Command, CommandSource>,
+    key: KeyEvent,
+    focused_view: ViewId,
+    views: &HashMap<ViewId, View>,
+) -> DispatchOutcome {
+    let Some(command) = resolve_command(resolved.action, resolved.source, focused_view, views)
+    else {
+        return DispatchOutcome::Consumed;
+    };
+    DispatchOutcome::Emit {
+        command,
+        replay: Vec::new(),
+        continuation: mode_continuation(resolved.source, key),
+    }
+}
+
+fn snapshot_context_modes(
+    views: &HashMap<ViewId, View>,
+    modes: &ModeViewStore,
+    content_modes: &ModeContentStore,
+    source: CommandSource,
+) -> Vec<InputModeSnapshot> {
+    let view = match source {
+        CommandSource::Mode { view, .. } => view,
+        CommandSource::Global => return Vec::new(),
+    };
+    let Some(content) = views.get(&view).map(View::content) else {
+        return Vec::new();
+    };
+    let mode_ids = modes.mode_ids(view);
+    let mut snapshots: Vec<_> = content_modes
+        .snapshots(content, mode_ids)
+        .into_iter()
+        .map(|(mode, snapshot)| InputModeSnapshot::Content(mode, content, snapshot))
+        .collect();
+    snapshots.extend(
+        modes
+            .snapshots(view)
+            .into_iter()
+            .map(|(mode, snapshot)| InputModeSnapshot::View(mode, view, snapshot)),
+    );
+    snapshots
 }
 
 fn context_status(
     views: &HashMap<ViewId, View>,
-    modes: &ViewModeInstances,
-    content_modes: &ContentModeInstances,
+    modes: &ModeViewStore,
+    content_modes: &ModeContentStore,
     contents: &ContentStore,
     source: CommandSource,
 ) -> InputStatus {
     match source {
-        CommandSource::View(view) => views.get(&view).map_or(InputStatus::Ready, |view_data| {
-            let content = view_data.content();
-            if content_modes.is_active(content) {
-                content_modes.input_status(content, contents)
-            } else {
-                let context = ViewModeContext::new(view, view_data, contents);
-                modes.input_status(view, &context)
-            }
-        }),
+        CommandSource::Mode { view, index } => {
+            views.get(&view).map_or(InputStatus::Ready, |view_data| {
+                let context = ModeViewContext::new(view, view_data, contents);
+                modes.status_at(view, index, &context, content_modes)
+            })
+        }
         CommandSource::Global => InputStatus::Ready,
     }
 }
 
 fn fallback(
     key: KeyEvent,
+    start_mode: usize,
     focused_view: ViewId,
     views: &HashMap<ViewId, View>,
-    modes: &ViewModeInstances,
-    content_modes: &ContentModeInstances,
+    modes: &ModeViewStore,
+    content_modes: &ModeContentStore,
     contents: &ContentStore,
 ) -> DispatchOutcome {
-    let Some(content) = views.get(&focused_view).map(View::content) else {
+    let Some(_content) = views.get(&focused_view).map(View::content) else {
         return DispatchOutcome::Consumed;
     };
-    let action = if content_modes.is_active(content) {
-        content_modes.fallback(content, contents, key)
-    } else {
-        let context = ViewModeContext::new(
-            focused_view,
-            views.get(&focused_view).expect("focused view exists"),
-            contents,
-        );
-        modes.fallback(focused_view, &context, key)
-    };
-    let Some(action) = action else {
+    let context = ModeViewContext::new(
+        focused_view,
+        views.get(&focused_view).expect("focused view exists"),
+        contents,
+    );
+    let action = modes.fallback_in_chain(
+        focused_view,
+        start_mode,
+        &context,
+        content_modes,
+        contents,
+        key,
+    );
+    let Some((index, action)) = action else {
         return DispatchOutcome::Consumed;
     };
     let Some(command) = resolve_command(
         action,
-        CommandSource::View(focused_view),
+        CommandSource::Mode {
+            view: focused_view,
+            index,
+        },
         focused_view,
         views,
     ) else {
@@ -789,19 +850,33 @@ fn fallback(
     DispatchOutcome::Emit {
         command,
         replay: Vec::new(),
+        continuation: Some(DispatchInput::Continue {
+            key,
+            mode_index: index + 1,
+        }),
     }
+}
+
+fn mode_continuation(source: CommandSource, key: KeyEvent) -> Option<DispatchInput> {
+    let CommandSource::Mode { index, .. } = source else {
+        return None;
+    };
+    Some(DispatchInput::Continue {
+        key,
+        mode_index: index + 1,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::command_resolver::default_global_keymap;
-    use crate::app::mode::{ContentModeInstances, ModeRegistry, ViewModeInstances};
+    use crate::app::mode::{ModeContentStore, ModeRegistry, ModeViewStore};
+    use crate::app::mode_name::ModeName;
     use crate::app::scene_model::{SceneBuilder, build_editor_scene};
     use crate::core::buffer::Buffer;
     use crate::core::content::Content;
     use crate::core::content_store::ContentStore;
-    use crate::core::mode_name::ModeName;
     use crate::core::status_bar::StatusBar;
     use crate::protocol::ids::ContentId;
     use crate::protocol::viewport::{
@@ -813,8 +888,8 @@ mod tests {
         Scene,
         SpaceId,
         HashMap<ViewId, View>,
-        ViewModeInstances,
-        ContentModeInstances,
+        ModeViewStore,
+        ModeContentStore,
         ModeRegistry,
         ContentStore,
     ) {
@@ -841,15 +916,18 @@ mod tests {
                 View::new(status, contents.create_view_state(status).unwrap()),
             ),
         ]);
-        let mut view_modes = ViewModeInstances::default();
-        view_modes.insert(ViewId(0), modes.instantiate(&ModeName::new("vim")).unwrap());
+        let mut view_modes = ModeViewStore::default();
+        let mode = modes.instantiate(&ModeName::new("vim")).unwrap();
+        let mut mode_contents = ModeContentStore::default();
+        mode_contents.attach_view(editor, &mode);
+        view_modes.insert(ViewId(0), mode);
         (
             Dispatcher::new(default_global_keymap()),
             scene,
             focused,
             views,
             view_modes,
-            ContentModeInstances::default(),
+            mode_contents,
             modes,
             contents,
         )
@@ -873,6 +951,7 @@ mod tests {
             DispatchOutcome::Emit {
                 command: DispatchCommand::App(AppCommand::Quit),
                 replay: Vec::new(),
+                continuation: None,
             }
         );
     }
@@ -930,6 +1009,7 @@ mod tests {
                     content: ContentId(0),
                 },
                 replay: Vec::new(),
+                continuation: None,
             }
         );
     }
@@ -972,6 +1052,7 @@ mod tests {
                     content: ContentId(0),
                 },
                 replay,
+                ..
             } if replay.is_empty()
         ));
     }
@@ -1013,10 +1094,11 @@ mod tests {
     fn timeout_executes_the_longest_complete_binding_and_replays_suffix() {
         let (mut dispatcher, scene, focused, views, mut view_modes, mut content_modes, _, contents) =
             fixture();
-        let g = KeyEvent::char('g');
+        let g = KeyEvent::char('z');
         dispatcher
             .global_keymap
             .bind([g], Command::App(AppCommand::FocusNext));
+        dispatcher.global_keymap.bind([g, g], Command::Noop);
         let start = Instant::now();
         assert_eq!(
             dispatcher.dispatch(
@@ -1044,6 +1126,7 @@ mod tests {
             DispatchOutcome::Emit {
                 command: DispatchCommand::App(AppCommand::FocusNext),
                 replay: Vec::new(),
+                continuation: None,
             }
         );
     }
@@ -1052,10 +1135,11 @@ mod tests {
     fn mismatch_executes_shorter_complete_binding_before_replaying_new_key() {
         let (mut dispatcher, scene, focused, views, mut view_modes, mut content_modes, _, contents) =
             fixture();
-        let g = KeyEvent::char('g');
+        let g = KeyEvent::char('z');
         dispatcher
             .global_keymap
             .bind([g], Command::App(AppCommand::FocusNext));
+        dispatcher.global_keymap.bind([g, g], Command::Noop);
         let now = Instant::now();
         assert_eq!(
             dispatcher.dispatch(
@@ -1073,7 +1157,7 @@ mod tests {
 
         assert_eq!(
             dispatcher.dispatch(
-                DispatchInput::Normal(KeyEvent::char('x')),
+                DispatchInput::Normal(KeyEvent::char('!')),
                 now,
                 focused,
                 &scene,
@@ -1084,7 +1168,8 @@ mod tests {
             ),
             DispatchOutcome::Emit {
                 command: DispatchCommand::App(AppCommand::FocusNext),
-                replay: vec![DispatchInput::Normal(KeyEvent::char('x'))],
+                replay: vec![DispatchInput::Normal(KeyEvent::char('!'))],
+                continuation: None,
             }
         );
     }
@@ -1121,15 +1206,17 @@ mod tests {
                 &modes,
                 &ModeCommand {
                     mode: ModeName::new("vim"),
-                    action: crate::core::mode_name::ModeActionName::new("count-2"),
+                    action: crate::app::mode_name::ModeActionName::new("count-2"),
+                    arguments: Default::default(),
                 },
             ),
             Ok(None)
         );
-        let context = ViewModeContext::new(ViewId(0), &views[&ViewId(0)], &contents);
-        dispatcher.sync_view(
+        let context = ModeViewContext::new(ViewId(0), &views[&ViewId(0)], &contents);
+        dispatcher.sync_mode(
             ViewId(0),
-            view_modes.input_status(ViewId(0), &context),
+            0,
+            view_modes.status_at(ViewId(0), 0, &context, &content_modes),
             true,
             now,
         );
@@ -1145,7 +1232,7 @@ mod tests {
 
         assert!(!dispatcher.is_pending());
         assert_eq!(
-            view_modes.input_status(ViewId(0), &context),
+            view_modes.status_at(ViewId(0), 0, &context, &content_modes),
             InputStatus::Ready
         );
     }
@@ -1197,6 +1284,7 @@ mod tests {
                     ..
                 },
                 replay,
+                ..
             } if replay.is_empty()
         ));
     }

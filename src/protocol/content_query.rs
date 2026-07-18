@@ -4,6 +4,66 @@ use crate::protocol::ids::{ContentId, ViewId};
 use crate::protocol::selection::{Selections, TextOffset, TextPoint};
 use crate::protocol::status::StatusMessage;
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FaceName(String);
+
+impl FaceName {
+    #[allow(dead_code, reason = "dynamic modes and themes create named faces")]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+}
+
+#[allow(dead_code, reason = "dynamic faces provide terminal and RGB colors")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Color {
+    Ansi(u8),
+    Rgb { red: u8, green: u8, blue: u8 },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Face {
+    pub foreground: Option<Color>,
+    pub background: Option<Color>,
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    pub underline: Option<bool>,
+}
+
+impl Face {
+    pub fn overlay(&mut self, patch: &Self) {
+        if patch.foreground.is_some() {
+            self.foreground = patch.foreground;
+        }
+        if patch.background.is_some() {
+            self.background = patch.background;
+        }
+        if patch.bold.is_some() {
+            self.bold = patch.bold;
+        }
+        if patch.italic.is_some() {
+            self.italic = patch.italic;
+        }
+        if patch.underline.is_some() {
+            self.underline = patch.underline;
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedTextDecoration {
+    pub start: TextOffset,
+    pub end: TextOffset,
+    pub face: FaceName,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextDecoration {
+    pub start: TextOffset,
+    pub end: TextOffset,
+    pub face: Face,
+}
+
 /// 行范围 [start, end)，前端按可见行拉取。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RowRange {
@@ -40,6 +100,7 @@ pub struct TextPresentation {
     pub selections: Selections,
     pub cursor_style: CursorStyle,
     pub selection_shape: SelectionShape,
+    pub selection_face: Face,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,6 +124,8 @@ pub struct ViewData {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContentQuery {
+    #[allow(dead_code, reason = "dynamic content analyzers need exact source text")]
+    Text,
     TextRows(RowRange),
     TextPoints(Vec<TextOffset>),
     DocumentStatus,
@@ -71,6 +134,7 @@ pub enum ContentQuery {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContentData {
+    Text(String),
     TextRows(Vec<String>),
     TextPoints(Vec<TextPoint>),
     DocumentStatus(DocumentStatus),
@@ -82,4 +146,7 @@ pub enum ContentData {
 pub trait RenderQuery {
     fn content(&self, id: ContentId, query: ContentQuery) -> ContentData;
     fn view(&self, id: ViewId) -> ViewData;
+    fn decorations(&self, _view: ViewId, _visible_rows: RowRange) -> Vec<TextDecoration> {
+        Vec::new()
+    }
 }

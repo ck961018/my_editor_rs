@@ -167,6 +167,9 @@ impl ContentStore {
 
     pub fn query(&self, id: ContentId, query: ContentQuery) -> ContentData {
         match (self.entries.get(&id).map(|entry| &entry.content), query) {
+            (Some(Content::Buffer(buffer)), ContentQuery::Text) => {
+                ContentData::Text(buffer.slice().to_string())
+            }
             (Some(Content::Buffer(buffer)), ContentQuery::TextRows(range)) => {
                 ContentData::TextRows(text_rows(buffer, range))
             }
@@ -185,7 +188,8 @@ impl ContentStore {
                 ContentData::StatusBarData(
                     match self.query(status_bar.target_content_id(), ContentQuery::DocumentStatus) {
                         ContentData::DocumentStatus(status) => status,
-                        ContentData::TextRows(_)
+                        ContentData::Text(_)
+                        | ContentData::TextRows(_)
                         | ContentData::TextPoints(_)
                         | ContentData::StatusBarData(_)
                         | ContentData::Unsupported => default_status_bar_data(),
@@ -504,6 +508,10 @@ mod tests {
         assert_eq!(
             store.query(id, ContentQuery::TextRows(RowRange { start: 0, end: 2 })),
             ContentData::TextRows(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(
+            store.query(id, ContentQuery::Text),
+            ContentData::Text("a\r\nb".to_string())
         );
     }
 }

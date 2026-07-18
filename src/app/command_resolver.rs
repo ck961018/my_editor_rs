@@ -49,13 +49,6 @@ pub(super) fn resolve_command(
                 content: views.get(&view)?.content(),
             })
         }
-        Command::ContentMode(operation) => {
-            let view = source.view_or(focused_view);
-            Some(DispatchCommand::ContentMode {
-                operation,
-                content: views.get(&view)?.content(),
-            })
-        }
     }
 }
 

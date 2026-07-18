@@ -465,6 +465,21 @@ impl Buffer {
         *selections != before
     }
 
+    pub fn clamp_cursor_to_character(&self, selections: &mut Selections) {
+        self.reconcile_selections(selections);
+        for selection in selections.all_mut() {
+            let collapsed = selection.anchor == selection.head;
+            let row = self.rope.char_to_line(selection.head.char_index);
+            selection.head.char_index = selection
+                .head
+                .char_index
+                .min(line_end_char(&self.rope, row));
+            if collapsed {
+                selection.anchor = selection.head;
+            }
+        }
+    }
+
     /// 移动 head，不碰 anchor（extend 语义：selection 变非空）。
     pub fn move_head_by(&self, sel: &mut Selection, chars: isize, lines: isize) {
         self.move_cursor_by(&mut sel.head, chars, lines);
