@@ -6,10 +6,45 @@ use ropey::Rope;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TextStateId(pub u64);
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextTransactionData {
+    pub forward: TextChangeSet,
+    pub inverse: TextChangeSet,
+    pub before_state: TextStateId,
+    pub after_state: TextStateId,
+}
+
+impl TextTransactionData {
+    pub fn is_empty(&self) -> bool {
+        self.forward.is_empty()
+    }
+
+    pub fn compose(&self, next: &Self) -> Result<Self, TextTransactionError> {
+        if self.after_state != next.before_state {
+            return Err(TextTransactionError::StateMismatch {
+                expected: self.after_state,
+                actual: next.before_state,
+            });
+        }
+        Ok(Self {
+            forward: self.forward.compose(&next.forward)?,
+            inverse: next.inverse.compose(&self.inverse)?,
+            before_state: self.before_state,
+            after_state: next.after_state,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Affinity {
     Before,
     After,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransactionDirection {
+    Forward,
+    Inverse,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,11 +71,26 @@ impl TextEdit {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TextTransactionError {
-    LengthMismatch { expected: usize, actual: usize },
-    InvalidRange { start: usize, end: usize },
-    ConflictingEdits { previous_end: usize, start: usize },
-    DuplicateInsert { offset: usize },
+    LengthMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidRange {
+        start: usize,
+        end: usize,
+    },
+    ConflictingEdits {
+        previous_end: usize,
+        start: usize,
+    },
+    DuplicateInsert {
+        offset: usize,
+    },
     InvalidChangeSet,
+    StateMismatch {
+        expected: TextStateId,
+        actual: TextStateId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,18 +101,6 @@ pub struct TextChangeSet {
 }
 
 impl TextChangeSet {
-    pub fn empty(len: usize) -> Self {
-        Self {
-            before_len: len,
-            after_len: len,
-            changes: if len == 0 {
-                Vec::new()
-            } else {
-                vec![TextChange::Retain(len)]
-            },
-        }
-    }
-
     fn builder(before_len: usize) -> Self {
         Self {
             before_len,

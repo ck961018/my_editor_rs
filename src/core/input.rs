@@ -23,13 +23,6 @@ pub enum InputDecision<A> {
     Emit(A),
 }
 
-pub trait InputContext<A> {
-    fn status(&self) -> InputStatus;
-    fn capture(&mut self, key: KeyEvent) -> InputDecision<A>;
-    fn on_timeout(&mut self);
-    fn cancel(&mut self);
-}
-
 #[derive(Clone, Debug)]
 pub struct KeySequenceConfig {
     default_timeout: Duration,
@@ -78,7 +71,25 @@ impl KeySequenceConfig {
 #[derive(Clone, Copy)]
 pub struct KeymapLayer<'a, A, S> {
     pub source: S,
-    pub keymap: &'a Keymap<A>,
+    pub keymap: &'a dyn KeymapLookup<A>,
+}
+
+pub trait KeymapLookup<A> {
+    fn lookup(&self, sequence: &[KeyEvent]) -> Option<(Option<A>, bool)>;
+    fn extend_continuations(&self, sequence: &[KeyEvent], continuations: &mut HashSet<KeyEvent>);
+}
+
+impl<A: Clone> KeymapLookup<A> for Keymap<A> {
+    fn lookup(&self, sequence: &[KeyEvent]) -> Option<(Option<A>, bool)> {
+        let node = self.node(sequence)?;
+        Some((node.action().cloned(), !node.children().is_empty()))
+    }
+
+    fn extend_continuations(&self, sequence: &[KeyEvent], continuations: &mut HashSet<KeyEvent>) {
+        if let Some(node) = self.node(sequence) {
+            continuations.extend(node.children().keys().copied());
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,7 +104,7 @@ pub struct SequenceMatch<A, S> {
     pub has_children: bool,
 }
 
-pub fn match_sequence<A: Clone, S: Clone>(
+pub fn match_sequence<A, S: Clone>(
     layers: &[KeymapLayer<'_, A, S>],
     sequence: &[KeyEvent],
 ) -> Option<SequenceMatch<A, S>> {
@@ -101,16 +112,16 @@ pub fn match_sequence<A: Clone, S: Clone>(
     let mut has_children = false;
     let mut matched = false;
     for layer in layers {
-        let Some(node) = layer.keymap.node(sequence) else {
+        let Some((action, node_has_children)) = layer.keymap.lookup(sequence) else {
             continue;
         };
         matched = true;
-        has_children |= !node.children().is_empty();
+        has_children |= node_has_children;
         if exact.is_none()
-            && let Some(action) = node.action()
+            && let Some(action) = action
         {
             exact = Some(ResolvedAction {
-                action: action.clone(),
+                action,
                 source: layer.source.clone(),
             });
         }
@@ -127,7 +138,7 @@ pub struct CompleteMatch<A, S> {
     pub resolved: ResolvedAction<A, S>,
 }
 
-pub fn longest_complete<A: Clone, S: Clone>(
+pub fn longest_complete<A, S: Clone>(
     layers: &[KeymapLayer<'_, A, S>],
     sequence: &[KeyEvent],
 ) -> Option<CompleteMatch<A, S>> {
@@ -145,11 +156,13 @@ pub fn continuations<A, S>(
     layers: &[KeymapLayer<'_, A, S>],
     sequence: &[KeyEvent],
 ) -> HashSet<KeyEvent> {
-    layers
-        .iter()
-        .filter_map(|layer| layer.keymap.node(sequence))
-        .flat_map(|node| node.children().keys().copied())
-        .collect()
+    let mut continuations = HashSet::new();
+    for layer in layers {
+        layer
+            .keymap
+            .extend_continuations(sequence, &mut continuations);
+    }
+    continuations
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

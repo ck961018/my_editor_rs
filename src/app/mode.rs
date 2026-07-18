@@ -3,15 +3,20 @@ use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
-use crate::core::command::{
-    CharSearchDirection, Command, ContentCommand, EditCommand, TransactionCommand,
-};
-use crate::core::input::{InputContext, InputDecision, InputStatus, TimeoutPolicy};
+use crate::app::action::{TransactionIntent, ViewAction};
+use crate::app::command::{AppCommand, Command, ContentCommand, ModeCommand, TransactionCommand};
+use crate::app::view::View;
+use crate::core::action::ContentAction;
+use crate::core::command::{CharSearchDirection, EditCommand};
+use crate::core::content_store::ContentStore;
+use crate::core::input::{InputDecision, InputStatus, TimeoutPolicy};
 use crate::core::keymap::Keymap;
 use crate::core::mode_name::{ModeActionName, ModeName};
 use crate::core::motion::{OperatorCommand, TextMotion, TextOperator, TextTarget};
-use crate::protocol::content_query::{CursorStyle, SelectionShape};
+use crate::protocol::content_query::{ContentData, ContentQuery, CursorStyle, SelectionShape};
+use crate::protocol::ids::{ContentId, ViewId};
 use crate::protocol::key_event::{KeyCode, KeyEvent};
+use crate::protocol::selection::Selections;
 use crate::protocol::viewport::{
     ViewportCommand, ViewportCursorBehavior, ViewportMoveAmount, ViewportMoveDirection,
 };
@@ -93,9 +98,10 @@ impl std::error::Error for ModeError {}
 pub trait ModeState: Any {
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
+    fn clone_box(&self) -> Box<dyn ModeState>;
 }
 
-impl<T: Any> ModeState for T {
+impl<T: Any + Clone> ModeState for T {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -103,48 +109,404 @@ impl<T: Any> ModeState for T {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+
+    fn clone_box(&self) -> Box<dyn ModeState> {
+        Box::new(self.clone())
+    }
 }
 
-pub trait Mode {
+pub(crate) struct ModeStateSnapshot(Box<dyn ModeState>);
+
+#[allow(
+    dead_code,
+    reason = "native ContentMode adapters are registered by extensions"
+)]
+pub struct ContentModeContext<'a> {
+    content_id: ContentId,
+    contents: &'a ContentStore,
+}
+
+#[allow(
+    dead_code,
+    reason = "native ContentMode adapters are registered by extensions"
+)]
+impl<'a> ContentModeContext<'a> {
+    pub(crate) fn new(content_id: ContentId, contents: &'a ContentStore) -> Self {
+        Self {
+            content_id,
+            contents,
+        }
+    }
+
+    pub fn content_id(&self) -> ContentId {
+        self.content_id
+    }
+
+    pub fn query_content(&self, query: ContentQuery) -> ContentData {
+        self.contents.query(self.content_id, query)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContentModeResult {
+    operations: Vec<ContentModeOperation>,
+}
+
+impl ContentModeResult {
+    pub fn none() -> Self {
+        Self {
+            operations: Vec::new(),
+        }
+    }
+
+    #[allow(dead_code, reason = "ContentMode results are an extension-facing API")]
+    pub fn operations(operations: Vec<ContentModeOperation>) -> Self {
+        Self { operations }
+    }
+
+    fn into_operations(self) -> Vec<ContentModeOperation> {
+        self.operations
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "ContentMode operations are an extension-facing API"
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContentModeOperation {
+    Content(ContentAction),
+    Transaction(TransactionIntent),
+    Save,
+}
+
+#[allow(dead_code, reason = "ContentMode bindings are an extension-facing API")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContentModeBinding {
+    Mode(ModeCommand),
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "direct operation bindings are an extension-facing capability"
+        )
+    )]
+    Operation(ContentModeOperation),
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "explicit no-op bindings are an extension seam")
+    )]
+    Noop,
+}
+
+impl From<ContentModeBinding> for Command {
+    fn from(binding: ContentModeBinding) -> Self {
+        match binding {
+            ContentModeBinding::Mode(command) => Command::Mode(command),
+            ContentModeBinding::Operation(operation) => Command::ContentMode(operation),
+            ContentModeBinding::Noop => Command::Noop,
+        }
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "ContentMode definitions are supplied by extensions"
+)]
+pub trait ContentMode {
     fn name(&self) -> &ModeName;
     fn actions(&self) -> &[ModeActionName];
     fn new_state(&self) -> Box<dyn ModeState>;
-    fn keymap(&self, state: &dyn ModeState) -> &Keymap<Command>;
-    fn typing(&self, state: &dyn ModeState, key: KeyEvent) -> Option<Command>;
-    fn input_status(&self, _state: &dyn ModeState) -> InputStatus {
+    fn keymap(
+        &self,
+        state: &dyn ModeState,
+        context: &ContentModeContext<'_>,
+    ) -> &Keymap<ContentModeBinding>;
+    fn typing(
+        &self,
+        state: &dyn ModeState,
+        context: &ContentModeContext<'_>,
+        key: KeyEvent,
+    ) -> Option<ContentModeBinding>;
+    fn input_status(
+        &self,
+        _state: &dyn ModeState,
+        _context: &ContentModeContext<'_>,
+    ) -> InputStatus {
         InputStatus::Ready
     }
-    fn capture(&self, _state: &mut dyn ModeState, _key: KeyEvent) -> InputDecision<Command> {
+    fn capture(
+        &self,
+        _state: &mut dyn ModeState,
+        _context: &ContentModeContext<'_>,
+        _key: KeyEvent,
+    ) -> InputDecision<ContentModeBinding> {
         InputDecision::Pass
     }
-    fn on_timeout(&self, _state: &mut dyn ModeState) {}
-    fn cancel(&self, _state: &mut dyn ModeState) {}
-    fn cursor_style(&self, state: &dyn ModeState) -> CursorStyle;
-    fn selection_shape(&self, _state: &dyn ModeState) -> SelectionShape {
+    fn on_timeout(
+        &self,
+        _state: &mut dyn ModeState,
+        _context: &ContentModeContext<'_>,
+    ) -> ContentModeResult {
+        ContentModeResult::none()
+    }
+    fn cancel(&self, _state: &mut dyn ModeState, _context: &ContentModeContext<'_>) {}
+    fn execute(
+        &self,
+        state: &mut dyn ModeState,
+        context: &ContentModeContext<'_>,
+        action: &ModeActionName,
+    ) -> Result<ContentModeResult, ModeError>;
+}
+
+#[allow(dead_code, reason = "built-in Vim does not need every read capability")]
+pub struct ViewModeContext<'a> {
+    view_id: ViewId,
+    view: &'a View,
+    contents: &'a ContentStore,
+}
+
+#[allow(dead_code, reason = "built-in Vim does not need every read capability")]
+impl<'a> ViewModeContext<'a> {
+    pub(crate) fn new(view_id: ViewId, view: &'a View, contents: &'a ContentStore) -> Self {
+        Self {
+            view_id,
+            view,
+            contents,
+        }
+    }
+
+    pub fn view_id(&self) -> ViewId {
+        self.view_id
+    }
+
+    pub fn content_id(&self) -> ContentId {
+        self.view.content()
+    }
+
+    pub fn selections(&self) -> Option<&Selections> {
+        self.view.selections()
+    }
+
+    pub fn query_content(&self, query: ContentQuery) -> ContentData {
+        self.contents.query(self.content_id(), query)
+    }
+
+    fn resolve_edit(&self, command: EditCommand) -> Option<ResolvedViewEdit> {
+        let before = self.selections()?.clone();
+        let plan = self
+            .contents
+            .plan_edit(self.content_id(), command, &before)?;
+        Some(ResolvedViewEdit {
+            content: plan.action,
+            view: Some(ViewAction::SetSelections(plan.selections)),
+            before,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViewModeResult {
+    operations: Vec<ViewModeOperation>,
+    #[cfg(test)]
+    edit_command: Option<EditCommand>,
+}
+
+impl ViewModeResult {
+    #[allow(
+        dead_code,
+        reason = "empty typed results are part of the mode contract"
+    )]
+    pub fn none() -> Self {
+        Self {
+            operations: Vec::new(),
+            #[cfg(test)]
+            edit_command: None,
+        }
+    }
+
+    #[allow(dead_code, reason = "ViewMode results are an extension-facing API")]
+    pub fn operations(operations: Vec<ViewModeOperation>) -> Self {
+        Self {
+            operations,
+            #[cfg(test)]
+            edit_command: None,
+        }
+    }
+
+    fn from_command(context: &ViewModeContext<'_>, command: Option<Command>) -> Self {
+        #[cfg(test)]
+        let edit_command = command.as_ref().and_then(first_edit_command);
+        let mut operations = Vec::new();
+        if let Some(command) = command {
+            append_command_operations(context, command, &mut operations, false);
+        }
+        Self {
+            operations,
+            #[cfg(test)]
+            edit_command,
+        }
+    }
+
+    fn into_operations(self) -> Vec<ViewModeOperation> {
+        self.operations
+    }
+}
+
+#[cfg(test)]
+fn first_edit_command(command: &Command) -> Option<EditCommand> {
+    match command {
+        Command::Content(ContentCommand::Edit(command)) => Some(command.clone()),
+        Command::Content(ContentCommand::Sequence(commands)) => commands
+            .clone()
+            .into_commands()
+            .iter()
+            .find_map(|command| first_edit_command(&Command::Content(command.clone()))),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedViewEdit {
+    pub content: Option<ContentAction>,
+    pub view: Option<ViewAction>,
+    pub before: Selections,
+}
+
+#[allow(dead_code, reason = "ViewMode operations are an extension-facing API")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ViewModeOperation {
+    Edit(ResolvedViewEdit),
+    DeferredEdit(EditCommand),
+    View(ViewAction),
+    Content(ContentAction),
+    Transaction(TransactionIntent),
+    App(AppCommand),
+    Mode(ModeCommand),
+    Viewport(ViewportCommand),
+    Save,
+    Noop,
+}
+
+fn append_command_operations(
+    context: &ViewModeContext<'_>,
+    command: Command,
+    operations: &mut Vec<ViewModeOperation>,
+    defer_edits: bool,
+) {
+    match command {
+        Command::Content(ContentCommand::Edit(command)) => {
+            if defer_edits {
+                operations.push(ViewModeOperation::DeferredEdit(command));
+            } else if let Some(edit) = context.resolve_edit(command) {
+                operations.push(ViewModeOperation::Edit(edit));
+            }
+        }
+        Command::Content(ContentCommand::Transaction(command)) => {
+            operations.push(ViewModeOperation::Transaction(match command {
+                TransactionCommand::Begin => TransactionIntent::Begin,
+                TransactionCommand::Commit => TransactionIntent::Commit,
+                TransactionCommand::Rollback => TransactionIntent::Rollback,
+            }));
+        }
+        Command::Content(ContentCommand::Undo) => {
+            operations.push(ViewModeOperation::Transaction(TransactionIntent::Undo));
+        }
+        Command::Content(ContentCommand::Redo) => {
+            operations.push(ViewModeOperation::Transaction(TransactionIntent::Redo));
+        }
+        Command::Content(ContentCommand::Sequence(commands)) => {
+            for command in commands.into_commands() {
+                append_command_operations(context, Command::Content(command), operations, true);
+            }
+        }
+        Command::Content(ContentCommand::Save) => operations.push(ViewModeOperation::Save),
+        Command::App(command) => operations.push(ViewModeOperation::App(command)),
+        Command::Mode(command) => operations.push(ViewModeOperation::Mode(command)),
+        Command::Viewport(command) => operations.push(ViewModeOperation::Viewport(command)),
+        Command::Noop => operations.push(ViewModeOperation::Noop),
+        Command::ContentMode(operation) => match operation {
+            ContentModeOperation::Content(action) => {
+                operations.push(ViewModeOperation::Content(action));
+            }
+            ContentModeOperation::Transaction(intent) => {
+                operations.push(ViewModeOperation::Transaction(intent));
+            }
+            ContentModeOperation::Save => operations.push(ViewModeOperation::Save),
+        },
+    }
+}
+
+pub trait ViewMode {
+    fn name(&self) -> &ModeName;
+    fn actions(&self) -> &[ModeActionName];
+    fn new_state(&self) -> Box<dyn ModeState>;
+    fn keymap(&self, state: &dyn ModeState, context: &ViewModeContext<'_>) -> &Keymap<Command>;
+    fn typing(
+        &self,
+        state: &dyn ModeState,
+        context: &ViewModeContext<'_>,
+        key: KeyEvent,
+    ) -> Option<Command>;
+    fn input_status(&self, _state: &dyn ModeState, _context: &ViewModeContext<'_>) -> InputStatus {
+        InputStatus::Ready
+    }
+    fn capture(
+        &self,
+        _state: &mut dyn ModeState,
+        _context: &ViewModeContext<'_>,
+        _key: KeyEvent,
+    ) -> InputDecision<Command> {
+        InputDecision::Pass
+    }
+    fn on_timeout(
+        &self,
+        _state: &mut dyn ModeState,
+        _context: &ViewModeContext<'_>,
+    ) -> ViewModeResult {
+        ViewModeResult::none()
+    }
+    fn cancel(&self, _state: &mut dyn ModeState, _context: &ViewModeContext<'_>) {}
+    fn cursor_style(&self, state: &dyn ModeState, context: &ViewModeContext<'_>) -> CursorStyle;
+    fn selection_shape(
+        &self,
+        _state: &dyn ModeState,
+        _context: &ViewModeContext<'_>,
+    ) -> SelectionShape {
         SelectionShape::Character
     }
     fn execute(
         &self,
         state: &mut dyn ModeState,
+        context: &ViewModeContext<'_>,
         action: &ModeActionName,
-    ) -> Result<Option<Command>, ModeError>;
+    ) -> Result<ViewModeResult, ModeError>;
 }
 
 pub(crate) struct ModeRegistry {
-    definitions: HashMap<ModeId, Rc<RegisteredMode>>,
+    definitions: HashMap<ModeId, Rc<ModeRegistration>>,
     ids_by_name: HashMap<ModeName, ModeId>,
     next_id: u32,
 }
 
-struct RegisteredMode {
+#[allow(
+    dead_code,
+    reason = "ContentMode definitions are supplied by extensions"
+)]
+enum RegisteredMode {
+    PerContent(Box<dyn ContentMode>),
+    PerView(Box<dyn ViewMode>),
+}
+
+struct ModeRegistration {
     id: ModeId,
-    definition: Box<dyn Mode>,
+    definition: RegisteredMode,
     action_names: Vec<ModeActionName>,
     actions: HashMap<ModeActionName, ModeActionId>,
 }
 
-pub(crate) struct ModeInstance {
-    registered: Rc<RegisteredMode>,
+pub(crate) struct ViewModeInstance {
+    registered: Rc<ModeRegistration>,
     state: Box<dyn ModeState>,
 }
 
@@ -159,24 +521,43 @@ impl ModeRegistry {
 
     pub(crate) fn builtin() -> Self {
         let mut registry = Self::new();
-        registry.register(VimMode::new());
+        registry.register_view(VimMode::new());
         registry
     }
 
     #[cfg(test)]
     pub(crate) fn plain_edit() -> Self {
         let mut registry = Self::new();
-        registry.register(PlainEditMode::new());
+        registry.register_view(PlainEditMode::new());
         registry
     }
 
-    pub(crate) fn register(&mut self, mode: impl Mode + 'static) -> ModeId {
+    pub(crate) fn register_view(&mut self, mode: impl ViewMode + 'static) -> ModeId {
         let name = mode.name().clone();
+        let actions = mode.actions().to_vec();
+        self.register_definition(name, actions, RegisteredMode::PerView(Box::new(mode)))
+    }
+
+    #[allow(
+        dead_code,
+        reason = "ContentMode definitions are supplied by extensions"
+    )]
+    pub(crate) fn register_content(&mut self, mode: impl ContentMode + 'static) -> ModeId {
+        let name = mode.name().clone();
+        let actions = mode.actions().to_vec();
+        self.register_definition(name, actions, RegisteredMode::PerContent(Box::new(mode)))
+    }
+
+    fn register_definition(
+        &mut self,
+        name: ModeName,
+        action_names: Vec<ModeActionName>,
+        definition: RegisteredMode,
+    ) -> ModeId {
         assert!(
             !self.ids_by_name.contains_key(&name),
             "mode name must be unique"
         );
-        let action_names = mode.actions().to_vec();
         let mut actions = HashMap::new();
         for (index, name) in action_names.iter().cloned().enumerate() {
             let action = ModeActionId(u32::try_from(index).expect("mode action id overflow"));
@@ -187,9 +568,9 @@ impl ModeRegistry {
         }
         let id = ModeId(self.next_id);
         self.next_id = self.next_id.checked_add(1).expect("mode id overflow");
-        let registered = Rc::new(RegisteredMode {
+        let registered = Rc::new(ModeRegistration {
             id,
-            definition: Box::new(mode),
+            definition,
             action_names,
             actions,
         });
@@ -227,52 +608,332 @@ impl ModeRegistry {
         Ok((mode_id, action_id))
     }
 
-    pub(crate) fn instantiate(&self, name: &ModeName) -> Option<ModeInstance> {
+    pub(crate) fn instantiate(&self, name: &ModeName) -> Option<ViewModeInstance> {
         let id = self.resolve_mode(name)?;
         let registered = self.definitions.get(&id)?.clone();
-        Some(ModeInstance {
-            state: registered.definition.new_state(),
+        let RegisteredMode::PerView(definition) = &registered.definition else {
+            return None;
+        };
+        Some(ViewModeInstance {
+            state: definition.new_state(),
+            registered,
+        })
+    }
+
+    pub(crate) fn instantiate_content(
+        &self,
+        name: &ModeName,
+        content: ContentId,
+    ) -> Option<ContentModeInstance> {
+        let id = self.resolve_mode(name)?;
+        let registered = self.definitions.get(&id)?.clone();
+        let RegisteredMode::PerContent(definition) = &registered.definition else {
+            return None;
+        };
+        let state = definition.new_state();
+        Some(ContentModeInstance {
+            content,
+            state,
             registered,
         })
     }
 }
 
-impl ModeInstance {
-    pub(crate) fn name(&self) -> &ModeName {
-        self.registered.definition.name()
+impl ModeRegistration {
+    fn view(&self) -> &dyn ViewMode {
+        match &self.definition {
+            RegisteredMode::PerView(mode) => mode.as_ref(),
+            RegisteredMode::PerContent(_) => {
+                unreachable!("view instance must reference a view mode")
+            }
+        }
     }
 
-    pub(crate) fn keymap(&self) -> &Keymap<Command> {
-        self.registered.definition.keymap(self.state.as_ref())
+    fn content(&self) -> &dyn ContentMode {
+        match &self.definition {
+            RegisteredMode::PerContent(mode) => mode.as_ref(),
+            RegisteredMode::PerView(_) => {
+                unreachable!("content instance must reference a content mode")
+            }
+        }
+    }
+}
+
+pub(crate) struct ContentModeInstance {
+    content: ContentId,
+    registered: Rc<ModeRegistration>,
+    state: Box<dyn ModeState>,
+}
+
+impl ContentModeInstance {
+    fn snapshot(&self) -> ModeStateSnapshot {
+        ModeStateSnapshot(self.state.clone_box())
     }
 
-    #[cfg(test)]
-    pub(crate) fn resolve_key(&self, key: KeyEvent) -> Option<Command> {
-        self.keymap()
-            .node(&[key])
-            .and_then(|node| node.action().cloned())
-            .or_else(|| self.registered.definition.typing(self.state.as_ref(), key))
+    fn restore(&mut self, snapshot: ModeStateSnapshot) {
+        self.state = snapshot.0;
     }
 
-    pub(crate) fn fallback(&self, key: KeyEvent) -> Option<Command> {
-        self.registered.definition.typing(self.state.as_ref(), key)
-    }
-
-    pub(crate) fn cursor_style(&self) -> CursorStyle {
-        self.registered.definition.cursor_style(self.state.as_ref())
-    }
-
-    pub(crate) fn selection_shape(&self) -> SelectionShape {
+    fn keymap(&self, contents: &ContentStore) -> &Keymap<ContentModeBinding> {
+        let context = ContentModeContext::new(self.content, contents);
         self.registered
-            .definition
-            .selection_shape(self.state.as_ref())
+            .content()
+            .keymap(self.state.as_ref(), &context)
+    }
+
+    fn fallback(&self, contents: &ContentStore, key: KeyEvent) -> Option<Command> {
+        let context = ContentModeContext::new(self.content, contents);
+        self.registered
+            .content()
+            .typing(self.state.as_ref(), &context, key)
+            .map(Command::from)
+    }
+
+    fn execute(
+        &mut self,
+        mode: ModeId,
+        action: ModeActionId,
+        contents: &ContentStore,
+    ) -> Result<Vec<ContentModeOperation>, ModeError> {
+        assert_eq!(self.registered.id, mode, "resolved mode must be active");
+        let action = self
+            .registered
+            .action_names
+            .get(usize::try_from(action.0).expect("mode action index overflow"))
+            .expect("mode action id belongs to registered mode");
+        let context = ContentModeContext::new(self.content, contents);
+        self.registered
+            .content()
+            .execute(self.state.as_mut(), &context, action)
+            .map(ContentModeResult::into_operations)
+    }
+
+    fn timeout(&mut self, contents: &ContentStore) -> Vec<ContentModeOperation> {
+        let context = ContentModeContext::new(self.content, contents);
+        self.registered
+            .content()
+            .on_timeout(self.state.as_mut(), &context)
+            .into_operations()
+    }
+
+    fn status(&self, contents: &ContentStore) -> InputStatus {
+        let context = ContentModeContext::new(self.content, contents);
+        self.registered
+            .content()
+            .input_status(self.state.as_ref(), &context)
+    }
+
+    fn capture(&mut self, contents: &ContentStore, key: KeyEvent) -> InputDecision<Command> {
+        let context = ContentModeContext::new(self.content, contents);
+        match self
+            .registered
+            .content()
+            .capture(self.state.as_mut(), &context, key)
+        {
+            InputDecision::Pass => InputDecision::Pass,
+            InputDecision::Consumed => InputDecision::Consumed,
+            InputDecision::Emit(binding) => InputDecision::Emit(Command::from(binding)),
+        }
+    }
+
+    fn cancel(&mut self, contents: &ContentStore) {
+        let context = ContentModeContext::new(self.content, contents);
+        self.registered
+            .content()
+            .cancel(self.state.as_mut(), &context);
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ContentModeInstances {
+    instances: HashMap<(ModeId, ContentId), ContentModeInstance>,
+    active: HashMap<ContentId, ModeId>,
+}
+
+impl ContentModeInstances {
+    pub(crate) fn is_active(&self, content: ContentId) -> bool {
+        self.active.contains_key(&content)
+    }
+
+    pub(crate) fn snapshot(&self, content: ContentId) -> Option<ModeStateSnapshot> {
+        self.active_instance(content)
+            .map(ContentModeInstance::snapshot)
+    }
+
+    pub(crate) fn restore(&mut self, content: ContentId, snapshot: ModeStateSnapshot) {
+        self.active_instance_mut(content)
+            .expect("content mode instance still exists")
+            .restore(snapshot);
+    }
+
+    pub(crate) fn bind(
+        &mut self,
+        registry: &ModeRegistry,
+        content: ContentId,
+        name: &ModeName,
+        contents: &ContentStore,
+    ) -> bool {
+        let Some(instance) = registry.instantiate_content(name, content) else {
+            return false;
+        };
+        let mode = instance.registered.id;
+        self.cancel(content, contents);
+        if let Some(previous) = self.active.insert(content, mode) {
+            self.instances.remove(&(previous, content));
+        }
+        self.instances.insert((mode, content), instance);
+        true
+    }
+
+    fn active_instance(&self, content: ContentId) -> Option<&ContentModeInstance> {
+        let mode = self.active.get(&content)?;
+        self.instances.get(&(*mode, content))
+    }
+
+    fn active_instance_mut(&mut self, content: ContentId) -> Option<&mut ContentModeInstance> {
+        let mode = *self.active.get(&content)?;
+        self.instances.get_mut(&(mode, content))
+    }
+
+    pub(crate) fn keymap(
+        &self,
+        content: ContentId,
+        contents: &ContentStore,
+    ) -> Option<&Keymap<ContentModeBinding>> {
+        self.active_instance(content)
+            .map(|instance| instance.keymap(contents))
+    }
+
+    pub(crate) fn fallback(
+        &self,
+        content: ContentId,
+        contents: &ContentStore,
+        key: KeyEvent,
+    ) -> Option<Command> {
+        self.active_instance(content)
+            .and_then(|instance| instance.fallback(contents, key))
+    }
+
+    pub(crate) fn input_status(&self, content: ContentId, contents: &ContentStore) -> InputStatus {
+        self.active_instance(content)
+            .map_or(InputStatus::Ready, |instance| instance.status(contents))
+    }
+
+    pub(crate) fn capture(
+        &mut self,
+        content: ContentId,
+        contents: &ContentStore,
+        key: KeyEvent,
+    ) -> InputDecision<Command> {
+        self.active_instance_mut(content)
+            .map_or(InputDecision::Pass, |instance| {
+                instance.capture(contents, key)
+            })
+    }
+
+    pub(crate) fn on_timeout(
+        &mut self,
+        content: ContentId,
+        contents: &ContentStore,
+    ) -> Vec<ContentModeOperation> {
+        self.active_instance_mut(content)
+            .map_or_else(Vec::new, |instance| instance.timeout(contents))
+    }
+
+    pub(crate) fn cancel(&mut self, content: ContentId, contents: &ContentStore) {
+        if let Some(instance) = self.active_instance_mut(content) {
+            instance.cancel(contents);
+        }
     }
 
     pub(crate) fn execute(
         &mut self,
+        registry: &ModeRegistry,
+        contents: &ContentStore,
+        content: ContentId,
+        command: &crate::app::command::ModeCommand,
+    ) -> Result<Vec<ContentModeOperation>, ModeError> {
+        let (mode, action) = registry.resolve_command_checked(&command.mode, &command.action)?;
+        let Some(active) = self.active.get(&content).copied() else {
+            return Err(ModeError::InactiveMode {
+                requested: command.mode.clone(),
+                active: None,
+            });
+        };
+        if active != mode {
+            let active = self
+                .instances
+                .get(&(active, content))
+                .map(|instance| instance.registered.content().name().clone());
+            return Err(ModeError::InactiveMode {
+                requested: command.mode.clone(),
+                active,
+            });
+        }
+        self.instances
+            .get_mut(&(mode, content))
+            .expect("active content mode instance exists")
+            .execute(mode, action, contents)
+    }
+}
+
+impl ViewModeInstance {
+    fn snapshot(&self) -> ModeStateSnapshot {
+        ModeStateSnapshot(self.state.clone_box())
+    }
+
+    fn restore(&mut self, snapshot: ModeStateSnapshot) {
+        self.state = snapshot.0;
+    }
+
+    pub(crate) fn name(&self) -> &ModeName {
+        self.registered.view().name()
+    }
+
+    pub(crate) fn keymap(&self, context: &ViewModeContext<'_>) -> &Keymap<Command> {
+        self.registered.view().keymap(self.state.as_ref(), context)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resolve_key(
+        &self,
+        context: &ViewModeContext<'_>,
+        key: KeyEvent,
+    ) -> Option<Command> {
+        self.keymap(context)
+            .node(&[key])
+            .and_then(|node| node.action().cloned())
+            .or_else(|| {
+                self.registered
+                    .view()
+                    .typing(self.state.as_ref(), context, key)
+            })
+    }
+
+    pub(crate) fn fallback(&self, context: &ViewModeContext<'_>, key: KeyEvent) -> Option<Command> {
+        self.registered
+            .view()
+            .typing(self.state.as_ref(), context, key)
+    }
+
+    pub(crate) fn cursor_style(&self, context: &ViewModeContext<'_>) -> CursorStyle {
+        self.registered
+            .view()
+            .cursor_style(self.state.as_ref(), context)
+    }
+
+    pub(crate) fn selection_shape(&self, context: &ViewModeContext<'_>) -> SelectionShape {
+        self.registered
+            .view()
+            .selection_shape(self.state.as_ref(), context)
+    }
+
+    pub(crate) fn execute_with_context(
+        &mut self,
         mode: ModeId,
         action: ModeActionId,
-    ) -> Result<Option<Command>, ModeError> {
+        context: &ViewModeContext<'_>,
+    ) -> Result<Vec<ViewModeOperation>, ModeError> {
         assert_eq!(self.registered.id, mode, "resolved mode must be active");
         let action = self
             .registered
@@ -280,26 +941,230 @@ impl ModeInstance {
             .get(usize::try_from(action.0).expect("mode action index overflow"))
             .expect("mode action id belongs to registered mode");
         self.registered
-            .definition
-            .execute(self.state.as_mut(), action)
+            .view()
+            .execute(self.state.as_mut(), context, action)
+            .map(ViewModeResult::into_operations)
+    }
+
+    fn timeout(&mut self, context: &ViewModeContext<'_>) -> Vec<ViewModeOperation> {
+        self.registered
+            .view()
+            .on_timeout(self.state.as_mut(), context)
+            .into_operations()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn execute(
+        &mut self,
+        mode: ModeId,
+        action: ModeActionId,
+    ) -> Result<Option<EditCommand>, ModeError> {
+        use crate::core::buffer::Buffer;
+        use crate::core::content::Content;
+
+        let content = ContentId(0);
+        let mut contents = ContentStore::default();
+        contents
+            .insert(content, Content::Buffer(Buffer::new()))
+            .expect("detached test content is unique");
+        let view = View::new(
+            content,
+            contents
+                .create_view_state(content)
+                .expect("detached test content creates view state"),
+        );
+        let context = ViewModeContext::new(ViewId(0), &view, &contents);
+        assert_eq!(self.registered.id, mode, "resolved mode must be active");
+        let action = self
+            .registered
+            .action_names
+            .get(usize::try_from(action.0).expect("mode action index overflow"))
+            .expect("mode action id belongs to registered mode");
+        self.registered
+            .view()
+            .execute(self.state.as_mut(), &context, action)
+            .map(|result| result.edit_command)
     }
 }
 
-impl InputContext<Command> for ModeInstance {
-    fn status(&self) -> InputStatus {
-        self.registered.definition.input_status(self.state.as_ref())
+impl ViewModeInstance {
+    fn status(&self, context: &ViewModeContext<'_>) -> InputStatus {
+        self.registered
+            .view()
+            .input_status(self.state.as_ref(), context)
     }
 
-    fn capture(&mut self, key: KeyEvent) -> InputDecision<Command> {
-        self.registered.definition.capture(self.state.as_mut(), key)
+    fn capture(&mut self, context: &ViewModeContext<'_>, key: KeyEvent) -> InputDecision<Command> {
+        self.registered
+            .view()
+            .capture(self.state.as_mut(), context, key)
     }
 
-    fn on_timeout(&mut self) {
-        self.registered.definition.on_timeout(self.state.as_mut());
+    fn cancel(&mut self, context: &ViewModeContext<'_>) {
+        self.registered.view().cancel(self.state.as_mut(), context);
     }
 
-    fn cancel(&mut self) {
-        self.registered.definition.cancel(self.state.as_mut());
+    #[cfg(test)]
+    fn status_for_test(&self) -> InputStatus {
+        with_detached_view_context(|context| self.status(context))
+    }
+
+    #[cfg(test)]
+    fn capture_for_test(&mut self, key: KeyEvent) -> InputDecision<Command> {
+        with_detached_view_context(|context| self.capture(context, key))
+    }
+
+    #[cfg(test)]
+    fn selection_shape_for_test(&self) -> SelectionShape {
+        with_detached_view_context(|context| self.selection_shape(context))
+    }
+
+    #[cfg(test)]
+    fn resolve_key_for_test(&self, key: KeyEvent) -> Option<Command> {
+        with_detached_view_context(|context| self.resolve_key(context, key))
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ViewModeInstances {
+    instances: HashMap<ViewId, ViewModeInstance>,
+}
+
+impl ViewModeInstances {
+    pub(crate) fn is_active(&self, view: ViewId) -> bool {
+        self.instances.contains_key(&view)
+    }
+
+    pub(crate) fn insert(&mut self, view: ViewId, mode: ViewModeInstance) {
+        assert!(
+            self.instances.insert(view, mode).is_none(),
+            "view mode instance must be unique"
+        );
+    }
+
+    pub(crate) fn remove(&mut self, view: ViewId) {
+        self.instances.remove(&view);
+    }
+
+    pub(crate) fn snapshot(&self, view: ViewId) -> Option<ModeStateSnapshot> {
+        self.instances.get(&view).map(ViewModeInstance::snapshot)
+    }
+
+    pub(crate) fn restore(&mut self, view: ViewId, snapshot: ModeStateSnapshot) {
+        self.instances
+            .get_mut(&view)
+            .expect("view mode instance still exists")
+            .restore(snapshot);
+    }
+
+    pub(crate) fn keymap(
+        &self,
+        view: ViewId,
+        context: &ViewModeContext<'_>,
+    ) -> Option<&Keymap<Command>> {
+        self.instances.get(&view).map(|mode| mode.keymap(context))
+    }
+
+    pub(crate) fn input_status(&self, view: ViewId, context: &ViewModeContext<'_>) -> InputStatus {
+        self.instances
+            .get(&view)
+            .map_or(InputStatus::Ready, |mode| mode.status(context))
+    }
+
+    pub(crate) fn capture(
+        &mut self,
+        view: ViewId,
+        context: &ViewModeContext<'_>,
+        key: KeyEvent,
+    ) -> InputDecision<Command> {
+        self.instances
+            .get_mut(&view)
+            .map_or(InputDecision::Pass, |mode| mode.capture(context, key))
+    }
+
+    pub(crate) fn fallback(
+        &self,
+        view: ViewId,
+        context: &ViewModeContext<'_>,
+        key: KeyEvent,
+    ) -> Option<Command> {
+        self.instances
+            .get(&view)
+            .and_then(|mode| mode.fallback(context, key))
+    }
+
+    pub(crate) fn on_timeout(
+        &mut self,
+        view: ViewId,
+        context: &ViewModeContext<'_>,
+    ) -> Vec<ViewModeOperation> {
+        self.instances
+            .get_mut(&view)
+            .map_or_else(Vec::new, |mode| mode.timeout(context))
+    }
+
+    pub(crate) fn cancel(&mut self, view: ViewId, context: &ViewModeContext<'_>) {
+        if let Some(mode) = self.instances.get_mut(&view) {
+            mode.cancel(context);
+        }
+    }
+
+    pub(crate) fn cursor_style(&self, view: ViewId, context: &ViewModeContext<'_>) -> CursorStyle {
+        self.instances
+            .get(&view)
+            .map_or(CursorStyle::Default, |mode| mode.cursor_style(context))
+    }
+
+    pub(crate) fn selection_shape(
+        &self,
+        view: ViewId,
+        context: &ViewModeContext<'_>,
+    ) -> SelectionShape {
+        self.instances
+            .get(&view)
+            .map_or(SelectionShape::Character, |mode| {
+                mode.selection_shape(context)
+            })
+    }
+
+    pub(crate) fn execute_with_context(
+        &mut self,
+        view: ViewId,
+        registry: &ModeRegistry,
+        command: &crate::app::command::ModeCommand,
+        context: &ViewModeContext<'_>,
+    ) -> Result<Vec<ViewModeOperation>, ModeError> {
+        let (mode, action) = registry.resolve_command_checked(&command.mode, &command.action)?;
+        let Some(instance) = self.instances.get_mut(&view) else {
+            return Err(ModeError::InactiveMode {
+                requested: command.mode.clone(),
+                active: None,
+            });
+        };
+        if instance.name() != &command.mode {
+            return Err(ModeError::InactiveMode {
+                requested: command.mode.clone(),
+                active: Some(instance.name().clone()),
+            });
+        }
+        instance.execute_with_context(mode, action, context)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn execute(
+        &mut self,
+        view: ViewId,
+        registry: &ModeRegistry,
+        command: &crate::app::command::ModeCommand,
+    ) -> Result<Option<EditCommand>, ModeError> {
+        let (mode, action) = registry.resolve_command_checked(&command.mode, &command.action)?;
+        let Some(instance) = self.instances.get_mut(&view) else {
+            return Err(ModeError::InactiveMode {
+                requested: command.mode.clone(),
+                active: None,
+            });
+        };
+        instance.execute(mode, action)
     }
 }
 
@@ -307,6 +1172,26 @@ impl InputContext<Command> for ModeInstance {
 pub(crate) struct ModeSet {
     registry: ModeRegistry,
     mode: ModeName,
+}
+
+#[cfg(test)]
+fn with_detached_view_context<R>(query: impl FnOnce(&ViewModeContext<'_>) -> R) -> R {
+    use crate::core::buffer::Buffer;
+    use crate::core::content::Content;
+
+    let content = ContentId(0);
+    let mut contents = ContentStore::default();
+    contents
+        .insert(content, Content::Buffer(Buffer::new()))
+        .expect("detached test content is unique");
+    let view = View::new(
+        content,
+        contents
+            .create_view_state(content)
+            .expect("detached test content creates view state"),
+    );
+    let context = ViewModeContext::new(ViewId(0), &view, &contents);
+    query(&context)
 }
 
 #[cfg(test)]
@@ -325,48 +1210,32 @@ impl ModeSet {
         }
     }
 
-    pub(crate) fn create_runtime(&self) -> ModeInstance {
+    pub(crate) fn create_runtime(&self) -> ViewModeInstance {
         self.registry
             .instantiate(&self.mode)
             .expect("test mode exists")
     }
 
-    pub(crate) fn resolve_key(&self, instance: &ModeInstance, key: KeyEvent) -> Option<Command> {
-        instance.resolve_key(key)
+    pub(crate) fn resolve_key(
+        &self,
+        instance: &ViewModeInstance,
+        key: KeyEvent,
+    ) -> Option<Command> {
+        with_detached_view_context(|context| instance.resolve_key(context, key))
     }
 
-    pub(crate) fn cursor_style(&self, instance: &ModeInstance) -> CursorStyle {
-        instance.cursor_style()
+    pub(crate) fn cursor_style(&self, instance: &ViewModeInstance) -> CursorStyle {
+        with_detached_view_context(|context| instance.cursor_style(context))
     }
 
     pub(crate) fn execute(
         &self,
-        instance: &mut ModeInstance,
+        instance: &mut ViewModeInstance,
         mode: ModeName,
         action: ModeActionName,
     ) -> Option<EditCommand> {
         let (mode, action) = self.registry.resolve_command_checked(&mode, &action).ok()?;
-        match instance.execute(mode, action).ok().flatten() {
-            Some(Command::Content(ContentCommand::Edit(edit))) => Some(edit),
-            Some(Command::Content(ContentCommand::Sequence(commands))) => {
-                commands.into_commands().into_iter().find_map(|command| {
-                    if let ContentCommand::Edit(edit) = command {
-                        Some(edit)
-                    } else {
-                        None
-                    }
-                })
-            }
-            None
-            | Some(Command::Content(ContentCommand::Transaction(_)))
-            | Some(Command::Viewport(_))
-            | Some(Command::App(_))
-            | Some(Command::Mode(_))
-            | Some(Command::Noop) => None,
-            Some(Command::Content(command)) => {
-                panic!("test helper expected edit command, got {command:?}")
-            }
-        }
+        instance.execute(mode, action).ok().flatten()
     }
 }
 
@@ -389,7 +1258,7 @@ impl PlainEditMode {
 }
 
 #[cfg(test)]
-impl Mode for PlainEditMode {
+impl ViewMode for PlainEditMode {
     fn name(&self) -> &ModeName {
         &self.name
     }
@@ -402,24 +1271,30 @@ impl Mode for PlainEditMode {
         Box::new(())
     }
 
-    fn keymap(&self, _state: &dyn ModeState) -> &Keymap<Command> {
+    fn keymap(&self, _state: &dyn ModeState, _context: &ViewModeContext<'_>) -> &Keymap<Command> {
         &self.keymap
     }
 
-    fn typing(&self, _state: &dyn ModeState, key: KeyEvent) -> Option<Command> {
+    fn typing(
+        &self,
+        _state: &dyn ModeState,
+        _context: &ViewModeContext<'_>,
+        key: KeyEvent,
+    ) -> Option<Command> {
         key.is_plain_char()
             .map(|ch| EditCommand::InsertText(ch.to_string()).into())
     }
 
-    fn cursor_style(&self, _state: &dyn ModeState) -> CursorStyle {
+    fn cursor_style(&self, _state: &dyn ModeState, _context: &ViewModeContext<'_>) -> CursorStyle {
         CursorStyle::Default
     }
 
     fn execute(
         &self,
         _state: &mut dyn ModeState,
+        _context: &ViewModeContext<'_>,
         action: &ModeActionName,
-    ) -> Result<Option<Command>, ModeError> {
+    ) -> Result<ViewModeResult, ModeError> {
         Err(ModeError::UnknownAction {
             mode: self.name.clone(),
             action: action.clone(),
@@ -437,6 +1312,7 @@ enum VimState {
     VisualLine,
 }
 
+#[derive(Clone)]
 struct VimModeState {
     state: VimState,
     pending: Option<VimPending>,
@@ -672,7 +1548,7 @@ fn content_sequence(commands: Vec<ContentCommand>) -> ContentCommand {
     ContentCommand::try_sequence(commands).expect("built-in mode sequence must be valid")
 }
 
-impl Mode for VimMode {
+impl ViewMode for VimMode {
     fn name(&self) -> &ModeName {
         &self.name
     }
@@ -688,7 +1564,7 @@ impl Mode for VimMode {
         })
     }
 
-    fn keymap(&self, state: &dyn ModeState) -> &Keymap<Command> {
+    fn keymap(&self, state: &dyn ModeState, _context: &ViewModeContext<'_>) -> &Keymap<Command> {
         match self.state(state).state {
             VimState::Normal => &self.normal_keymap,
             VimState::Insert => &self.insert_keymap,
@@ -696,7 +1572,12 @@ impl Mode for VimMode {
         }
     }
 
-    fn typing(&self, state: &dyn ModeState, key: KeyEvent) -> Option<Command> {
+    fn typing(
+        &self,
+        state: &dyn ModeState,
+        _context: &ViewModeContext<'_>,
+        key: KeyEvent,
+    ) -> Option<Command> {
         match self.state(state).state {
             VimState::Normal => None,
             VimState::Insert => key
@@ -706,7 +1587,7 @@ impl Mode for VimMode {
         }
     }
 
-    fn input_status(&self, state: &dyn ModeState) -> InputStatus {
+    fn input_status(&self, state: &dyn ModeState, _context: &ViewModeContext<'_>) -> InputStatus {
         if self.state(state).pending.is_some() {
             InputStatus::Awaiting(TimeoutPolicy::Never)
         } else {
@@ -714,7 +1595,12 @@ impl Mode for VimMode {
         }
     }
 
-    fn capture(&self, state: &mut dyn ModeState, key: KeyEvent) -> InputDecision<Command> {
+    fn capture(
+        &self,
+        state: &mut dyn ModeState,
+        _context: &ViewModeContext<'_>,
+        key: KeyEvent,
+    ) -> InputDecision<Command> {
         let state = self.state_mut(state);
         if state.pending.is_none() {
             return InputDecision::Pass;
@@ -733,11 +1619,11 @@ impl Mode for VimMode {
                     )));
                     InputDecision::Consumed
                 }
-                Some('h' | 'j' | 'k' | 'l' | 'w' | 'f' | 'F' | 'g' | 'd') => {
+                Some('h' | 'j' | 'k' | 'l' | 'w' | 'b' | 'e' | 'f' | 'F' | 'g' | 'd') => {
                     state.pending = Some(VimPending::Count(count));
                     InputDecision::Pass
                 }
-                Some('b' | 'e' | '^' | '$' | 'G' | '{' | '}')
+                Some('^' | '$' | 'G' | '{' | '}')
                     if matches!(state.state, VimState::Visual | VimState::VisualLine) =>
                 {
                     state.pending = Some(VimPending::Count(count));
@@ -822,22 +1708,31 @@ impl Mode for VimMode {
         }
     }
 
-    fn on_timeout(&self, state: &mut dyn ModeState) {
+    fn on_timeout(
+        &self,
+        state: &mut dyn ModeState,
+        _context: &ViewModeContext<'_>,
+    ) -> ViewModeResult {
+        self.state_mut(state).pending = None;
+        ViewModeResult::none()
+    }
+
+    fn cancel(&self, state: &mut dyn ModeState, _context: &ViewModeContext<'_>) {
         self.state_mut(state).pending = None;
     }
 
-    fn cancel(&self, state: &mut dyn ModeState) {
-        self.state_mut(state).pending = None;
-    }
-
-    fn cursor_style(&self, state: &dyn ModeState) -> CursorStyle {
+    fn cursor_style(&self, state: &dyn ModeState, _context: &ViewModeContext<'_>) -> CursorStyle {
         match self.state(state).state {
             VimState::Normal | VimState::Visual | VimState::VisualLine => CursorStyle::Block,
             VimState::Insert => CursorStyle::Bar,
         }
     }
 
-    fn selection_shape(&self, state: &dyn ModeState) -> SelectionShape {
+    fn selection_shape(
+        &self,
+        state: &dyn ModeState,
+        _context: &ViewModeContext<'_>,
+    ) -> SelectionShape {
         if self.state(state).state == VimState::VisualLine {
             SelectionShape::Line
         } else {
@@ -848,8 +1743,9 @@ impl Mode for VimMode {
     fn execute(
         &self,
         state: &mut dyn ModeState,
+        context: &ViewModeContext<'_>,
         action: &ModeActionName,
-    ) -> Result<Option<Command>, ModeError> {
+    ) -> Result<ViewModeResult, ModeError> {
         let Some(vim_action) = VimAction::from_name(action) else {
             return Err(ModeError::UnknownAction {
                 mode: self.name.clone(),
@@ -863,7 +1759,10 @@ impl Mode for VimMode {
             }
             VimAction::EnterNormal => {
                 Self::set_editor_state(self.state_mut(state), VimState::Normal);
-                Some(ContentCommand::Transaction(TransactionCommand::Commit))
+                Some(content_sequence(vec![
+                    ContentCommand::Transaction(TransactionCommand::Commit),
+                    EditCommand::CollapseSelections.into(),
+                ]))
             }
             VimAction::ToggleVisual => {
                 let state = self.state_mut(state);
@@ -890,23 +1789,20 @@ impl Mode for VimMode {
                 Some(EditCommand::CollapseSelections.into())
             }
             VimAction::DeleteSelection => {
-                let state = self.state_mut(state);
-                let linewise = state.state == VimState::VisualLine;
-                Self::set_editor_state(state, VimState::Normal);
-                Some(
-                    if linewise {
-                        EditCommand::DeleteSelectedLines
-                    } else {
-                        EditCommand::Delete(1)
-                    }
-                    .into(),
-                )
+                let linewise = self.state(state).state == VimState::VisualLine;
+                let command = if linewise {
+                    EditCommand::DeleteSelectedLines
+                } else {
+                    EditCommand::Delete(1)
+                };
+                let result =
+                    ViewModeResult::from_command(context, Some(Command::Content(command.into())));
+                Self::set_editor_state(self.state_mut(state), VimState::Normal);
+                return Ok(result);
             }
             VimAction::ChangeSelection => {
-                let state = self.state_mut(state);
-                let linewise = state.state == VimState::VisualLine;
-                Self::set_editor_state(state, VimState::Insert);
-                Some(content_sequence(vec![
+                let linewise = self.state(state).state == VimState::VisualLine;
+                let command = content_sequence(vec![
                     ContentCommand::Transaction(TransactionCommand::Begin),
                     if linewise {
                         EditCommand::DeleteSelectedLines
@@ -914,7 +1810,10 @@ impl Mode for VimMode {
                         EditCommand::Delete(1)
                     }
                     .into(),
-                ]))
+                ]);
+                let result = ViewModeResult::from_command(context, Some(Command::Content(command)));
+                Self::set_editor_state(self.state_mut(state), VimState::Insert);
+                return Ok(result);
             }
             VimAction::Append => {
                 Self::set_editor_state(self.state_mut(state), VimState::Insert);
@@ -1163,39 +2062,54 @@ impl Mode for VimMode {
                 None
             }
             VimAction::ViewportHalfUp => {
-                return Ok(Some(Command::Viewport(viewport_command(
-                    self.state_mut(state),
-                    ViewportMoveDirection::Up,
-                    ViewportMoveAmount::HalfPage,
-                ))));
+                return Ok(ViewModeResult::from_command(
+                    context,
+                    Some(Command::Viewport(viewport_command(
+                        self.state_mut(state),
+                        ViewportMoveDirection::Up,
+                        ViewportMoveAmount::HalfPage,
+                    ))),
+                ));
             }
             VimAction::ViewportHalfDown => {
-                return Ok(Some(Command::Viewport(viewport_command(
-                    self.state_mut(state),
-                    ViewportMoveDirection::Down,
-                    ViewportMoveAmount::HalfPage,
-                ))));
+                return Ok(ViewModeResult::from_command(
+                    context,
+                    Some(Command::Viewport(viewport_command(
+                        self.state_mut(state),
+                        ViewportMoveDirection::Down,
+                        ViewportMoveAmount::HalfPage,
+                    ))),
+                ));
             }
             VimAction::ViewportFullUp => {
-                return Ok(Some(Command::Viewport(viewport_command(
-                    self.state_mut(state),
-                    ViewportMoveDirection::Up,
-                    ViewportMoveAmount::FullPage,
-                ))));
+                return Ok(ViewModeResult::from_command(
+                    context,
+                    Some(Command::Viewport(viewport_command(
+                        self.state_mut(state),
+                        ViewportMoveDirection::Up,
+                        ViewportMoveAmount::FullPage,
+                    ))),
+                ));
             }
             VimAction::ViewportFullDown => {
-                return Ok(Some(Command::Viewport(viewport_command(
-                    self.state_mut(state),
-                    ViewportMoveDirection::Down,
-                    ViewportMoveAmount::FullPage,
-                ))));
+                return Ok(ViewModeResult::from_command(
+                    context,
+                    Some(Command::Viewport(viewport_command(
+                        self.state_mut(state),
+                        ViewportMoveDirection::Down,
+                        ViewportMoveAmount::FullPage,
+                    ))),
+                ));
             }
             VimAction::Count(digit) => {
                 self.state_mut(state).pending = Some(VimPending::Count(usize::from(digit)));
                 None
             }
         };
-        Ok(command.map(Command::Content))
+        Ok(ViewModeResult::from_command(
+            context,
+            command.map(Command::Content),
+        ))
     }
 }
 
@@ -1221,8 +2135,10 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    use crate::core::command::{AppCommand, ContentCommand, EditCommand};
-    use crate::core::input::{InputContext, InputDecision, InputStatus, TimeoutPolicy};
+    use crate::app::command::{AppCommand, ContentCommand};
+    use crate::core::command::EditCommand;
+    use crate::core::input::{InputDecision, InputStatus, TimeoutPolicy};
+    use crate::protocol::key_event::ArrowKey;
 
     struct DynamicMode {
         name: ModeName,
@@ -1245,7 +2161,7 @@ mod tests {
         }
     }
 
-    impl Mode for DynamicMode {
+    impl ViewMode for DynamicMode {
         fn name(&self) -> &ModeName {
             &self.name
         }
@@ -1258,31 +2174,303 @@ mod tests {
             Box::new(())
         }
 
-        fn keymap(&self, _state: &dyn ModeState) -> &Keymap<Command> {
+        fn keymap(
+            &self,
+            _state: &dyn ModeState,
+            _context: &ViewModeContext<'_>,
+        ) -> &Keymap<Command> {
             &self.keymap
         }
 
-        fn typing(&self, _state: &dyn ModeState, _key: KeyEvent) -> Option<Command> {
+        fn typing(
+            &self,
+            _state: &dyn ModeState,
+            _context: &ViewModeContext<'_>,
+            _key: KeyEvent,
+        ) -> Option<Command> {
             None
         }
 
-        fn cursor_style(&self, _state: &dyn ModeState) -> CursorStyle {
+        fn cursor_style(
+            &self,
+            _state: &dyn ModeState,
+            _context: &ViewModeContext<'_>,
+        ) -> CursorStyle {
             CursorStyle::Default
         }
 
         fn execute(
             &self,
             _state: &mut dyn ModeState,
+            context: &ViewModeContext<'_>,
             action: &ModeActionName,
-        ) -> Result<Option<Command>, ModeError> {
+        ) -> Result<ViewModeResult, ModeError> {
             if action.as_str() == "focus-next" {
-                return Ok(Some(Command::App(AppCommand::FocusNext)));
+                return Ok(ViewModeResult::from_command(
+                    context,
+                    Some(Command::App(AppCommand::FocusNext)),
+                ));
             }
             Err(ModeError::UnknownAction {
                 mode: self.name.clone(),
                 action: action.clone(),
             })
         }
+    }
+
+    struct DynamicContentMode {
+        name: ModeName,
+        actions: Vec<ModeActionName>,
+        keymap: Keymap<ContentModeBinding>,
+    }
+
+    struct TimeoutViewMode {
+        name: ModeName,
+        keymap: Keymap<Command>,
+    }
+
+    impl ViewMode for TimeoutViewMode {
+        fn name(&self) -> &ModeName {
+            &self.name
+        }
+
+        fn actions(&self) -> &[ModeActionName] {
+            &[]
+        }
+
+        fn new_state(&self) -> Box<dyn ModeState> {
+            Box::new(())
+        }
+
+        fn keymap(
+            &self,
+            _state: &dyn ModeState,
+            _context: &ViewModeContext<'_>,
+        ) -> &Keymap<Command> {
+            &self.keymap
+        }
+
+        fn typing(
+            &self,
+            _state: &dyn ModeState,
+            _context: &ViewModeContext<'_>,
+            _key: KeyEvent,
+        ) -> Option<Command> {
+            None
+        }
+
+        fn input_status(
+            &self,
+            _state: &dyn ModeState,
+            _context: &ViewModeContext<'_>,
+        ) -> InputStatus {
+            InputStatus::Awaiting(TimeoutPolicy::Never)
+        }
+
+        fn on_timeout(
+            &self,
+            _state: &mut dyn ModeState,
+            _context: &ViewModeContext<'_>,
+        ) -> ViewModeResult {
+            ViewModeResult::operations(vec![
+                ViewModeOperation::Transaction(TransactionIntent::Commit),
+                ViewModeOperation::View(ViewAction::SetSelections(Selections::single(
+                    crate::protocol::selection::Selection::collapsed(
+                        crate::protocol::selection::TextOffset { char_index: 1 },
+                    ),
+                ))),
+            ])
+        }
+
+        fn cursor_style(
+            &self,
+            _state: &dyn ModeState,
+            _context: &ViewModeContext<'_>,
+        ) -> CursorStyle {
+            CursorStyle::Default
+        }
+
+        fn execute(
+            &self,
+            _state: &mut dyn ModeState,
+            _context: &ViewModeContext<'_>,
+            action: &ModeActionName,
+        ) -> Result<ViewModeResult, ModeError> {
+            Err(ModeError::UnknownAction {
+                mode: self.name.clone(),
+                action: action.clone(),
+            })
+        }
+    }
+
+    impl DynamicContentMode {
+        fn new() -> Self {
+            Self {
+                name: ModeName::new("content-probe"),
+                actions: vec![ModeActionName::new("advance")],
+                keymap: Keymap::new(),
+            }
+        }
+    }
+
+    impl ContentMode for DynamicContentMode {
+        fn name(&self) -> &ModeName {
+            &self.name
+        }
+
+        fn actions(&self) -> &[ModeActionName] {
+            &self.actions
+        }
+
+        fn new_state(&self) -> Box<dyn ModeState> {
+            Box::new(0_u8)
+        }
+
+        fn keymap(
+            &self,
+            _state: &dyn ModeState,
+            _context: &ContentModeContext<'_>,
+        ) -> &Keymap<ContentModeBinding> {
+            &self.keymap
+        }
+
+        fn typing(
+            &self,
+            _state: &dyn ModeState,
+            _context: &ContentModeContext<'_>,
+            _key: KeyEvent,
+        ) -> Option<ContentModeBinding> {
+            None
+        }
+
+        fn execute(
+            &self,
+            state: &mut dyn ModeState,
+            context: &ContentModeContext<'_>,
+            action: &ModeActionName,
+        ) -> Result<ContentModeResult, ModeError> {
+            if action != &self.actions[0] {
+                return Err(ModeError::UnknownAction {
+                    mode: self.name.clone(),
+                    action: action.clone(),
+                });
+            }
+            assert_eq!(context.content_id(), ContentId(7));
+            let _ = context.query_content(ContentQuery::DocumentStatus);
+            let count = state
+                .as_any_mut()
+                .downcast_mut::<u8>()
+                .expect("content mode owns its state");
+            *count += 1;
+            Ok(ContentModeResult::none())
+        }
+    }
+
+    #[test]
+    fn content_mode_is_instantiated_once_for_its_content() {
+        use crate::core::buffer::Buffer;
+        use crate::core::content::Content;
+
+        let content = ContentId(7);
+        let name = ModeName::new("content-probe");
+        let command = crate::app::command::ModeCommand {
+            mode: name.clone(),
+            action: ModeActionName::new("advance"),
+        };
+        let mut contents = ContentStore::default();
+        contents
+            .insert(content, Content::Buffer(Buffer::new()))
+            .unwrap();
+        let mut registry = ModeRegistry::new();
+        registry.register_content(DynamicContentMode::new());
+        let mut instances = ContentModeInstances::default();
+
+        assert!(instances.bind(&registry, content, &name, &contents));
+        assert!(instances.keymap(content, &contents).is_some());
+        assert_eq!(
+            instances.input_status(content, &contents),
+            InputStatus::Ready
+        );
+        assert_eq!(
+            instances.capture(content, &contents, KeyEvent::char('x')),
+            InputDecision::Pass
+        );
+        assert_eq!(
+            instances.fallback(content, &contents, KeyEvent::char('x')),
+            None
+        );
+        instances.on_timeout(content, &contents);
+        instances.cancel(content, &contents);
+        assert_eq!(
+            instances.execute(&registry, &contents, content, &command),
+            Ok(Vec::new())
+        );
+        assert_eq!(
+            instances.execute(&registry, &contents, content, &command),
+            Ok(Vec::new())
+        );
+        assert!(registry.instantiate(&name).is_none());
+    }
+
+    #[test]
+    fn view_mode_timeout_uses_the_same_typed_view_result_path() {
+        use crate::core::buffer::Buffer;
+        use crate::core::content::Content;
+
+        let content = ContentId(7);
+        let mut contents = ContentStore::default();
+        contents
+            .insert(content, Content::Buffer(Buffer::new()))
+            .unwrap();
+        let view = View::new(content, contents.create_view_state(content).unwrap());
+        let mut registry = ModeRegistry::new();
+        registry.register_view(TimeoutViewMode {
+            name: ModeName::new("timeout-view"),
+            keymap: Keymap::new(),
+        });
+        let mut instance = registry
+            .instantiate(&ModeName::new("timeout-view"))
+            .unwrap();
+        let context = ViewModeContext::new(ViewId(9), &view, &contents);
+
+        assert!(matches!(
+            instance.timeout(&context).as_slice(),
+            [
+                ViewModeOperation::Transaction(TransactionIntent::Commit),
+                ViewModeOperation::View(ViewAction::SetSelections(selections)),
+            ]
+                if selections.primary().head().char_index == 1
+        ));
+    }
+
+    #[test]
+    fn ordered_command_conversion_defers_edits_until_execution() {
+        use crate::core::buffer::Buffer;
+        use crate::core::content::Content;
+
+        let content = ContentId(7);
+        let mut contents = ContentStore::default();
+        contents
+            .insert(content, Content::Buffer(Buffer::new()))
+            .unwrap();
+        let view = View::new(content, contents.create_view_state(content).unwrap());
+        let context = ViewModeContext::new(ViewId(9), &view, &contents);
+        let command = ContentCommand::try_sequence(vec![
+            ContentCommand::Undo,
+            EditCommand::InsertText("x".to_string()).into(),
+        ])
+        .unwrap();
+
+        let operations = ViewModeResult::from_command(&context, Some(Command::Content(command)))
+            .into_operations();
+
+        assert!(matches!(
+            operations.as_slice(),
+            [
+                ViewModeOperation::Transaction(TransactionIntent::Undo),
+                ViewModeOperation::DeferredEdit(EditCommand::InsertText(text)),
+            ] if text == "x"
+        ));
     }
 
     #[test]
@@ -1323,7 +2511,7 @@ mod tests {
         let mode_name = String::from("script-mode");
         let action_name = String::from("script-action");
         let mut registry = ModeRegistry::new();
-        let id = registry.register(DynamicMode::new(mode_name.clone(), [action_name.clone()]));
+        let id = registry.register_view(DynamicMode::new(mode_name.clone(), [action_name.clone()]));
 
         assert_eq!(registry.resolve_mode(&ModeName::new(mode_name)), Some(id));
         let action = registry
@@ -1342,7 +2530,7 @@ mod tests {
     #[test]
     fn registry_reports_unknown_mode_and_action() {
         let mut registry = ModeRegistry::new();
-        registry.register(DynamicMode::new("script-mode", ["known"]));
+        registry.register_view(DynamicMode::new("script-mode", ["known"]));
 
         assert_eq!(
             registry
@@ -1366,7 +2554,7 @@ mod tests {
     #[test]
     fn registered_but_unimplemented_action_is_an_error() {
         let mut registry = ModeRegistry::new();
-        registry.register(DynamicMode::new("script-mode", ["declared"]));
+        registry.register_view(DynamicMode::new("script-mode", ["declared"]));
         let mode_name = ModeName::new("script-mode");
         let action_name = ModeActionName::new("declared");
         let mut instance = registry.instantiate(&mode_name).unwrap();
@@ -1386,7 +2574,7 @@ mod tests {
     #[test]
     fn mode_action_can_return_an_app_command() {
         let mut registry = ModeRegistry::new();
-        registry.register(DynamicMode::new("script-mode", ["focus-next"]));
+        registry.register_view(DynamicMode::new("script-mode", ["focus-next"]));
         let mode_name = ModeName::new("script-mode");
         let action_name = ModeActionName::new("focus-next");
         let mut instance = registry.instantiate(&mode_name).unwrap();
@@ -1394,25 +2582,22 @@ mod tests {
             .resolve_command_checked(&mode_name, &action_name)
             .unwrap();
 
-        assert_eq!(
-            instance.execute(mode, action),
-            Ok(Some(Command::App(AppCommand::FocusNext)))
-        );
+        assert_eq!(instance.execute(mode, action), Ok(None));
     }
 
     #[test]
     #[should_panic(expected = "mode name must be unique")]
     fn registry_rejects_duplicate_mode_names() {
         let mut registry = ModeRegistry::new();
-        registry.register(DynamicMode::new("script-mode", ["first"]));
-        registry.register(DynamicMode::new("script-mode", ["second"]));
+        registry.register_view(DynamicMode::new("script-mode", ["first"]));
+        registry.register_view(DynamicMode::new("script-mode", ["second"]));
     }
 
     #[test]
     #[should_panic(expected = "mode action name must be unique")]
     fn registry_rejects_duplicate_action_names() {
         let mut registry = ModeRegistry::new();
-        registry.register(DynamicMode::new("script-mode", ["same", "same"]));
+        registry.register_view(DynamicMode::new("script-mode", ["same", "same"]));
     }
 
     #[test]
@@ -1539,7 +2724,7 @@ mod tests {
             ),
             None,
         );
-        assert_eq!(runtime.selection_shape(), SelectionShape::Line);
+        assert_eq!(runtime.selection_shape_for_test(), SelectionShape::Line);
         assert_eq!(
             modes.execute(
                 &mut runtime,
@@ -1556,7 +2741,10 @@ mod tests {
             ),
             Some(EditCommand::DeleteSelectedLines),
         );
-        assert_eq!(runtime.selection_shape(), SelectionShape::Character);
+        assert_eq!(
+            runtime.selection_shape_for_test(),
+            SelectionShape::Character
+        );
     }
 
     #[test]
@@ -1565,7 +2753,7 @@ mod tests {
         let mode_name = ModeName::new("vim");
         let mut runtime = registry.instantiate(&mode_name).unwrap();
 
-        for (key, action, direction, amount) in [
+        for (key, action, _direction, _amount) in [
             (
                 'u',
                 VimAction::ViewportHalfUp,
@@ -1592,20 +2780,13 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                runtime.resolve_key(KeyEvent::ctrl(key)),
+                runtime.resolve_key_for_test(KeyEvent::ctrl(key)),
                 Some(vim_mode_command(action)),
             );
             let (mode, action) = registry
                 .resolve_command_checked(&mode_name, &ModeActionName::new(action.name()))
                 .unwrap();
-            assert_eq!(
-                runtime.execute(mode, action),
-                Ok(Some(Command::Viewport(ViewportCommand::new(
-                    direction,
-                    amount,
-                    ViewportCursorBehavior::Move,
-                )))),
-            );
+            assert_eq!(runtime.execute(mode, action), Ok(None),);
         }
     }
 
@@ -1661,6 +2842,40 @@ mod tests {
         assert_eq!(
             modes.resolve_key(&runtime, KeyEvent::ctrl('h')),
             Some(EditCommand::Delete(-1).into()),
+        );
+    }
+
+    #[test]
+    fn vim_insert_shift_arrows_extend_selections() {
+        let modes = ModeSet::vim();
+        let mut runtime = modes.create_runtime();
+        modes.execute(
+            &mut runtime,
+            ModeName::new("vim"),
+            ModeActionName::new("enter-insert"),
+        );
+        for (arrow, command) in [
+            (ArrowKey::Left, EditCommand::ExtendLeftBy(1)),
+            (ArrowKey::Right, EditCommand::ExtendRightBy(1)),
+            (ArrowKey::Up, EditCommand::ExtendUpBy(1)),
+            (ArrowKey::Down, EditCommand::ExtendDownBy(1)),
+        ] {
+            assert_eq!(
+                modes.resolve_key(&runtime, KeyEvent::shift_arrow(arrow)),
+                Some(Command::Content(ContentCommand::Edit(command)))
+            );
+        }
+    }
+
+    #[test]
+    fn plain_edit_escape_collapses_selections() {
+        let modes = ModeSet::plain_edit();
+        let runtime = modes.create_runtime();
+        assert_eq!(
+            modes.resolve_key(&runtime, KeyEvent::plain(KeyCode::Escape)),
+            Some(Command::Content(ContentCommand::Edit(
+                EditCommand::CollapseSelections
+            )))
         );
     }
 
@@ -1774,10 +2989,7 @@ mod tests {
 
         assert_eq!(
             instance.execute(mode, action),
-            Ok(Some(Command::Content(content_sequence(vec![
-                ContentCommand::Edit(EditCommand::MoveRightBy(1)),
-                ContentCommand::Transaction(TransactionCommand::Begin),
-            ]))))
+            Ok(Some(EditCommand::MoveRightBy(1)))
         );
     }
 
@@ -1795,7 +3007,7 @@ mod tests {
         let runtime = modes.create_runtime();
         assert_eq!(
             modes.resolve_key(&runtime, KeyEvent::char('w')),
-            Some(EditCommand::MoveWordForward.into()),
+            Some(vim_mode_command(VimAction::MoveWordForward)),
         );
     }
 
@@ -1805,7 +3017,7 @@ mod tests {
         let runtime = modes.create_runtime();
         assert_eq!(
             modes.resolve_key(&runtime, KeyEvent::char('b')),
-            Some(EditCommand::MoveWordBackward.into()),
+            Some(vim_mode_command(VimAction::MoveWordBackward)),
         );
     }
 
@@ -1815,7 +3027,7 @@ mod tests {
         let runtime = modes.create_runtime();
         assert_eq!(
             modes.resolve_key(&runtime, KeyEvent::char('e')),
-            Some(EditCommand::MoveWordEnd.into()),
+            Some(vim_mode_command(VimAction::MoveWordEnd)),
         );
     }
 
@@ -2114,10 +3326,13 @@ mod tests {
             None
         );
         assert_eq!(
-            runtime.status(),
+            runtime.status_for_test(),
             InputStatus::Awaiting(TimeoutPolicy::Never)
         );
-        assert_eq!(runtime.capture(KeyEvent::char('d')), InputDecision::Pass);
+        assert_eq!(
+            runtime.capture_for_test(KeyEvent::char('d')),
+            InputDecision::Pass
+        );
         assert_eq!(
             modes.execute(
                 &mut runtime,
@@ -2127,15 +3342,15 @@ mod tests {
             None
         );
         assert_eq!(
-            runtime.capture(KeyEvent::char('3')),
+            runtime.capture_for_test(KeyEvent::char('3')),
             InputDecision::Consumed
         );
         assert_eq!(
-            runtime.capture(KeyEvent::char('0')),
+            runtime.capture_for_test(KeyEvent::char('0')),
             InputDecision::Consumed
         );
         assert_eq!(
-            runtime.capture(KeyEvent::char('d')),
+            runtime.capture_for_test(KeyEvent::char('d')),
             InputDecision::Emit(Command::Content(ContentCommand::Edit(
                 EditCommand::Operate(OperatorCommand {
                     operator: TextOperator::Delete,
@@ -2143,7 +3358,7 @@ mod tests {
                 })
             )))
         );
-        assert_eq!(runtime.status(), InputStatus::Ready);
+        assert_eq!(runtime.status_for_test(), InputStatus::Ready);
     }
 
     #[test]
@@ -2160,7 +3375,7 @@ mod tests {
         );
 
         assert_eq!(
-            runtime.capture(KeyEvent::char('0')),
+            runtime.capture_for_test(KeyEvent::char('0')),
             InputDecision::Emit(Command::Content(ContentCommand::Edit(
                 EditCommand::Operate(OperatorCommand {
                     operator: TextOperator::Delete,
@@ -2171,6 +3386,6 @@ mod tests {
                 })
             )))
         );
-        assert_eq!(runtime.status(), InputStatus::Ready);
+        assert_eq!(runtime.status_for_test(), InputStatus::Ready);
     }
 }

@@ -4,38 +4,70 @@ use std::path::Path;
 
 use tokio::sync::mpsc;
 
+use crate::app::command::ModeCommand;
 use crate::app::message::AppMessage;
+use crate::app::mode::{
+    ContentModeInstances, ContentModeOperation, ModeError, ModeRegistry, ModeStateSnapshot,
+};
 use crate::app::tasks::AppTasks;
-use crate::core::content::{ContentEvent, ContentInput, ContentResult, SaveSnapshot};
-use crate::core::content_store::ContentStore;
-use crate::core::mode::ModeRegistry;
-use crate::core::transaction::TextStateId;
-use crate::protocol::ids::ContentId;
+use crate::app::transaction::{
+    TransactionManager, TransactionManagerError, TransactionRecord, TransactionSnapshot,
+};
+use crate::core::action::{ContentAction, ContentEditPlan};
+use crate::core::content::{
+    ContentActionResult, ContentChange, ContentEvent, ContentInput, ContentResult,
+    ContentTransactionError, SaveSnapshot,
+};
+use crate::core::content_store::{ContentSnapshot, ContentStore};
+use crate::core::mode_name::ModeName;
+use crate::core::transaction::{TextStateId, TransactionDirection};
+use crate::protocol::ids::{ContentId, ViewId};
+use crate::protocol::selection::Selections;
 
 pub(super) struct Kernel {
     contents: ContentStore,
     modes: ModeRegistry,
+    content_modes: ContentModeInstances,
+    transactions: TransactionManager,
+    new_view_modes: HashMap<ContentId, ModeName>,
     message_tx: mpsc::UnboundedSender<AppMessage>,
     message_rx: mpsc::UnboundedReceiver<AppMessage>,
     tasks: AppTasks,
     pending_saves: HashMap<ContentId, PendingSave>,
+    command_transaction: Option<CommandTransaction>,
 }
 
 impl Kernel {
-    pub(super) fn new(contents: ContentStore, modes: ModeRegistry) -> Self {
+    pub(super) fn new(
+        contents: ContentStore,
+        modes: ModeRegistry,
+        new_view_modes: HashMap<ContentId, ModeName>,
+    ) -> Self {
         let (message_tx, message_rx) = mpsc::unbounded_channel();
         Self {
             contents,
             modes,
+            content_modes: ContentModeInstances::default(),
+            transactions: TransactionManager::default(),
+            new_view_modes,
             message_tx,
             message_rx,
             tasks: AppTasks::new(),
             pending_saves: HashMap::new(),
+            command_transaction: None,
         }
     }
 
     pub(super) fn contents(&self) -> &ContentStore {
         &self.contents
+    }
+
+    pub(super) fn snapshot_content(&self, content: ContentId) -> Option<ContentSnapshot> {
+        self.contents.snapshot(content)
+    }
+
+    pub(super) fn restore_content(&mut self, snapshot: ContentSnapshot) {
+        self.contents.restore(snapshot);
     }
 
     #[cfg(test)]
@@ -47,13 +79,167 @@ impl Kernel {
         &self.modes
     }
 
+    pub(super) fn view_mode_for_new_view(&self, content: ContentId) -> Option<&ModeName> {
+        (!self.has_content_mode(content))
+            .then(|| self.new_view_modes.get(&content))
+            .flatten()
+    }
+
+    pub(super) fn has_content_mode(&self, content: ContentId) -> bool {
+        self.content_modes.is_active(content)
+    }
+
+    pub(super) fn content_modes(&self) -> &ContentModeInstances {
+        &self.content_modes
+    }
+
+    pub(super) fn mode_runtime_parts(&mut self) -> (&ContentStore, &mut ContentModeInstances) {
+        (&self.contents, &mut self.content_modes)
+    }
+
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "ContentMode binding is an app extension seam")
+    )]
+    pub(super) fn bind_content_mode(&mut self, content: ContentId, mode: &ModeName) -> bool {
+        self.content_modes
+            .bind(&self.modes, content, mode, &self.contents)
+    }
+
+    pub(super) fn execute_content_mode(
+        &mut self,
+        content: ContentId,
+        command: &ModeCommand,
+    ) -> Result<Vec<ContentModeOperation>, ModeError> {
+        self.content_modes
+            .execute(&self.modes, &self.contents, content, command)
+    }
+
+    pub(super) fn snapshot_content_mode(&self, content: ContentId) -> Option<ModeStateSnapshot> {
+        self.content_modes.snapshot(content)
+    }
+
+    pub(super) fn restore_content_mode(&mut self, content: ContentId, snapshot: ModeStateSnapshot) {
+        self.content_modes.restore(content, snapshot);
+    }
+
     #[cfg(test)]
     pub(super) fn modes_mut(&mut self) -> &mut ModeRegistry {
         &mut self.modes
     }
 
-    pub(super) fn execute(&mut self, content: ContentId, input: ContentInput<'_>) -> ContentResult {
+    pub(super) fn execute(&mut self, content: ContentId, input: ContentInput) -> ContentResult {
         self.contents.execute(content, input)
+    }
+
+    pub(super) fn plan_edit(
+        &self,
+        content: ContentId,
+        command: crate::core::command::EditCommand,
+        selections: &Selections,
+    ) -> Option<ContentEditPlan> {
+        self.contents.plan_edit(content, command, selections)
+    }
+
+    pub(super) fn apply_content_action(
+        &mut self,
+        content: ContentId,
+        action: ContentAction,
+    ) -> ContentActionResult {
+        self.contents.apply(content, action)
+    }
+
+    pub(super) fn begin_transaction(
+        &mut self,
+        content: ContentId,
+        owner: Option<ViewId>,
+    ) -> Option<TransactionRecord> {
+        self.checkpoint_transaction(content);
+        self.preserve_truncated_history();
+        self.transactions.begin(content, owner)
+    }
+
+    pub(super) fn record_transaction(
+        &mut self,
+        record: TransactionRecord,
+    ) -> Result<(), TransactionManagerError> {
+        self.checkpoint_transaction(record.target);
+        self.transactions.record(record)
+    }
+
+    pub(super) fn commit_transaction(&mut self, content: ContentId) -> Option<TransactionRecord> {
+        self.checkpoint_transaction(content);
+        self.preserve_truncated_history();
+        self.transactions.commit(content)
+    }
+
+    pub(super) fn rollback_transaction(&mut self, content: ContentId) -> Option<TransactionRecord> {
+        self.checkpoint_transaction(content);
+        self.transactions.rollback(content)
+    }
+
+    pub(super) fn undo_transaction(&mut self, content: ContentId) -> Option<TransactionRecord> {
+        self.checkpoint_transaction(content);
+        self.transactions.undo(content)
+    }
+
+    pub(super) fn redo_transaction(&mut self, content: ContentId) -> Option<TransactionRecord> {
+        self.checkpoint_transaction(content);
+        self.transactions.redo(content)
+    }
+
+    pub(super) fn active_transaction_owner(&self, content: ContentId) -> Option<Option<ViewId>> {
+        self.transactions.active_owner(content)
+    }
+
+    pub(super) fn start_command_transaction(&mut self, target: Option<ContentId>) {
+        assert!(self.command_transaction.is_none());
+        self.command_transaction = target.map(|target| CommandTransaction {
+            target,
+            snapshot: None,
+        });
+    }
+
+    pub(super) fn finish_command_transaction(&mut self, success: bool) {
+        let Some(command) = self.command_transaction.take() else {
+            return;
+        };
+        if !success && let Some(snapshot) = command.snapshot {
+            self.transactions.restore(snapshot);
+        }
+    }
+
+    fn checkpoint_transaction(&mut self, content: ContentId) {
+        let Some(command) = self.command_transaction.as_mut() else {
+            return;
+        };
+        assert_eq!(
+            command.target, content,
+            "command changed transaction target"
+        );
+        if command.snapshot.is_none() {
+            command.snapshot = Some(self.transactions.snapshot(content));
+        }
+    }
+
+    fn preserve_truncated_history(&mut self) {
+        let Some(snapshot) = self
+            .command_transaction
+            .as_mut()
+            .and_then(|command| command.snapshot.as_mut())
+        else {
+            return;
+        };
+        self.transactions.preserve_truncated_history(snapshot);
+    }
+
+    pub(super) fn apply_transaction_record(
+        &mut self,
+        record: &TransactionRecord,
+        direction: TransactionDirection,
+    ) -> Result<Option<ContentChange>, ContentTransactionError> {
+        self.contents
+            .apply_transaction(record.target, &record.data.content, direction)
     }
 
     pub(super) fn cancel(&self) {
@@ -191,6 +377,11 @@ struct PendingSave {
     revision: u64,
     state: TextStateId,
     queued: Option<SaveSnapshot>,
+}
+
+struct CommandTransaction {
+    target: ContentId,
+    snapshot: Option<TransactionSnapshot>,
 }
 
 async fn atomic_write(snapshot: SaveSnapshot) -> io::Result<()> {

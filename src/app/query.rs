@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::app::mode::ViewModeInstances;
 use crate::app::view::View;
 use crate::core::content_store::ContentStore;
 use crate::protocol::content_query::{
@@ -11,6 +12,7 @@ use crate::protocol::ids::{ContentId, ViewId};
 pub(super) struct AppQuery<'a> {
     pub(super) contents: &'a ContentStore,
     pub(super) views: &'a HashMap<ViewId, View>,
+    pub(super) view_modes: &'a ViewModeInstances,
 }
 
 impl RenderQuery for AppQuery<'_> {
@@ -27,13 +29,14 @@ impl RenderQuery for AppQuery<'_> {
             .expect("view references existing content")
         {
             ContentPresentation::Text => {
+                let context = crate::app::mode::ViewModeContext::new(id, view, self.contents);
                 let selections = view
                     .selections()
                     .expect("text content creates selection-backed view state");
                 ViewPresentation::Text(TextPresentation {
                     selections: selections.clone(),
-                    cursor_style: view.cursor_style(),
-                    selection_shape: view.selection_shape(),
+                    cursor_style: self.view_modes.cursor_style(id, &context),
+                    selection_shape: self.view_modes.selection_shape(id, &context),
                 })
             }
             ContentPresentation::StatusBar => {

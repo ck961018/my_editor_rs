@@ -20,12 +20,15 @@ pub trait Frontend {
         focused: SpaceId,
     ) -> io::Result<()>;
 
-    /// 处理依赖实际布局尺寸的视口命令，并返回本次解析出的逻辑行数。
-    fn execute_viewport_command(
+    /// 根据实际布局尺寸解析视口命令，不修改前端状态。
+    fn resolve_viewport_command(
         &mut self,
         scene: &Scene,
         scene_revision: Revision,
         view: ViewId,
         command: ViewportCommand,
     ) -> io::Result<usize>;
+
+    /// 在 app 提交整个有序结果后应用已解析的视口移动。
+    fn apply_viewport_command(&mut self, view: ViewId, command: ViewportCommand, lines: usize);
 }

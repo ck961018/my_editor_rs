@@ -1,9 +1,12 @@
+use std::collections::HashMap;
+
 use crate::app::kernel::Kernel;
+use crate::app::mode::ModeRegistry;
 use crate::app::session::{ClientSession, EditorSessionInit, InitialView};
 use crate::core::buffer::Buffer;
 use crate::core::content::Content;
 use crate::core::content_store::ContentStore;
-use crate::core::mode::ModeRegistry;
+use crate::core::mode_name::ModeName;
 use crate::core::status_bar::StatusBar;
 use crate::protocol::ids::{ContentId, ViewId};
 
@@ -65,15 +68,21 @@ pub(super) fn bootstrap_editor(buffer: Buffer, width: usize, height: usize) -> E
             editor: InitialView {
                 view: editor_view,
                 content: editor_content,
+                mode: Some(ModeName::new("vim")),
             },
             status: InitialView {
                 view: status_view,
                 content: status_content,
+                mode: None,
             },
             next_view_id: ids.next_view,
         },
     );
-    let kernel = Kernel::new(contents, modes);
+    let kernel = Kernel::new(
+        contents,
+        modes,
+        HashMap::from([(editor_content, ModeName::new("vim"))]),
+    );
     EditorBootstrap { kernel, session }
 }
 
@@ -98,10 +107,12 @@ pub(super) fn create_editor_session(
             editor: InitialView {
                 view: editor_view,
                 content: editor_content,
+                mode: Some(ModeName::new("vim")),
             },
             status: InitialView {
                 view: status_view,
                 content: status_content,
+                mode: None,
             },
             next_view_id: ids.next_view,
         },

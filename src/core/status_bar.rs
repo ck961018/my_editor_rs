@@ -2,6 +2,7 @@ use crate::protocol::ids::ContentId;
 
 /// Status-bar content stores only its target. ContentStore derives its display data by
 /// querying the target document status.
+#[derive(Clone)]
 pub struct StatusBar {
     target_content_id: ContentId,
 }

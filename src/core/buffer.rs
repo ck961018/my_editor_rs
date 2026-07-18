@@ -3,12 +3,14 @@ use std::borrow::Cow;
 use std::io;
 use std::path::PathBuf;
 
-use crate::core::command::CharSearchDirection;
+use crate::core::action::{ContentAction, ContentEditPlan};
+use crate::core::command::{CharSearchDirection, EditCommand};
 use crate::core::motion::{
     TextRange, TextTarget, forward_word_start, line_end_insert, resolve_target,
 };
 use crate::core::transaction::{
-    Affinity, TextChangeSet, TextEdit, TextStateId, TextTransactionError,
+    Affinity, TextChangeSet, TextEdit, TextStateId, TextTransactionData, TextTransactionError,
+    TransactionDirection,
 };
 use crate::protocol::selection::{Selection, Selections, TextOffset, TextPoint};
 use crate::protocol::status::StatusMessage;
@@ -22,6 +24,7 @@ use navigation::{
 };
 use ranges::merge_ranges;
 
+#[derive(Clone)]
 pub struct Buffer {
     rope: Rope,
     path: Option<PathBuf>,
@@ -29,36 +32,13 @@ pub struct Buffer {
     current_state: TextStateId,
     saved_state: TextStateId,
     next_state: u64,
-    active_transaction: Option<Box<ActiveTextTransaction>>,
-    history: Vec<TextHistoryEntry>,
-    history_cursor: usize,
     last_change: Option<TextChangeSet>,
     status: StatusMessage,
 }
 
-struct ActiveTextTransaction {
-    original: Rope,
-    changes: TextChangeSet,
-    before_state: TextStateId,
-    selection_snapshots: Option<SelectionSnapshots>,
-}
-
-struct SelectionSnapshots {
-    before: Selections,
-    after: Selections,
-}
-
-struct TextHistoryEntry {
-    forward: TextChangeSet,
-    inverse: TextChangeSet,
-    before_state: TextStateId,
-    after_state: TextStateId,
-    selection_snapshots: Option<SelectionSnapshots>,
-}
-
-pub(crate) struct TextHistoryTraversal {
-    pub(crate) change: TextChangeSet,
-    pub(crate) selections: Option<Selections>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BufferTransactionData {
+    pub text: TextTransactionData,
 }
 
 impl Buffer {
@@ -70,11 +50,27 @@ impl Buffer {
             current_state: TextStateId(0),
             saved_state: TextStateId(0),
             next_state: 1,
-            active_transaction: None,
-            history: Vec::new(),
-            history_cursor: 0,
             last_change: None,
             status: StatusMessage::None,
+        }
+    }
+
+    pub fn plan_edit(&self, command: EditCommand, selections: &Selections) -> ContentEditPlan {
+        let mut scratch = Self {
+            rope: self.rope.clone(),
+            path: self.path.clone(),
+            revision: self.revision,
+            current_state: self.current_state,
+            saved_state: self.saved_state,
+            next_state: self.next_state,
+            last_change: None,
+            status: self.status.clone(),
+        };
+        let mut selections = selections.clone();
+        crate::core::edit::apply_edit(command, &mut scratch, &mut selections);
+        ContentEditPlan {
+            action: scratch.take_last_change().map(ContentAction::Text),
+            selections,
         }
     }
 
@@ -84,13 +80,13 @@ impl Buffer {
             Ok(text) => {
                 self.rope = Rope::from_str(&text);
                 self.advance_revision();
-                self.reset_history_to_saved_state();
+                self.reset_to_saved_state();
                 Ok(())
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 self.rope = Rope::new();
                 self.advance_revision();
-                self.reset_history_to_saved_state();
+                self.reset_to_saved_state();
                 Ok(())
             }
             Err(e) => Err(e),
@@ -129,7 +125,7 @@ impl Buffer {
 
     pub fn mark_saved(&mut self, state: TextStateId) -> bool {
         self.saved_state = state;
-        !self.active_transaction_is_dirty() && self.current_state == state
+        self.current_state == state
     }
 
     fn advance_revision(&mut self) {
@@ -148,153 +144,11 @@ impl Buffer {
         state
     }
 
-    fn reset_history_to_saved_state(&mut self) {
+    fn reset_to_saved_state(&mut self) {
         let state = self.allocate_state();
         self.current_state = state;
         self.saved_state = state;
-        self.active_transaction = None;
-        self.history.clear();
-        self.history_cursor = 0;
         self.last_change = None;
-    }
-
-    pub fn begin_transaction(&mut self) {
-        self.begin_transaction_at(None);
-    }
-
-    pub fn begin_transaction_with_selections(&mut self, selections: &Selections) {
-        self.begin_transaction_at(Some(selections.clone()));
-    }
-
-    fn begin_transaction_at(&mut self, selections: Option<Selections>) {
-        if self.active_transaction.is_none() {
-            let selection_snapshots = selections.map(|after| SelectionSnapshots {
-                before: after.clone(),
-                after,
-            });
-            self.active_transaction = Some(Box::new(ActiveTextTransaction {
-                original: self.rope.clone(),
-                changes: TextChangeSet::empty(self.rope.len_chars()),
-                before_state: self.current_state,
-                selection_snapshots,
-            }));
-        }
-    }
-
-    pub fn update_transaction_selections(&mut self, selections: &Selections) {
-        if let Some(snapshots) = self
-            .active_transaction
-            .as_mut()
-            .and_then(|active| active.selection_snapshots.as_mut())
-        {
-            snapshots.after = selections.clone();
-        }
-    }
-
-    pub fn transaction_active(&self) -> bool {
-        self.active_transaction.is_some()
-    }
-
-    pub fn commit_transaction(&mut self) -> Result<bool, TextTransactionError> {
-        let Some(active) = self.active_transaction.take() else {
-            return Ok(false);
-        };
-        if active.changes.is_empty() {
-            self.current_state = active.before_state;
-            return Ok(false);
-        }
-        let inverse = active.changes.invert(&active.original)?;
-        self.history.truncate(self.history_cursor);
-        let after_state = self.allocate_state();
-        self.history.push(TextHistoryEntry {
-            forward: active.changes,
-            inverse,
-            before_state: active.before_state,
-            after_state,
-            selection_snapshots: active.selection_snapshots,
-        });
-        self.history_cursor = self.history.len();
-        self.current_state = after_state;
-        Ok(true)
-    }
-
-    pub fn checkpoint_transaction(&mut self) -> Result<bool, TextTransactionError> {
-        let continuation = self
-            .active_transaction
-            .as_ref()
-            .and_then(|active| active.selection_snapshots.as_ref())
-            .map(|snapshots| snapshots.after.clone());
-        let was_active = self.active_transaction.is_some();
-        let changed = self.commit_transaction()?;
-        if was_active {
-            self.begin_transaction_at(continuation);
-        }
-        Ok(changed)
-    }
-
-    pub fn rollback_transaction(
-        &mut self,
-    ) -> Result<Option<TextHistoryTraversal>, TextTransactionError> {
-        let Some(active) = self.active_transaction.take() else {
-            return Ok(None);
-        };
-        if active.changes.is_empty() {
-            self.current_state = active.before_state;
-            return Ok(None);
-        }
-        let inverse = active.changes.invert(&active.original)?;
-        inverse.apply(&mut self.rope)?;
-        self.advance_revision();
-        self.current_state = active.before_state;
-        self.last_change = None;
-        Ok(Some(TextHistoryTraversal {
-            change: inverse,
-            selections: active.selection_snapshots.map(|snapshots| snapshots.before),
-        }))
-    }
-
-    pub fn undo(&mut self) -> Result<Option<TextHistoryTraversal>, TextTransactionError> {
-        self.commit_transaction()?;
-        if self.history_cursor == 0 {
-            return Ok(None);
-        }
-        let index = self.history_cursor - 1;
-        let inverse = self.history[index].inverse.clone();
-        let selections = self.history[index]
-            .selection_snapshots
-            .as_ref()
-            .map(|snapshots| snapshots.before.clone());
-        inverse.apply(&mut self.rope)?;
-        self.history_cursor = index;
-        self.current_state = self.history[index].before_state;
-        self.advance_revision();
-        self.last_change = None;
-        Ok(Some(TextHistoryTraversal {
-            change: inverse,
-            selections,
-        }))
-    }
-
-    pub fn redo(&mut self) -> Result<Option<TextHistoryTraversal>, TextTransactionError> {
-        self.commit_transaction()?;
-        if self.history_cursor >= self.history.len() {
-            return Ok(None);
-        }
-        let index = self.history_cursor;
-        let forward = self.history[index].forward.clone();
-        let selections = self.history[index]
-            .selection_snapshots
-            .as_ref()
-            .map(|snapshots| snapshots.after.clone());
-        forward.apply(&mut self.rope)?;
-        self.history_cursor += 1;
-        self.current_state = self.history[index].after_state;
-        self.advance_revision();
-        self.last_change = None;
-        Ok(Some(TextHistoryTraversal {
-            change: forward,
-            selections,
-        }))
     }
 
     pub fn take_last_change(&mut self) -> Option<TextChangeSet> {
@@ -338,41 +192,81 @@ impl Buffer {
         selections != &before
     }
 
-    fn active_transaction_is_dirty(&self) -> bool {
-        self.active_transaction
-            .as_ref()
-            .is_some_and(|active| !active.changes.is_empty())
-    }
-
     fn apply_text_edits(&mut self, edits: Vec<TextEdit>) -> Result<bool, TextTransactionError> {
         let changes = TextChangeSet::from_edits(self.rope.len_chars(), edits)?;
+        self.apply_resolved_change(changes)
+    }
+
+    pub(crate) fn apply_resolved_change(
+        &mut self,
+        changes: TextChangeSet,
+    ) -> Result<bool, TextTransactionError> {
         if changes.is_empty() {
             self.last_change = None;
             return Ok(false);
         }
         self.validate_crlf_boundaries(&changes)?;
-        let implicit = self.active_transaction.is_none();
-        if implicit {
-            self.begin_transaction();
-        }
-        let composed = self
-            .active_transaction
-            .as_ref()
-            .expect("transaction was started")
-            .changes
-            .compose(&changes)?;
         changes.apply(&mut self.rope)?;
-        let active = self
-            .active_transaction
-            .as_mut()
-            .expect("transaction was started");
-        active.changes = composed;
+        self.current_state = self.allocate_state();
         self.advance_revision();
         self.last_change = Some(changes);
-        if implicit {
-            self.commit_transaction()?;
-        }
         Ok(true)
+    }
+
+    pub fn apply_content_change(
+        &mut self,
+        change: TextChangeSet,
+    ) -> Result<Option<BufferTransactionData>, TextTransactionError> {
+        if change.is_empty() {
+            self.last_change = None;
+            return Ok(None);
+        }
+        self.validate_crlf_boundaries(&change)?;
+        let before_state = self.current_state;
+        let inverse = change.invert(&self.rope)?;
+        change.apply(&mut self.rope)?;
+        let after_state = self.allocate_state();
+        self.current_state = after_state;
+        self.advance_revision();
+        self.last_change = None;
+        Ok(Some(BufferTransactionData {
+            text: TextTransactionData {
+                forward: change,
+                inverse,
+                before_state,
+                after_state,
+            },
+        }))
+    }
+
+    pub fn apply_transaction_data(
+        &mut self,
+        data: &BufferTransactionData,
+        direction: TransactionDirection,
+    ) -> Result<TextChangeSet, TextTransactionError> {
+        let (expected, next, change) = match direction {
+            TransactionDirection::Forward => (
+                data.text.before_state,
+                data.text.after_state,
+                &data.text.forward,
+            ),
+            TransactionDirection::Inverse => (
+                data.text.after_state,
+                data.text.before_state,
+                &data.text.inverse,
+            ),
+        };
+        if self.current_state != expected {
+            return Err(TextTransactionError::StateMismatch {
+                expected,
+                actual: self.current_state,
+            });
+        }
+        change.apply(&mut self.rope)?;
+        self.current_state = next;
+        self.advance_revision();
+        self.last_change = None;
+        Ok(change.clone())
     }
 
     fn validate_crlf_boundaries(
@@ -457,7 +351,7 @@ impl Buffer {
     }
 
     pub fn modified(&self) -> bool {
-        self.active_transaction_is_dirty() || self.current_state != self.saved_state
+        self.current_state != self.saved_state
     }
 
     // ——编辑原语：底层点操作（pub(crate)，操作 head）——
@@ -1331,10 +1225,6 @@ impl Default for Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::command::{Command, ContentCommand, EditCommand};
-    use crate::core::mode::ModeSet;
-    use crate::core::mode_name::{ModeActionName, ModeName};
-    use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
     use crate::protocol::selection::{Selection, Selections};
     use tempfile::tempdir;
 
@@ -1402,61 +1292,6 @@ mod tests {
 
         assert!(!b.mark_saved(saved_state));
         assert!(b.modified());
-    }
-
-    #[test]
-    fn explicit_transaction_groups_multiple_visible_edits_for_undo() {
-        let mut buffer = Buffer::new();
-        buffer.begin_transaction();
-        buffer.insert_char(0, 'a');
-        buffer.insert_char(1, 'b');
-        assert_eq!(buffer.slice().to_string(), "ab");
-
-        assert!(buffer.commit_transaction().unwrap());
-        assert!(buffer.undo().unwrap().is_some());
-        assert_eq!(buffer.slice().to_string(), "");
-        assert!(buffer.redo().unwrap().is_some());
-        assert_eq!(buffer.slice().to_string(), "ab");
-    }
-
-    #[test]
-    fn editing_after_undo_truncates_the_redo_branch() {
-        let mut buffer = Buffer::new();
-        buffer.insert_char(0, 'a');
-        buffer.insert_char(1, 'b');
-        assert!(buffer.undo().unwrap().is_some());
-        buffer.insert_char(1, 'c');
-
-        assert_eq!(buffer.slice().to_string(), "ac");
-        assert!(buffer.redo().unwrap().is_none());
-    }
-
-    #[test]
-    fn modified_is_derived_from_stable_saved_state_across_history() {
-        let mut buffer = Buffer::new();
-        buffer.insert_char(0, 'a');
-        let saved = buffer.state_id();
-        assert!(buffer.mark_saved(saved));
-        buffer.insert_char(1, 'b');
-        assert!(buffer.modified());
-
-        assert!(buffer.undo().unwrap().is_some());
-        assert!(!buffer.modified());
-        assert!(buffer.redo().unwrap().is_some());
-        assert!(buffer.modified());
-    }
-
-    #[test]
-    fn rollback_restores_the_transaction_start_without_history() {
-        let mut buffer = Buffer::new();
-        buffer.insert_char(0, 'a');
-        buffer.begin_transaction();
-        buffer.insert_char(1, 'b');
-
-        assert!(buffer.rollback_transaction().unwrap().is_some());
-        assert_eq!(buffer.slice().to_string(), "a");
-        assert!(buffer.undo().unwrap().is_some());
-        assert_eq!(buffer.slice().to_string(), "");
     }
 
     #[test]
@@ -2179,56 +2014,6 @@ mod tests {
         );
         Buffer::collapse_to_head(s.primary_mut());
         assert_eq!(s.primary().anchor, s.primary().head());
-    }
-
-    #[test]
-    fn buffer_keymap_shift_arrow_binds_extend() {
-        // 模式化后 shift+方向键绑在 vim Insert keymap；Normal 无此绑定。
-        let modes = ModeSet::vim();
-        let mut runtime = modes.create_runtime();
-        modes.execute(
-            &mut runtime,
-            ModeName::new("vim"),
-            ModeActionName::new("enter-insert"),
-        );
-        assert_eq!(
-            modes.resolve_key(&runtime, KeyEvent::shift_arrow(ArrowKey::Left)),
-            Some(Command::Content(ContentCommand::Edit(
-                EditCommand::ExtendLeftBy(1)
-            )))
-        );
-        assert_eq!(
-            modes.resolve_key(&runtime, KeyEvent::shift_arrow(ArrowKey::Right)),
-            Some(Command::Content(ContentCommand::Edit(
-                EditCommand::ExtendRightBy(1)
-            )))
-        );
-        assert_eq!(
-            modes.resolve_key(&runtime, KeyEvent::shift_arrow(ArrowKey::Up)),
-            Some(Command::Content(ContentCommand::Edit(
-                EditCommand::ExtendUpBy(1)
-            )))
-        );
-        assert_eq!(
-            modes.resolve_key(&runtime, KeyEvent::shift_arrow(ArrowKey::Down)),
-            Some(Command::Content(ContentCommand::Edit(
-                EditCommand::ExtendDownBy(1)
-            )))
-        );
-    }
-
-    #[test]
-    fn buffer_keymap_escape_binds_collapse_selections() {
-        // PlainEditMode（非 vim）Escape → CollapseSelections。
-        // vim 的 Escape 语义由 vim_*_escape_* 测试覆盖。
-        let modes = ModeSet::plain_edit();
-        let runtime = modes.create_runtime();
-        assert_eq!(
-            modes.resolve_key(&runtime, KeyEvent::plain(KeyCode::Escape)),
-            Some(Command::Content(ContentCommand::Edit(
-                EditCommand::CollapseSelections
-            )))
-        );
     }
 
     #[test]

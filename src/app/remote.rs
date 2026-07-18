@@ -65,6 +65,7 @@ mod tests {
     struct Fixture {
         contents: ContentStore,
         views: HashMap<ViewId, View>,
+        view_modes: crate::app::mode::ViewModeInstances,
     }
 
     impl Fixture {
@@ -74,10 +75,11 @@ mod tests {
             contents
                 .insert(content, Content::Buffer(Buffer::new()))
                 .unwrap();
-            let view = View::new(content, contents.create_view_state(content).unwrap(), None);
+            let view = View::new(content, contents.create_view_state(content).unwrap());
             Self {
                 contents,
                 views: HashMap::from([(ViewId(0), view)]),
+                view_modes: crate::app::mode::ViewModeInstances::default(),
             }
         }
 
@@ -85,6 +87,7 @@ mod tests {
             AppQuery {
                 contents: &self.contents,
                 views: &self.views,
+                view_modes: &self.view_modes,
             }
         }
     }

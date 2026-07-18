@@ -134,7 +134,7 @@ impl SceneRenderer {
         canvas.flush()
     }
 
-    pub fn execute_viewport_command(
+    pub fn resolve_viewport_command(
         &mut self,
         scene: &Scene,
         scene_revision: Revision,
@@ -149,16 +149,18 @@ impl SceneRenderer {
         if height == 0 {
             return 0;
         }
-        let lines = match command.amount {
+        match command.amount {
             ViewportMoveAmount::HalfPage => (height / 2).max(1),
             ViewportMoveAmount::FullPage => height,
-        };
+        }
+    }
+
+    pub fn apply_viewport_command(&mut self, view: ViewId, command: ViewportCommand, lines: usize) {
         let viewport = self.viewports.entry(view).or_insert_with(Viewport::origin);
         match command.direction {
             ViewportMoveDirection::Up => viewport.scroll_up(lines),
             ViewportMoveDirection::Down => viewport.scroll_down(lines),
         }
-        lines
     }
 }
 
@@ -853,26 +855,20 @@ mod tests {
             },
         );
 
-        let half = renderer.execute_viewport_command(
-            &scene,
-            Revision(0),
-            ViewId(0),
-            ViewportCommand::new(
-                ViewportMoveDirection::Up,
-                ViewportMoveAmount::HalfPage,
-                crate::protocol::viewport::ViewportCursorBehavior::Move,
-            ),
+        let half_command = ViewportCommand::new(
+            ViewportMoveDirection::Up,
+            ViewportMoveAmount::HalfPage,
+            crate::protocol::viewport::ViewportCursorBehavior::Move,
         );
-        let full = renderer.execute_viewport_command(
-            &scene,
-            Revision(0),
-            ViewId(0),
-            ViewportCommand::new(
-                ViewportMoveDirection::Down,
-                ViewportMoveAmount::FullPage,
-                crate::protocol::viewport::ViewportCursorBehavior::Move,
-            ),
+        let half = renderer.resolve_viewport_command(&scene, Revision(0), ViewId(0), half_command);
+        renderer.apply_viewport_command(ViewId(0), half_command, half);
+        let full_command = ViewportCommand::new(
+            ViewportMoveDirection::Down,
+            ViewportMoveAmount::FullPage,
+            crate::protocol::viewport::ViewportCursorBehavior::Move,
         );
+        let full = renderer.resolve_viewport_command(&scene, Revision(0), ViewId(0), full_command);
+        renderer.apply_viewport_command(ViewId(0), full_command, full);
 
         assert_eq!(half, 2);
         assert_eq!(full, 4);

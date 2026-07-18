@@ -49,7 +49,7 @@ impl<W: io::Write> Frontend for TuiFrontend<W> {
         )
     }
 
-    fn execute_viewport_command(
+    fn resolve_viewport_command(
         &mut self,
         scene: &Scene,
         scene_revision: Revision,
@@ -58,6 +58,10 @@ impl<W: io::Write> Frontend for TuiFrontend<W> {
     ) -> io::Result<usize> {
         Ok(self
             .renderer
-            .execute_viewport_command(scene, scene_revision, view, command))
+            .resolve_viewport_command(scene, scene_revision, view, command))
+    }
+
+    fn apply_viewport_command(&mut self, view: ViewId, command: ViewportCommand, lines: usize) {
+        self.renderer.apply_viewport_command(view, command, lines);
     }
 }

@@ -4,13 +4,16 @@
 //! 分别维护后端任务/保存状态与客户端 Scene/View 状态；`layout` 和 `query` 提供布局入口
 //! 与前端查询适配。
 
+mod action;
 mod application;
 mod bootstrap;
+pub(crate) mod command;
 mod command_resolver;
 mod dispatcher;
 mod kernel;
 mod layout;
 mod message;
+pub(crate) mod mode;
 mod query;
 mod remote;
 mod runtime;
@@ -18,6 +21,7 @@ mod save;
 mod scene_model;
 mod session;
 mod tasks;
+mod transaction;
 mod view;
 
 pub use application::App;

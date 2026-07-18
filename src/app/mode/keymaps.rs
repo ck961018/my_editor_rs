@@ -1,5 +1,6 @@
 use super::{CommandKeymapExt, VimAction};
-use crate::core::command::{Command, ContentCommand, EditCommand, ModeCommand};
+use crate::app::command::{Command, ContentCommand, ModeCommand};
+use crate::core::command::EditCommand;
 use crate::core::keymap::Keymap;
 use crate::core::mode_name::{ModeActionName, ModeName};
 use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
@@ -83,9 +84,6 @@ pub(super) fn vim_normal_keymap() -> Keymap<Command> {
         keymap.bind(KeyEvent::char(key), vim_mode_command(action));
     }
     for (key, edit) in [
-        ('w', EditCommand::MoveWordForward),
-        ('b', EditCommand::MoveWordBackward),
-        ('e', EditCommand::MoveWordEnd),
         ('0', EditCommand::MoveToLineStart),
         ('^', EditCommand::MoveToFirstNonBlank),
         ('$', EditCommand::MoveToLineEnd),
@@ -114,6 +112,9 @@ pub(super) fn vim_normal_keymap() -> Keymap<Command> {
         ('a', VimAction::Append),
         ('v', VimAction::ToggleVisual),
         ('V', VimAction::ToggleLineVisual),
+        ('w', VimAction::MoveWordForward),
+        ('b', VimAction::MoveWordBackward),
+        ('e', VimAction::MoveWordEnd),
         ('f', VimAction::FindForward),
         ('F', VimAction::FindBackward),
         ('d', VimAction::DeleteOperator),

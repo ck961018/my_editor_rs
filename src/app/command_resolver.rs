@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
+use crate::app::command::{AppCommand, Command, ContentCommandContext};
 use crate::app::dispatcher::{CommandSource, DispatchCommand};
 use crate::app::view::View;
-use crate::core::command::{AppCommand, Command, ContentCommandContext};
 use crate::core::keymap::Keymap;
 use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::key_event::KeyEvent;
@@ -49,6 +49,13 @@ pub(super) fn resolve_command(
                 content: views.get(&view)?.content(),
             })
         }
+        Command::ContentMode(operation) => {
+            let view = source.view_or(focused_view);
+            Some(DispatchCommand::ContentMode {
+                operation,
+                content: views.get(&view)?.content(),
+            })
+        }
     }
 }
 
@@ -64,7 +71,7 @@ pub(super) fn default_global_keymap() -> Keymap<Command> {
     keymap.bind(KeyEvent::ctrl('q'), Command::App(AppCommand::Quit));
     keymap.bind(
         KeyEvent::ctrl('s'),
-        Command::Content(crate::core::command::ContentCommand::Save),
+        Command::Content(crate::app::command::ContentCommand::Save),
     );
     keymap
 }

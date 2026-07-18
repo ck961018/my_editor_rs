@@ -1,7 +1,7 @@
 # Editor Kernel Architecture
 
 **状态：** 当前实现架构
-**更新日期：** 2026-07-16
+**更新日期：** 2026-07-17
 
 ## 1. 文档定位
 
@@ -34,7 +34,7 @@ protocol -> std
 | 层 | 当前职责 |
 | --- | --- |
 | `protocol` | ID、几何、Scene 快照、selection、按键、viewport、查询数据和远程语义消息 |
-| `core` | Buffer、Content、ContentStore、编辑命令、Mode、keymap trie 和通用输入状态机 |
+| `core` | Buffer、Content、ContentStore、领域 action、文本事务数据和输入算法 |
 | `frontend` | 只定义 `Frontend` 行为接缝 |
 | `app` | 主循环、命令路由、View/Session/Kernel 所有权、Scene 修改和后台保存 |
 | `terminal` | crossterm 输入翻译、终端生命周期和 `Canvas` 输出 |
@@ -53,12 +53,15 @@ App<F: Frontend>
 ├── Kernel
 │   ├── ContentStore
 │   ├── ModeRegistry
+│   ├── ContentModeInstances
+│   ├── TransactionManager
 │   ├── AppTasks
 │   ├── pending_saves
 │   └── AppMessage channel
 ├── ClientSession
 │   ├── Scene + SceneBuilder + scene revision
 │   ├── ViewStore: HashMap<ViewId, View>
+│   ├── ViewModeInstances
 │   ├── focused SpaceId
 │   └── Dispatcher
 └── F: Frontend
@@ -81,8 +84,9 @@ Viewport 属于具体 Frontend。TUI 的 `SceneRenderer` 按 `ViewId` 保存 vie
 
 ```text
 Scene: SpaceId -> ViewId
-View:  ViewId  -> ContentId + ModeInstance + ContentViewState
+View:  ViewId  -> ContentId + ContentViewState
 Store: ContentId -> Content
+Mode:  (ModeId, ViewId | ContentId) -> ModeInstance
 ```
 
 - `SpaceId` 标识 Scene 树中的布局节点；
@@ -90,7 +94,8 @@ Store: ContentId -> Content
 - `ContentId` 标识可被多个 View 引用的共享内容。
 
 同一个 `ViewId` 不能同时挂载到多个 Scene leaf。同一 `ContentId` 可以由多个 View 展示，
-这些 View 拥有彼此独立的 selection、Mode 状态、revision 和前端 viewport。
+这些 View 拥有彼此独立的 selection、revision 和前端 viewport。ViewMode
+状态按 View 隔离；ContentMode 状态按 Content 共享。
 
 ## 5. Content 与 View
 
@@ -107,11 +112,13 @@ enum Content {
 
 `ContentStore` 是唯一 Content 表，每个 `ContentEntry` 同时保存 Content 与 Revision，重复
 ContentId 会在不修改旧条目的前提下返回错误。除启动时构造内建 Content 外，App 的执行与查询路径不借出
-`Buffer`/`StatusBar`，而是通过 ContentStore 分派。Content 通过三类 `ContentInput` 接收行为：
+`Buffer`/`StatusBar`，而是通过 ContentStore 分派。Content 接收已解析的
+`ContentAction`、保存请求和后台 `ContentEvent`。它不接收顶层 Command、
+`ContentInput::View` 或可变 `ContentViewState`。
 
-- `Command`：不依赖某个 View 的共享内容命令，例如保存；
-- `View`：同时携带语义命令和该 View 的 `ContentViewState`，例如编辑文本并更新 selection；
-- `Event`：后台结果，例如带 Buffer revision 的 `SaveFinished`。
+文本操作先由 app 使用只读 selections 规划为静态 `TextChangeSet`，再由
+Content 验证和应用。Content 返回规范 `ContentChange`，app 将它映射到绑定
+同一 Content 的所有 View。
 
 执行结果显式区分 `Handled(ContentEffect)` 与 `NotHandled`。当前 effect 只有保存快照；App
 解释 effect 并启动 IO，Content 不直接管理异步任务或 Frontend。
@@ -129,71 +136,59 @@ Content 还通过穷尽分派声明 `ContentPresentation::{Text, StatusBar}`；A
 View
 ├── ContentId
 ├── ContentViewState
-├── Option<ModeInstance>
 └── Revision
 ```
 
-`ContentViewState` 与 Content 类型配对。Buffer View 保存 `Selections`，StatusBar View 没有
-selection。类型不匹配属于 App 内部不变量破坏，会直接 panic，而不是跨边界的可恢复错误。
+`ContentViewState` 只表达跨 Content 复用的 View 能力。文本 View 保存
+`Selections`，无状态 View 没有 selection。具体 Content 负责创建状态，并在
+change mapping 边界验证能力是否匹配。
 
-View 对上游只暴露中立行为：当前 keymap、输入状态、动态 capture、typing fallback、输入取消、
-超时通知、cursor style 和 mode command 执行。App 与 Dispatcher 不读取 Vim 的 count、operator
-或字符搜索状态。
+View 只保存会话数据，不保存或代理 Mode。keymap、动态 capture、timeout、
+cursor style 和 Mode action 都由 app 中的集中实例表处理。App 与 Dispatcher
+不读取 Vim 的 count、operator 或字符搜索状态。
 
 ## 6. Mode 与命令模型
 
-### 6.1 定义、注册与实例
+### 6.1 静态能力与实例作用域
 
-`Mode` trait 是原生 Mode 的定义契约，负责：
+`ModeRegistry` 只接受 `ContentMode` 或 `ViewMode` 两种静态定义。
 
-- 声明 owned `ModeName` 与 `ModeActionName`；
-- 为每个 View 创建私有 `ModeState`；
-- 根据状态提供 keymap、typing fallback 和 cursor style；
-- 实现通用 `InputContext<Command>` 所需的等待、capture、timeout 与 cancel 行为；
-- 执行 `ModeCommand`，原地更新私有状态，并按需产生普通顶层 `Command`。
+- `ContentModeContext` 只有目标 Content identity 和只读 query；
+- `ViewModeContext` 只有绑定 View、其 selections 和绑定 Content 的只读 query；
+- 两种 Context 都不借出可变状态；
+- keymap、typing、capture、timeout、cancel、presentation 和 execute 都使用
+  对应的 Context 类型。
 
-`ModeRegistry` 按名称注册定义，并在进程内分配稳定的 `ModeId`/`ModeActionId`。`ModeInstance`
-通过 `Rc` 共享已注册定义，同时独占 `Box<dyn ModeState>`。当前生产 registry 只注册内建 Vim；
-脚本 adapter 尚未实现。
+`ContentModeInstance` 按 `(ModeId, ContentId)` 共享，`ViewModeInstance` 按
+`(ModeId, ViewId)` 隔离。每个 View 最多解析到 ContentMode、ViewMode 或无
+Mode 三者之一。Vim 是 ViewMode，因此不同 View 可以处于不同 Vim 状态。
 
-Mode 的私有语法只产生通用命令。例如 Vim 的 `f/F`、count 和 `dd` 最终产生
-`MoveToChar`、`MoveToLine` 或 `DeleteLines`，Buffer 不知道这些按键语法。
-内建 Vim action 由私有 `VimAction` 枚举统一定义；注册列表、keymap 构造和执行分派都从该
-枚举派生。只有进入通用 ModeRegistry 的动态名称边界时才转换为 owned `ModeActionName`。
+Mode 返回有序 typed operation。`ContentModeResult` 不能表达 View identity
+或 `ViewAction`；`ViewModeResult` 可以表达绑定 View、Content、事务、App 和
+Viewport 操作。ModeState 是 provisional 状态，跨层失败会恢复调用前快照。
 
-### 6.2 命令层级
+### 6.2 路由与领域 action
+
+顶层 `Command`、`AppCommand`、`ModeCommand` 和目标解析都在 app。core 只保留
+`EditCommand` 等纯领域算法、`ContentAction` 和 Content 事务数据。
 
 ```text
-Command
-├── App(AppCommand)
-├── Content(ContentCommand)
-│   ├── Edit(EditCommand)
-│   ├── Transaction / Undo / Redo
-│   ├── Sequence(ContentSequence)
-│   └── Save
-├── Mode(ModeCommand)
-├── Viewport(ViewportCommand)
-└── Noop
+key / timeout / script / event
+-> Dispatcher 或直接 typed action
+-> ContentModeResult / ViewModeResult
+-> app ordered executor
+-> ViewAction / ContentAction / TransactionIntent / AppAction
 ```
 
-`Dispatcher` 再将 `Command` 解析为带实际目标的 App 内部 `DispatchCommand`。App command 由 App
-执行；Mode command 交给目标 View 的 ModeInstance；Content command 交给目标 `ContentStore`
-条目。`Save` 只需要 `ContentId`，其他 Content command 同时借用目标 View 的
-`ContentViewState`。这是同一命令类型的两种执行上下文，不形成第二套 view-content 命令。
+`EditCommand` 在 app 中结合只读 View selections 和 Content 解析为静态
+`ResolvedViewEdit`。Content 只验证并应用 `ContentAction`，不再执行 selection
+移动或顶层命令。Save、undo、redo 和 Content event 使用各自的 typed 路径。
 
-`ContentSequence` 是验证后的有序 Content 命令容器，只接受需要 `ContentViewState` 的命令，
-不能包含 `Save`。它保证所有成员使用同一个执行上下文，但不代替 Content transaction 的回滚
-与 undo 语义。
-
-Mode action 返回 `Option<Command>`，并以原始 View 为来源重新进入与 keymap 相同的 Dispatcher
-目标解析入口。因此 Mode 可以产生 Content、Viewport 或 App 命令；全局 keymap 也可以直接
-绑定 `Command::Viewport`，并解析到 focused View。Viewport 由 Frontend 根据实际 pane 高度
-解析，再降低为 `ContentCommand::Edit`。命令链使用有固定上限的迭代执行，避免用户 Mode
-通过 `Mode -> Mode` 造成递归溢出或无限循环。unknown mode/action 返回 `ModeError`，不再被
-App 静默吞掉。
-
-Mode action 先更新 Mode 私有状态，再执行后续 replay。这样按键导致 Normal/Insert 切换后，
-同一输入队列中的下一个键立即使用新状态。
+ordered executor 使用固定命令链上限。任一步失败时，它反向恢复本次已应用的
+Content 数据，并恢复 ModeState、View selections 和 TransactionManager。
+依赖前端几何的 viewport 操作先只读解析，待整条命令链成功后再提交前端状态。
+Visual operator 在切换 Vim 状态前解析静态范围；进入 Normal 还会显式压缩
+selections。
 
 ## 7. 输入架构
 
@@ -229,17 +224,18 @@ Leader 是定义绑定时展开的 alias，运行时 trie 只保存 concrete `Ke
 
 ### 7.3 通用 Awaiting
 
-动态输入使用与 Vim 无关的接口：
+动态输入使用与 Vim 无关的值类型：
 
 ```rust
 InputStatus::{Ready, Awaiting(TimeoutPolicy)}
 InputDecision<A>::{Pass, Consumed, Emit(A)}
-InputContext<A>::{status, capture, on_timeout, cancel}
 ```
 
 `InputCoordinator` 将固定序列 pending 和动态 context 放在同一 LIFO 等待栈中，并选择最近到期
 的 deadline；被较新 context 覆盖的底层 timer 不暂停。Dispatcher 只在 context 处于
 `Awaiting` 时调用 `capture`；`Pass` 传播原键，`Consumed` 吞掉输入，`Emit` 产生中立 action。
+具体回调由 `ContentMode` 和 `ViewMode` 分别声明，并接收各自的只读 Context，
+不再通过一个无法表达 View 能力边界的统一 `InputContext` trait。
 
 固定序列 mismatch/timeout 的处理顺序为：
 
@@ -308,7 +304,28 @@ scalar 映射为 terminal cell 宽度，宽字符的 viewport 跟随、裁剪、
 cell 计算。CR/LF 不进入行内容，其他控制字符在输出前替换为 U+FFFD。tab stop、grapheme cluster、
 组合 emoji 序列和软换行尚未进入显示模型。
 
-## 9. 保存与后台任务
+## 9. 事务与保存
+
+`TransactionManager` 是 history、history cursor、redo 截断和活动事务的唯一
+所有者。每个 `ContentId` 有独立事务流，活动事务记录可选的来源 `ViewId`。
+跨 View 编辑、关闭 owner View 和 Save 都通过同一 checkpoint 路径。
+
+core 的闭合 `ContentTransaction` 负责分派具体 Content 事务数据；app 的
+`TransactionRecord` 只将该中立载荷与通用 View participant 配对，不匹配
+Buffer 等具体类型。View participant 使用 `Source { before, after }`，无
+View 输入使用 `None`，不伪造 `ViewId`。Buffer 只生成、验证和应用文本事务
+数据，并维护 current/saved `TextStateId`；它没有 history stack 或 history
+cursor。
+
+ordered executor 只在首次事务写入时保存目标 Content flow 的 active 状态和
+可能被截断的 redo 尾部。已提交历史前缀不会为每条命令重复复制；失败时用
+该 checkpoint 恢复 Manager，成功时直接丢弃。
+
+undo/redo 先按 `ContentId` 选择历史流。来源 View 仍存在时恢复其 selections，
+其他 View 只执行 `ContentChange` mapping；来源 View 已关闭时跳过该快照。
+ModeState、viewport、focus 和布局不进入第一阶段历史。
+
+### 9.1 保存与后台任务
 
 Buffer 每次编辑递增文档 revision。保存时 Content 生成包含 path、bytes 和 revision 的不可变
 `SaveSnapshot`，App 使用临时文件加 rename 执行原子写入。
@@ -336,7 +353,12 @@ snapshot/delta、连接管理或远程 Frontend 事件循环。
 ## 11. 当前不变量
 
 - Content 共享状态与 View 会话状态分离。
-- Mode 定义由 registry 共享，ModeInstance 和 ModeState 按 View 隔离。
+- ContentViewState 只表达通用 View 能力，不镜像具体 Content 变体。
+- Mode 定义由 registry 共享；ViewModeState 按 View 隔离，ContentModeState
+  按 Content 共享。
+- 每个 View 只解析到 ContentMode、ViewMode 或无 Mode 三者之一。
+- TransactionManager 是历史和活动事务生命周期的唯一所有者。
+- Buffer 不保存 View selections、history stack 或 history cursor。
 - App/Dispatcher 只看通用输入状态和命令，不读取具体 Mode 语法。
 - SpaceId、ViewId、ContentId 不互相替代。
 - ContentStore 是唯一 Content 表；Frontend 不识别具体 Content 对象。
