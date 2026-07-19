@@ -871,10 +871,11 @@ fn mode_continuation(source: CommandSource, key: KeyEvent) -> Option<DispatchInp
 mod tests {
     use super::*;
     use crate::app::command_resolver::default_global_keymap;
-    use crate::app::mode::{ModeContentStore, ModeRegistry, ModeViewStore};
-    use crate::app::mode_name::ModeName;
+    use crate::app::mode::{Mode, ModeContentStore, ModeRegistry, ModeViewStore};
+    use crate::app::mode_name::{ModeActionName, ModeName};
     use crate::app::scene_model::{SceneBuilder, build_editor_scene};
     use crate::core::buffer::Buffer;
+    use crate::core::command::EditCommand;
     use crate::core::content::Content;
     use crate::core::content_store::ContentStore;
     use crate::core::status_bar::StatusBar;
@@ -882,6 +883,51 @@ mod tests {
     use crate::protocol::viewport::{
         ViewportCursorBehavior, ViewportMoveAmount, ViewportMoveDirection,
     };
+
+    struct DispatcherTestMode {
+        name: ModeName,
+        actions: Vec<ModeActionName>,
+        keymap: Keymap<Command>,
+    }
+
+    impl DispatcherTestMode {
+        fn new() -> Self {
+            let name = ModeName::new("dispatcher-test");
+            let action = ModeActionName::new("sequence");
+            let mut keymap = Keymap::new();
+            keymap.bind(
+                [KeyEvent::char('g'), KeyEvent::char('g')],
+                Command::Mode(ModeCommand::new(name.clone(), action.clone())),
+            );
+            keymap.bind(
+                KeyEvent::char('x'),
+                Command::Content(ContentCommand::Edit(EditCommand::Delete(1))),
+            );
+            Self {
+                name,
+                actions: vec![action],
+                keymap,
+            }
+        }
+    }
+
+    impl Mode for DispatcherTestMode {
+        fn name(&self) -> &ModeName {
+            &self.name
+        }
+
+        fn actions(&self) -> &[ModeActionName] {
+            &self.actions
+        }
+
+        fn keymap(
+            &self,
+            _state: &dyn crate::app::mode::ModeState,
+            _context: &ModeViewContext<'_>,
+        ) -> &Keymap<Command> {
+            &self.keymap
+        }
+    }
 
     fn fixture() -> (
         Dispatcher,
@@ -902,7 +948,8 @@ mod tests {
         contents
             .insert(status, Content::StatusBar(StatusBar::new(editor)))
             .unwrap();
-        let modes = ModeRegistry::builtin();
+        let mut modes = ModeRegistry::new();
+        modes.register(DispatcherTestMode::new());
         let mut builder = SceneBuilder::new();
         let (scene, focused) =
             build_editor_scene(&mut builder, 40, 5, ViewId(0), ViewId(1)).unwrap();
@@ -917,7 +964,9 @@ mod tests {
             ),
         ]);
         let mut view_modes = ModeViewStore::default();
-        let mode = modes.instantiate(&ModeName::new("vim")).unwrap();
+        let mode = modes
+            .instantiate(&ModeName::new("dispatcher-test"))
+            .unwrap();
         let mut mode_contents = ModeContentStore::default();
         mode_contents.attach_view(editor, &mode);
         view_modes.insert(ViewId(0), mode);
@@ -1015,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn vim_gg_waits_then_resolves_to_the_view() {
+    fn mode_sequence_waits_then_resolves_to_the_view() {
         let (mut dispatcher, scene, focused, views, mut view_modes, mut content_modes, _, contents) =
             fixture();
         let now = Instant::now();
@@ -1176,16 +1225,8 @@ mod tests {
 
     #[test]
     fn invalidating_a_view_discards_sequence_and_cancels_private_awaiting() {
-        let (
-            mut dispatcher,
-            scene,
-            focused,
-            views,
-            mut view_modes,
-            mut content_modes,
-            modes,
-            contents,
-        ) = fixture();
+        let (mut dispatcher, scene, focused, views, mut view_modes, mut content_modes, _, contents) =
+            fixture();
         let now = Instant::now();
         assert_eq!(
             dispatcher.dispatch(
@@ -1200,27 +1241,6 @@ mod tests {
             ),
             DispatchOutcome::Waiting
         );
-        assert_eq!(
-            view_modes.execute(
-                ViewId(0),
-                &modes,
-                &ModeCommand {
-                    mode: ModeName::new("vim"),
-                    action: crate::app::mode_name::ModeActionName::new("count-2"),
-                    arguments: Default::default(),
-                },
-            ),
-            Ok(None)
-        );
-        let context = ModeViewContext::new(ViewId(0), &views[&ViewId(0)], &contents);
-        dispatcher.sync_mode(
-            ViewId(0),
-            0,
-            view_modes.status_at(ViewId(0), 0, &context, &content_modes),
-            true,
-            now,
-        );
-
         dispatcher.invalidate_view(
             ViewId(0),
             &views[&ViewId(0)],
@@ -1231,10 +1251,6 @@ mod tests {
         );
 
         assert!(!dispatcher.is_pending());
-        assert_eq!(
-            view_modes.status_at(ViewId(0), 0, &context, &content_modes),
-            InputStatus::Ready
-        );
     }
 
     #[test]

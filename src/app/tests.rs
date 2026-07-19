@@ -987,7 +987,7 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
     assert!(decorations.iter().any(|decoration| {
         decoration.start.char_index == 0
             && decoration.end.char_index == 2
-            && decoration.face.foreground == Some(Color::Ansi(204))
+            && decoration.face.foreground == Some(Color::Ansi(170))
     }));
     assert!(app.session.view(view).unwrap().revision() > revision_before);
 
@@ -1009,12 +1009,12 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
     assert!(!decorations.iter().any(|decoration| {
         decoration.start.char_index == 0
             && decoration.end.char_index == 2
-            && decoration.face.foreground == Some(Color::Ansi(204))
+            && decoration.face.foreground == Some(Color::Ansi(170))
     }));
     assert!(decorations.iter().any(|decoration| {
         decoration.start.char_index == 5
             && decoration.end.char_index == 7
-            && decoration.face.foreground == Some(Color::Ansi(204))
+            && decoration.face.foreground == Some(Color::Ansi(170))
             && decoration.face.bold == Some(true)
     }));
 
@@ -1035,17 +1035,27 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
         faces: app.session.faces(),
     };
     let decorations = query.decorations(view, RowRange { start: 0, end: 1 });
-    assert!(decorations.iter().any(|decoration| {
-        decoration.start.char_index == 0
-            && decoration.end.char_index == 4
-            && decoration.face.foreground == Some(Color::Ansi(244))
-            && decoration.face.italic == Some(true)
-    }));
+    assert!(
+        decorations.iter().any(|decoration| {
+            decoration.start.char_index == 0
+                && decoration.end.char_index == 4
+                && decoration.face.foreground == Some(Color::Ansi(244))
+                && decoration.face.italic == Some(true)
+        }),
+        "{decorations:#?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn markdown_fence_uses_injected_rust_highlights() {
-    let source = "```rust\nfn embedded() {}\n```\n";
+async fn markdown_and_fenced_rust_are_highlighted() {
+    let source = concat!(
+        "# Heading\r\n",
+        "- **bold** [link](https://example.com) `code`\r\n",
+        "> quote\r\n",
+        "```rust\r\n",
+        "fn embedded() {}\r\n",
+        "```\r\n",
+    );
     let file = tempfile::Builder::new().suffix(".md").tempfile().unwrap();
     std::fs::write(file.path(), source).unwrap();
     let mut app = make_app(vec![], file.path().to_str());
@@ -1068,14 +1078,92 @@ async fn markdown_fence_uses_injected_rust_highlights() {
         mode_contents: app.kernel.content_modes(),
         faces: app.session.faces(),
     };
-    let decorations = query.decorations(view, RowRange { start: 0, end: 3 });
-    let keyword_start = source.find("fn").unwrap();
+    let decorations = query.decorations(view, RowRange { start: 0, end: 6 });
     assert!(decorations.iter().any(|decoration| {
-        decoration.start.char_index == keyword_start
-            && decoration.end.char_index == keyword_start + 2
-            && decoration.face.foreground == Some(Color::Ansi(204))
+        decoration.start.char_index == 0
+            && decoration.end.char_index == "# Heading".len()
+            && decoration.face.foreground == Some(Color::Ansi(75))
             && decoration.face.bold == Some(true)
     }));
+    let bold_start = source.find("**bold**").unwrap();
+    assert!(decorations.iter().any(|decoration| {
+        decoration.start.char_index == bold_start
+            && decoration.end.char_index == bold_start + "**bold**".len()
+            && decoration.face.bold == Some(true)
+    }));
+    let link_start = source.find("[link]").unwrap();
+    assert!(decorations.iter().any(|decoration| {
+        decoration.start.char_index == link_start
+            && decoration.face.foreground == Some(Color::Ansi(75))
+            && decoration.face.underline == Some(true)
+    }));
+    let code_start = source.find("`code`").unwrap();
+    assert!(decorations.iter().any(|decoration| {
+        decoration.start.char_index == code_start
+            && decoration.end.char_index == code_start + "`code`".len()
+            && decoration.face.foreground == Some(Color::Ansi(114))
+    }));
+    let keyword_start = source.find("fn").unwrap();
+    assert!(
+        decorations.iter().any(|decoration| {
+            decoration.start.char_index == keyword_start
+                && decoration.end.char_index == keyword_start + 2
+                && decoration.face.foreground == Some(Color::Ansi(170))
+                && decoration.face.bold == Some(true)
+        }),
+        "{decorations:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rust_highlighting_survives_crlf_comment_edits() {
+    let file = tempfile::Builder::new().suffix(".rs").tempfile().unwrap();
+    std::fs::write(file.path(), "fn main() {}\r\n").unwrap();
+    let mut app = make_app(vec![], file.path().to_str());
+    let view = view_id(&app, app.session.focused());
+
+    app.kernel.schedule_mode_jobs();
+    let message = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        app.kernel.receive_message(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    app.handle_app_message(message).unwrap();
+
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("// note\r\n".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    let message = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        app.kernel.receive_message(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    app.handle_app_message(message).unwrap();
+
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        view_modes: app.session.view_modes(),
+        mode_contents: app.kernel.content_modes(),
+        faces: app.session.faces(),
+    };
+    let decorations = query.decorations(view, RowRange { start: 0, end: 2 });
+    assert!(
+        decorations.iter().any(|decoration| {
+            decoration.start.char_index == 0
+                && decoration.end.char_index == "// note".len()
+                && decoration.face.foreground == Some(Color::Ansi(244))
+                && decoration.face.italic == Some(true)
+        }),
+        "{decorations:#?}"
+    );
 }
 
 fn editor_cid() -> ContentId {
@@ -1116,6 +1204,8 @@ fn text_presentation(view: &ViewData) -> &TextPresentation {
 #[tokio::test(flavor = "multi_thread")]
 async fn sessions_sharing_one_kernel_keep_client_state_independent() {
     let mut app = make_app(vec![], None);
+    let first_view = view_id(&app, app.session.focused());
+    let editor_modes = app.session.view_modes().mode_names(first_view);
     let (contents, modes, mode_contents) = app.kernel.mode_attachment_parts();
     let mut second = create_editor_session(
         contents,
@@ -1125,8 +1215,8 @@ async fn sessions_sharing_one_kernel_keep_client_state_independent() {
         20,
         editor_cid(),
         ContentId(1),
+        editor_modes,
     );
-    let first_view = view_id(&app, app.session.focused());
     let second_view = view_for_space(second.scene(), second.focused()).unwrap();
 
     second.resize(100, 30);

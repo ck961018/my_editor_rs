@@ -27,6 +27,7 @@ impl KeyModifiers {
             shift: false,
         }
     }
+    #[cfg(test)]
     pub fn shift() -> Self {
         Self {
             ctrl: false,
@@ -91,9 +92,11 @@ impl KeyEvent {
     pub fn ctrl(c: char) -> Self {
         Self::modified(KeyCode::Char(c.to_ascii_lowercase()), KeyModifiers::ctrl())
     }
+    #[cfg(test)]
     pub fn arrow(arrow: ArrowKey) -> Self {
         Self::plain(KeyCode::Arrow(arrow))
     }
+    #[cfg(test)]
     pub fn shift_arrow(arrow: ArrowKey) -> Self {
         Self::modified(KeyCode::Arrow(arrow), KeyModifiers::shift())
     }
@@ -106,13 +109,5 @@ impl KeyEvent {
     )]
     pub fn unknown() -> Self {
         Self::plain(KeyCode::Unknown)
-    }
-    pub fn is_plain_char(&self) -> Option<char> {
-        if self.modifiers == KeyModifiers::none()
-            && let KeyCode::Char(c) = self.code
-        {
-            return Some(c);
-        }
-        None
     }
 }

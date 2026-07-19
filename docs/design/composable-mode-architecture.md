@@ -3,6 +3,10 @@
 **状态：** 已确认，基础架构已实现
 **日期：** 2026-07-18
 
+当前默认 Mode 已全部迁移为 TypeScript 插件。Rust 只持有统一 Mode contract、
+registry、state store、effect executor、后台任务和 presentation cache；不注册或
+识别任何具体编辑模式、解析器或语言。
+
 ## 1. 文档定位
 
 本文定义下一阶段的统一、可组合 Mode 架构。

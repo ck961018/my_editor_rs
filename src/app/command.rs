@@ -5,6 +5,10 @@ use crate::app::mode_name::{ModeActionName, ModeName};
 use crate::core::command::EditCommand;
 use crate::protocol::viewport::ViewportCommand;
 
+#[allow(
+    dead_code,
+    reason = "the neutral command protocol includes dynamically bound commands"
+)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     App(AppCommand),
@@ -73,6 +77,10 @@ pub enum AppCommand {
     FocusPrev,
 }
 
+#[allow(
+    dead_code,
+    reason = "script effects construct the full content command protocol indirectly"
+)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContentCommand {
     Edit(EditCommand),
@@ -86,6 +94,10 @@ pub enum ContentCommand {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContentSequence(Vec<ContentCommand>);
 
+#[allow(
+    dead_code,
+    reason = "validated command sequences remain part of the extension contract"
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ContentSequenceError {
     index: usize,
@@ -98,6 +110,10 @@ pub(crate) enum ContentCommandContext {
 }
 
 impl ContentCommand {
+    #[allow(
+        dead_code,
+        reason = "validated command sequences remain part of the extension contract"
+    )]
     pub fn try_sequence(commands: Vec<Self>) -> Result<Self, ContentSequenceError> {
         ContentSequence::try_new(commands).map(Self::Sequence)
     }
@@ -113,6 +129,10 @@ impl ContentCommand {
 }
 
 impl ContentSequence {
+    #[allow(
+        dead_code,
+        reason = "validated command sequences remain part of the extension contract"
+    )]
     fn try_new(commands: Vec<ContentCommand>) -> Result<Self, ContentSequenceError> {
         if let Some(index) = commands
             .iter()
@@ -140,6 +160,10 @@ impl fmt::Display for ContentSequenceError {
 
 impl std::error::Error for ContentSequenceError {}
 
+#[allow(
+    dead_code,
+    reason = "script transaction effects map onto the full transaction protocol"
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransactionCommand {
     Begin,

@@ -4,18 +4,30 @@ use std::time::{Duration, Instant};
 use crate::core::keymap::Keymap;
 use crate::protocol::key_event::KeyEvent;
 
+#[allow(
+    dead_code,
+    reason = "dynamic modes may opt into host-managed pending input"
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimeoutPolicy {
     After(Duration),
     Never,
 }
 
+#[allow(
+    dead_code,
+    reason = "dynamic modes may opt into host-managed pending input"
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputStatus {
     Ready,
     Awaiting(TimeoutPolicy),
 }
 
+#[allow(
+    dead_code,
+    reason = "dynamic modes may capture, consume, or emit raw input"
+)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InputDecision<A> {
     Pass,

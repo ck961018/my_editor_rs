@@ -13,10 +13,6 @@ futures = "0.3"
 taffy = "0.11"
 tempfile = "3"
 unicode-width = "0.2"
-tree-sitter = "0.26"
-tree-sitter-highlight = "0.26"
-tree-sitter-md = "0.5"
-tree-sitter-rust = "0.24"
 serde_json = "1"
 deno_ast = { version = "0.50.3", features = ["transpiling"] }
 v8 = { version = "=149.3.0", default-features = false, features = [

@@ -3,6 +3,7 @@ use std::io;
 
 use crate::app::kernel::Kernel;
 use crate::app::mode::{Mode, ModeRegistry};
+#[cfg(test)]
 use crate::app::mode_name::ModeName;
 use crate::app::script::ScriptMode;
 use crate::app::session::{ClientSession, EditorSessionInit, InitialView};
@@ -54,7 +55,7 @@ pub(super) fn bootstrap_editor(
     let status_content = ids.content();
     let editor_view = ids.view();
     let status_view = ids.view();
-    let mut editor_modes = vec![ModeName::new("vim"), ModeName::new("tree-sitter")];
+    let mut editor_modes = Vec::new();
 
     let mut contents = ContentStore::default();
     contents
@@ -66,7 +67,7 @@ pub(super) fn bootstrap_editor(
             Content::StatusBar(StatusBar::new(editor_content)),
         )
         .expect("bootstrap allocates unique content ids");
-    let mut modes = ModeRegistry::builtin();
+    let mut modes = ModeRegistry::new();
     for mode in script_modes {
         let name = mode.name().clone();
         if modes.resolve_mode(&name).is_some() {
@@ -121,6 +122,10 @@ pub(super) fn bootstrap_editor(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "test helper exposes the editor session's independent inputs"
+)]
 pub(super) fn create_editor_session(
     contents: &ContentStore,
     modes: &ModeRegistry,
@@ -129,6 +134,7 @@ pub(super) fn create_editor_session(
     height: usize,
     editor_content: ContentId,
     status_content: ContentId,
+    editor_modes: Vec<ModeName>,
 ) -> ClientSession {
     let mut ids = BootstrapIds::default();
     let editor_view = ids.view();
@@ -143,7 +149,7 @@ pub(super) fn create_editor_session(
             editor: InitialView {
                 view: editor_view,
                 content: editor_content,
-                modes: vec![ModeName::new("vim")],
+                modes: editor_modes,
             },
             status: InitialView {
                 view: status_view,
@@ -170,11 +176,19 @@ mod tests {
         contents
             .insert(status, Content::StatusBar(StatusBar::new(editor)))
             .unwrap();
-        let modes = ModeRegistry::builtin();
+        let modes = ModeRegistry::new();
         let mut mode_contents = crate::app::mode::ModeContentStore::default();
 
-        let session =
-            create_editor_session(&contents, &modes, &mut mode_contents, 40, 5, editor, status);
+        let session = create_editor_session(
+            &contents,
+            &modes,
+            &mut mode_contents,
+            40,
+            5,
+            editor,
+            status,
+            Vec::new(),
+        );
 
         assert_eq!(session.views()[&ViewId(0)].content(), editor);
         assert_eq!(session.views()[&ViewId(1)].content(), status);
