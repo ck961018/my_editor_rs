@@ -116,6 +116,8 @@ Absolute paths, parent traversal, network access, timers, and Node APIs are
 not provided.
 
 The mode's `content.job` callback returns a JSON message, slot, and version.
+Set `includeText: true` to add the current document text to the worker message
+off the UI thread. The message must then be an object without a `text` field.
 The existing Mode job scheduler runs the worker off the UI thread. One job per
 `(Mode, Content, slot)` runs at a time, and only the latest queued request is
 kept. `content.applyJob` validates the generation and Content revision before

@@ -67,27 +67,32 @@ impl<F: Frontend> App<F> {
                 .session
                 .next_input_deadline(self.kernel.content_modes(), self.kernel.contents());
             let cancellation = self.kernel.cancellation_token();
-            tokio::select! {
+            let should_render = tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => break,
                 _ = wait_for_input_deadline(input_deadline) => {
                     self.handle_input_timeout()?;
+                    true
                 }
                 message = self.kernel.receive_message() => {
                     if let Some(message) = message {
-                        self.handle_app_message(message)?;
+                        self.handle_app_message(message)?
                     } else {
                         self.kernel.cancel();
+                        false
                     }
                 }
                 ev = self.frontend.next_event() => {
                     match ev? {
                         Some(event) => self.handle_event(event).await?,
-                        None => self.kernel.cancel(),
+                        None => {
+                            self.kernel.cancel();
+                            false
+                        }
                     }
                 }
-            }
-            if !self.kernel.is_cancelled() {
+            };
+            if should_render && !self.kernel.is_cancelled() {
                 self.render()?;
             }
         }
@@ -112,15 +117,22 @@ impl<F: Frontend> App<F> {
         Ok(())
     }
 
-    pub(super) async fn handle_event(&mut self, event: FrontendEvent) -> io::Result<()> {
-        match event {
-            FrontendEvent::Resize(r) => self.session.resize(r.width, r.height),
+    pub(super) async fn handle_event(&mut self, event: FrontendEvent) -> io::Result<bool> {
+        let render = match event {
+            FrontendEvent::Resize(r) => {
+                self.session.resize(r.width, r.height);
+                true
+            }
             FrontendEvent::Key(k) => {
                 self.process_input_queue(VecDeque::from([DispatchInput::Normal(k)]))?;
+                true
             }
-            FrontendEvent::QuitRequest => self.kernel.cancel(),
-        }
-        Ok(())
+            FrontendEvent::QuitRequest => {
+                self.kernel.cancel();
+                false
+            }
+        };
+        Ok(render)
     }
 
     fn process_input_queue(&mut self, mut queue: VecDeque<DispatchInput>) -> io::Result<()> {

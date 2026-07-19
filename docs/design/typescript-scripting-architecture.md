@@ -13,10 +13,15 @@
 - Vim 输入行为和语法高亮均由内嵌 TypeScript 插件定义；
 - Script Mode 可定义 Face、decoration、view policy 和原始输入 action；
 - Content 分析使用持久的独立 V8 worker isolate；
+- Tree-sitter worker 按 Content 保留旧语法树，并以最小文本差异执行增量解析；
 - worker 只接收结构化消息和插件目录内的只读内嵌资源；
 - worker Promise 由显式 microtask checkpoint 驱动，并受取消和超时约束；
 - 后台任务复用通用 `(ModeId, ContentId, slot)` 调度和最新版本合并；
+- 新版本后台任务会取消仍在运行的旧版本，不执行过期的完整分析；
+- `content.job` 通过 `includeText` 在 worker 线程构造全文消息，UI 线程只捕获
+  低成本 TextSnapshot；
 - 渲染只读取 Rust 侧缓存的 presentation snapshot，不同步进入 V8；
+- decoration 缓存按可见行裁剪后再交给 TUI；
 - 文本变化期间旧 decoration 会经过位置映射，直到新 revision 安装。
 - 输入和显式 action 通过 callback-scoped native functions 调用 Rust 原语；
 - 原语直接暂存类型化 `ModeEffect`，不使用字符串命令或 `ScriptEffect` DTO；
@@ -263,6 +268,9 @@ native functions。
 
 不在每次 callback 时把全文转成一个 JavaScript string。快照由 Rust 持有，脚本
 通过窄范围查询读取所需内容；只有请求的文本跨 V8 边界。
+
+需要分析全文的后台 job 返回 `includeText: true`。宿主捕获 TextSnapshot，并在
+worker 线程上把正文加入消息的 `text` 字段，避免阻塞输入线程。
 
 ## 12. 脚本坐标
 

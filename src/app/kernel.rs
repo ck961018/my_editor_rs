@@ -279,20 +279,29 @@ impl Kernel {
         };
         let pending = PendingModeJob { version, run };
         let entry = self.mode_jobs.entry(key.clone()).or_default();
-        if entry.running.is_some() {
-            if entry.running == Some(version) {
+        if let Some(running) = entry.running.as_ref() {
+            if running.version == version {
                 return;
             }
+            running.cancellation.cancel();
             entry.queued = Some(pending);
             return;
         }
-        entry.running = Some(version);
-        self.spawn_mode_job(key, pending);
+        let cancellation = self.tasks.cancellation_token().child_token();
+        entry.running = Some(RunningModeJob {
+            version,
+            cancellation: cancellation.clone(),
+        });
+        self.spawn_mode_job(key, pending, cancellation);
     }
 
-    fn spawn_mode_job(&self, key: ModeJobKey, pending: PendingModeJob) {
+    fn spawn_mode_job(
+        &self,
+        key: ModeJobKey,
+        pending: PendingModeJob,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) {
         let tx = self.message_tx.clone();
-        let cancellation = self.tasks.cancellation_token();
         self.tasks.spawn_detached(async move {
             let version = pending.version;
             let result = tokio::task::spawn_blocking(move || (pending.run)(cancellation))
@@ -315,7 +324,7 @@ impl Kernel {
         let Some(slot) = self.mode_jobs.get_mut(&key) else {
             return false;
         };
-        if slot.running != Some(version) {
+        if slot.running.as_ref().map(|running| running.version) != Some(version) {
             return false;
         }
         slot.running = None;
@@ -328,8 +337,12 @@ impl Kernel {
         );
         let queued = slot.queued.take();
         if let Some(pending) = queued {
-            slot.running = Some(pending.version);
-            self.spawn_mode_job(key, pending);
+            let cancellation = self.tasks.cancellation_token().child_token();
+            slot.running = Some(RunningModeJob {
+                version: pending.version,
+                cancellation: cancellation.clone(),
+            });
+            self.spawn_mode_job(key, pending, cancellation);
         }
         changed
     }
@@ -466,8 +479,13 @@ struct CommandTransaction {
 
 #[derive(Default)]
 struct ModeJobSlot {
-    running: Option<u64>,
+    running: Option<RunningModeJob>,
     queued: Option<PendingModeJob>,
+}
+
+struct RunningModeJob {
+    version: u64,
+    cancellation: tokio_util::sync::CancellationToken,
 }
 
 struct PendingModeJob {
@@ -499,4 +517,50 @@ async fn atomic_write(snapshot: SaveSnapshot) -> io::Result<()> {
     })
     .await
     .map_err(io::Error::other)?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::mode_name::ModeName;
+
+    struct TestMode(ModeName);
+
+    impl crate::app::mode::Mode for TestMode {
+        fn name(&self) -> &ModeName {
+            &self.0
+        }
+
+        fn actions(&self) -> &[crate::app::mode_name::ModeActionName] {
+            &[]
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn newer_mode_job_cancels_the_running_version() {
+        let mut modes = ModeRegistry::new();
+        let mode = modes.register(TestMode(ModeName::new("test")));
+        let mut kernel = Kernel::new(ContentStore::default(), modes, HashMap::new());
+        let key = ModeJobKey {
+            mode,
+            content: ContentId(0),
+            slot: "parse".to_owned(),
+        };
+        let request = |version| {
+            ModeJobRequest::new("parse", version, move |cancellation| {
+                while !cancellation.is_cancelled() {
+                    std::thread::yield_now();
+                }
+                Err("cancelled".to_owned())
+            })
+        };
+
+        kernel.queue_mode_job(mode, ContentId(0), request(1));
+        kernel.queue_mode_job(mode, ContentId(0), request(2));
+
+        let slot = &kernel.mode_jobs[&key];
+        assert!(slot.running.as_ref().unwrap().cancellation.is_cancelled());
+        assert_eq!(slot.queued.as_ref().unwrap().version, 2);
+        kernel.cancel();
+    }
 }

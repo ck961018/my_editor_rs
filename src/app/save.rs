@@ -7,8 +7,8 @@ use crate::frontend::Frontend;
 use crate::protocol::ids::ContentId;
 
 impl<F: Frontend> App<F> {
-    pub(super) fn handle_app_message(&mut self, message: AppMessage) -> io::Result<()> {
-        match message {
+    pub(super) fn handle_app_message(&mut self, message: AppMessage) -> io::Result<bool> {
+        let changed = match message {
             AppMessage::SaveCompleted {
                 content,
                 revision,
@@ -21,6 +21,7 @@ impl<F: Frontend> App<F> {
                 if let Some(snapshot) = queued {
                     self.kernel.queue_save(content, snapshot);
                 }
+                true
             }
             AppMessage::ModeJobCompleted {
                 key,
@@ -28,12 +29,14 @@ impl<F: Frontend> App<F> {
                 result,
             } => {
                 let content = key.content;
-                if self.kernel.complete_mode_job(key, version, result) {
+                let changed = self.kernel.complete_mode_job(key, version, result);
+                if changed {
                     self.session.touch_content_views(content);
                 }
+                changed
             }
-        }
-        Ok(())
+        };
+        Ok(changed)
     }
 
     pub(super) fn handle_content_result(&mut self, content: ContentId, result: ContentResult) {

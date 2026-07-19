@@ -489,6 +489,20 @@ fn paint_line_with_highlight(
     let mut reverse_on = false;
     let mut active_face = Face::default();
     let mut previous_char_was_visible = false;
+    let mut decoration_events: Vec<_> = decorations
+        .iter()
+        .enumerate()
+        .filter(|(_, decoration)| decoration.start < decoration.end)
+        .flat_map(|(index, decoration)| {
+            [
+                (decoration.start, true, index),
+                (decoration.end, false, index),
+            ]
+        })
+        .collect();
+    decoration_events.sort_by_key(|(col, entering, _)| (*col, *entering));
+    let mut next_event = 0;
+    let mut active_decorations = Vec::new();
 
     for (logical_col, source) in content.chars().enumerate() {
         let ch = terminal_char(source);
@@ -523,10 +537,19 @@ fn paint_line_with_highlight(
         let highlighted = hi.is_some_and(|(start, end)| logical_col >= start && logical_col < end);
         let reverse_highlighted = highlighted && selection_face == &Face::default();
         let mut face = Face::default();
-        for decoration in decorations {
-            if logical_col >= decoration.start && logical_col < decoration.end {
-                face.overlay(&decoration.face);
+        while let Some(&(col, entering, index)) = decoration_events.get(next_event)
+            && col <= logical_col
+        {
+            if entering {
+                let position = active_decorations.partition_point(|active| *active < index);
+                active_decorations.insert(position, index);
+            } else if let Ok(position) = active_decorations.binary_search(&index) {
+                active_decorations.remove(position);
             }
+            next_event += 1;
+        }
+        for &index in &active_decorations {
+            face.overlay(&decorations[index].face);
         }
         if highlighted {
             face.overlay(selection_face);
@@ -1406,6 +1429,43 @@ mod tests {
         let output = String::from_utf8(out.into_inner()).unwrap();
         assert!(output.contains("\x1b[38;5;1m"), "got: {output:?}");
         assert!(output.contains("\x1b[7m"), "got: {output:?}");
+    }
+
+    #[test]
+    fn overlapping_decorations_restore_the_outer_face() {
+        let mut out = Output::new(Vec::new());
+        paint_line_with_highlight(
+            &mut out,
+            "abc",
+            0,
+            3,
+            None,
+            &Face::default(),
+            &[
+                RowDecoration {
+                    start: 0,
+                    end: 3,
+                    face: Face {
+                        foreground: Some(crate::protocol::content_query::Color::Ansi(1)),
+                        ..Face::default()
+                    },
+                },
+                RowDecoration {
+                    start: 1,
+                    end: 2,
+                    face: Face {
+                        foreground: Some(crate::protocol::content_query::Color::Ansi(2)),
+                        ..Face::default()
+                    },
+                },
+            ],
+        )
+        .unwrap();
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        let outer = output.match_indices("\x1b[38;5;1m").collect::<Vec<_>>();
+        assert_eq!(outer.len(), 2, "got: {output:?}");
+        assert!(output.contains("\x1b[38;5;2m"), "got: {output:?}");
     }
 
     #[test]

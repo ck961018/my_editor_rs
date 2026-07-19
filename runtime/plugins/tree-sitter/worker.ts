@@ -30,7 +30,13 @@ global.URL = class {
 (0, eval)(editor.resources.readText("vendor/tree-sitter.js"));
 
 const TreeSitter = global.Parser as any;
-const parsers = new Map<string, any>();
+interface ParserState {
+  parser: any;
+  tree: any | null;
+  text: string;
+}
+
+const parsers = new Map<string, ParserState>();
 
 const ready = (async () => {
   await TreeSitter.Parser.init({
@@ -102,15 +108,65 @@ function textPositions(text: string): Map<number, EditorPosition> {
   return positions;
 }
 
-function parserFor(contentId: number, name: string, language: any): any {
+function parserFor(contentId: number, name: string, language: any): ParserState {
   const key = `${contentId}:${name}`;
-  let parser = parsers.get(key);
-  if (parser === undefined) {
-    parser = new TreeSitter.Parser();
+  let state = parsers.get(key);
+  if (state === undefined) {
+    const parser = new TreeSitter.Parser();
     parser.setLanguage(language);
-    parsers.set(key, parser);
+    state = { parser, tree: null, text: "" };
+    parsers.set(key, state);
   }
-  return parser;
+  return state;
+}
+
+function pointAt(text: string, index: number): { row: number; column: number } {
+  let row = 0;
+  let lineStart = 0;
+  for (let offset = 0; offset < index; offset += 1) {
+    if (text[offset] === "\n") {
+      row += 1;
+      lineStart = offset + 1;
+    }
+  }
+  return { row, column: index - lineStart };
+}
+
+function editTree(tree: any, previous: string, next: string): void {
+  let start = 0;
+  const shared = Math.min(previous.length, next.length);
+  while (start < shared && previous[start] === next[start]) start += 1;
+  if (start > 0 && /[\uDC00-\uDFFF]/.test(previous[start] ?? next[start] ?? "")) {
+    start -= 1;
+  }
+
+  let suffix = 0;
+  while (
+    suffix < previous.length - start &&
+    suffix < next.length - start &&
+    previous[previous.length - suffix - 1] === next[next.length - suffix - 1]
+  ) {
+    suffix += 1;
+  }
+  if (
+    suffix > 0 &&
+    /[\uD800-\uDBFF]/.test(
+      previous[previous.length - suffix] ?? next[next.length - suffix] ?? "",
+    )
+  ) {
+    suffix -= 1;
+  }
+
+  const oldEnd = previous.length - suffix;
+  const newEnd = next.length - suffix;
+  tree.edit({
+    startIndex: start,
+    oldEndIndex: oldEnd,
+    newEndIndex: newEnd,
+    startPosition: pointAt(previous, start),
+    oldEndPosition: pointAt(previous, oldEnd),
+    newEndPosition: pointAt(next, newEnd),
+  });
 }
 
 function captureSpans(
@@ -182,13 +238,23 @@ function highlightRust(
   language: any,
   query: any,
 ): DecorationSpan[] {
-  const parser = parserFor(contentId, base === 0 ? "rust" : "rust-injection", language);
-  const tree = parser.parse(source);
+  const state = parserFor(
+    contentId,
+    base === 0 ? "rust" : `rust-injection:${base}`,
+    language,
+  );
+  const oldTree = state.tree?.copy() ?? null;
+  if (oldTree !== null) editTree(oldTree, state.text, source);
+  state.parser.reset();
+  const tree = state.parser.parse(source, oldTree);
+  oldTree?.delete();
   if (tree === null) {
     throw new Error("Tree-sitter parse returned no tree");
   }
   const spans = captureSpans(query, tree.rootNode, positions, base);
-  tree.delete();
+  state.tree?.delete();
+  state.tree = tree;
+  state.text = source;
   return spans;
 }
 

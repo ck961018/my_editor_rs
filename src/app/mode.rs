@@ -679,6 +679,7 @@ pub(crate) struct ModeContentInstance {
     state: Box<dyn ModeState>,
     attachments: usize,
     faulted: bool,
+    background_job_dirty: bool,
 }
 
 impl ModeContentInstance {
@@ -710,12 +711,16 @@ impl ModeContentInstance {
             .get(usize::try_from(action.0).expect("mode action index overflow"))
             .expect("mode action id belongs to registered mode");
         let context = ModeContentContext::new(self.content, contents);
-        self.registered.mode().execute_content_with_arguments(
+        let result = self.registered.mode().execute_content_with_arguments(
             self.state.as_mut(),
             &context,
             action,
             arguments,
-        )
+        );
+        if result.is_ok() {
+            self.background_job_dirty = true;
+        }
+        result
     }
 
     fn notify_changed(&mut self, contents: &ContentStore, change: &ContentChange) {
@@ -732,13 +737,16 @@ impl ModeContentInstance {
         {
             self.restore(snapshot);
             self.faulted = true;
+        } else {
+            self.background_job_dirty = true;
         }
     }
 
     fn take_background_job(&mut self, contents: &ContentStore) -> Option<ModeJobRequest> {
-        if self.faulted {
+        if self.faulted || !self.background_job_dirty {
             return None;
         }
+        self.background_job_dirty = false;
         let context = ModeContentContext::new(self.content, contents);
         self.registered
             .mode()
@@ -762,7 +770,10 @@ impl ModeContentInstance {
             version,
             result,
         ) {
-            Ok(changed) => changed,
+            Ok(changed) => {
+                self.background_job_dirty |= changed;
+                changed
+            }
             Err(_) => {
                 self.restore(snapshot);
                 self.faulted = true;
@@ -853,6 +864,7 @@ impl ModeContentStore {
                 state: mode.registered.mode().new_content_state(),
                 attachments: 1,
                 faulted: false,
+                background_job_dirty: true,
             },
         );
     }
@@ -881,6 +893,7 @@ impl ModeContentStore {
                     state,
                     attachments: 1,
                     faulted,
+                    background_job_dirty: !faulted,
                 },
             );
         }
@@ -1465,12 +1478,66 @@ impl ModeViewStore {
         let content_state = mode_contents
             .instance_mut(mode, context.content_id())
             .expect("attached mode has content state");
-        instance.execute_with_context(
+        let result = instance.execute_with_context(
             content_state.state.as_mut(),
             mode,
             action,
             &command.arguments,
             context,
-        )
+        );
+        if result.is_ok() {
+            content_state.background_job_dirty = true;
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    struct CountingJobMode {
+        name: ModeName,
+        calls: Rc<Cell<usize>>,
+    }
+
+    impl Mode for CountingJobMode {
+        fn name(&self) -> &ModeName {
+            &self.name
+        }
+
+        fn actions(&self) -> &[ModeActionName] {
+            &[]
+        }
+
+        fn take_background_job(
+            &self,
+            _state: &mut dyn ModeState,
+            _context: &ModeContentContext<'_>,
+        ) -> Option<ModeJobRequest> {
+            self.calls.set(self.calls.get() + 1);
+            None
+        }
+    }
+
+    #[test]
+    fn unchanged_content_does_not_poll_background_jobs_again() {
+        let calls = Rc::new(Cell::new(0));
+        let name = ModeName::new("counting-jobs");
+        let mut registry = ModeRegistry::new();
+        registry.register(CountingJobMode {
+            name: name.clone(),
+            calls: calls.clone(),
+        });
+        let mode = registry.instantiate(&name).unwrap();
+        let mut content_modes = ModeContentStore::default();
+        content_modes.attach_view(ContentId(1), &mode);
+        let contents = ContentStore::default();
+
+        assert!(content_modes.take_background_jobs(&contents).is_empty());
+        assert!(content_modes.take_background_jobs(&contents).is_empty());
+        assert_eq!(calls.get(), 1);
     }
 }

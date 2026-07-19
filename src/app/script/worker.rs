@@ -441,4 +441,39 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn tree_sitter_worker_recovers_after_a_cancelled_request() {
+        let worker =
+            ScriptWorker::start("tree-sitter/".to_owned(), "worker.ts".to_owned()).unwrap();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let cancelled = worker.request(
+            serde_json::json!({
+                "contentId": 9,
+                "generation": 0,
+                "language": "rust",
+                "revision": 0,
+                "text": "fn cancelled() {}\n",
+            }),
+            cancellation,
+        );
+        assert!(cancelled.is_err());
+
+        let result = worker
+            .request(
+                serde_json::json!({
+                    "contentId": 9,
+                    "generation": 1,
+                    "language": "rust",
+                    "revision": 1,
+                    "text": "fn recovered() {}\n",
+                }),
+                CancellationToken::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result["revision"], 1);
+        assert!(!result["spans"].as_array().unwrap().is_empty());
+    }
 }

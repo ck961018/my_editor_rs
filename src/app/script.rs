@@ -252,10 +252,10 @@ impl ScriptHost {
         content_state.data = next_content;
         view_state.data = next_view;
         if let Some(decorations) = content_decorations {
-            content_state.decorations = Arc::new(decorations);
+            content_state.decorations = DecorationSet::new(decorations);
         }
         if let Some(decorations) = view_decorations {
-            view_state.decorations = Arc::new(decorations);
+            view_state.decorations = DecorationSet::new(decorations);
         }
         Ok(result)
     }
@@ -295,7 +295,7 @@ impl ScriptHost {
         let v8_context = self.context.clone();
         v8::scope_with_context!(scope, &mut self.isolate, v8_context);
         v8::tc_scope!(let scope, scope);
-        let argument = content_context_object(scope, context)?;
+        let argument = content_context_object(scope, context, true)?;
         let callback = v8::Local::new(scope, callback);
         let receiver = v8::undefined(scope).into();
         let value = callback
@@ -314,7 +314,7 @@ impl ScriptHost {
         let v8_context = self.context.clone();
         v8::scope_with_context!(scope, &mut self.isolate, v8_context);
         v8::tc_scope!(let scope, scope);
-        let argument = content_context_object(scope, context)?;
+        let argument = content_context_object(scope, context, false)?;
         let content_state = json_to_v8(scope, &state.data)?;
         set_value(scope, argument, "contentState", content_state);
         let change_value = content_change_to_v8(scope, change)?;
@@ -340,7 +340,7 @@ impl ScriptHost {
         let v8_context = self.context.clone();
         v8::scope_with_context!(scope, &mut self.isolate, v8_context);
         v8::tc_scope!(let scope, scope);
-        let argument = content_context_object(scope, context)?;
+        let argument = content_context_object(scope, context, false)?;
         let content_state = json_to_v8(scope, &state.data)?;
         set_value(scope, argument, "contentState", content_state);
         let callback = v8::Local::new(scope, callback);
@@ -356,7 +356,15 @@ impl ScriptHost {
             return Ok(None);
         }
         let value = v8_to_json(scope, value, "content job")?;
-        ScriptJob::from_json(value).map(Some)
+        let mut job = ScriptJob::from_json(value)?;
+        if job.include_text {
+            job.text_snapshot = Some(
+                context
+                    .text_snapshot()
+                    .ok_or_else(|| ScriptError::new("content job text requires text content"))?,
+            );
+        }
+        Ok(Some(job))
     }
 
     fn apply_content_job(
@@ -370,7 +378,7 @@ impl ScriptHost {
         let v8_context = self.context.clone();
         v8::scope_with_context!(scope, &mut self.isolate, v8_context);
         v8::tc_scope!(let scope, scope);
-        let argument = content_context_object(scope, context)?;
+        let argument = content_context_object(scope, context, false)?;
         let content_state = json_to_v8(scope, &state.data)?;
         set_value(scope, argument, "contentState", content_state);
         set_number(scope, argument, "jobVersion", version as f64);
@@ -394,7 +402,7 @@ impl ScriptHost {
         let changed = next != state.data || decorations.is_some();
         state.data = next;
         if let Some(decorations) = decorations {
-            state.decorations = Arc::new(decorations);
+            state.decorations = DecorationSet::new(decorations);
         }
         scope.perform_microtask_checkpoint();
         Ok(changed)
@@ -451,13 +459,62 @@ struct ScriptModeDefinition {
 #[derive(Clone)]
 struct ScriptModeState {
     data: serde_json::Value,
-    decorations: Arc<Vec<NamedTextDecoration>>,
+    decorations: DecorationSet,
+}
+
+#[derive(Clone, Default)]
+struct DecorationSet {
+    values: Arc<Vec<NamedTextDecoration>>,
+    prefix_max_end: Arc<Vec<usize>>,
+}
+
+impl DecorationSet {
+    fn new(values: Vec<NamedTextDecoration>) -> Self {
+        let mut max_end = 0;
+        let prefix_max_end = values
+            .iter()
+            .map(|decoration| {
+                max_end = max_end.max(decoration.end.char_index);
+                max_end
+            })
+            .collect();
+        Self {
+            values: Arc::new(values),
+            prefix_max_end: Arc::new(prefix_max_end),
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &NamedTextDecoration> {
+        self.values.iter()
+    }
+
+    fn visible(
+        &self,
+        snapshot: &crate::core::text_snapshot::TextSnapshot,
+        rows: RowRange,
+    ) -> Vec<NamedTextDecoration> {
+        let range = snapshot.char_range_for_rows(rows.start, rows.end);
+        if range.is_empty() {
+            return Vec::new();
+        }
+        let end = self
+            .values
+            .partition_point(|decoration| decoration.start.char_index < range.end);
+        let start = self.prefix_max_end[..end].partition_point(|end| *end <= range.start);
+        self.values[start..end]
+            .iter()
+            .filter(|decoration| decoration.end.char_index > range.start)
+            .cloned()
+            .collect()
+    }
 }
 
 struct ScriptJob {
     slot: String,
     version: u64,
     message: serde_json::Value,
+    include_text: bool,
+    text_snapshot: Option<crate::core::text_snapshot::TextSnapshot>,
 }
 
 enum ScriptJobOutput {
@@ -486,10 +543,31 @@ impl ScriptJob {
             .get("message")
             .cloned()
             .ok_or_else(|| ScriptError::new("content job.message is required"))?;
+        let include_text = object
+            .get("includeText")
+            .map(|value| {
+                value
+                    .as_bool()
+                    .ok_or_else(|| ScriptError::new("content job.includeText must be a boolean"))
+            })
+            .transpose()?
+            .unwrap_or(false);
+        if include_text {
+            let message = message.as_object().ok_or_else(|| {
+                ScriptError::new("content job.message must be an object when includeText is true")
+            })?;
+            if message.contains_key("text") {
+                return Err(ScriptError::new(
+                    "content job.message.text is reserved when includeText is true",
+                ));
+            }
+        }
         Ok(Self {
             slot,
             version,
             message,
+            include_text,
+            text_snapshot: None,
         })
     }
 }
@@ -498,7 +576,7 @@ impl ScriptModeState {
     fn new(data: serde_json::Value) -> Self {
         Self {
             data,
-            decorations: Arc::new(Vec::new()),
+            decorations: DecorationSet::default(),
         }
     }
 }
@@ -680,7 +758,7 @@ impl Mode for ScriptMode {
                 })
             })
             .collect();
-        state.decorations = Arc::new(mapped);
+        state.decorations = DecorationSet::new(mapped);
         if let Some(callback) = self.content_changed.as_ref() {
             self.host
                 .borrow_mut()
@@ -718,15 +796,27 @@ impl Mode for ScriptMode {
             Err(error) => return Some(failed_script_job(error.to_string())),
         };
         let worker = worker.clone();
-        Some(ModeJobRequest::new(
-            job.slot,
-            job.version,
-            move |cancellation| {
-                worker.request(job.message, cancellation).map(|result| {
-                    Box::new(ScriptJobOutput::Response(result)) as Box<dyn std::any::Any + Send>
-                })
-            },
-        ))
+        let ScriptJob {
+            slot,
+            version,
+            mut message,
+            text_snapshot,
+            ..
+        } = job;
+        Some(ModeJobRequest::new(slot, version, move |cancellation| {
+            if let Some(snapshot) = text_snapshot {
+                message
+                    .as_object_mut()
+                    .expect("includeText message was validated")
+                    .insert(
+                        "text".to_owned(),
+                        serde_json::Value::String(snapshot.to_owned_string()),
+                    );
+            }
+            worker.request(message, cancellation).map(|result| {
+                Box::new(ScriptJobOutput::Response(result)) as Box<dyn std::any::Any + Send>
+            })
+        }))
     }
 
     fn apply_background_job(
@@ -772,14 +862,17 @@ impl Mode for ScriptMode {
         &self,
         content_state: &dyn ModeState,
         view_state: &dyn ModeState,
-        _context: &ModeViewContext<'_>,
-        _visible_rows: RowRange,
+        context: &ModeViewContext<'_>,
+        visible_rows: RowRange,
     ) -> Vec<NamedTextDecoration> {
+        let Some(snapshot) = context.text_snapshot() else {
+            return Vec::new();
+        };
         let mut decorations = script_state(content_state, &self.name)
-            .map(|state| state.decorations.as_ref().clone())
+            .map(|state| state.decorations.visible(&snapshot, visible_rows))
             .unwrap_or_default();
         if let Ok(state) = script_state(view_state, &self.name) {
-            decorations.extend(state.decorations.iter().cloned());
+            decorations.extend(state.decorations.visible(&snapshot, visible_rows));
         }
         decorations
     }
@@ -1624,13 +1717,14 @@ fn set_string(scope: &mut v8::PinScope, object: v8::Local<v8::Object>, name: &st
 fn content_context_object<'scope>(
     scope: &mut v8::PinScope<'scope, '_>,
     context: &ModeContentContext<'_>,
+    include_text: bool,
 ) -> Result<v8::Local<'scope, v8::Object>, ScriptError> {
     let argument = v8::Object::new(scope);
     set_number(scope, argument, "contentId", context.content_id().0 as f64);
     if let Some(revision) = context.content_revision() {
         set_number(scope, argument, "revision", revision.0 as f64);
     }
-    if let Some(snapshot) = context.text_snapshot() {
+    if include_text && let Some(snapshot) = context.text_snapshot() {
         set_string(scope, argument, "text", &snapshot.to_owned_string());
     }
     if let ContentData::DocumentStatus(status) = context.query_content(ContentQuery::DocumentStatus)
@@ -1914,6 +2008,37 @@ mod tests {
     use crate::core::content::Content;
     use crate::core::content_store::ContentStore;
     use crate::protocol::ids::{ContentId, ViewId};
+
+    #[test]
+    fn decoration_set_returns_only_spans_intersecting_visible_rows() {
+        let snapshot = crate::core::text_snapshot::TextSnapshot::new(&ropey::Rope::from_str(
+            &"a\n".repeat(100),
+        ));
+        let face = FaceName::new("syntax.test");
+        let decorations = DecorationSet::new(vec![
+            NamedTextDecoration {
+                start: crate::protocol::selection::TextOffset { char_index: 0 },
+                end: crate::protocol::selection::TextOffset { char_index: 150 },
+                face: face.clone(),
+            },
+            NamedTextDecoration {
+                start: crate::protocol::selection::TextOffset { char_index: 10 },
+                end: crate::protocol::selection::TextOffset { char_index: 20 },
+                face: face.clone(),
+            },
+            NamedTextDecoration {
+                start: crate::protocol::selection::TextOffset { char_index: 100 },
+                end: crate::protocol::selection::TextOffset { char_index: 101 },
+                face,
+            },
+        ]);
+
+        let visible = decorations.visible(&snapshot, RowRange { start: 50, end: 51 });
+
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].start.char_index, 0);
+        assert_eq!(visible[1].start.char_index, 100);
+    }
 
     #[test]
     fn transpiles_and_executes_typescript() {

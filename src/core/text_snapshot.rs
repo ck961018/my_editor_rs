@@ -18,6 +18,23 @@ impl TextSnapshot {
         self.rope.len_chars()
     }
 
+    pub fn char_range_for_rows(&self, start: usize, end: usize) -> std::ops::Range<usize> {
+        let len_lines = self.rope.len_lines();
+        let start = start.min(len_lines);
+        let end = end.min(len_lines).max(start);
+        let start = if start == len_lines {
+            self.rope.len_chars()
+        } else {
+            self.rope.line_to_char(start)
+        };
+        let end = if end == len_lines {
+            self.rope.len_chars()
+        } else {
+            self.rope.line_to_char(end)
+        };
+        start..end
+    }
+
     /// Converts a zero-based UTF-16 line/character position to a character offset.
     pub fn utf16_position_to_char(&self, line: usize, character: usize) -> Option<usize> {
         if line >= self.rope.len_lines() {
@@ -70,5 +87,14 @@ mod tests {
         assert_eq!(snapshot.utf16_position_to_char(0, 3), Some(2));
         assert_eq!(snapshot.utf16_position_to_char(1, 1), Some(5));
         assert_eq!(snapshot.utf16_position_to_char(2, 0), None);
+    }
+
+    #[test]
+    fn converts_clamped_row_ranges_to_character_offsets() {
+        let snapshot = TextSnapshot::new(&Rope::from_str("ab\n中\n"));
+
+        assert_eq!(snapshot.char_range_for_rows(1, 2), 3..5);
+        assert_eq!(snapshot.char_range_for_rows(2, usize::MAX), 5..5);
+        assert_eq!(snapshot.char_range_for_rows(99, 100), 5..5);
     }
 }

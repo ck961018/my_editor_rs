@@ -198,6 +198,7 @@ interface ModeContext<ContentState, ViewState, Arguments = ScriptData>
 interface ContentJob {
   slot: string;
   version: number;
+  includeText?: boolean;
   message: ScriptData;
 }
 

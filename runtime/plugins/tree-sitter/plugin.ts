@@ -62,8 +62,7 @@ editor.modes.define<HighlightState, null, HighlightResult>({
       if (
         state.language === null ||
         state.scheduledGeneration === state.generation ||
-        context.revision === undefined ||
-        context.text === undefined
+        context.revision === undefined
       ) {
         return;
       }
@@ -71,12 +70,12 @@ editor.modes.define<HighlightState, null, HighlightResult>({
       return {
         slot: "parse",
         version: state.generation,
+        includeText: true,
         message: {
           contentId: context.contentId,
           generation: state.generation,
           language: state.language,
           revision: context.revision,
-          text: context.text,
         },
       };
     },
