@@ -997,6 +997,21 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
         content: editor_cid(),
     })
     .unwrap();
+
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        view_modes: app.session.view_modes(),
+        mode_contents: app.kernel.content_modes(),
+        faces: app.session.faces(),
+    };
+    let decorations = query.decorations(view, RowRange { start: 0, end: 1 });
+    assert!(!decorations.iter().any(|decoration| {
+        decoration.start.char_index == 0
+            && decoration.end.char_index == 2
+            && decoration.face.foreground == Some(Color::Ansi(204))
+    }));
+
     let message = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         app.kernel.receive_message(),
@@ -1019,6 +1034,41 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
             && decoration.end.char_index == 4
             && decoration.face.foreground == Some(Color::Ansi(244))
             && decoration.face.italic == Some(true)
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn markdown_fence_uses_injected_rust_highlights() {
+    let source = "```rust\nfn embedded() {}\n```\n";
+    let file = tempfile::Builder::new().suffix(".md").tempfile().unwrap();
+    std::fs::write(file.path(), source).unwrap();
+    let mut app = make_app(vec![], file.path().to_str());
+    let view = view_id(&app, app.session.focused());
+
+    app.kernel.schedule_mode_jobs();
+    let message = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        app.kernel.receive_message(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    app.handle_app_message(message).unwrap();
+
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        view_modes: app.session.view_modes(),
+        mode_contents: app.kernel.content_modes(),
+        faces: app.session.faces(),
+    };
+    let decorations = query.decorations(view, RowRange { start: 0, end: 3 });
+    let keyword_start = source.find("fn").unwrap();
+    assert!(decorations.iter().any(|decoration| {
+        decoration.start.char_index == keyword_start
+            && decoration.end.char_index == keyword_start + 2
+            && decoration.face.foreground == Some(Color::Ansi(204))
+            && decoration.face.bold == Some(true)
     }));
 }
 

@@ -1,5 +1,3 @@
-use std::ops::Range;
-
 use ropey::Rope;
 
 use crate::core::transaction::{TextChangeSet, TextTransactionError};
@@ -47,12 +45,6 @@ impl TextSnapshot {
         } else {
             self.rope.line_to_byte(row)
         }
-    }
-
-    pub fn byte_slice(&self, range: Range<usize>) -> Vec<u8> {
-        let start = range.start.min(self.rope.len_bytes());
-        let end = range.end.min(self.rope.len_bytes()).max(start);
-        self.rope.byte_slice(start..end).to_string().into_bytes()
     }
 
     pub fn apply(&self, change: &TextChangeSet) -> Result<Self, TextTransactionError> {

@@ -700,7 +700,7 @@ impl ModeRegistry {
     pub(crate) fn builtin() -> Self {
         let mut registry = Self::new();
         registry.register(VimMode::new());
-        registry.register(TreeSitterMode::rust());
+        registry.register(TreeSitterMode::new());
         registry
     }
 

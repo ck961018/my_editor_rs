@@ -47,10 +47,7 @@ pub(super) fn bootstrap_editor(buffer: Buffer, width: usize, height: usize) -> E
     let status_content = ids.content();
     let editor_view = ids.view();
     let status_view = ids.view();
-    let mut editor_modes = vec![ModeName::new("vim")];
-    if buffer.path().and_then(|path| path.extension()) == Some(std::ffi::OsStr::new("rs")) {
-        editor_modes.push(ModeName::new("tree-sitter-rust"));
-    }
+    let editor_modes = vec![ModeName::new("vim"), ModeName::new("tree-sitter")];
 
     let mut contents = ContentStore::default();
     contents

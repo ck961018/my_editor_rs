@@ -496,6 +496,16 @@ Tokio 主循环。
 
 后台失败保留上一份有效状态，不回滚用户文本，也不进入 undo/redo 历史。
 
+Tree-sitter Mode 使用共享、只读的语言注册表保存 grammar、highlight query、
+injection query、文件扩展名和注入别名。宿主语言和嵌入语言使用同一份配置，
+注入解析由后台任务递归完成；未知语言只跳过对应注入层，不影响宿主语法树。
+
+content state 保存增量宿主语法树和按字节排序的高亮快照。高亮快照使用共享
+所有权参与 execution frame checkpoint，View 查询只二分定位并复制可见范围的
+decoration。App 只附加通用 Tree-sitter Mode，不按具体语言分支。
+文本 revision 变化时立即丢弃旧高亮快照，只安装同 revision 的后台结果，避免
+将旧快照的字节区间用于新文本。
+
 ## 18. 呈现策略
 
 Mode 呈现分为独占 policy 和可叠加 decoration。
