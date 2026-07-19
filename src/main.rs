@@ -22,7 +22,7 @@ async fn main() -> io::Result<()> {
 
     let (width, height) = term_size().unwrap_or((80, 24));
     let frontend = TuiFrontend::new(Output::new(io::stdout()));
-    let mut app = App::new(path, width as usize, height as usize, frontend)?;
+    let mut app = App::new_configured(path, width as usize, height as usize, frontend)?;
     app.run().await?;
     Ok(())
 }

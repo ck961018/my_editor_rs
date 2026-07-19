@@ -1005,11 +1005,17 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
         mode_contents: app.kernel.content_modes(),
         faces: app.session.faces(),
     };
-    let decorations = query.decorations(view, RowRange { start: 0, end: 1 });
+    let decorations = query.decorations(view, RowRange { start: 0, end: 2 });
     assert!(!decorations.iter().any(|decoration| {
         decoration.start.char_index == 0
             && decoration.end.char_index == 2
             && decoration.face.foreground == Some(Color::Ansi(204))
+    }));
+    assert!(decorations.iter().any(|decoration| {
+        decoration.start.char_index == 5
+            && decoration.end.char_index == 7
+            && decoration.face.foreground == Some(Color::Ansi(204))
+            && decoration.face.bold == Some(true)
     }));
 
     let message = tokio::time::timeout(

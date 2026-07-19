@@ -13,7 +13,7 @@
 
 技术栈：
 
-- Rust 2024，MSRV 1.85。
+- Rust 2024，MSRV 1.88。
 - `ropey` 负责文本缓冲区。
 - `crossterm` 负责终端 IO、原始模式、VT 序列和事件流。
 - `tokio` + `futures` 负责异步主循环和后台保存。

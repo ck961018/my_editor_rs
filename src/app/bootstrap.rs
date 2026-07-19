@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::io;
 
 use crate::app::kernel::Kernel;
-use crate::app::mode::ModeRegistry;
+use crate::app::mode::{Mode, ModeRegistry};
 use crate::app::mode_name::ModeName;
+use crate::app::script::ScriptMode;
 use crate::app::session::{ClientSession, EditorSessionInit, InitialView};
 use crate::core::buffer::Buffer;
 use crate::core::content::Content;
@@ -41,13 +43,18 @@ impl BootstrapIds {
     }
 }
 
-pub(super) fn bootstrap_editor(buffer: Buffer, width: usize, height: usize) -> EditorBootstrap {
+pub(super) fn bootstrap_editor(
+    buffer: Buffer,
+    width: usize,
+    height: usize,
+    script_modes: Vec<ScriptMode>,
+) -> io::Result<EditorBootstrap> {
     let mut ids = BootstrapIds::default();
     let editor_content = ids.content();
     let status_content = ids.content();
     let editor_view = ids.view();
     let status_view = ids.view();
-    let editor_modes = vec![ModeName::new("vim"), ModeName::new("tree-sitter")];
+    let mut editor_modes = vec![ModeName::new("vim"), ModeName::new("tree-sitter")];
 
     let mut contents = ContentStore::default();
     contents
@@ -59,7 +66,31 @@ pub(super) fn bootstrap_editor(buffer: Buffer, width: usize, height: usize) -> E
             Content::StatusBar(StatusBar::new(editor_content)),
         )
         .expect("bootstrap allocates unique content ids");
-    let modes = ModeRegistry::builtin();
+    let mut modes = ModeRegistry::builtin();
+    for mode in script_modes {
+        let name = mode.name().clone();
+        if modes.resolve_mode(&name).is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("mode '{}' is already registered", name.as_str()),
+            ));
+        }
+        if let Some(before) = mode.before() {
+            let index = editor_modes
+                .iter()
+                .position(|candidate| candidate == before)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("mode '{}' cannot attach before unknown mode", name.as_str()),
+                    )
+                })?;
+            editor_modes.insert(index, name);
+        } else {
+            editor_modes.push(name);
+        }
+        modes.register(mode);
+    }
     let mut kernel = Kernel::new(
         contents,
         modes,
@@ -86,7 +117,7 @@ pub(super) fn bootstrap_editor(buffer: Buffer, width: usize, height: usize) -> E
             next_view_id: ids.next_view,
         },
     );
-    EditorBootstrap { kernel, session }
+    Ok(EditorBootstrap { kernel, session })
 }
 
 #[cfg(test)]

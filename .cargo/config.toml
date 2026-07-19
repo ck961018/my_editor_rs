@@ -1,0 +1,2 @@
+[env]
+RUSTY_V8_SRC_BINDING_PATH = { value = "vendor/rusty_v8-bindings/mod.rs", relative = true }

@@ -108,10 +108,10 @@ impl KeyEvent {
         Self::plain(KeyCode::Unknown)
     }
     pub fn is_plain_char(&self) -> Option<char> {
-        if self.modifiers == KeyModifiers::none() {
-            if let KeyCode::Char(c) = self.code {
-                return Some(c);
-            }
+        if self.modifiers == KeyModifiers::none()
+            && let KeyCode::Char(c) = self.code
+        {
+            return Some(c);
         }
         None
     }

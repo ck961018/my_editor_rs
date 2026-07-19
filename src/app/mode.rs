@@ -275,6 +275,10 @@ impl<'a> ModeViewContext<'a> {
         self.contents.revision(self.content_id())
     }
 
+    pub fn text_snapshot(&self) -> Option<crate::core::text_snapshot::TextSnapshot> {
+        self.contents.text_snapshot(self.content_id())
+    }
+
     fn resolve_edit(&self, command: EditCommand) -> Option<ResolvedViewEdit> {
         let before = self.selections()?.clone();
         let plan = self

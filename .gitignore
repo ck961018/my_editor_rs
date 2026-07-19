@@ -1,3 +1,5 @@
 /.*/
+!/.cargo/
+!/.cargo/config.toml
 /target
 /.worktrees/

@@ -596,6 +596,10 @@ revision，不要求动态 ModeState 实现相等比较。
 Native 和 script Mode 都注册为同一个 `ModeDefinition`。App 只持有通用
 Mode trait object，不按实现类型分支。
 
+具体 TypeScript runtime、状态、Content 编辑和模块边界由
+`typescript-scripting-architecture.md` 定义；本文只保留语言无关的 Mode
+contract。
+
 脚本作者定义：
 
 ```text

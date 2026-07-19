@@ -1,4 +1,4 @@
-#[expect(
+#[allow(
     dead_code,
     reason = "scene identity is reserved for multi-scene sessions"
 )]

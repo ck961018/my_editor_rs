@@ -14,6 +14,7 @@ use super::{
 use crate::app::mode_name::{ModeActionName, ModeName};
 use crate::core::content::ContentChange;
 use crate::core::text_snapshot::{TextBytePoint, TextSnapshot};
+use crate::core::transaction::{Affinity, TextChangeSet};
 use crate::protocol::content_query::{
     Color, ContentData, ContentQuery, Face, FaceName, NamedTextDecoration, RowRange,
 };
@@ -51,6 +52,35 @@ struct HighlightSpan {
     end_byte: usize,
     face_start: usize,
     face_end: usize,
+}
+
+impl HighlightSnapshot {
+    fn map_through(
+        &self,
+        before: &TextSnapshot,
+        after: &TextSnapshot,
+        change: &TextChangeSet,
+    ) -> Self {
+        let mut mapped = Self::default();
+        for span in &self.spans {
+            let start = change.map_position(before.byte_to_char(span.start_byte), Affinity::After);
+            let end = change.map_position(before.byte_to_char(span.end_byte), Affinity::Before);
+            if start >= end {
+                continue;
+            }
+            let face_start = mapped.faces.len();
+            mapped
+                .faces
+                .extend_from_slice(&self.faces[span.face_start..span.face_end]);
+            mapped.spans.push(HighlightSpan {
+                start_byte: after.char_to_byte(start),
+                end_byte: after.char_to_byte(end),
+                face_start,
+                face_end: mapped.faces.len(),
+            });
+        }
+        mapped
+    }
 }
 
 struct ParseOutput {
@@ -232,11 +262,12 @@ impl Mode for TreeSitterMode {
             edit_tree(tree, &state.source, change)
                 .map_err(|message| callback_error(self, message))?;
         }
-        state.source = state
+        let source = state
             .source
             .apply(change)
             .map_err(|error| callback_error(self, format!("invalid text delta: {error:?}")))?;
-        state.highlights = Arc::new(HighlightSnapshot::default());
+        state.highlights = Arc::new(state.highlights.map_through(&state.source, &source, change));
+        state.source = source;
         state.revision = context.content_revision().unwrap_or(state.revision);
         state.generation = state
             .generation

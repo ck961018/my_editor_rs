@@ -34,7 +34,7 @@ impl Rect {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[expect(
+#[allow(
     dead_code,
     reason = "integer point is a neutral geometry primitive reserved for frontend adapters"
 )]
