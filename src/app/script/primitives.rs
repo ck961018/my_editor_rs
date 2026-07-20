@@ -1,10 +1,13 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::app::action::TransactionIntent;
 use crate::app::command::{AppCommand, ModeCommand, ModeValue};
 use crate::app::mode::{ModeEffect, ModeViewContext};
 use crate::app::mode_name::{ModeActionName, ModeName};
+use crate::app::operation::{
+    AppOperation, ContentOperation, ContentTarget, ModeInvocation, ModeTarget, OperationRequest,
+    ViewOperation, ViewTarget,
+};
 use crate::core::action::ContentAction;
 use crate::core::command::{CharSearchDirection, EditCommand};
 use crate::core::motion::{OperatorCommand, TextMotion, TextOperator, TextTarget};
@@ -120,7 +123,7 @@ primitives! {
 struct PrimitiveInvocation {
     id: u64,
     snapshot: Option<TextSnapshot>,
-    effects: Vec<ModeEffect>,
+    effects: Vec<OperationRequest>,
 }
 
 pub(super) struct PrimitiveRuntime {
@@ -160,7 +163,11 @@ impl PrimitiveRuntime {
                 "script primitive invocation changed unexpectedly",
             ));
         }
-        Ok(invocation.effects)
+        Ok(invocation
+            .effects
+            .into_iter()
+            .map(ModeEffect::Operation)
+            .collect())
     }
 }
 
@@ -302,13 +309,21 @@ fn primitive_effects(
     arguments: &v8::FunctionCallbackArguments,
     primitive: Primitive,
     runtime: &Rc<RefCell<PrimitiveRuntime>>,
-) -> Result<Vec<ModeEffect>, ScriptError> {
+) -> Result<Vec<OperationRequest>, ScriptError> {
     use Primitive::*;
 
-    let deferred = |command| vec![ModeEffect::DeferredEdit(command)];
+    let deferred = |command| {
+        vec![OperationRequest::View {
+            target: ViewTarget::Current,
+            operation: ViewOperation::Edit(command),
+        }]
+    };
     let repeated = |command: EditCommand, count: usize| {
         (0..count)
-            .map(|_| ModeEffect::DeferredEdit(command.clone()))
+            .map(|_| OperationRequest::View {
+                target: ViewTarget::Current,
+                operation: ViewOperation::Edit(command.clone()),
+            })
             .collect()
     };
     Ok(match primitive {
@@ -424,12 +439,15 @@ fn primitive_effects(
         DeleteLines => deferred(delete_operator(TextTarget::Lines {
             count: count(scope, arguments, 0)?,
         })),
-        ApplyEdits => vec![ModeEffect::Content(apply_edits(scope, arguments, runtime)?)],
-        Begin => vec![ModeEffect::Transaction(TransactionIntent::Begin)],
-        Commit => vec![ModeEffect::Transaction(TransactionIntent::Commit)],
-        Rollback => vec![ModeEffect::Transaction(TransactionIntent::Rollback)],
-        Undo => vec![ModeEffect::Transaction(TransactionIntent::Undo)],
-        Redo => vec![ModeEffect::Transaction(TransactionIntent::Redo)],
+        ApplyEdits => vec![OperationRequest::View {
+            target: ViewTarget::Current,
+            operation: ViewOperation::ApplyContent(apply_edits(scope, arguments, runtime)?),
+        }],
+        Begin => vec![history(crate::app::action::TransactionIntent::Begin)],
+        Commit => vec![history(crate::app::action::TransactionIntent::Commit)],
+        Rollback => vec![history(crate::app::action::TransactionIntent::Rollback)],
+        Undo => vec![history(crate::app::action::TransactionIntent::Undo)],
+        Redo => vec![history(crate::app::action::TransactionIntent::Redo)],
         HalfPageUp => viewport(
             ViewportMoveDirection::Up,
             ViewportMoveAmount::HalfPage,
@@ -459,13 +477,33 @@ fn primitive_effects(
             } else {
                 json_to_mode_value(&v8_to_json(scope, value, "mode arguments")?)?
             };
-            vec![ModeEffect::Mode(
-                ModeCommand::new(mode, action).with_arguments(arguments),
-            )]
+            nested(OperationRequest::Mode {
+                target: ModeTarget::CurrentView,
+                invocation: ModeInvocation {
+                    command: ModeCommand::new(mode, action).with_arguments(arguments),
+                    nested: true,
+                },
+            })
         }
-        Save => vec![ModeEffect::Save],
-        Quit => vec![ModeEffect::App(AppCommand::Quit)],
+        Save => nested(OperationRequest::Content {
+            target: ContentTarget::Current,
+            operation: ContentOperation::Save,
+        }),
+        Quit => nested(OperationRequest::App(AppOperation::Command(
+            AppCommand::Quit,
+        ))),
     })
+}
+
+fn history(operation: crate::app::action::TransactionIntent) -> OperationRequest {
+    OperationRequest::History {
+        target: ContentTarget::Current,
+        operation,
+    }
+}
+
+fn nested(operation: OperationRequest) -> Vec<OperationRequest> {
+    vec![OperationRequest::App(AppOperation::Noop), operation]
 }
 
 fn delete_operator(target: TextTarget) -> EditCommand {
@@ -479,16 +517,19 @@ fn viewport(
     direction: ViewportMoveDirection,
     amount: ViewportMoveAmount,
     extend_selection: bool,
-) -> Vec<ModeEffect> {
-    vec![ModeEffect::Viewport(ViewportCommand::new(
-        direction,
-        amount,
-        if extend_selection {
-            ViewportCursorBehavior::Extend
-        } else {
-            ViewportCursorBehavior::Move
-        },
-    ))]
+) -> Vec<OperationRequest> {
+    nested(OperationRequest::View {
+        target: ViewTarget::Current,
+        operation: ViewOperation::Viewport(ViewportCommand::new(
+            direction,
+            amount,
+            if extend_selection {
+                ViewportCursorBehavior::Extend
+            } else {
+                ViewportCursorBehavior::Move
+            },
+        )),
+    })
 }
 
 fn apply_edits(

@@ -182,7 +182,7 @@ HistoryTransaction
 | --- | --- | --- | --- |
 | P0 | 固化语义级行为基线 | 不变 | 已完成 |
 | P1 | 提取统一 ExecutionFrame | 不变 | 已完成 |
-| P2 | 统一 scoped operation | 不变 | 未开始 |
+| P2 | 统一 scoped operation | 不变 | 已完成 |
 | P3 | Mode callback state draft 化 | 不变 | 未开始 |
 | P4 | 建立 PresentationLayerStore | 原则上不变 | 未开始 |
 
@@ -444,6 +444,8 @@ pub struct ExecutionBudget {
 
 # P2：统一 scoped operation
 
+状态：已完成（2026-07-20）。
+
 本阶段替换重复的 command/effect 执行分支，但不把“意图”和任意
 `TargetRef` 做成可以自由组合的笛卡尔积。
 
@@ -490,11 +492,16 @@ pub enum ModeTarget {
 
 ```rust
 pub struct OperationOrigin {
+    pub scope: OperationOriginScope,
     pub view: Option<ViewId>,
     pub content: Option<ContentId>,
     pub mode: Option<ModeId>,
 }
 ```
+
+`scope` 区分 app、content 和 view 来源。它不是可选 target 的替代品，而是
+resolver 判断 history owner 和 capability 边界所需的来源事实。例如
+content-scoped 来源即使携带 source View，也不能直接发出 View operation。
 
 缺少所需来源时 resolver 返回错误，不使用 focused View 静默补齐不相关的
 目标。
@@ -623,6 +630,28 @@ frame。删除类型不能改变 sequence 的原子性和顺序。
 - nested invocation、sequence 和预算语义保持不变；
 - 旧插件 API 无需修改；
 - 新旧路径的 `BehaviorSnapshot` 一致。
+
+## 8. 实现记录
+
+- 新增 [`app::operation`][12]，集中定义 typed request、resolved operation、
+  origin、target、adapter、短生命周期 `ViewEditPlan` 和显式执行队列元素。
+- `OperationOrigin` 额外保存 app/content/view scope。resolver 同时验证
+  current target 是否存在、View/Content 绑定、history owner 和 mode target
+  是否与来源匹配；content-scoped 来源不能借 source View 越权执行 View
+  operation。
+- [`runtime.rs`][2] 只保留一个 `ResolvedOperation` executor。Mode callback
+  产生的 operation 以前插方式进入当前 queue，保持原有深度优先顺序；
+  `ContentCommand::Sequence` 在 adapter 展开后仍属于同一 frame。
+- edit planning 在 View operation 到达执行点时发生。内部 `ViewEditPlan`
+  分离 selections/revision stale precondition 与 history before-state，后者在
+  通过 stale 校验后从当前 View 捕获。
+- `Command` 和旧 `ModeEffect` 保留兼容 adapter；`ResolvedViewEdit` 作为旧
+  Mode API 的兼容 variant 暂不删除。脚本 primitive 已直接创建
+  `OperationRequest`，仅通过 `ModeEffect::Operation` 携带到统一 executor。
+- legacy sequence 与 nested effect 在 adapter 中保留显式 `Noop` 预算步，
+  因而 operation、nested mode call 和 replay 的既有上限语义不变。
+- 新增 adapter 顺序、非法 scope、预算兼容和 resolver capability 回归测试；
+  P0 的 BehaviorSnapshot 测试继续覆盖成功与失败原子性。
 
 ---
 
@@ -1091,3 +1120,4 @@ Plugin API v2、plugin lifecycle、crate 拆分和新显示能力不属于这条
 [9]: ../../src/app/behavior.rs
 [10]: ../../src/app/tests.rs
 [11]: ../../src/app/execution.rs
+[12]: ../../src/app/operation.rs

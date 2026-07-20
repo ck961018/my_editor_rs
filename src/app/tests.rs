@@ -4245,6 +4245,26 @@ fn raw_view_mode_content_action_maps_its_source_view() {
 }
 
 #[test]
+fn content_scoped_origin_cannot_smuggle_a_view_operation() {
+    let mut app = make_app(vec![], None);
+    let request = crate::app::operation::OperationRequest::View {
+        target: crate::app::operation::ViewTarget::Current,
+        operation: crate::app::operation::ViewOperation::Apply(ViewAction::SetSelections(
+            Selections::single(Selection::collapsed(TextOffset::origin())),
+        )),
+    };
+
+    let error = app
+        .execute_command(DispatchCommand::ModeContentEffects {
+            effects: vec![ModeEffect::Operation(request)],
+            content: editor_cid(),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("view-scoped origin"));
+}
+
+#[test]
 fn mode_operations_reject_invalid_or_stale_view_state() {
     let mut invalid = make_app(vec![], None);
     let invalid_view = view_id(&invalid, invalid.session.focused());

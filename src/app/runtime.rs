@@ -7,10 +7,16 @@ use crate::app::action::{TransactionIntent, ViewAction};
 use crate::app::application::App;
 #[cfg(test)]
 use crate::app::behavior::EffectBehavior;
-use crate::app::command::{AppCommand, ContentCommand, TransactionCommand};
+use crate::app::command::AppCommand;
 use crate::app::dispatcher::{DispatchCommand, DispatchInput, DispatchOutcome, InputModeSnapshot};
 use crate::app::execution::{ExecutionFrame, InputCheckpoint, PreparedEffect, StateRollback};
-use crate::app::mode::{CursorDomain, InputFlow, ModeEffect, ResolvedViewEdit};
+use crate::app::mode::{CursorDomain, InputFlow};
+use crate::app::operation::{
+    AppOperation, ContentOperation, ContentTarget, ModeTarget, OperationError, OperationOrigin,
+    OperationOriginScope, OperationRequest, QueuedOperation, ResolvedModeScope, ResolvedOperation,
+    ViewEditPlan, ViewOperation, ViewPrecondition, ViewTarget, adapt_dispatch_command,
+    adapt_mode_effects, prepend_operations,
+};
 use crate::app::query::AppQuery;
 use crate::app::transaction::{TransactionData, TransactionRecord, ViewTransactionData};
 use crate::core::command::EditCommand;
@@ -59,6 +65,14 @@ fn prepend_inputs(queue: &mut VecDeque<DispatchInput>, inputs: Vec<DispatchInput
     for input in inputs.into_iter().rev() {
         queue.push_front(input);
     }
+}
+
+fn operation_error(error: OperationError) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
+fn invalid_operation(message: &'static str) -> io::Error {
+    operation_error(OperationError::new(message))
 }
 
 impl<F: Frontend> App<F> {
@@ -482,226 +496,350 @@ impl<F: Frontend> App<F> {
         command: DispatchCommand,
         frame: &mut ExecutionFrame,
     ) -> io::Result<InputFlow> {
-        let mut command = command;
+        let operations = adapt_dispatch_command(command).map_err(operation_error)?;
+        self.execute_operation_queue(VecDeque::from(operations), frame)
+    }
+
+    fn execute_operation_queue(
+        &mut self,
+        mut queue: VecDeque<QueuedOperation>,
+        frame: &mut ExecutionFrame,
+    ) -> io::Result<InputFlow> {
         let mut mode_revisions: Vec<(ViewId, Revision)> = Vec::new();
         let mut input_flow = InputFlow::Stop;
 
-        loop {
+        while let Some(queued) = queue.pop_front() {
             if let Err(error) = frame.consume_operation() {
                 self.touch_unchanged_mode_views(&mode_revisions);
                 return Err(error);
             }
-            let next = match command {
-                DispatchCommand::App(command) => {
+            let origin = queued.origin;
+            let operation = match self.resolve_operation(queued) {
+                Ok(operation) => operation,
+                Err(error) => {
+                    self.touch_unchanged_mode_views(&mode_revisions);
+                    return Err(error);
+                }
+            };
+            let result = match operation {
+                ResolvedOperation::App(AppOperation::Command(command)) => {
                     match command {
                         AppCommand::Quit => self.prepare_effect(frame, PreparedEffect::Quit),
                         AppCommand::FocusNext | AppCommand::FocusPrev => {}
                     }
-                    None
+                    Ok(())
                 }
-                DispatchCommand::Content { command, content } => {
-                    let active_owner = matches!(command, ContentCommand::Save)
-                        .then(|| self.kernel.active_transaction_owner(content))
-                        .flatten();
-                    if active_owner.is_some() {
-                        self.kernel.commit_transaction(content);
+                ResolvedOperation::App(AppOperation::Noop) => Ok(()),
+                ResolvedOperation::Content { content, operation } => match operation {
+                    ContentOperation::Apply(action) => {
+                        self.execute_content_action(action, content, frame)
                     }
-                    self.checkpoint_target(frame, content);
-                    let result = self.kernel.execute(content, ContentInput::Save);
-                    if let ContentResult::Handled(outcome) = result
-                        && let ContentEffect::Save(snapshot) = outcome.effect
-                    {
-                        self.prepare_effect(frame, PreparedEffect::Save { content, snapshot });
-                    }
-                    if let Some(owner) = active_owner {
-                        self.kernel.begin_transaction(content, owner);
-                    }
-                    None
-                }
-                DispatchCommand::ContentWithView {
-                    command,
+                    ContentOperation::Save => self.execute_save(content, frame),
+                },
+                ResolvedOperation::View {
                     view,
                     content,
-                } => {
-                    self.execute_view_content_command(command, view, content, frame)?;
-                    None
-                }
-                DispatchCommand::Mode {
-                    command,
-                    view,
-                    content,
-                } => {
-                    let scope = self
-                        .kernel
-                        .modes()
-                        .command_scope(&command.mode, &command.action)
-                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                    let mode = self
-                        .kernel
-                        .modes()
-                        .resolve_mode(&command.mode)
-                        .expect("validated mode exists");
-                    if scope == crate::app::mode::ModeActionScope::Content {
-                        if !frame.has_mode_content_checkpoint(mode, content)
-                            && let Some(snapshot) =
-                                self.kernel.snapshot_mode_content_for(mode, content)
-                        {
-                            frame.record_state_rollback(StateRollback::ModeContent(
-                                mode, content, snapshot,
-                            ));
-                        }
-                        let result = self
-                            .kernel
-                            .execute_mode_content_action(content, &command)
-                            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                        let (flow, operations) = result.into_parts();
-                        input_flow = flow;
-                        self.execute_mode_content_effects(operations, content, Some(view), frame)?;
-                        None
-                    } else {
-                        if !frame.has_mode_view_checkpoint(mode, view)
-                            && let Some(snapshot) = self.session.snapshot_mode_view_for(mode, view)
-                        {
-                            frame.record_state_rollback(StateRollback::ModeView(
-                                mode, view, snapshot,
-                            ));
-                        }
-                        let target_view = self.session.view(view).expect("target view exists");
-                        assert_eq!(
-                            target_view.content(),
-                            content,
-                            "view/content target mismatch"
-                        );
-                        let revision_before = target_view.revision();
-                        let (contents, modes, mode_contents) = self.kernel.mode_attachment_parts();
-                        let result = self
+                    operation,
+                } => match operation {
+                    ViewOperation::Edit(command) => {
+                        self.execute_edit(command, view, content, frame)
+                    }
+                    ViewOperation::ApplyPlan(plan) => {
+                        self.apply_view_edit_plan(plan, view, content, frame)
+                    }
+                    ViewOperation::ApplyContent(action) => {
+                        let selections = self
                             .session
-                            .execute_mode(view, modes, contents, &command, mode_contents)
-                            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                        let (flow, operations) = result.into_parts();
-                        input_flow = flow;
-                        if !mode_revisions.iter().any(|(recorded, _)| *recorded == view) {
-                            mode_revisions.push((view, revision_before));
-                        }
-                        self.execute_view_mode_operations(operations, view, content, frame)?;
-                        None
-                    }
-                }
-                DispatchCommand::Viewport {
-                    command,
-                    view,
-                    content,
-                } => {
-                    let lines = self.frontend.resolve_viewport_command(
-                        self.session.scene(),
-                        self.session.scene_revision(),
-                        view,
-                        command,
-                    )?;
-                    if lines == 0 {
-                        None
-                    } else {
-                        self.prepare_effect(
-                            frame,
-                            PreparedEffect::Viewport {
-                                view,
-                                command,
-                                lines,
+                            .view(view)
+                            .and_then(|view| view.selections())
+                            .expect("editable mode view has selections")
+                            .clone();
+                        self.apply_view_edit_plan(
+                            ViewEditPlan {
+                                expected: ViewPrecondition::Selections(selections),
+                                content: Some(action),
+                                view: None,
                             },
-                        );
-                        Some(DispatchCommand::ContentWithView {
-                            command: ContentCommand::Edit(viewport_cursor_edit(command, lines)),
                             view,
                             content,
-                        })
+                            frame,
+                        )
+                    }
+                    ViewOperation::Apply(action) => self.apply_view_action(view, action, frame),
+                    ViewOperation::Viewport(command) => {
+                        let lines = self.frontend.resolve_viewport_command(
+                            self.session.scene(),
+                            self.session.scene_revision(),
+                            view,
+                            command,
+                        )?;
+                        if lines > 0 {
+                            self.prepare_effect(
+                                frame,
+                                PreparedEffect::Viewport {
+                                    view,
+                                    command,
+                                    lines,
+                                },
+                            );
+                            prepend_operations(
+                                &mut queue,
+                                origin,
+                                vec![OperationRequest::View {
+                                    target: ViewTarget::Current,
+                                    operation: ViewOperation::Edit(viewport_cursor_edit(
+                                        command, lines,
+                                    )),
+                                }],
+                            );
+                        }
+                        Ok(())
+                    }
+                },
+                ResolvedOperation::History {
+                    content,
+                    owner,
+                    operation,
+                } => self.execute_transaction_intent(operation, owner, content, frame),
+                ResolvedOperation::Mode {
+                    mode,
+                    scope,
+                    invocation,
+                } => {
+                    if invocation.nested {
+                        frame.consume_nested_mode_call()?;
+                    }
+                    match scope {
+                        ResolvedModeScope::Content {
+                            content,
+                            source_view,
+                        } => {
+                            if !frame.has_mode_content_checkpoint(mode, content)
+                                && let Some(snapshot) =
+                                    self.kernel.snapshot_mode_content_for(mode, content)
+                            {
+                                frame.record_state_rollback(StateRollback::ModeContent(
+                                    mode, content, snapshot,
+                                ));
+                            }
+                            let result = self
+                                .kernel
+                                .execute_mode_content_action(content, &invocation.command)
+                                .map_err(|error| {
+                                    io::Error::new(io::ErrorKind::InvalidData, error)
+                                })?;
+                            let (flow, effects) = result.into_parts();
+                            input_flow = flow;
+                            let mut effect_origin = OperationOrigin::content(content, source_view);
+                            effect_origin.mode = Some(mode);
+                            let requests =
+                                adapt_mode_effects(effects, OperationOriginScope::Content)
+                                    .map_err(operation_error)?;
+                            prepend_operations(&mut queue, effect_origin, requests);
+                            Ok(())
+                        }
+                        ResolvedModeScope::View { view, content } => {
+                            if !frame.has_mode_view_checkpoint(mode, view)
+                                && let Some(snapshot) =
+                                    self.session.snapshot_mode_view_for(mode, view)
+                            {
+                                frame.record_state_rollback(StateRollback::ModeView(
+                                    mode, view, snapshot,
+                                ));
+                            }
+                            let revision_before = self
+                                .session
+                                .view(view)
+                                .expect("target view exists")
+                                .revision();
+                            let (contents, modes, mode_contents) =
+                                self.kernel.mode_attachment_parts();
+                            let result = self
+                                .session
+                                .execute_mode(
+                                    view,
+                                    modes,
+                                    contents,
+                                    &invocation.command,
+                                    mode_contents,
+                                )
+                                .map_err(|error| {
+                                    io::Error::new(io::ErrorKind::InvalidData, error)
+                                })?;
+                            let (flow, effects) = result.into_parts();
+                            input_flow = flow;
+                            if !mode_revisions.iter().any(|(recorded, _)| *recorded == view) {
+                                mode_revisions.push((view, revision_before));
+                            }
+                            let mut effect_origin = OperationOrigin::view(view, content);
+                            effect_origin.mode = Some(mode);
+                            let requests = adapt_mode_effects(effects, OperationOriginScope::View)
+                                .map_err(operation_error)?;
+                            prepend_operations(&mut queue, effect_origin, requests);
+                            Ok(())
+                        }
                     }
                 }
-                DispatchCommand::ModeContentEffects { effects, content } => {
-                    self.execute_mode_content_effects(effects, content, None, frame)?;
-                    None
+            };
+            if let Err(error) = result {
+                self.touch_unchanged_mode_views(&mode_revisions);
+                return Err(error);
+            }
+        }
+        self.touch_unchanged_mode_views(&mode_revisions);
+        Ok(input_flow)
+    }
+
+    fn resolve_operation(&self, queued: QueuedOperation) -> io::Result<ResolvedOperation> {
+        let QueuedOperation { request, origin } = queued;
+        match request {
+            OperationRequest::App(operation) => Ok(ResolvedOperation::App(operation)),
+            OperationRequest::Content { target, operation } => {
+                let content = self.resolve_content_target(target, origin)?;
+                Ok(ResolvedOperation::Content { content, operation })
+            }
+            OperationRequest::View { target, operation } => {
+                if origin.scope != OperationOriginScope::View {
+                    return Err(invalid_operation(
+                        "view operation requires a view-scoped origin",
+                    ));
                 }
-                DispatchCommand::ModeEffects {
-                    operations,
+                let (view, content) = self.resolve_view_target(target, origin)?;
+                Ok(ResolvedOperation::View {
                     view,
                     content,
-                } => {
-                    self.execute_view_mode_operations(operations, view, content, frame)?;
+                    operation,
+                })
+            }
+            OperationRequest::History { target, operation } => {
+                let content = self.resolve_content_target(target, origin)?;
+                let owner = if origin.scope == OperationOriginScope::View {
+                    let (view, view_content) =
+                        self.resolve_view_target(ViewTarget::Current, origin)?;
+                    if view_content != content {
+                        return Err(invalid_operation("history owner targets another content"));
+                    }
+                    Some(view)
+                } else {
                     None
+                };
+                Ok(ResolvedOperation::History {
+                    content,
+                    owner,
+                    operation,
+                })
+            }
+            OperationRequest::Mode { target, invocation } => {
+                let target_matches_origin = matches!(
+                    (target, origin.scope),
+                    (ModeTarget::CurrentView, OperationOriginScope::View)
+                        | (ModeTarget::CurrentContent, OperationOriginScope::Content)
+                );
+                if !target_matches_origin {
+                    return Err(invalid_operation(
+                        "mode target is incompatible with its origin",
+                    ));
                 }
-                DispatchCommand::Noop => None,
-            };
-
-            let Some(next) = next else {
-                self.touch_unchanged_mode_views(&mode_revisions);
-                return Ok(input_flow);
-            };
-            command = next;
+                if invocation.nested && origin.view.is_none() {
+                    return Err(invalid_operation(
+                        "nested mode invocation needs a source view",
+                    ));
+                }
+                let command_scope = self
+                    .kernel
+                    .modes()
+                    .command_scope(&invocation.command.mode, &invocation.command.action)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                let mode = self
+                    .kernel
+                    .modes()
+                    .resolve_mode(&invocation.command.mode)
+                    .expect("validated mode exists");
+                let scope = match command_scope {
+                    crate::app::mode::ModeActionScope::Content => {
+                        let content =
+                            self.resolve_content_target(ContentTarget::Current, origin)?;
+                        let source_view = origin.view;
+                        if target == ModeTarget::CurrentView && source_view.is_none() {
+                            return Err(invalid_operation("mode invocation needs a source view"));
+                        }
+                        ResolvedModeScope::Content {
+                            content,
+                            source_view,
+                        }
+                    }
+                    crate::app::mode::ModeActionScope::View => {
+                        let (view, content) =
+                            self.resolve_view_target(ViewTarget::Current, origin)?;
+                        ResolvedModeScope::View { view, content }
+                    }
+                };
+                Ok(ResolvedOperation::Mode {
+                    mode,
+                    scope,
+                    invocation,
+                })
+            }
         }
     }
 
-    fn execute_view_content_command(
-        &mut self,
-        command: ContentCommand,
-        view: ViewId,
-        content: ContentId,
-        frame: &mut ExecutionFrame,
-    ) -> io::Result<()> {
-        if let ContentCommand::Sequence(commands) = command {
-            for command in commands.into_commands() {
-                frame.consume_operation()?;
-                self.execute_view_content_command(command, view, content, frame)?;
-            }
-            return Ok(());
+    fn resolve_content_target(
+        &self,
+        target: ContentTarget,
+        origin: OperationOrigin,
+    ) -> io::Result<ContentId> {
+        let content = match target {
+            ContentTarget::Current => origin
+                .content
+                .ok_or_else(|| invalid_operation("operation has no current content"))?,
+            ContentTarget::Id(content) => content,
+        };
+        if !self.kernel.contents().contains(content) {
+            return Err(invalid_operation("operation targets missing content"));
         }
+        Ok(content)
+    }
 
-        let target_view = self.session.view(view).expect("target view exists");
-        assert_eq!(
-            target_view.content(),
-            content,
-            "view/content target mismatch"
-        );
-
-        match command {
-            ContentCommand::Edit(command) => self.execute_edit(command, view, content, frame),
-            ContentCommand::Transaction(command) => {
-                match command {
-                    TransactionCommand::Begin => {
-                        self.kernel.begin_transaction(content, Some(view));
-                    }
-                    TransactionCommand::Commit => {
-                        self.prepare_effect(frame, PreparedEffect::HistoryCommit { content });
-                    }
-                    TransactionCommand::Rollback => {
-                        if let Some(record) = self.kernel.rollback_transaction(content) {
-                            self.apply_history_record(
-                                &record,
-                                TransactionDirection::Inverse,
-                                frame,
-                            )?;
-                        }
-                    }
-                }
-                Ok(())
-            }
-            ContentCommand::Undo | ContentCommand::Redo => {
-                self.kernel.commit_transaction(content);
-                let record = if matches!(command, ContentCommand::Undo) {
-                    self.kernel.undo_transaction(content)
-                } else {
-                    self.kernel.redo_transaction(content)
-                };
-                if let Some(record) = record {
-                    let direction = if matches!(command, ContentCommand::Undo) {
-                        TransactionDirection::Inverse
-                    } else {
-                        TransactionDirection::Forward
-                    };
-                    self.apply_history_record(&record, direction, frame)?;
-                }
-                Ok(())
-            }
-            ContentCommand::Save | ContentCommand::Sequence(_) => Ok(()),
+    fn resolve_view_target(
+        &self,
+        target: ViewTarget,
+        origin: OperationOrigin,
+    ) -> io::Result<(ViewId, ContentId)> {
+        let view = match target {
+            ViewTarget::Current => origin
+                .view
+                .ok_or_else(|| invalid_operation("operation has no current view"))?,
+            ViewTarget::Id(view) => view,
+        };
+        let content = self
+            .session
+            .view(view)
+            .ok_or_else(|| invalid_operation("operation targets missing view"))?
+            .content();
+        if target == ViewTarget::Current
+            && origin.content.is_some_and(|expected| expected != content)
+        {
+            return Err(invalid_operation("view/content target mismatch"));
         }
+        Ok((view, content))
+    }
+
+    fn execute_save(&mut self, content: ContentId, frame: &mut ExecutionFrame) -> io::Result<()> {
+        let active_owner = self.kernel.active_transaction_owner(content);
+        if active_owner.is_some() {
+            self.kernel.commit_transaction(content);
+        }
+        self.checkpoint_target(frame, content);
+        let result = self.kernel.execute(content, ContentInput::Save);
+        if let ContentResult::Handled(outcome) = result
+            && let ContentEffect::Save(snapshot) = outcome.effect
+        {
+            self.prepare_effect(frame, PreparedEffect::Save { content, snapshot });
+        }
+        if let Some(owner) = active_owner {
+            self.kernel.begin_transaction(content, owner);
+        }
+        Ok(())
     }
 
     fn execute_edit(
@@ -721,11 +859,11 @@ impl<F: Frontend> App<F> {
             .kernel
             .plan_edit(content, command, &before)
             .expect("editable content plans edits");
-        self.apply_resolved_view_edit(
-            ResolvedViewEdit {
+        self.apply_view_edit_plan(
+            ViewEditPlan {
+                expected: ViewPrecondition::Selections(before),
                 content: plan.action,
                 view: Some(ViewAction::SetSelections(plan.selections)),
-                before,
             },
             view,
             content,
@@ -733,24 +871,33 @@ impl<F: Frontend> App<F> {
         )
     }
 
-    fn apply_resolved_view_edit(
+    fn apply_view_edit_plan(
         &mut self,
-        edit: ResolvedViewEdit,
+        plan: ViewEditPlan,
         view: ViewId,
         content: ContentId,
         frame: &mut ExecutionFrame,
     ) -> io::Result<()> {
-        let ResolvedViewEdit {
+        let ViewEditPlan {
+            expected,
             content: content_action,
             view: view_action,
-            before,
-        } = edit;
-        if self.session.view(view).and_then(|view| view.selections()) != Some(&before) {
+        } = plan;
+        let target_view = self.session.view(view).expect("target view exists");
+        let stale = match &expected {
+            ViewPrecondition::Selections(expected) => target_view.selections() != Some(expected),
+            ViewPrecondition::Revision(expected) => target_view.revision() != *expected,
+        };
+        if stale {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "stale resolved view edit",
             ));
         }
+        let before = target_view
+            .selections()
+            .expect("editable view has selections")
+            .clone();
         let Some(action) = content_action else {
             if let Some(action) = view_action {
                 self.apply_view_action(view, action, frame)?;
@@ -833,143 +980,6 @@ impl<F: Frontend> App<F> {
         self.handle_content_result(content, ContentResult::Handled(outcome));
         if implicit {
             self.kernel.commit_transaction(content);
-        }
-        Ok(())
-    }
-
-    fn execute_view_mode_operations(
-        &mut self,
-        operations: Vec<ModeEffect>,
-        view: ViewId,
-        content: ContentId,
-        frame: &mut ExecutionFrame,
-    ) -> io::Result<()> {
-        for operation in operations {
-            frame.consume_operation()?;
-            match operation {
-                ModeEffect::Edit(edit) => {
-                    self.apply_resolved_view_edit(edit, view, content, frame)?;
-                }
-                ModeEffect::DeferredEdit(command) => {
-                    self.execute_edit(command, view, content, frame)?;
-                }
-                ModeEffect::View(action) => {
-                    self.apply_view_action(view, action, frame)?;
-                }
-                ModeEffect::Content(action) => {
-                    let selections = self
-                        .session
-                        .view(view)
-                        .and_then(|view| view.selections())
-                        .expect("editable mode view has selections")
-                        .clone();
-                    self.apply_resolved_view_edit(
-                        ResolvedViewEdit {
-                            content: Some(action),
-                            view: None,
-                            before: selections,
-                        },
-                        view,
-                        content,
-                        frame,
-                    )?;
-                }
-                ModeEffect::Transaction(intent) => {
-                    self.execute_transaction_intent(intent, Some(view), content, frame)?;
-                }
-                ModeEffect::App(command) => {
-                    self.execute_command_inner(DispatchCommand::App(command), frame)?;
-                }
-                ModeEffect::Mode(command) => {
-                    frame.consume_nested_mode_call()?;
-                    self.execute_command_inner(
-                        DispatchCommand::Mode {
-                            command,
-                            view,
-                            content,
-                        },
-                        frame,
-                    )?;
-                }
-                ModeEffect::Viewport(command) => {
-                    self.execute_command_inner(
-                        DispatchCommand::Viewport {
-                            command,
-                            view,
-                            content,
-                        },
-                        frame,
-                    )?;
-                }
-                ModeEffect::Save => {
-                    self.execute_command_inner(
-                        DispatchCommand::Content {
-                            command: ContentCommand::Save,
-                            content,
-                        },
-                        frame,
-                    )?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn execute_mode_content_effects(
-        &mut self,
-        effects: Vec<ModeEffect>,
-        content: ContentId,
-        source_view: Option<ViewId>,
-        frame: &mut ExecutionFrame,
-    ) -> io::Result<()> {
-        for effect in effects {
-            frame.consume_operation()?;
-            match effect {
-                ModeEffect::Content(action) => {
-                    self.execute_content_action(action, content, frame)?;
-                }
-                ModeEffect::Transaction(intent) => {
-                    self.execute_transaction_intent(intent, None, content, frame)?;
-                }
-                ModeEffect::Save => {
-                    self.execute_command_inner(
-                        DispatchCommand::Content {
-                            command: ContentCommand::Save,
-                            content,
-                        },
-                        frame,
-                    )?;
-                }
-                ModeEffect::Mode(command) => {
-                    frame.consume_nested_mode_call()?;
-                    let view = source_view.ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "content-scoped mode command needs a source view",
-                        )
-                    })?;
-                    self.execute_command_inner(
-                        DispatchCommand::Mode {
-                            command,
-                            view,
-                            content,
-                        },
-                        frame,
-                    )?;
-                }
-                ModeEffect::App(command) => {
-                    self.execute_command_inner(DispatchCommand::App(command), frame)?;
-                }
-                ModeEffect::Edit(_)
-                | ModeEffect::DeferredEdit(_)
-                | ModeEffect::View(_)
-                | ModeEffect::Viewport(_) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "content-scoped mode emitted a view-scoped effect",
-                    ));
-                }
-            }
         }
         Ok(())
     }

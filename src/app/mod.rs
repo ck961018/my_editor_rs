@@ -18,6 +18,7 @@ mod layout;
 mod message;
 pub(crate) mod mode;
 pub(crate) mod mode_name;
+mod operation;
 mod query;
 mod remote;
 mod runtime;

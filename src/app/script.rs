@@ -2155,8 +2155,13 @@ editor.modes.define({
         );
         assert!(matches!(
             effects.as_slice(),
-            [crate::app::mode::ModeEffect::DeferredEdit(
-                EditCommand::InsertText(text)
+            [crate::app::mode::ModeEffect::Operation(
+                crate::app::operation::OperationRequest::View {
+                    operation: crate::app::operation::ViewOperation::Edit(
+                        EditCommand::InsertText(text)
+                    ),
+                    ..
+                }
             )] if text == "\"\""
         ));
     }
@@ -2332,7 +2337,14 @@ editor.modes.define({
             )
             .unwrap()
             .into_parts();
-        let crate::app::mode::ModeEffect::Content(ContentAction::Text(change)) = &effects[0] else {
+        let crate::app::mode::ModeEffect::Operation(
+            crate::app::operation::OperationRequest::View {
+                operation:
+                    crate::app::operation::ViewOperation::ApplyContent(ContentAction::Text(change)),
+                ..
+            },
+        ) = &effects[0]
+        else {
             panic!("script action should return a text content effect");
         };
 

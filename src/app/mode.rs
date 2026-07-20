@@ -307,6 +307,7 @@ pub struct ResolvedViewEdit {
 #[allow(dead_code, reason = "Mode effects are an extension-facing API")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModeEffect {
+    Operation(crate::app::operation::OperationRequest),
     Edit(ResolvedViewEdit),
     DeferredEdit(EditCommand),
     View(ViewAction),
@@ -343,6 +344,7 @@ impl ModeViewPolicy {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModeActionScope {
+    #[allow(dead_code, reason = "content-scoped modes are an extension contract")]
     Content,
     View,
 }
