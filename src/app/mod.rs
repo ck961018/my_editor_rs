@@ -12,6 +12,7 @@ mod bootstrap;
 pub(crate) mod command;
 mod command_resolver;
 mod dispatcher;
+mod execution;
 mod kernel;
 mod layout;
 mod message;

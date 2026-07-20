@@ -9,15 +9,12 @@ use crate::app::application::App;
 use crate::app::behavior::EffectBehavior;
 use crate::app::command::{AppCommand, ContentCommand, TransactionCommand};
 use crate::app::dispatcher::{DispatchCommand, DispatchInput, DispatchOutcome, InputModeSnapshot};
-use crate::app::mode::{
-    CursorDomain, InputFlow, ModeEffect, ModeId, ModeStateSnapshot, ResolvedViewEdit,
-};
+use crate::app::execution::{ExecutionFrame, InputCheckpoint, PreparedEffect, StateRollback};
+use crate::app::mode::{CursorDomain, InputFlow, ModeEffect, ResolvedViewEdit};
 use crate::app::query::AppQuery;
 use crate::app::transaction::{TransactionData, TransactionRecord, ViewTransactionData};
 use crate::core::command::EditCommand;
-use crate::core::content::{
-    ContentActionResult, ContentEffect, ContentInput, ContentResult, SaveSnapshot,
-};
+use crate::core::content::{ContentActionResult, ContentEffect, ContentInput, ContentResult};
 use crate::core::transaction::TransactionDirection;
 use crate::frontend::Frontend;
 use crate::protocol::content_query::RenderQuery;
@@ -26,33 +23,22 @@ use crate::protocol::ids::{ContentId, ViewId};
 use crate::protocol::revision::Revision;
 use crate::protocol::viewport::{ViewportCommand, ViewportCursorBehavior, ViewportMoveDirection};
 
-const MAX_COMMAND_CHAIN: usize = 256;
-
-enum ModeRollback {
-    Content(ModeId, ContentId, ModeStateSnapshot),
-    View(ModeId, ViewId, ModeStateSnapshot),
-    Text(TransactionRecord, TransactionDirection),
-}
-
-enum DeferredEffect {
-    HistoryCommit(ContentId),
-    Save(ContentId, SaveSnapshot),
-    Viewport(ViewId, ViewportCommand, usize),
-    Quit,
-}
-
 #[cfg(test)]
-impl DeferredEffect {
+impl PreparedEffect {
     fn behavior(&self) -> EffectBehavior {
         match self {
-            Self::HistoryCommit(content) => EffectBehavior::HistoryCommit { content: *content },
-            Self::Save(content, snapshot) => EffectBehavior::Save {
+            Self::HistoryCommit { content } => EffectBehavior::HistoryCommit { content: *content },
+            Self::Save { content, snapshot } => EffectBehavior::Save {
                 content: *content,
                 bytes: snapshot.bytes.clone(),
                 revision: snapshot.revision,
                 state: snapshot.state,
             },
-            Self::Viewport(view, command, lines) => EffectBehavior::Viewport {
+            Self::Viewport {
+                view,
+                command,
+                lines,
+            } => EffectBehavior::Viewport {
                 view: *view,
                 command: *command,
                 lines: *lines,
@@ -76,14 +62,10 @@ fn prepend_inputs(queue: &mut VecDeque<DispatchInput>, inputs: Vec<DispatchInput
 }
 
 impl<F: Frontend> App<F> {
-    fn prepare_deferred_effect(
-        &mut self,
-        effects: &mut Vec<DeferredEffect>,
-        effect: DeferredEffect,
-    ) {
+    fn prepare_effect(&mut self, frame: &mut ExecutionFrame, effect: PreparedEffect) {
         #[cfg(test)]
         self.behavior.record_prepared(effect.behavior());
-        effects.push(effect);
+        frame.prepare(effect);
     }
 
     pub async fn run(&mut self) -> io::Result<()> {
@@ -178,6 +160,74 @@ impl<F: Frontend> App<F> {
         Ok(())
     }
 
+    fn begin_execution_frame(
+        &mut self,
+        content: Option<ContentId>,
+        input: Option<InputCheckpoint>,
+    ) -> ExecutionFrame {
+        self.kernel.start_command_transaction(content);
+        ExecutionFrame::new(content, input)
+    }
+
+    fn checkpoint_target(&mut self, frame: &mut ExecutionFrame, content: ContentId) {
+        if !frame.needs_target_checkpoint(content) {
+            return;
+        }
+        let content_snapshot = self
+            .kernel
+            .snapshot_content(content)
+            .expect("execution target content exists");
+        let selection_snapshot = self.session.snapshot_selections(content);
+        frame.record_target_checkpoint(content_snapshot, selection_snapshot);
+    }
+
+    fn finish_execution_frame<T>(
+        &mut self,
+        frame: ExecutionFrame,
+        result: io::Result<T>,
+    ) -> io::Result<T> {
+        let success = result.is_ok();
+        let (checkpoints, effects) = frame.into_parts();
+        if !success {
+            let (content, selections, input, state_rollbacks) = checkpoints.into_parts();
+            for rollback in state_rollbacks.into_iter().rev() {
+                match rollback {
+                    StateRollback::ModeContent(mode, content, snapshot) => self
+                        .kernel
+                        .restore_mode_content_for(mode, content, snapshot),
+                    StateRollback::ModeView(mode, view, snapshot) => {
+                        self.session.restore_mode_view_for(mode, view, snapshot);
+                    }
+                    StateRollback::Text(record, direction) => {
+                        let inverse = match direction {
+                            TransactionDirection::Forward => TransactionDirection::Inverse,
+                            TransactionDirection::Inverse => TransactionDirection::Forward,
+                        };
+                        self.kernel
+                            .apply_transaction_record(&record, inverse)
+                            .expect("runtime rollback data was already validated");
+                    }
+                }
+            }
+            if let Some(snapshot) = content {
+                self.kernel.restore_content(snapshot);
+            }
+            if let Some(snapshot) = selections {
+                self.session.restore_selections(snapshot);
+            }
+            if let Some(input) = input {
+                self.restore_input_modes(input.modes);
+                self.session.restore_input(input.dispatcher);
+            }
+        }
+        self.kernel.finish_command_transaction(success);
+        if success {
+            self.publish_prepared_effects(effects);
+            self.kernel.schedule_mode_jobs();
+        }
+        result
+    }
+
     fn process_input_frame(
         &mut self,
         input: DispatchInput,
@@ -205,13 +255,14 @@ impl<F: Frontend> App<F> {
             );
             snapshots
         });
-        let content_snapshot = content.and_then(|content| self.kernel.snapshot_content(content));
-        let selection_snapshot = content.map(|content| self.session.snapshot_selections(content));
-        let mut rollbacks = Vec::new();
-        let mut deferred_effects = Vec::new();
-        let mut budget = MAX_COMMAND_CHAIN;
+        let mut frame = self.begin_execution_frame(
+            content,
+            Some(InputCheckpoint {
+                dispatcher: input_snapshot,
+                modes: mode_snapshots,
+            }),
+        );
         let mut queue = VecDeque::from([input]);
-        self.kernel.start_command_transaction(content);
 
         let mut result = Ok(());
         while result.is_ok() && !self.kernel.is_cancelled() {
@@ -224,28 +275,33 @@ impl<F: Frontend> App<F> {
                 self.session.dispatch(input, now, mode_contents, contents);
             match outcome {
                 DispatchOutcome::Waiting | DispatchOutcome::Consumed => {}
-                DispatchOutcome::Replay(replay) => prepend_inputs(&mut queue, replay),
+                DispatchOutcome::Replay(replay) => {
+                    if let Err(error) = frame.consume_replayed_inputs(replay.len()) {
+                        result = Err(error);
+                    } else {
+                        prepend_inputs(&mut queue, replay);
+                    }
+                }
                 DispatchOutcome::Emit {
                     command,
                     replay,
                     continuation,
-                } => match self.execute_command_inner(
-                    command,
-                    &mut rollbacks,
-                    &mut deferred_effects,
-                    &mut budget,
-                ) {
+                } => match self.execute_command_inner(command, &mut frame) {
                     Ok(flow) => {
                         self.session.sync_focused_input(
                             now,
                             self.kernel.content_modes(),
                             self.kernel.contents(),
                         );
-                        prepend_inputs(&mut queue, replay);
-                        if flow == InputFlow::Continue
-                            && let Some(continuation) = continuation
-                        {
-                            queue.push_front(continuation);
+                        if let Err(error) = frame.consume_replayed_inputs(replay.len()) {
+                            result = Err(error);
+                        } else {
+                            prepend_inputs(&mut queue, replay);
+                            if flow == InputFlow::Continue
+                                && let Some(continuation) = continuation
+                            {
+                                queue.push_front(continuation);
+                            }
                         }
                     }
                     Err(error) => result = Err(error),
@@ -267,62 +323,35 @@ impl<F: Frontend> App<F> {
                 EditCommand::ClampCursorToCharacter,
                 view,
                 content,
-                &mut rollbacks,
+                &mut frame,
             );
         }
-        if result.is_err() {
-            for rollback in rollbacks.into_iter().rev() {
-                match rollback {
-                    ModeRollback::Content(mode, content, snapshot) => self
-                        .kernel
-                        .restore_mode_content_for(mode, content, snapshot),
-                    ModeRollback::View(mode, view, snapshot) => {
-                        self.session.restore_mode_view_for(mode, view, snapshot)
-                    }
-                    ModeRollback::Text(record, direction) => {
-                        let inverse = match direction {
-                            TransactionDirection::Forward => TransactionDirection::Inverse,
-                            TransactionDirection::Inverse => TransactionDirection::Forward,
-                        };
-                        self.kernel
-                            .apply_transaction_record(&record, inverse)
-                            .expect("runtime rollback data was already validated");
-                    }
-                }
-            }
-            if let Some(snapshot) = content_snapshot {
-                self.kernel.restore_content(snapshot);
-            }
-            if let Some(snapshot) = selection_snapshot {
-                self.session.restore_selections(snapshot);
-            }
-            self.restore_input_modes(mode_snapshots);
-            self.session.restore_input(input_snapshot);
-        }
-        self.kernel.finish_command_transaction(result.is_ok());
+        let result = self.finish_execution_frame(frame, result);
         if result.is_ok() {
-            self.publish_deferred_effects(deferred_effects);
-            self.kernel.schedule_mode_jobs();
             outer_queue.extend(queue);
         }
         result
     }
 
-    fn publish_deferred_effects(&mut self, effects: Vec<DeferredEffect>) {
+    fn publish_prepared_effects(&mut self, effects: Vec<PreparedEffect>) {
         for effect in effects {
             #[cfg(test)]
             self.behavior.record_published(effect.behavior());
             match effect {
-                DeferredEffect::HistoryCommit(content) => {
+                PreparedEffect::HistoryCommit { content } => {
                     self.kernel.commit_transaction(content);
                 }
-                DeferredEffect::Save(content, snapshot) => {
+                PreparedEffect::Save { content, snapshot } => {
                     self.kernel.queue_save(content, snapshot);
                 }
-                DeferredEffect::Viewport(view, command, lines) => {
+                PreparedEffect::Viewport {
+                    view,
+                    command,
+                    lines,
+                } => {
                     self.frontend.apply_viewport_command(view, command, lines);
                 }
-                DeferredEffect::Quit => self.kernel.cancel(),
+                PreparedEffect::Quit => self.kernel.cancel(),
             }
         }
     }
@@ -332,21 +361,26 @@ impl<F: Frontend> App<F> {
         outcome: DispatchOutcome,
         queue: &mut VecDeque<DispatchInput>,
         now: Instant,
+        frame: &mut ExecutionFrame,
     ) -> io::Result<()> {
         match outcome {
             DispatchOutcome::Waiting | DispatchOutcome::Consumed => {}
-            DispatchOutcome::Replay(replay) => prepend_inputs(queue, replay),
+            DispatchOutcome::Replay(replay) => {
+                frame.consume_replayed_inputs(replay.len())?;
+                prepend_inputs(queue, replay);
+            }
             DispatchOutcome::Emit {
                 command,
                 replay,
                 continuation,
             } => {
-                let flow = self.execute_input_command(command)?;
+                let flow = self.execute_command_in_frame(command, true, frame)?;
                 self.session.sync_focused_input(
                     now,
                     self.kernel.content_modes(),
                     self.kernel.contents(),
                 );
+                frame.consume_replayed_inputs(replay.len())?;
                 prepend_inputs(queue, replay);
                 if flow == InputFlow::Continue
                     && let Some(continuation) = continuation
@@ -372,12 +406,25 @@ impl<F: Frontend> App<F> {
             let (contents, content_modes) = self.kernel.mode_runtime_parts();
             let (outcome, mode_snapshots, mode_revisions) =
                 self.session.dispatch_timeout(now, content_modes, contents);
+            let content = match &outcome {
+                DispatchOutcome::Emit { command, .. } => command.content(),
+                DispatchOutcome::Waiting
+                | DispatchOutcome::Consumed
+                | DispatchOutcome::Replay(_) => self
+                    .session
+                    .view_for_space(self.session.focused())
+                    .and_then(|view| self.session.view(view).map(|view| view.content())),
+            };
+            let mut frame = self.begin_execution_frame(
+                content,
+                Some(InputCheckpoint {
+                    dispatcher: input_snapshot,
+                    modes: mode_snapshots,
+                }),
+            );
             let mut replay = VecDeque::new();
-            if let Err(error) = self.apply_dispatch_outcome(outcome, &mut replay, now) {
-                self.restore_input_modes(mode_snapshots);
-                self.session.restore_input(input_snapshot);
-                return Err(error);
-            }
+            let result = self.apply_dispatch_outcome(outcome, &mut replay, now, &mut frame);
+            self.finish_execution_frame(frame, result)?;
             self.touch_unchanged_mode_views(&mode_revisions);
             self.process_input_queue(replay)?;
         }
@@ -399,29 +446,21 @@ impl<F: Frontend> App<F> {
 
     #[cfg(test)]
     pub(super) fn execute_command(&mut self, command: DispatchCommand) -> io::Result<()> {
-        self.execute_command_with_cursor_domain(command, false)
-            .map(|_| ())
+        let content = command.content();
+        let mut frame = self.begin_execution_frame(content, None);
+        let result = self.execute_command_in_frame(command, false, &mut frame);
+        self.finish_execution_frame(frame, result).map(|_| ())
     }
 
-    fn execute_input_command(&mut self, command: DispatchCommand) -> io::Result<InputFlow> {
-        self.execute_command_with_cursor_domain(command, true)
-    }
-
-    fn execute_command_with_cursor_domain(
+    fn execute_command_in_frame(
         &mut self,
         command: DispatchCommand,
         enforce_cursor_domain: bool,
+        frame: &mut ExecutionFrame,
     ) -> io::Result<InputFlow> {
-        let mut rollbacks = Vec::new();
-        let mut deferred_effects = Vec::new();
-        let mut budget = MAX_COMMAND_CHAIN;
         let content = command.content();
         let view = command.view();
-        let content_snapshot = content.and_then(|content| self.kernel.snapshot_content(content));
-        let selection_snapshot = content.map(|content| self.session.snapshot_selections(content));
-        self.kernel.start_command_transaction(content);
-        let mut result =
-            self.execute_command_inner(command, &mut rollbacks, &mut deferred_effects, &mut budget);
+        let mut result = self.execute_command_inner(command, frame);
         if enforce_cursor_domain
             && result.is_ok()
             && let (Some(view), Some(content)) = (view, content)
@@ -432,46 +471,8 @@ impl<F: Frontend> App<F> {
         {
             let flow = *result.as_ref().expect("checked successful result");
             result = self
-                .execute_edit(
-                    EditCommand::ClampCursorToCharacter,
-                    view,
-                    content,
-                    &mut rollbacks,
-                )
+                .execute_edit(EditCommand::ClampCursorToCharacter, view, content, frame)
                 .map(|_| flow);
-        }
-        if result.is_err() {
-            for rollback in rollbacks.into_iter().rev() {
-                match rollback {
-                    ModeRollback::Content(mode, content, snapshot) => {
-                        self.kernel
-                            .restore_mode_content_for(mode, content, snapshot);
-                    }
-                    ModeRollback::View(mode, view, snapshot) => {
-                        self.session.restore_mode_view_for(mode, view, snapshot);
-                    }
-                    ModeRollback::Text(record, direction) => {
-                        let inverse = match direction {
-                            TransactionDirection::Forward => TransactionDirection::Inverse,
-                            TransactionDirection::Inverse => TransactionDirection::Forward,
-                        };
-                        self.kernel
-                            .apply_transaction_record(&record, inverse)
-                            .expect("runtime rollback data was already validated");
-                    }
-                }
-            }
-            if let Some(snapshot) = content_snapshot {
-                self.kernel.restore_content(snapshot);
-            }
-            if let Some(snapshot) = selection_snapshot {
-                self.session.restore_selections(snapshot);
-            }
-        }
-        self.kernel.finish_command_transaction(result.is_ok());
-        if result.is_ok() {
-            self.publish_deferred_effects(deferred_effects);
-            self.kernel.schedule_mode_jobs();
         }
         result
     }
@@ -479,22 +480,21 @@ impl<F: Frontend> App<F> {
     fn execute_command_inner(
         &mut self,
         command: DispatchCommand,
-        rollbacks: &mut Vec<ModeRollback>,
-        deferred_effects: &mut Vec<DeferredEffect>,
-        budget: &mut usize,
+        frame: &mut ExecutionFrame,
     ) -> io::Result<InputFlow> {
         let mut command = command;
         let mut mode_revisions: Vec<(ViewId, Revision)> = Vec::new();
         let mut input_flow = InputFlow::Stop;
 
-        while *budget > 0 {
-            *budget -= 1;
+        loop {
+            if let Err(error) = frame.consume_operation() {
+                self.touch_unchanged_mode_views(&mode_revisions);
+                return Err(error);
+            }
             let next = match command {
                 DispatchCommand::App(command) => {
                     match command {
-                        AppCommand::Quit => {
-                            self.prepare_deferred_effect(deferred_effects, DeferredEffect::Quit)
-                        }
+                        AppCommand::Quit => self.prepare_effect(frame, PreparedEffect::Quit),
                         AppCommand::FocusNext | AppCommand::FocusPrev => {}
                     }
                     None
@@ -506,14 +506,12 @@ impl<F: Frontend> App<F> {
                     if active_owner.is_some() {
                         self.kernel.commit_transaction(content);
                     }
+                    self.checkpoint_target(frame, content);
                     let result = self.kernel.execute(content, ContentInput::Save);
                     if let ContentResult::Handled(outcome) = result
                         && let ContentEffect::Save(snapshot) = outcome.effect
                     {
-                        self.prepare_deferred_effect(
-                            deferred_effects,
-                            DeferredEffect::Save(content, snapshot),
-                        );
+                        self.prepare_effect(frame, PreparedEffect::Save { content, snapshot });
                     }
                     if let Some(owner) = active_owner {
                         self.kernel.begin_transaction(content, owner);
@@ -525,13 +523,7 @@ impl<F: Frontend> App<F> {
                     view,
                     content,
                 } => {
-                    self.execute_view_content_command(
-                        command,
-                        view,
-                        content,
-                        rollbacks,
-                        deferred_effects,
-                    )?;
+                    self.execute_view_content_command(command, view, content, frame)?;
                     None
                 }
                 DispatchCommand::Mode {
@@ -550,11 +542,13 @@ impl<F: Frontend> App<F> {
                         .resolve_mode(&command.mode)
                         .expect("validated mode exists");
                     if scope == crate::app::mode::ModeActionScope::Content {
-                        if !rollbacks.iter().any(|rollback| {
-                            matches!(rollback, ModeRollback::Content(id, target, _) if *id == mode && *target == content)
-                        }) && let Some(snapshot) = self.kernel.snapshot_mode_content_for(mode, content)
+                        if !frame.has_mode_content_checkpoint(mode, content)
+                            && let Some(snapshot) =
+                                self.kernel.snapshot_mode_content_for(mode, content)
                         {
-                            rollbacks.push(ModeRollback::Content(mode, content, snapshot));
+                            frame.record_state_rollback(StateRollback::ModeContent(
+                                mode, content, snapshot,
+                            ));
                         }
                         let result = self
                             .kernel
@@ -562,21 +556,15 @@ impl<F: Frontend> App<F> {
                             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
                         let (flow, operations) = result.into_parts();
                         input_flow = flow;
-                        self.execute_mode_content_effects(
-                            operations,
-                            content,
-                            Some(view),
-                            rollbacks,
-                            deferred_effects,
-                            budget,
-                        )?;
+                        self.execute_mode_content_effects(operations, content, Some(view), frame)?;
                         None
                     } else {
-                        if !rollbacks.iter().any(
-                            |rollback| matches!(rollback, ModeRollback::View(id, target, _) if *id == mode && *target == view),
-                        ) && let Some(snapshot) = self.session.snapshot_mode_view_for(mode, view)
+                        if !frame.has_mode_view_checkpoint(mode, view)
+                            && let Some(snapshot) = self.session.snapshot_mode_view_for(mode, view)
                         {
-                            rollbacks.push(ModeRollback::View(mode, view, snapshot));
+                            frame.record_state_rollback(StateRollback::ModeView(
+                                mode, view, snapshot,
+                            ));
                         }
                         let target_view = self.session.view(view).expect("target view exists");
                         assert_eq!(
@@ -595,14 +583,7 @@ impl<F: Frontend> App<F> {
                         if !mode_revisions.iter().any(|(recorded, _)| *recorded == view) {
                             mode_revisions.push((view, revision_before));
                         }
-                        self.execute_view_mode_operations(
-                            operations,
-                            view,
-                            content,
-                            rollbacks,
-                            deferred_effects,
-                            budget,
-                        )?;
+                        self.execute_view_mode_operations(operations, view, content, frame)?;
                         None
                     }
                 }
@@ -620,9 +601,13 @@ impl<F: Frontend> App<F> {
                     if lines == 0 {
                         None
                     } else {
-                        self.prepare_deferred_effect(
-                            deferred_effects,
-                            DeferredEffect::Viewport(view, command, lines),
+                        self.prepare_effect(
+                            frame,
+                            PreparedEffect::Viewport {
+                                view,
+                                command,
+                                lines,
+                            },
                         );
                         Some(DispatchCommand::ContentWithView {
                             command: ContentCommand::Edit(viewport_cursor_edit(command, lines)),
@@ -632,14 +617,7 @@ impl<F: Frontend> App<F> {
                     }
                 }
                 DispatchCommand::ModeContentEffects { effects, content } => {
-                    self.execute_mode_content_effects(
-                        effects,
-                        content,
-                        None,
-                        rollbacks,
-                        deferred_effects,
-                        budget,
-                    )?;
+                    self.execute_mode_content_effects(effects, content, None, frame)?;
                     None
                 }
                 DispatchCommand::ModeEffects {
@@ -647,14 +625,7 @@ impl<F: Frontend> App<F> {
                     view,
                     content,
                 } => {
-                    self.execute_view_mode_operations(
-                        operations,
-                        view,
-                        content,
-                        rollbacks,
-                        deferred_effects,
-                        budget,
-                    )?;
+                    self.execute_view_mode_operations(operations, view, content, frame)?;
                     None
                 }
                 DispatchCommand::Noop => None,
@@ -666,12 +637,6 @@ impl<F: Frontend> App<F> {
             };
             command = next;
         }
-
-        self.touch_unchanged_mode_views(&mode_revisions);
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("command chain exceeded the limit of {MAX_COMMAND_CHAIN} commands"),
-        ))
     }
 
     fn execute_view_content_command(
@@ -679,18 +644,12 @@ impl<F: Frontend> App<F> {
         command: ContentCommand,
         view: ViewId,
         content: ContentId,
-        rollbacks: &mut Vec<ModeRollback>,
-        deferred_effects: &mut Vec<DeferredEffect>,
+        frame: &mut ExecutionFrame,
     ) -> io::Result<()> {
         if let ContentCommand::Sequence(commands) = command {
             for command in commands.into_commands() {
-                self.execute_view_content_command(
-                    command,
-                    view,
-                    content,
-                    rollbacks,
-                    deferred_effects,
-                )?;
+                frame.consume_operation()?;
+                self.execute_view_content_command(command, view, content, frame)?;
             }
             return Ok(());
         }
@@ -703,24 +662,21 @@ impl<F: Frontend> App<F> {
         );
 
         match command {
-            ContentCommand::Edit(command) => self.execute_edit(command, view, content, rollbacks),
+            ContentCommand::Edit(command) => self.execute_edit(command, view, content, frame),
             ContentCommand::Transaction(command) => {
                 match command {
                     TransactionCommand::Begin => {
                         self.kernel.begin_transaction(content, Some(view));
                     }
                     TransactionCommand::Commit => {
-                        self.prepare_deferred_effect(
-                            deferred_effects,
-                            DeferredEffect::HistoryCommit(content),
-                        );
+                        self.prepare_effect(frame, PreparedEffect::HistoryCommit { content });
                     }
                     TransactionCommand::Rollback => {
                         if let Some(record) = self.kernel.rollback_transaction(content) {
                             self.apply_history_record(
                                 &record,
                                 TransactionDirection::Inverse,
-                                rollbacks,
+                                frame,
                             )?;
                         }
                     }
@@ -740,7 +696,7 @@ impl<F: Frontend> App<F> {
                     } else {
                         TransactionDirection::Forward
                     };
-                    self.apply_history_record(&record, direction, rollbacks)?;
+                    self.apply_history_record(&record, direction, frame)?;
                 }
                 Ok(())
             }
@@ -753,7 +709,7 @@ impl<F: Frontend> App<F> {
         command: EditCommand,
         view: ViewId,
         content: ContentId,
-        rollbacks: &mut Vec<ModeRollback>,
+        frame: &mut ExecutionFrame,
     ) -> io::Result<()> {
         let before = self
             .session
@@ -773,7 +729,7 @@ impl<F: Frontend> App<F> {
             },
             view,
             content,
-            rollbacks,
+            frame,
         )
     }
 
@@ -782,7 +738,7 @@ impl<F: Frontend> App<F> {
         edit: ResolvedViewEdit,
         view: ViewId,
         content: ContentId,
-        rollbacks: &mut Vec<ModeRollback>,
+        frame: &mut ExecutionFrame,
     ) -> io::Result<()> {
         let ResolvedViewEdit {
             content: content_action,
@@ -797,11 +753,12 @@ impl<F: Frontend> App<F> {
         }
         let Some(action) = content_action else {
             if let Some(action) = view_action {
-                self.apply_view_action(view, action)?;
+                self.apply_view_action(view, action, frame)?;
             }
             return Ok(());
         };
 
+        self.checkpoint_target(frame, content);
         let implicit = self.kernel.active_transaction_owner(content) != Some(Some(view));
         if implicit {
             self.kernel.begin_transaction(content, Some(view));
@@ -820,7 +777,7 @@ impl<F: Frontend> App<F> {
 
         match view_action {
             Some(action) => {
-                self.apply_view_action(view, action)?;
+                self.apply_view_action(view, action, frame)?;
                 if let Some(change) = &outcome.change {
                     self.session.transform_content_views(
                         self.kernel.contents(),
@@ -862,7 +819,7 @@ impl<F: Frontend> App<F> {
                     },
                 },
             };
-            rollbacks.push(ModeRollback::Text(
+            frame.record_state_rollback(StateRollback::Text(
                 record.clone(),
                 TransactionDirection::Forward,
             ));
@@ -885,20 +842,19 @@ impl<F: Frontend> App<F> {
         operations: Vec<ModeEffect>,
         view: ViewId,
         content: ContentId,
-        rollbacks: &mut Vec<ModeRollback>,
-        deferred_effects: &mut Vec<DeferredEffect>,
-        budget: &mut usize,
+        frame: &mut ExecutionFrame,
     ) -> io::Result<()> {
         for operation in operations {
+            frame.consume_operation()?;
             match operation {
                 ModeEffect::Edit(edit) => {
-                    self.apply_resolved_view_edit(edit, view, content, rollbacks)?;
+                    self.apply_resolved_view_edit(edit, view, content, frame)?;
                 }
                 ModeEffect::DeferredEdit(command) => {
-                    self.execute_edit(command, view, content, rollbacks)?;
+                    self.execute_edit(command, view, content, frame)?;
                 }
                 ModeEffect::View(action) => {
-                    self.apply_view_action(view, action)?;
+                    self.apply_view_action(view, action, frame)?;
                 }
                 ModeEffect::Content(action) => {
                     let selections = self
@@ -915,36 +871,24 @@ impl<F: Frontend> App<F> {
                         },
                         view,
                         content,
-                        rollbacks,
+                        frame,
                     )?;
                 }
                 ModeEffect::Transaction(intent) => {
-                    self.execute_transaction_intent(
-                        intent,
-                        Some(view),
-                        content,
-                        rollbacks,
-                        deferred_effects,
-                    )?;
+                    self.execute_transaction_intent(intent, Some(view), content, frame)?;
                 }
                 ModeEffect::App(command) => {
-                    self.execute_command_inner(
-                        DispatchCommand::App(command),
-                        rollbacks,
-                        deferred_effects,
-                        budget,
-                    )?;
+                    self.execute_command_inner(DispatchCommand::App(command), frame)?;
                 }
                 ModeEffect::Mode(command) => {
+                    frame.consume_nested_mode_call()?;
                     self.execute_command_inner(
                         DispatchCommand::Mode {
                             command,
                             view,
                             content,
                         },
-                        rollbacks,
-                        deferred_effects,
-                        budget,
+                        frame,
                     )?;
                 }
                 ModeEffect::Viewport(command) => {
@@ -954,9 +898,7 @@ impl<F: Frontend> App<F> {
                             view,
                             content,
                         },
-                        rollbacks,
-                        deferred_effects,
-                        budget,
+                        frame,
                     )?;
                 }
                 ModeEffect::Save => {
@@ -965,9 +907,7 @@ impl<F: Frontend> App<F> {
                             command: ContentCommand::Save,
                             content,
                         },
-                        rollbacks,
-                        deferred_effects,
-                        budget,
+                        frame,
                     )?;
                 }
             }
@@ -980,23 +920,16 @@ impl<F: Frontend> App<F> {
         effects: Vec<ModeEffect>,
         content: ContentId,
         source_view: Option<ViewId>,
-        rollbacks: &mut Vec<ModeRollback>,
-        deferred_effects: &mut Vec<DeferredEffect>,
-        budget: &mut usize,
+        frame: &mut ExecutionFrame,
     ) -> io::Result<()> {
         for effect in effects {
+            frame.consume_operation()?;
             match effect {
                 ModeEffect::Content(action) => {
-                    self.execute_content_action(action, content, rollbacks)?;
+                    self.execute_content_action(action, content, frame)?;
                 }
                 ModeEffect::Transaction(intent) => {
-                    self.execute_transaction_intent(
-                        intent,
-                        None,
-                        content,
-                        rollbacks,
-                        deferred_effects,
-                    )?;
+                    self.execute_transaction_intent(intent, None, content, frame)?;
                 }
                 ModeEffect::Save => {
                     self.execute_command_inner(
@@ -1004,12 +937,11 @@ impl<F: Frontend> App<F> {
                             command: ContentCommand::Save,
                             content,
                         },
-                        rollbacks,
-                        deferred_effects,
-                        budget,
+                        frame,
                     )?;
                 }
                 ModeEffect::Mode(command) => {
+                    frame.consume_nested_mode_call()?;
                     let view = source_view.ok_or_else(|| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
@@ -1022,18 +954,11 @@ impl<F: Frontend> App<F> {
                             view,
                             content,
                         },
-                        rollbacks,
-                        deferred_effects,
-                        budget,
+                        frame,
                     )?;
                 }
                 ModeEffect::App(command) => {
-                    self.execute_command_inner(
-                        DispatchCommand::App(command),
-                        rollbacks,
-                        deferred_effects,
-                        budget,
-                    )?;
+                    self.execute_command_inner(DispatchCommand::App(command), frame)?;
                 }
                 ModeEffect::Edit(_)
                 | ModeEffect::DeferredEdit(_)
@@ -1053,8 +978,9 @@ impl<F: Frontend> App<F> {
         &mut self,
         action: crate::core::action::ContentAction,
         content: ContentId,
-        rollbacks: &mut Vec<ModeRollback>,
+        frame: &mut ExecutionFrame,
     ) -> io::Result<()> {
+        self.checkpoint_target(frame, content);
         let implicit = self.kernel.active_transaction_owner(content) != Some(None);
         if implicit {
             self.kernel.begin_transaction(content, None);
@@ -1082,7 +1008,7 @@ impl<F: Frontend> App<F> {
                     view: ViewTransactionData::None,
                 },
             };
-            rollbacks.push(ModeRollback::Text(
+            frame.record_state_rollback(StateRollback::Text(
                 record.clone(),
                 TransactionDirection::Forward,
             ));
@@ -1105,22 +1031,18 @@ impl<F: Frontend> App<F> {
         intent: TransactionIntent,
         owner: Option<ViewId>,
         content: ContentId,
-        rollbacks: &mut Vec<ModeRollback>,
-        deferred_effects: &mut Vec<DeferredEffect>,
+        frame: &mut ExecutionFrame,
     ) -> io::Result<()> {
         match intent {
             TransactionIntent::Begin => {
                 self.kernel.begin_transaction(content, owner);
             }
             TransactionIntent::Commit => {
-                self.prepare_deferred_effect(
-                    deferred_effects,
-                    DeferredEffect::HistoryCommit(content),
-                );
+                self.prepare_effect(frame, PreparedEffect::HistoryCommit { content });
             }
             TransactionIntent::Rollback => {
                 if let Some(record) = self.kernel.rollback_transaction(content) {
-                    self.apply_history_record(&record, TransactionDirection::Inverse, rollbacks)?;
+                    self.apply_history_record(&record, TransactionDirection::Inverse, frame)?;
                 }
             }
             TransactionIntent::Undo | TransactionIntent::Redo => {
@@ -1136,7 +1058,7 @@ impl<F: Frontend> App<F> {
                     } else {
                         TransactionDirection::Forward
                     };
-                    self.apply_history_record(&record, direction, rollbacks)?;
+                    self.apply_history_record(&record, direction, frame)?;
                 }
             }
         }
@@ -1147,8 +1069,9 @@ impl<F: Frontend> App<F> {
         &mut self,
         record: &TransactionRecord,
         direction: TransactionDirection,
-        rollbacks: &mut Vec<ModeRollback>,
+        frame: &mut ExecutionFrame,
     ) -> io::Result<()> {
+        self.checkpoint_target(frame, record.target);
         let source = match &record.data.view {
             ViewTransactionData::Source {
                 view,
@@ -1172,14 +1095,14 @@ impl<F: Frontend> App<F> {
                     format!("invalid history traversal: {error:?}"),
                 )
             })?;
-        rollbacks.push(ModeRollback::Text(record.clone(), direction));
+        frame.record_state_rollback(StateRollback::Text(record.clone(), direction));
         if let Some((view, selections)) = &source
             && self
                 .session
                 .view(*view)
                 .is_some_and(|data| data.content() == record.target)
         {
-            self.apply_view_action(*view, ViewAction::SetSelections(selections.clone()))?;
+            self.apply_view_action(*view, ViewAction::SetSelections(selections.clone()), frame)?;
         }
         if let Some(change) = &change {
             self.session.transform_content_views(
@@ -1204,7 +1127,18 @@ impl<F: Frontend> App<F> {
             .notify_mode_content_changed(content, mode_contents, contents, change);
     }
 
-    fn apply_view_action(&mut self, view: ViewId, action: ViewAction) -> io::Result<()> {
+    fn apply_view_action(
+        &mut self,
+        view: ViewId,
+        action: ViewAction,
+        frame: &mut ExecutionFrame,
+    ) -> io::Result<()> {
+        let content = self
+            .session
+            .view(view)
+            .expect("target view exists")
+            .content();
+        self.checkpoint_target(frame, content);
         self.session
             .apply_view_action(view, action, self.kernel.contents())
             .map(|_| ())

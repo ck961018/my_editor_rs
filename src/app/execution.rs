@@ -1,0 +1,241 @@
+use std::collections::HashMap;
+use std::io;
+
+use crate::app::dispatcher::{DispatcherInputSnapshot, InputModeSnapshot};
+use crate::app::mode::{ModeId, ModeStateSnapshot};
+use crate::app::transaction::TransactionRecord;
+use crate::core::content::SaveSnapshot;
+use crate::core::content_store::ContentSnapshot;
+use crate::core::transaction::TransactionDirection;
+use crate::protocol::ids::{ContentId, ViewId};
+use crate::protocol::revision::Revision;
+use crate::protocol::selection::Selections;
+use crate::protocol::viewport::ViewportCommand;
+
+const DEFAULT_OPERATION_BUDGET: usize = 256;
+const DEFAULT_NESTED_MODE_BUDGET: usize = 256;
+const DEFAULT_REPLAYED_INPUT_BUDGET: usize = 256;
+
+pub(super) struct ExecutionFrame {
+    checkpoints: CheckpointJournal,
+    prepared_effects: Vec<PreparedEffect>,
+    budget: ExecutionBudget,
+}
+
+pub(super) struct CheckpointJournal {
+    target: Option<ContentId>,
+    content: Option<ContentSnapshot>,
+    selections: Option<SelectionCheckpoint>,
+    input: Option<InputCheckpoint>,
+    state_rollbacks: Vec<StateRollback>,
+}
+
+pub(super) type SelectionCheckpoint = HashMap<ViewId, (Selections, Revision)>;
+
+pub(super) struct InputCheckpoint {
+    pub dispatcher: DispatcherInputSnapshot,
+    pub modes: Vec<InputModeSnapshot>,
+}
+
+pub(super) enum StateRollback {
+    ModeContent(ModeId, ContentId, ModeStateSnapshot),
+    ModeView(ModeId, ViewId, ModeStateSnapshot),
+    Text(TransactionRecord, TransactionDirection),
+}
+
+pub(super) enum PreparedEffect {
+    HistoryCommit {
+        content: ContentId,
+    },
+    Save {
+        content: ContentId,
+        snapshot: SaveSnapshot,
+    },
+    Viewport {
+        view: ViewId,
+        command: ViewportCommand,
+        lines: usize,
+    },
+    Quit,
+}
+
+pub(super) struct ExecutionBudget {
+    operations: usize,
+    nested_mode_calls: usize,
+    replayed_inputs: usize,
+}
+
+impl ExecutionFrame {
+    pub(super) fn new(target: Option<ContentId>, input: Option<InputCheckpoint>) -> Self {
+        Self {
+            checkpoints: CheckpointJournal {
+                target,
+                content: None,
+                selections: None,
+                input,
+                state_rollbacks: Vec::new(),
+            },
+            prepared_effects: Vec::new(),
+            budget: ExecutionBudget::default(),
+        }
+    }
+
+    pub(super) fn prepare(&mut self, effect: PreparedEffect) {
+        self.prepared_effects.push(effect);
+    }
+
+    pub(super) fn record_state_rollback(&mut self, rollback: StateRollback) {
+        self.checkpoints.state_rollbacks.push(rollback);
+    }
+
+    pub(super) fn needs_target_checkpoint(&self, content: ContentId) -> bool {
+        assert_eq!(
+            self.checkpoints.target,
+            Some(content),
+            "execution frame changed content target"
+        );
+        self.checkpoints.content.is_none()
+    }
+
+    pub(super) fn record_target_checkpoint(
+        &mut self,
+        content: ContentSnapshot,
+        selections: SelectionCheckpoint,
+    ) {
+        assert!(self.checkpoints.content.is_none());
+        assert!(self.checkpoints.selections.is_none());
+        self.checkpoints.content = Some(content);
+        self.checkpoints.selections = Some(selections);
+    }
+
+    pub(super) fn has_mode_content_checkpoint(&self, mode: ModeId, content: ContentId) -> bool {
+        self.checkpoints.state_rollbacks.iter().any(|rollback| {
+            matches!(
+                rollback,
+                StateRollback::ModeContent(recorded_mode, recorded_content, _)
+                    if *recorded_mode == mode && *recorded_content == content
+            )
+        })
+    }
+
+    pub(super) fn has_mode_view_checkpoint(&self, mode: ModeId, view: ViewId) -> bool {
+        self.checkpoints.state_rollbacks.iter().any(|rollback| {
+            matches!(
+                rollback,
+                StateRollback::ModeView(recorded_mode, recorded_view, _)
+                    if *recorded_mode == mode && *recorded_view == view
+            )
+        })
+    }
+
+    pub(super) fn consume_operation(&mut self) -> io::Result<()> {
+        self.budget.consume_operation()
+    }
+
+    pub(super) fn consume_nested_mode_call(&mut self) -> io::Result<()> {
+        self.budget.consume_nested_mode_call()
+    }
+
+    pub(super) fn consume_replayed_inputs(&mut self, count: usize) -> io::Result<()> {
+        self.budget.consume_replayed_inputs(count)
+    }
+
+    pub(super) fn into_parts(self) -> (CheckpointJournal, Vec<PreparedEffect>) {
+        (self.checkpoints, self.prepared_effects)
+    }
+}
+
+impl CheckpointJournal {
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        Option<ContentSnapshot>,
+        Option<SelectionCheckpoint>,
+        Option<InputCheckpoint>,
+        Vec<StateRollback>,
+    ) {
+        (
+            self.content,
+            self.selections,
+            self.input,
+            self.state_rollbacks,
+        )
+    }
+}
+
+impl Default for ExecutionBudget {
+    fn default() -> Self {
+        Self {
+            operations: DEFAULT_OPERATION_BUDGET,
+            nested_mode_calls: DEFAULT_NESTED_MODE_BUDGET,
+            replayed_inputs: DEFAULT_REPLAYED_INPUT_BUDGET,
+        }
+    }
+}
+
+impl ExecutionBudget {
+    fn consume_operation(&mut self) -> io::Result<()> {
+        consume(
+            &mut self.operations,
+            "command chain exceeded the limit of 256 commands",
+        )
+    }
+
+    fn consume_nested_mode_call(&mut self) -> io::Result<()> {
+        consume(
+            &mut self.nested_mode_calls,
+            "nested mode calls exceeded the limit of 256 calls",
+        )
+    }
+
+    fn consume_replayed_inputs(&mut self, count: usize) -> io::Result<()> {
+        if count > self.replayed_inputs {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "replayed inputs exceeded the limit of 256 inputs",
+            ));
+        }
+        self.replayed_inputs -= count;
+        Ok(())
+    }
+}
+
+fn consume(remaining: &mut usize, message: &'static str) -> io::Result<()> {
+    let Some(next) = remaining.checked_sub(1) else {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, message));
+    };
+    *remaining = next;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_owns_the_operation_budget() {
+        let mut frame = ExecutionFrame::new(None, None);
+
+        for _ in 0..DEFAULT_OPERATION_BUDGET {
+            frame.consume_operation().unwrap();
+        }
+
+        let error = frame.consume_operation().unwrap_err();
+        assert!(error.to_string().contains("command chain exceeded"));
+    }
+
+    #[test]
+    fn frame_owns_nested_mode_and_replay_budgets() {
+        let mut frame = ExecutionFrame::new(None, None);
+
+        for _ in 0..DEFAULT_NESTED_MODE_BUDGET {
+            frame.consume_nested_mode_call().unwrap();
+        }
+        assert!(frame.consume_nested_mode_call().is_err());
+
+        frame
+            .consume_replayed_inputs(DEFAULT_REPLAYED_INPUT_BUDGET)
+            .unwrap();
+        assert!(frame.consume_replayed_inputs(1).is_err());
+    }
+}

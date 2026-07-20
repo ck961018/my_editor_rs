@@ -181,7 +181,7 @@ HistoryTransaction
 | 阶段 | 核心目标 | 用户行为 | 状态 |
 | --- | --- | --- | --- |
 | P0 | 固化语义级行为基线 | 不变 | 已完成 |
-| P1 | 提取统一 ExecutionFrame | 不变 | 未开始 |
+| P1 | 提取统一 ExecutionFrame | 不变 | 已完成 |
 | P2 | 统一 scoped operation | 不变 | 未开始 |
 | P3 | Mode callback state draft 化 | 不变 | 未开始 |
 | P4 | 建立 PresentationLayerStore | 原则上不变 | 未开始 |
@@ -309,6 +309,8 @@ P0 只增加测试观察接缝。运行时中的 effect 记录均受 `cfg(test)`
 
 # P1：提取统一 ExecutionFrame
 
+状态：已完成（2026-07-20）。
+
 先在不改变 `Command` 和 `ModeEffect` 的前提下，收敛现有执行事务。
 这样可以把行为变化与类型迁移分开验证。
 
@@ -419,6 +421,24 @@ pub struct ExecutionBudget {
 - Save、Quit 和 viewport 的失败原子性保持不变；
 - 增加一种可变状态时有唯一 checkpoint 接入点；
 - `cargo test` 和 clippy 全部通过。
+
+## 6. 实现记录
+
+- 新增 [`app::execution`][11]，集中持有 `CheckpointJournal`、
+  `PreparedEffect` 和 `ExecutionBudget`；frame 不持有 Kernel、session 或
+  frontend 的可变引用。
+- 普通输入、输入超时和测试显式命令统一通过同一套 frame begin/finish
+  生命周期；[`runtime.rs`][2] 不再分别实现 rollback 和 publish。
+- Content 与同 content 的 selections 在第一次变更前按需 checkpoint；
+  ModeContent、ModeView 仍按 attachment 首次变更保存状态。输入状态在
+  dispatch 前保存，history 继续复用 Kernel 的 lazy command transaction，
+  没有引入第二套 history rollback 协议。
+- Save、viewport 和 Quit 在执行到其有序位置时捕获完整参数，frame 成功后
+  才按顺序发布；任一后续 operation 失败都会丢弃全部 prepared effects。
+- operation、nested mode call 和 replay 分别计数，但统一归属当前 frame；
+  `ModeEffect` 与 `ContentCommand::Sequence` adapter 也纳入 operation 预算。
+- Mode callback draft 和显式 operation queue 仍留给 P2、P3，本阶段保持
+  现有深度优先执行与 mode API 不变。
 
 ---
 
@@ -1070,3 +1090,4 @@ Plugin API v2、plugin lifecycle、crate 拆分和新显示能力不属于这条
 [8]: ../scripting.md
 [9]: ../../src/app/behavior.rs
 [10]: ../../src/app/tests.rs
+[11]: ../../src/app/execution.rs
