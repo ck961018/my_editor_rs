@@ -7,7 +7,7 @@ use crate::protocol::frontend_event::FrontendEvent;
 use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::revision::Revision;
 use crate::protocol::scene::Scene;
-use crate::protocol::viewport::ViewportCommand;
+use crate::protocol::viewport::{ResolvedViewportCommand, ViewportCommand};
 
 pub trait Frontend {
     async fn next_event(&mut self) -> io::Result<Option<FrontendEvent>>;
@@ -26,9 +26,10 @@ pub trait Frontend {
         scene: &Scene,
         scene_revision: Revision,
         view: ViewId,
+        cursor_row: usize,
         command: ViewportCommand,
-    ) -> io::Result<usize>;
+    ) -> io::Result<ResolvedViewportCommand>;
 
-    /// 在 app 提交整个有序结果后应用已解析的视口移动。
-    fn apply_viewport_command(&mut self, view: ViewId, command: ViewportCommand, lines: usize);
+    /// 在 app 提交整个有序结果后应用已解析的视口变化。
+    fn apply_viewport_command(&mut self, view: ViewId, command: ResolvedViewportCommand);
 }

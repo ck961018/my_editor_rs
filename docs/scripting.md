@@ -51,6 +51,10 @@ Scripts call these functions directly; operation names are not serialized as
 strings. Dynamic mode and action names remain strings because plugins define
 that namespace.
 
+Viewport primitives include pane-sized scrolling and cursor alignment.
+`alignTop()`, `alignCenter()`, and `alignBottom()` become delayed viewport
+effects; they do not move the text cursor.
+
 Primitive calls append typed Rust operations to the current callback. The app
 executes them in order only after the callback and its returned state validate.
 If the callback fails, none of its staged operations execute. A retained

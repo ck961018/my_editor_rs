@@ -201,8 +201,9 @@ Content、selections 和 input 在第一次变更前 lazy checkpoint。Mode stat
 
 Save、Quit 和 frontend viewport mutation 在有序执行点捕获完整 payload，
 但只在 frame 成功后发布。Save 携带当时的 `SaveSnapshot`，viewport 携带
-Frontend 根据实际 pane 布局解析的行数。后续 operation 失败会丢弃全部
-prepared effects。
+Frontend 根据实际 pane 布局解析的 `ResolvedViewportCommand`。滚动结果保存
+方向和行数；`zz`、`zt`、`zb` 等对齐结果保存目标 `top_row`，不移动 cursor。
+后续 operation 失败会丢弃全部 prepared effects。
 
 `ExecutionFrame` 不等于 undo/redo `HistoryTransaction`。如果 frame 开始前
 活动 transaction 已包含 A，本次追加 B 后失败，只撤销 B；A 和 transaction

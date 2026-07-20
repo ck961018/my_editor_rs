@@ -43,7 +43,8 @@ use crate::protocol::selection::{Selection, Selections, TextOffset, TextPoint};
 use crate::protocol::space::{Sizing, SpaceKind, SplitDirection};
 use crate::protocol::status::StatusMessage;
 use crate::protocol::viewport::{
-    ViewportCommand, ViewportCursorBehavior, ViewportMoveAmount, ViewportMoveDirection,
+    ResolvedViewportCommand, ViewportCommand, ViewportCursorBehavior, ViewportMoveAmount,
+    ViewportMoveDirection,
 };
 use std::collections::VecDeque;
 
@@ -54,7 +55,7 @@ struct ScriptedFrontend {
     fail_next_event: bool,
     fail_render: bool,
     viewport_height: usize,
-    viewport_commands: Vec<(ViewId, ViewportCommand)>,
+    viewport_commands: Vec<(ViewId, ResolvedViewportCommand)>,
 }
 
 struct LoopMode {
@@ -428,7 +429,7 @@ impl SharedContentMode {
         let actions = vec![ModeActionName::new("advance")];
         let mut keymap = Keymap::new();
         keymap.bind(
-            KeyEvent::char('z'),
+            KeyEvent::char('q'),
             Command::Mode(ModeCommand {
                 mode: name.clone(),
                 action: actions[0].clone(),
@@ -586,7 +587,7 @@ impl ContentAwareKeymapMode {
         let actions = vec![ModeActionName::new("insert")];
         let mut empty_keymap = Keymap::new();
         empty_keymap.bind(
-            KeyEvent::char('z'),
+            KeyEvent::char('q'),
             Command::Mode(ModeCommand {
                 mode: name.clone(),
                 action: actions[0].clone(),
@@ -594,7 +595,7 @@ impl ContentAwareKeymapMode {
             }),
         );
         let mut nonempty_keymap = Keymap::new();
-        nonempty_keymap.bind(KeyEvent::char('z'), Command::Noop);
+        nonempty_keymap.bind(KeyEvent::char('q'), Command::Noop);
         Self {
             name,
             actions,
@@ -983,17 +984,26 @@ impl Frontend for ScriptedFrontend {
         _scene: &Scene,
         _scene_revision: Revision,
         _view: ViewId,
+        cursor_row: usize,
         command: ViewportCommand,
-    ) -> io::Result<usize> {
-        Ok(match command.amount {
-            crate::protocol::viewport::ViewportMoveAmount::HalfPage => {
-                (self.viewport_height / 2).max(1)
+    ) -> io::Result<ResolvedViewportCommand> {
+        Ok(match command {
+            ViewportCommand::Scroll {
+                direction, amount, ..
+            } => {
+                let lines = match amount {
+                    ViewportMoveAmount::HalfPage => (self.viewport_height / 2).max(1),
+                    ViewportMoveAmount::FullPage => self.viewport_height,
+                };
+                ResolvedViewportCommand::Scroll { direction, lines }
             }
-            crate::protocol::viewport::ViewportMoveAmount::FullPage => self.viewport_height,
+            ViewportCommand::Align { alignment } => ResolvedViewportCommand::SetTopRow {
+                top_row: cursor_row.saturating_sub(alignment.row_offset(self.viewport_height)),
+            },
         })
     }
 
-    fn apply_viewport_command(&mut self, view: ViewId, command: ViewportCommand, _lines: usize) {
+    fn apply_viewport_command(&mut self, view: ViewId, command: ResolvedViewportCommand) {
         self.viewport_commands.push((view, command));
     }
 }
@@ -1418,8 +1428,10 @@ async fn behavior_snapshot_normalizes_successful_execution_semantics() {
             },
             EffectBehavior::Viewport {
                 view: ViewId(0),
-                lines: 2,
-                ..
+                command: ResolvedViewportCommand::Scroll {
+                    direction: ViewportMoveDirection::Down,
+                    lines: 2,
+                },
             }
         ] if bytes == "abc"
     ));
@@ -1488,7 +1500,7 @@ async fn behavior_snapshot_uses_explicit_mode_probes_and_reports_faults() {
     let shared_id = app.kernel.modes().resolve_mode(&shared).unwrap();
     let view = view_id(&app, app.session.focused());
 
-    app.handle_event(FrontendEvent::Key(KeyEvent::char('z')))
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('q')))
         .await
         .unwrap();
 
@@ -2044,7 +2056,7 @@ async fn content_mode_binding_is_shared_and_coexists_with_view_modes() {
         action: ModeActionName::new("advance"),
         arguments: Default::default(),
     };
-    app.handle_event(FrontendEvent::Key(KeyEvent::char('z')))
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('q')))
         .await
         .unwrap();
     assert_eq!(
@@ -2072,10 +2084,10 @@ async fn content_mode_keymap_tracks_current_content() {
         .register(ContentAwareKeymapMode::new());
     assert!(app.attach_mode_to_content(editor_cid(), &mode));
 
-    app.handle_event(FrontendEvent::Key(KeyEvent::char('z')))
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('q')))
         .await
         .unwrap();
-    app.handle_event(FrontendEvent::Key(KeyEvent::char('z')))
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('q')))
         .await
         .unwrap();
 
@@ -2123,7 +2135,7 @@ async fn later_mode_prefix_does_not_delay_an_earlier_exact_binding() {
         .modes_mut()
         .register(ChainProbeMode::with_sequence(
             "second-probe",
-            vec![KeyEvent::char('q'), KeyEvent::char('z')],
+            vec![KeyEvent::char('q'), KeyEvent::char('r')],
             vec![ModeEffect::DeferredEdit(EditCommand::InsertText(
                 "b".to_string(),
             ))],
@@ -2137,7 +2149,7 @@ async fn later_mode_prefix_does_not_delay_an_earlier_exact_binding() {
         .unwrap();
     assert_eq!(text_rows(&app, editor_cid()), vec!["a"]);
 
-    app.handle_event(FrontendEvent::Key(KeyEvent::char('z')))
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('r')))
         .await
         .unwrap();
     assert_eq!(text_rows(&app, editor_cid()), vec!["ba"]);
@@ -2333,7 +2345,7 @@ async fn failed_sequence_action_restores_the_modes_pending_prefix() {
         .modes_mut()
         .register(ChainProbeMode::with_sequence(
             "failing-sequence",
-            vec![KeyEvent::char('q'), KeyEvent::char('z')],
+            vec![KeyEvent::char('q'), KeyEvent::char('r')],
             vec![ModeEffect::Mode(ModeCommand::new(
                 ModeName::new("missing"),
                 ModeActionName::new("run"),
@@ -2348,7 +2360,7 @@ async fn failed_sequence_action_restores_the_modes_pending_prefix() {
     assert!(app.session.input_is_pending_for_test());
 
     let error = app
-        .handle_event(FrontendEvent::Key(KeyEvent::char('z')))
+        .handle_event(FrontendEvent::Key(KeyEvent::char('r')))
         .await
         .unwrap_err();
 
@@ -2368,7 +2380,7 @@ async fn mode_input_state_is_per_view_while_content_state_is_shared() {
         .split_space(left, editor_cid(), true, SplitDirection::Right, true)
         .unwrap()
         .new_space;
-    app.handle_event(FrontendEvent::Key(KeyEvent::char('z')))
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('q')))
         .await
         .unwrap();
     app.close_space(right).unwrap();
@@ -2395,7 +2407,7 @@ async fn leaving_content_cancels_view_input_without_resetting_content_state() {
     let mode = ModeName::new("shared-content");
     app.kernel.modes_mut().register(SharedContentMode::new());
     assert!(app.attach_mode_to_content(editor_cid(), &mode));
-    app.handle_event(FrontendEvent::Key(KeyEvent::char('z')))
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('q')))
         .await
         .unwrap();
 
@@ -2813,6 +2825,39 @@ async fn vim_normal_dollar_moves_to_line_end() {
     );
     app.run().await.unwrap();
     assert_eq!(text_rows(&app, editor_cid()), vec!["ab"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_counted_dollar_moves_to_the_later_line_end() {
+    let mut app = make_app(
+        vec![
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('2')),
+            FrontendEvent::Key(KeyEvent::char('$')),
+            FrontendEvent::Key(KeyEvent::ctrl('q')),
+        ],
+        None,
+    );
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("one\ntwo\nthree".to_string())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    app.run().await.unwrap();
+
+    let cursor = app.session.views()[&view]
+        .selections()
+        .unwrap()
+        .primary()
+        .head();
+    assert_eq!(
+        text_point(&app, editor_cid(), cursor),
+        TextPoint { row: 1, col: 2 }
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3405,18 +3450,18 @@ async fn prefix_key_sequence_saves() {
     let path = dir.path().join("g.txt");
     std::fs::write(&path, "x").unwrap();
     let path_str = path.to_str().unwrap().to_owned();
-    // 绑 'z' 前缀 + 's' → Save（覆盖 Ctrl+S 测试前缀路径）
+    // 绑定未被 Vim 使用的前缀，覆盖 Ctrl+S 之外的全局 sequence 路径。
     let mut app = make_app(
         vec![
-            FrontendEvent::Key(KeyEvent::char('z')),
-            FrontendEvent::Key(KeyEvent::char('z')),
+            FrontendEvent::Key(KeyEvent::char('[')),
+            FrontendEvent::Key(KeyEvent::char(']')),
             FrontendEvent::Key(KeyEvent::ctrl('q')),
         ],
         Some(&path_str),
     );
     let mut global = default_global_keymap();
     global.bind(
-        [KeyEvent::char('z'), KeyEvent::char('z')],
+        [KeyEvent::char('['), KeyEvent::char(']')],
         Command::Content(ContentCommand::Save),
     );
     app.session
@@ -3821,12 +3866,146 @@ async fn vim_line_visual_ctrl_d_deletes_frontend_sized_line_range() {
         app.frontend.viewport_commands[0],
         (
             focused_view,
-            ViewportCommand::new(
-                crate::protocol::viewport::ViewportMoveDirection::Down,
-                crate::protocol::viewport::ViewportMoveAmount::HalfPage,
-                ViewportCursorBehavior::Extend,
-            ),
+            ResolvedViewportCommand::Scroll {
+                direction: ViewportMoveDirection::Down,
+                lines: 2,
+            },
         )
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_zz_zt_and_zb_align_the_viewport_without_moving_the_cursor() {
+    let mut app = make_app(
+        vec![
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('5')),
+            FrontendEvent::Key(KeyEvent::char('j')),
+            FrontendEvent::Key(KeyEvent::char('z')),
+            FrontendEvent::Key(KeyEvent::char('z')),
+            FrontendEvent::Key(KeyEvent::char('z')),
+            FrontendEvent::Key(KeyEvent::char('t')),
+            FrontendEvent::Key(KeyEvent::char('z')),
+            FrontendEvent::Key(KeyEvent::char('b')),
+            FrontendEvent::Key(KeyEvent::ctrl('q')),
+        ],
+        None,
+    );
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText(
+            "0\n1\n2\n3\n4\n5\n6\n7\n8".to_string(),
+        )),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    app.run().await.unwrap();
+
+    assert_eq!(
+        app.frontend.viewport_commands,
+        vec![
+            (view, ResolvedViewportCommand::SetTopRow { top_row: 4 }),
+            (view, ResolvedViewportCommand::SetTopRow { top_row: 5 }),
+            (view, ResolvedViewportCommand::SetTopRow { top_row: 2 }),
+        ]
+    );
+    let cursor = app.session.views()[&view]
+        .selections()
+        .unwrap()
+        .primary()
+        .head();
+    assert_eq!(text_point(&app, editor_cid(), cursor).row, 5);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_counted_zz_moves_to_the_line_before_centering_it() {
+    let mut app = make_app(
+        vec![
+            FrontendEvent::Key(KeyEvent::char('3')),
+            FrontendEvent::Key(KeyEvent::char('z')),
+            FrontendEvent::Key(KeyEvent::char('z')),
+            FrontendEvent::Key(KeyEvent::ctrl('q')),
+        ],
+        None,
+    );
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText(
+            "00000\n11111\n22222\n33333\n44444\n55555".to_string(),
+        )),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    app.run().await.unwrap();
+
+    assert_eq!(
+        app.frontend.viewport_commands,
+        vec![(view, ResolvedViewportCommand::SetTopRow { top_row: 1 })]
+    );
+    let cursor = app.session.views()[&view]
+        .selections()
+        .unwrap()
+        .primary()
+        .head();
+    assert_eq!(
+        text_point(&app, editor_cid(), cursor),
+        TextPoint { row: 2, col: 4 }
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_visual_counted_zz_zt_and_zb_preserve_the_selection() {
+    let mut app = make_app(
+        vec![
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('2')),
+            FrontendEvent::Key(KeyEvent::char('l')),
+            FrontendEvent::Key(KeyEvent::char('v')),
+            FrontendEvent::Key(KeyEvent::char('3')),
+            FrontendEvent::Key(KeyEvent::char('z')),
+            FrontendEvent::Key(KeyEvent::char('z')),
+            FrontendEvent::Key(KeyEvent::char('z')),
+            FrontendEvent::Key(KeyEvent::char('t')),
+            FrontendEvent::Key(KeyEvent::char('z')),
+            FrontendEvent::Key(KeyEvent::char('b')),
+            FrontendEvent::Key(KeyEvent::ctrl('q')),
+        ],
+        None,
+    );
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText(
+            "00000\n11111\n22222\n33333".to_string(),
+        )),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    app.run().await.unwrap();
+
+    assert_eq!(
+        app.frontend.viewport_commands,
+        vec![
+            (view, ResolvedViewportCommand::SetTopRow { top_row: 1 }),
+            (view, ResolvedViewportCommand::SetTopRow { top_row: 2 }),
+            (view, ResolvedViewportCommand::SetTopRow { top_row: 0 }),
+        ]
+    );
+    let selection = app.session.views()[&view].selections().unwrap().primary();
+    assert_eq!(
+        text_point(&app, editor_cid(), selection.anchor),
+        TextPoint { row: 0, col: 2 }
+    );
+    assert_eq!(
+        text_point(&app, editor_cid(), selection.head()),
+        TextPoint { row: 2, col: 2 }
     );
 }
 
@@ -4074,6 +4253,391 @@ async fn vim_delete_operator_accepts_word_line_end_and_line_start_motions() {
     );
     line_start.run().await.unwrap();
     assert_eq!(text_rows(&line_start, editor_cid()), vec!["c"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_word_operators_distinguish_word_start_and_inclusive_word_end() {
+    async fn run(operator: char, motion: char) -> Vec<String> {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('i')),
+                FrontendEvent::Key(KeyEvent::char('o')),
+                FrontendEvent::Key(KeyEvent::char('n')),
+                FrontendEvent::Key(KeyEvent::char('e')),
+                FrontendEvent::Key(KeyEvent::char(' ')),
+                FrontendEvent::Key(KeyEvent::char('t')),
+                FrontendEvent::Key(KeyEvent::char('w')),
+                FrontendEvent::Key(KeyEvent::char('o')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::char('0')),
+                FrontendEvent::Key(KeyEvent::char(operator)),
+                FrontendEvent::Key(KeyEvent::char(motion)),
+                FrontendEvent::Key(KeyEvent::char('X')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+        app.run().await.unwrap();
+        text_rows(&app, editor_cid())
+    }
+
+    assert_eq!(run('d', 'w').await, vec!["two"]);
+    assert_eq!(run('d', 'e').await, vec![" two"]);
+    assert_eq!(run('c', 'w').await, vec!["X two"]);
+    assert_eq!(run('c', 'e').await, vec!["X two"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_cw_on_whitespace_stops_at_the_next_word_start() {
+    let mut app = make_app(
+        vec![
+            FrontendEvent::Key(KeyEvent::char('i')),
+            FrontendEvent::Key(KeyEvent::char('o')),
+            FrontendEvent::Key(KeyEvent::char('n')),
+            FrontendEvent::Key(KeyEvent::char('e')),
+            FrontendEvent::Key(KeyEvent::char(' ')),
+            FrontendEvent::Key(KeyEvent::char(' ')),
+            FrontendEvent::Key(KeyEvent::char(' ')),
+            FrontendEvent::Key(KeyEvent::char('t')),
+            FrontendEvent::Key(KeyEvent::char('w')),
+            FrontendEvent::Key(KeyEvent::char('o')),
+            FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+            FrontendEvent::Key(KeyEvent::char('0')),
+            FrontendEvent::Key(KeyEvent::char('3')),
+            FrontendEvent::Key(KeyEvent::char('l')),
+            FrontendEvent::Key(KeyEvent::char('c')),
+            FrontendEvent::Key(KeyEvent::char('w')),
+            FrontendEvent::Key(KeyEvent::char('X')),
+            FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+            FrontendEvent::Key(KeyEvent::ctrl('q')),
+        ],
+        None,
+    );
+
+    app.run().await.unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["oneXtwo"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_change_word_from_inline_whitespace_preserves_the_line_break() {
+    async fn run(text: &str, count: Option<char>) -> Vec<String> {
+        let mut events = vec![
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('3')),
+            FrontendEvent::Key(KeyEvent::char('l')),
+            FrontendEvent::Key(KeyEvent::char('c')),
+        ];
+        if let Some(count) = count {
+            events.push(FrontendEvent::Key(KeyEvent::char(count)));
+        }
+        events.extend([
+            FrontendEvent::Key(KeyEvent::char('w')),
+            FrontendEvent::Key(KeyEvent::char('X')),
+            FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+            FrontendEvent::Key(KeyEvent::ctrl('q')),
+        ]);
+        let mut app = make_app(events, None);
+        let view = view_id(&app, app.session.focused());
+        app.execute_command(DispatchCommand::ContentWithView {
+            command: ContentCommand::Edit(EditCommand::InsertText(text.to_string())),
+            view,
+            content: editor_cid(),
+        })
+        .unwrap();
+
+        app.run().await.unwrap();
+        text_rows(&app, editor_cid())
+    }
+
+    assert_eq!(run("one   \ntwo", None).await, vec!["oneX", "two"]);
+    assert_eq!(
+        run("one   two\nthree", Some('2')).await,
+        vec!["oneX", "three"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_counted_dw_preserves_the_break_after_the_last_word() {
+    let mut app = make_app(
+        vec![
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('d')),
+            FrontendEvent::Key(KeyEvent::char('2')),
+            FrontendEvent::Key(KeyEvent::char('w')),
+            FrontendEvent::Key(KeyEvent::ctrl('q')),
+        ],
+        None,
+    );
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("one two\nthree".to_string())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    app.run().await.unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["", "three"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_cw_on_an_empty_line_preserves_the_line_break() {
+    let mut app = make_app(
+        vec![
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('j')),
+            FrontendEvent::Key(KeyEvent::char('c')),
+            FrontendEvent::Key(KeyEvent::char('w')),
+            FrontendEvent::Key(KeyEvent::char('X')),
+            FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+            FrontendEvent::Key(KeyEvent::ctrl('q')),
+        ],
+        None,
+    );
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("one\n\ntwo".to_string())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    app.run().await.unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["one", "X", "two"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_counted_cw_on_an_empty_line_covers_the_next_word() {
+    let mut app = make_app(
+        vec![
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('j')),
+            FrontendEvent::Key(KeyEvent::char('c')),
+            FrontendEvent::Key(KeyEvent::char('2')),
+            FrontendEvent::Key(KeyEvent::char('w')),
+            FrontendEvent::Key(KeyEvent::char('X')),
+            FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+            FrontendEvent::Key(KeyEvent::ctrl('q')),
+        ],
+        None,
+    );
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("one\n\ntwo".to_string())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    app.run().await.unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["one", "X"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_counted_cw_counts_blank_lines_and_stops_at_the_next_word() {
+    async fn run(text: &str) -> Vec<String> {
+        let mut app = make_app(
+            vec![
+                FrontendEvent::Key(KeyEvent::char('g')),
+                FrontendEvent::Key(KeyEvent::char('g')),
+                FrontendEvent::Key(KeyEvent::char('j')),
+                FrontendEvent::Key(KeyEvent::char('c')),
+                FrontendEvent::Key(KeyEvent::char('2')),
+                FrontendEvent::Key(KeyEvent::char('w')),
+                FrontendEvent::Key(KeyEvent::char('X')),
+                FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+                FrontendEvent::Key(KeyEvent::ctrl('q')),
+            ],
+            None,
+        );
+        let view = view_id(&app, app.session.focused());
+        app.execute_command(DispatchCommand::ContentWithView {
+            command: ContentCommand::Edit(EditCommand::InsertText(text.to_string())),
+            view,
+            content: editor_cid(),
+        })
+        .unwrap();
+
+        app.run().await.unwrap();
+        text_rows(&app, editor_cid())
+    }
+
+    assert_eq!(run("one\n\n\ntwo").await, vec!["one", "X", "two"]);
+    assert_eq!(run("one\n\ntwo three").await, vec!["one", "Xthree"]);
+    assert_eq!(
+        run("one\n\ntwo\n   \nthree").await,
+        vec!["one", "X", "   ", "three"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_dw_on_an_empty_line_deletes_only_its_line_break() {
+    let mut app = make_app(
+        vec![
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('j')),
+            FrontendEvent::Key(KeyEvent::char('d')),
+            FrontendEvent::Key(KeyEvent::char('w')),
+            FrontendEvent::Key(KeyEvent::ctrl('q')),
+        ],
+        None,
+    );
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("one\n\n   \ntwo".to_string())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    app.run().await.unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["one", "   ", "two"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_single_dw_crossing_a_line_preserves_the_break() {
+    async fn run(text: &str, right: usize) -> Vec<String> {
+        let mut events = vec![
+            FrontendEvent::Key(KeyEvent::char('g')),
+            FrontendEvent::Key(KeyEvent::char('g')),
+        ];
+        if right > 0 {
+            events.push(FrontendEvent::Key(KeyEvent::char(
+                char::from_digit(right as u32, 10).unwrap(),
+            )));
+            events.push(FrontendEvent::Key(KeyEvent::char('l')));
+        }
+        events.extend([
+            FrontendEvent::Key(KeyEvent::char('d')),
+            FrontendEvent::Key(KeyEvent::char('w')),
+            FrontendEvent::Key(KeyEvent::ctrl('q')),
+        ]);
+        let mut app = make_app(events, None);
+        let view = view_id(&app, app.session.focused());
+        app.execute_command(DispatchCommand::ContentWithView {
+            command: ContentCommand::Edit(EditCommand::InsertText(text.to_string())),
+            view,
+            content: editor_cid(),
+        })
+        .unwrap();
+
+        app.run().await.unwrap();
+        text_rows(&app, editor_cid())
+    }
+
+    assert_eq!(run("one\ntwo", 0).await, vec!["", "two"]);
+    assert_eq!(run("one! \ntwo", 3).await, vec!["one", "two"]);
+    assert_eq!(run("one! \ntwo", 4).await, vec!["one!", "two"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_counted_cw_at_a_word_end_counts_that_character_first() {
+    let mut app = make_app(
+        vec![
+            FrontendEvent::Key(KeyEvent::char('i')),
+            FrontendEvent::Key(KeyEvent::char('o')),
+            FrontendEvent::Key(KeyEvent::char('n')),
+            FrontendEvent::Key(KeyEvent::char('e')),
+            FrontendEvent::Key(KeyEvent::char(' ')),
+            FrontendEvent::Key(KeyEvent::char('t')),
+            FrontendEvent::Key(KeyEvent::char('w')),
+            FrontendEvent::Key(KeyEvent::char('o')),
+            FrontendEvent::Key(KeyEvent::char(' ')),
+            FrontendEvent::Key(KeyEvent::char('t')),
+            FrontendEvent::Key(KeyEvent::char('h')),
+            FrontendEvent::Key(KeyEvent::char('r')),
+            FrontendEvent::Key(KeyEvent::char('e')),
+            FrontendEvent::Key(KeyEvent::char('e')),
+            FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+            FrontendEvent::Key(KeyEvent::char('0')),
+            FrontendEvent::Key(KeyEvent::char('2')),
+            FrontendEvent::Key(KeyEvent::char('l')),
+            FrontendEvent::Key(KeyEvent::char('c')),
+            FrontendEvent::Key(KeyEvent::char('2')),
+            FrontendEvent::Key(KeyEvent::char('w')),
+            FrontendEvent::Key(KeyEvent::char('X')),
+            FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+            FrontendEvent::Key(KeyEvent::ctrl('q')),
+        ],
+        None,
+    );
+
+    app.run().await.unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["onX three"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_change_operator_multiplies_counts_and_commits_one_undo_unit() {
+    let mut app = make_app(
+        vec![
+            FrontendEvent::Key(KeyEvent::char('i')),
+            FrontendEvent::Key(KeyEvent::char('o')),
+            FrontendEvent::Key(KeyEvent::char('n')),
+            FrontendEvent::Key(KeyEvent::char('e')),
+            FrontendEvent::Key(KeyEvent::char(' ')),
+            FrontendEvent::Key(KeyEvent::char('t')),
+            FrontendEvent::Key(KeyEvent::char('w')),
+            FrontendEvent::Key(KeyEvent::char('o')),
+            FrontendEvent::Key(KeyEvent::char(' ')),
+            FrontendEvent::Key(KeyEvent::char('t')),
+            FrontendEvent::Key(KeyEvent::char('h')),
+            FrontendEvent::Key(KeyEvent::char('r')),
+            FrontendEvent::Key(KeyEvent::char('e')),
+            FrontendEvent::Key(KeyEvent::char('e')),
+            FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+            FrontendEvent::Key(KeyEvent::char('0')),
+            FrontendEvent::Key(KeyEvent::char('2')),
+            FrontendEvent::Key(KeyEvent::char('c')),
+            FrontendEvent::Key(KeyEvent::char('2')),
+            FrontendEvent::Key(KeyEvent::char('w')),
+            FrontendEvent::Key(KeyEvent::char('X')),
+            FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+            FrontendEvent::Key(KeyEvent::char('u')),
+            FrontendEvent::Key(KeyEvent::ctrl('r')),
+            FrontendEvent::Key(KeyEvent::ctrl('q')),
+        ],
+        None,
+    );
+
+    app.run().await.unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["X"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_cc_preserves_a_blank_line_for_insert_mode() {
+    let mut app = make_app(
+        vec![
+            FrontendEvent::Key(KeyEvent::char('i')),
+            FrontendEvent::Key(KeyEvent::char('a')),
+            FrontendEvent::Key(KeyEvent::plain(KeyCode::Enter)),
+            FrontendEvent::Key(KeyEvent::char('b')),
+            FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+            FrontendEvent::Key(KeyEvent::char('k')),
+            FrontendEvent::Key(KeyEvent::char('c')),
+            FrontendEvent::Key(KeyEvent::char('c')),
+            FrontendEvent::Key(KeyEvent::char('X')),
+            FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)),
+            FrontendEvent::Key(KeyEvent::ctrl('q')),
+        ],
+        None,
+    );
+
+    app.run().await.unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["X", "b"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -70,6 +70,11 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
                 buffer.move_head_to_line(selection, line_index);
             });
         }
+        EditCommand::MoveToLinePreservingColumn { line_index } => {
+            move_and_collapse(buffer, selections, |buffer, selection| {
+                buffer.move_head_to_line_preserving_column(selection, line_index);
+            });
+        }
         EditCommand::MoveToChar {
             target,
             direction,
@@ -222,6 +227,11 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
                 buffer.move_head_to_line(selection, line_index);
             });
         }
+        EditCommand::ExtendToLinePreservingColumn { line_index } => {
+            extend(buffer, selections, |buffer, selection| {
+                buffer.move_head_to_line_preserving_column(selection, line_index);
+            });
+        }
         EditCommand::ExtendToChar {
             target,
             direction,
@@ -296,6 +306,9 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
         EditCommand::DeleteLineContent => {
             buffer.delete_line_content_at_selections(selections);
         }
+        EditCommand::ChangeLines { lines } => {
+            buffer.change_lines_at_selections(selections, lines);
+        }
         EditCommand::DeleteInclusiveSelection => {
             buffer.delete_inclusive_selection_at_selections(selections);
         }
@@ -310,7 +323,7 @@ mod tests {
     use super::*;
     use crate::core::buffer::Buffer;
     use crate::core::command::EditCommand;
-    use crate::protocol::selection::{Selection, Selections, TextOffset};
+    use crate::protocol::selection::{Selection, Selections, TextOffset, TextPoint};
 
     fn single_sel(at: TextOffset) -> Selections {
         Selections::single(Selection::collapsed(at))
@@ -565,6 +578,24 @@ mod tests {
         });
         apply_edit(EditCommand::MoveToLineStart, &mut buf, &mut s);
         assert_eq!(s.primary().head().char_index, 6);
+    }
+
+    #[test]
+    fn move_to_line_preserving_column_keeps_the_current_column() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "abcde\nshort\n12345");
+        let mut s = single_sel(TextOffset { char_index: 4 });
+
+        apply_edit(
+            EditCommand::MoveToLinePreservingColumn { line_index: 2 },
+            &mut buf,
+            &mut s,
+        );
+
+        assert_eq!(
+            buf.text_point(s.primary().head()),
+            TextPoint { row: 2, col: 4 }
+        );
     }
 
     #[test]

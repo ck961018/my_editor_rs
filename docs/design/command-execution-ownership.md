@@ -94,10 +94,11 @@ ContentAction。
 Undo/redo 解析为目标 Content 的 TransactionManager 历史遍历，不是
 ContentAction，也不由 Buffer 私有 history 直接处理。
 
-Viewport command 仍由 Frontend 根据 pane 几何解析。解析后的 cursor
-操作是 ViewAction；解析阶段只读，viewport 状态变更延迟到整个 ordered
-result 成功后提交，因此后续 operation 失败时不会留下前端副作用。viewport
-状态不进入 Content 或事务历史。
+Viewport command 仍由 Frontend 根据 pane 几何解析。滚动请求解析为行数，
+并按 cursor behavior 产生 View edit；对齐请求把当前 cursor row 解析为
+`SetTopRow`，不修改 cursor。两者都先形成 `ResolvedViewportCommand`，
+viewport 状态变更延迟到整个 ordered result 成功后提交。因此后续 operation
+失败时不会留下前端副作用，viewport 状态也不进入 Content 或事务历史。
 
 Content event 可以直接产生 ContentChange 或事务请求，不需要伪造 Mode。
 

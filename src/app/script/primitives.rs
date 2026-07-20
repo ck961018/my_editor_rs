@@ -14,7 +14,8 @@ use crate::core::motion::{OperatorCommand, TextMotion, TextOperator, TextTarget}
 use crate::core::text_snapshot::TextSnapshot;
 use crate::core::transaction::{TextChangeSet, TextEdit};
 use crate::protocol::viewport::{
-    ViewportCommand, ViewportCursorBehavior, ViewportMoveAmount, ViewportMoveDirection,
+    ViewportAlignment, ViewportCommand, ViewportCursorBehavior, ViewportMoveAmount,
+    ViewportMoveDirection,
 };
 
 use super::{
@@ -57,6 +58,7 @@ primitives! {
     MoveUp => ("cursor", "moveUp"),
     MoveDown => ("cursor", "moveDown"),
     MoveToLine => ("cursor", "moveToLine"),
+    MoveToLinePreservingColumn => ("cursor", "moveToLinePreservingColumn"),
     MoveToCharForward => ("cursor", "moveToCharForward"),
     MoveToCharBackward => ("cursor", "moveToCharBackward"),
     ExtendLeft => ("cursor", "extendLeft"),
@@ -66,6 +68,7 @@ primitives! {
     ExtendUp => ("cursor", "extendUp"),
     ExtendDown => ("cursor", "extendDown"),
     ExtendToLine => ("cursor", "extendToLine"),
+    ExtendToLinePreservingColumn => ("cursor", "extendToLinePreservingColumn"),
     ExtendToCharForward => ("cursor", "extendToCharForward"),
     ExtendToCharBackward => ("cursor", "extendToCharBackward"),
     MoveWordForward => ("cursor", "moveWordForward"),
@@ -102,9 +105,12 @@ primitives! {
     DeleteSelectionInclusive => ("text", "deleteSelectionInclusive"),
     DeleteSelectedLines => ("text", "deleteSelectedLines"),
     DeleteWordMotion => ("text", "deleteWordMotion"),
+    DeleteWordEndMotion => ("text", "deleteWordEndMotion"),
+    ChangeWordMotion => ("text", "changeWordMotion"),
     DeleteToLineStartMotion => ("text", "deleteToLineStartMotion"),
     DeleteToLineEndMotion => ("text", "deleteToLineEndMotion"),
     DeleteLines => ("text", "deleteLines"),
+    ChangeLines => ("text", "changeLines"),
     ApplyEdits => ("text", "applyEdits"),
     Begin => ("history", "begin"),
     Commit => ("history", "commit"),
@@ -115,6 +121,9 @@ primitives! {
     HalfPageDown => ("viewport", "halfPageDown"),
     FullPageUp => ("viewport", "fullPageUp"),
     FullPageDown => ("viewport", "fullPageDown"),
+    AlignTop => ("viewport", "alignTop"),
+    AlignCenter => ("viewport", "alignCenter"),
+    AlignBottom => ("viewport", "alignBottom"),
     InvokeMode => ("mode", "invoke"),
     Save => ("app", "save"),
     Quit => ("app", "quit"),
@@ -340,6 +349,9 @@ fn primitive_effects(
         MoveToLine => deferred(EditCommand::MoveToLine {
             line_index: non_negative_integer(scope, arguments.get(0), "line")?,
         }),
+        MoveToLinePreservingColumn => deferred(EditCommand::MoveToLinePreservingColumn {
+            line_index: non_negative_integer(scope, arguments.get(0), "line")?,
+        }),
         MoveToCharForward => deferred(EditCommand::MoveToChar {
             target: character(scope, arguments.get(0), "character")?,
             direction: CharSearchDirection::Forward,
@@ -361,6 +373,9 @@ fn primitive_effects(
         ExtendUp => deferred(EditCommand::ExtendUpBy(count(scope, arguments, 0)?)),
         ExtendDown => deferred(EditCommand::ExtendDownBy(count(scope, arguments, 0)?)),
         ExtendToLine => deferred(EditCommand::ExtendToLine {
+            line_index: non_negative_integer(scope, arguments.get(0), "line")?,
+        }),
+        ExtendToLinePreservingColumn => deferred(EditCommand::ExtendToLinePreservingColumn {
             line_index: non_negative_integer(scope, arguments.get(0), "line")?,
         }),
         ExtendToCharForward => deferred(EditCommand::ExtendToChar {
@@ -428,6 +443,14 @@ fn primitive_effects(
             motion: TextMotion::WordForward,
             count: count(scope, arguments, 0)?,
         })),
+        DeleteWordEndMotion => deferred(delete_operator(TextTarget::Motion {
+            motion: TextMotion::WordEnd,
+            count: count(scope, arguments, 0)?,
+        })),
+        ChangeWordMotion => deferred(delete_operator(TextTarget::Motion {
+            motion: TextMotion::ChangeWordForward,
+            count: count(scope, arguments, 0)?,
+        })),
         DeleteToLineStartMotion => deferred(delete_operator(TextTarget::Motion {
             motion: TextMotion::LineStart,
             count: count(scope, arguments, 0)?,
@@ -439,6 +462,9 @@ fn primitive_effects(
         DeleteLines => deferred(delete_operator(TextTarget::Lines {
             count: count(scope, arguments, 0)?,
         })),
+        ChangeLines => deferred(EditCommand::ChangeLines {
+            lines: count(scope, arguments, 0)?,
+        }),
         ApplyEdits => vec![OperationRequest::View {
             target: ViewTarget::Current,
             operation: ViewOperation::ApplyContent(apply_edits(scope, arguments, runtime)?),
@@ -468,6 +494,9 @@ fn primitive_effects(
             ViewportMoveAmount::FullPage,
             extend_selection(scope, arguments)?,
         ),
+        AlignTop => viewport_alignment(ViewportAlignment::Top),
+        AlignCenter => viewport_alignment(ViewportAlignment::Center),
+        AlignBottom => viewport_alignment(ViewportAlignment::Bottom),
         InvokeMode => {
             let mode = ModeName::new(string(scope, arguments.get(0), "mode")?);
             let action = ModeActionName::new(string(scope, arguments.get(1), "action")?);
@@ -529,6 +558,13 @@ fn viewport(
                 ViewportCursorBehavior::Move
             },
         )),
+    })
+}
+
+fn viewport_alignment(alignment: ViewportAlignment) -> Vec<OperationRequest> {
+    nested(OperationRequest::View {
+        target: ViewTarget::Current,
+        operation: ViewOperation::Viewport(ViewportCommand::align(alignment)),
     })
 }
 

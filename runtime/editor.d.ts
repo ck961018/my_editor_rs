@@ -79,6 +79,7 @@ interface CursorPrimitives {
   moveUp(count?: number): void;
   moveDown(count?: number): void;
   moveToLine(line: number): void;
+  moveToLinePreservingColumn(line: number): void;
   moveToCharForward(character: string, count?: number): void;
   moveToCharBackward(character: string, count?: number): void;
   extendLeft(count?: number): void;
@@ -88,6 +89,7 @@ interface CursorPrimitives {
   extendUp(count?: number): void;
   extendDown(count?: number): void;
   extendToLine(line: number): void;
+  extendToLinePreservingColumn(line: number): void;
   extendToCharForward(character: string, count?: number): void;
   extendToCharBackward(character: string, count?: number): void;
   moveWordForward(count?: number): void;
@@ -127,9 +129,12 @@ interface TextPrimitives {
   deleteSelectionInclusive(): void;
   deleteSelectedLines(): void;
   deleteWordMotion(count?: number): void;
+  deleteWordEndMotion(count?: number): void;
+  changeWordMotion(count?: number): void;
   deleteToLineStartMotion(count?: number): void;
   deleteToLineEndMotion(count?: number): void;
   deleteLines(count?: number): void;
+  changeLines(count?: number): void;
   applyEdits(edits: ContentEdit[]): void;
 }
 
@@ -146,6 +151,9 @@ interface ViewportPrimitives {
   halfPageDown(extendSelection?: boolean): void;
   fullPageUp(extendSelection?: boolean): void;
   fullPageDown(extendSelection?: boolean): void;
+  alignTop(): void;
+  alignCenter(): void;
+  alignBottom(): void;
 }
 
 interface ModePrimitives {

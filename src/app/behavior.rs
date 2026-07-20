@@ -5,7 +5,7 @@ use crate::protocol::content_query::{ContentData, ContentQuery, DocumentStatus};
 use crate::protocol::ids::{ContentId, ViewId};
 use crate::protocol::revision::Revision;
 use crate::protocol::selection::Selections;
-use crate::protocol::viewport::ViewportCommand;
+use crate::protocol::viewport::ResolvedViewportCommand;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct BehaviorSnapshot {
@@ -74,8 +74,7 @@ pub(super) enum EffectBehavior {
     },
     Viewport {
         view: ViewId,
-        command: ViewportCommand,
-        lines: usize,
+        command: ResolvedViewportCommand,
     },
     Quit,
 }

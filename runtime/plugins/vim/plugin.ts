@@ -17,8 +17,10 @@ type VimPending =
   | { kind: "count"; count: number }
   | { kind: "find"; direction: "forward" | "backward"; count: number }
   | { kind: "goto"; count: number }
+  | { kind: "viewport"; line?: number }
   | {
-    kind: "delete";
+    kind: "operator";
+    operator: "delete" | "change";
     operatorCount: number;
     motionCount?: number;
   };
@@ -61,6 +63,13 @@ function takeCount(state: VimViewState): number {
   return count;
 }
 
+function beginViewport(state: VimViewState): void {
+  const line = state.pending?.kind === "count"
+    ? Math.max(1, state.pending.count) - 1
+    : undefined;
+  state.pending = { kind: "viewport", line };
+}
+
 function isPlain(key: KeyInput): boolean {
   return !key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.shift;
 }
@@ -68,6 +77,22 @@ function isPlain(key: KeyInput): boolean {
 function isCtrl(key: KeyInput, character: string): boolean {
   return key.code === "character" && key.character === character &&
     key.modifiers.ctrl && !key.modifiers.alt;
+}
+
+function completeOperator(
+  state: VimViewState,
+  operator: "delete" | "change",
+  effect: Effect,
+): Effect[] {
+  if (operator === "delete") {
+    state.pending = null;
+    return [effect];
+  }
+  setEditorState(state, "insert");
+  return [
+    (context) => context.history.begin(),
+    effect,
+  ];
 }
 
 function handlePending(state: VimViewState, key: KeyInput): Effect[] | null {
@@ -108,32 +133,83 @@ function handlePending(state: VimViewState, key: KeyInput): Effect[] | null {
       : context.cursor.moveToLine(line)];
   }
 
-  if (pending.kind === "delete") {
+  if (pending.kind === "viewport") {
+    state.pending = null;
+    if (key.code !== "character" || !isPlain(key) || !key.character) return [];
+    const alignment = key.character === "t"
+      ? "top"
+      : key.character === "z"
+      ? "center"
+      : key.character === "b"
+      ? "bottom"
+      : null;
+    if (alignment === null) return [];
+    const effects: Effect[] = [];
+    if (pending.line !== undefined) {
+      effects.push((context) => isVisual(state)
+        ? context.cursor.extendToLinePreservingColumn(pending.line!)
+        : context.cursor.moveToLinePreservingColumn(pending.line!));
+    }
+    effects.push((context) => {
+      if (alignment === "top") context.viewport.alignTop();
+      else if (alignment === "center") context.viewport.alignCenter();
+      else context.viewport.alignBottom();
+    });
+    return effects;
+  }
+
+  if (pending.kind === "operator") {
     if (key.code !== "character" || !isPlain(key) || !key.character) {
       state.pending = null;
       return [];
     }
     if (key.character >= "0" && key.character <= "9") {
       if (key.character === "0" && pending.motionCount === undefined) {
-        state.pending = null;
-        return [(context) =>
-          context.text.deleteToLineStartMotion(pending.operatorCount)];
+        return completeOperator(
+          state,
+          pending.operator,
+          (context) =>
+            context.text.deleteToLineStartMotion(pending.operatorCount),
+        );
       }
       pending.motionCount = (pending.motionCount ?? 0) * 10 +
         Number(key.character);
       return [];
     }
-    state.pending = null;
     const count = pending.operatorCount * (pending.motionCount ?? 1);
-    if (key.character === "d") {
-      return [(context) => context.text.deleteLines(count)];
+    if (key.character === pending.operator[0]) {
+      return completeOperator(
+        state,
+        pending.operator,
+        (context) => pending.operator === "change"
+          ? context.text.changeLines(count)
+          : context.text.deleteLines(count),
+      );
     }
     if (key.character === "w") {
-      return [(context) => context.text.deleteWordMotion(count)];
+      return completeOperator(
+        state,
+        pending.operator,
+        (context) => pending.operator === "change"
+          ? context.text.changeWordMotion(count)
+          : context.text.deleteWordMotion(count),
+      );
+    }
+    if (key.character === "e") {
+      return completeOperator(
+        state,
+        pending.operator,
+        (context) => context.text.deleteWordEndMotion(count),
+      );
     }
     if (key.character === "$") {
-      return [(context) => context.text.deleteToLineEndMotion(count)];
+      return completeOperator(
+        state,
+        pending.operator,
+        (context) => context.text.deleteToLineEndMotion(count),
+      );
     }
+    state.pending = null;
     return [];
   }
 
@@ -146,8 +222,8 @@ function handlePending(state: VimViewState, key: KeyInput): Effect[] | null {
     return [];
   }
   const allowed = isVisual(state)
-    ? "hjklwbefFg d^$G{}".replaceAll(" ", "")
-    : "hjklwbefFgd";
+    ? "hjklwbefFg dz^$G{}".replaceAll(" ", "")
+    : "hjklwbefFgdzc$";
   if (!allowed.includes(key.character)) {
     state.pending = null;
     return [];
@@ -231,9 +307,14 @@ function handleMotion(state: VimViewState, character: string): Effect[] | null {
     "^": (context) => visual
       ? context.cursor.extendToFirstNonBlank()
       : context.cursor.moveToFirstNonBlank(),
-    "$": (context) => visual
-      ? context.cursor.extendToLineEnd()
-      : context.cursor.moveToLineEnd(),
+    "$": (context, count) => {
+      if (count > 1) {
+        if (visual) context.cursor.extendDown(count - 1);
+        else context.cursor.moveDown(count - 1);
+      }
+      if (visual) context.cursor.extendToLineEnd();
+      else context.cursor.moveToLineEnd();
+    },
     G: (context) => visual
       ? context.cursor.extendToLastLine()
       : context.cursor.moveToLastLine(),
@@ -301,6 +382,10 @@ function handleVisual(state: VimViewState, key: KeyInput): Effect[] | null {
   }
   if (key.character === "g") {
     state.pending = { kind: "goto", count: takeCount(state) };
+    return [];
+  }
+  if (key.character === "z") {
+    beginViewport(state);
     return [];
   }
   if (["d", "x", "D", "X"].includes(key.character)) {
@@ -419,9 +504,14 @@ function handleNormal(state: VimViewState, key: KeyInput): Effect[] | null {
     state.pending = { kind: "goto", count: takeCount(state) };
     return [];
   }
-  if (key.character === "d") {
+  if (key.character === "z") {
+    beginViewport(state);
+    return [];
+  }
+  if (key.character === "d" || key.character === "c") {
     state.pending = {
-      kind: "delete",
+      kind: "operator",
+      operator: key.character === "d" ? "delete" : "change",
       operatorCount: takeCount(state),
     };
     return [];

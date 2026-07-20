@@ -24,13 +24,46 @@ pub enum ViewportCursorBehavior {
     Extend,
 }
 
-/// 由后端上送给前端的视口移动请求。前端用实际布局高度解析移动行数，
-/// App 再按 cursor_behavior 把同一行数应用到当前 View 的 selection。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ViewportCommand {
-    pub direction: ViewportMoveDirection,
-    pub amount: ViewportMoveAmount,
-    pub cursor_behavior: ViewportCursorBehavior,
+pub enum ViewportAlignment {
+    Top,
+    Center,
+    Bottom,
+}
+
+impl ViewportAlignment {
+    pub const fn row_offset(self, height: usize) -> usize {
+        match self {
+            Self::Top => 0,
+            Self::Center => height.saturating_sub(1) / 2,
+            Self::Bottom => height.saturating_sub(1),
+        }
+    }
+}
+
+/// 由后端上送给前端的视口请求。前端根据实际布局高度解析滚动量或对齐位置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewportCommand {
+    Scroll {
+        direction: ViewportMoveDirection,
+        amount: ViewportMoveAmount,
+        cursor_behavior: ViewportCursorBehavior,
+    },
+    Align {
+        alignment: ViewportAlignment,
+    },
+}
+
+/// 前端基于 pane 高度解析后的、可延迟提交的 viewport mutation。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedViewportCommand {
+    Scroll {
+        direction: ViewportMoveDirection,
+        lines: usize,
+    },
+    SetTopRow {
+        top_row: usize,
+    },
 }
 
 impl ViewportCommand {
@@ -39,11 +72,15 @@ impl ViewportCommand {
         amount: ViewportMoveAmount,
         cursor_behavior: ViewportCursorBehavior,
     ) -> Self {
-        Self {
+        Self::Scroll {
             direction,
             amount,
             cursor_behavior,
         }
+    }
+
+    pub const fn align(alignment: ViewportAlignment) -> Self {
+        Self::Align { alignment }
     }
 }
 
@@ -74,6 +111,10 @@ impl Viewport {
 
     pub fn scroll_up(&mut self, n: usize) {
         self.top_row = self.top_row.saturating_sub(n);
+    }
+
+    pub fn set_top_row(&mut self, top_row: usize) {
+        self.top_row = top_row;
     }
 
     /// 按 lines 滚动（负向上、正向下）。
@@ -155,8 +196,32 @@ mod tests {
             ViewportCursorBehavior::Extend,
         );
 
-        assert_eq!(command.direction, ViewportMoveDirection::Down);
-        assert_eq!(command.amount, ViewportMoveAmount::HalfPage);
-        assert_eq!(command.cursor_behavior, ViewportCursorBehavior::Extend);
+        assert_eq!(
+            command,
+            ViewportCommand::Scroll {
+                direction: ViewportMoveDirection::Down,
+                amount: ViewportMoveAmount::HalfPage,
+                cursor_behavior: ViewportCursorBehavior::Extend,
+            }
+        );
+    }
+
+    #[test]
+    fn viewport_alignment_is_distinct_from_cursor_moving_scroll() {
+        let command = ViewportCommand::align(ViewportAlignment::Center);
+
+        assert_eq!(
+            command,
+            ViewportCommand::Align {
+                alignment: ViewportAlignment::Center,
+            }
+        );
+    }
+
+    #[test]
+    fn center_alignment_uses_the_upper_middle_row() {
+        assert_eq!(ViewportAlignment::Center.row_offset(0), 0);
+        assert_eq!(ViewportAlignment::Center.row_offset(4), 1);
+        assert_eq!(ViewportAlignment::Center.row_offset(5), 2);
     }
 }

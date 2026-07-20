@@ -8,7 +8,7 @@ use crate::protocol::frontend_event::FrontendEvent;
 use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::revision::Revision;
 use crate::protocol::scene::Scene;
-use crate::protocol::viewport::ViewportCommand;
+use crate::protocol::viewport::{ResolvedViewportCommand, ViewportCommand};
 use crate::terminal::input::Input;
 use crate::terminal::output::{Canvas, Output};
 use crate::tui::scene_renderer::SceneRenderer;
@@ -54,14 +54,15 @@ impl<W: io::Write> Frontend for TuiFrontend<W> {
         scene: &Scene,
         scene_revision: Revision,
         view: ViewId,
+        cursor_row: usize,
         command: ViewportCommand,
-    ) -> io::Result<usize> {
+    ) -> io::Result<ResolvedViewportCommand> {
         Ok(self
             .renderer
-            .resolve_viewport_command(scene, scene_revision, view, command))
+            .resolve_viewport_command(scene, scene_revision, view, cursor_row, command))
     }
 
-    fn apply_viewport_command(&mut self, view: ViewId, command: ViewportCommand, lines: usize) {
-        self.renderer.apply_viewport_command(view, command, lines);
+    fn apply_viewport_command(&mut self, view: ViewId, command: ResolvedViewportCommand) {
+        self.renderer.apply_viewport_command(view, command);
     }
 }

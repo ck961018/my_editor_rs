@@ -39,40 +39,6 @@ pub(super) fn backward_word_start(rope: &Rope, char_index: usize) -> usize {
     start
 }
 
-pub(super) fn forward_word_end(rope: &Rope, char_index: usize) -> usize {
-    let len = rope.len_chars();
-    let mut pos = char_index.min(len);
-    if pos >= len {
-        return len;
-    }
-
-    if rope.char(pos).is_whitespace() {
-        while pos < len && rope.char(pos).is_whitespace() {
-            pos += 1;
-        }
-        if pos >= len {
-            return len;
-        }
-    } else {
-        let start_class = char_class(rope.char(pos));
-        if pos + 1 < len && char_class(rope.char(pos + 1)) != start_class {
-            pos += 1;
-            while pos < len && rope.char(pos).is_whitespace() {
-                pos += 1;
-            }
-            if pos >= len {
-                return len;
-            }
-        }
-    }
-
-    let end_class = char_class(rope.char(pos));
-    while pos + 1 < len && char_class(rope.char(pos + 1)) == end_class {
-        pos += 1;
-    }
-    pos
-}
-
 pub(super) fn first_non_blank_in_line(rope: &Rope, row: usize) -> usize {
     let line_start = rope.line_to_char(row);
     let line = rope.line(row);
@@ -125,16 +91,6 @@ pub(super) fn next_paragraph(rope: &Rope, char_index: usize) -> usize {
         }
     }
     rope.line_to_char(last_row)
-}
-
-fn char_class(ch: char) -> u8 {
-    if ch.is_whitespace() {
-        0
-    } else if is_word_char(ch) {
-        1
-    } else {
-        2
-    }
 }
 
 fn is_empty_line(rope: &Rope, row: usize) -> bool {

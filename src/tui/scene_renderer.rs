@@ -13,7 +13,7 @@ use crate::protocol::revision::Revision;
 use crate::protocol::scene::Scene;
 use crate::protocol::selection::{TextOffset, TextPoint};
 use crate::protocol::viewport::{
-    Viewport, ViewportCommand, ViewportMoveAmount, ViewportMoveDirection,
+    ResolvedViewportCommand, Viewport, ViewportCommand, ViewportMoveAmount, ViewportMoveDirection,
 };
 use crate::terminal::output::Canvas;
 use crate::tui::resolved::{RenderItem, ResolvedScene};
@@ -151,27 +151,45 @@ impl SceneRenderer {
         scene: &Scene,
         scene_revision: Revision,
         view: ViewId,
+        cursor_row: usize,
         command: ViewportCommand,
-    ) -> usize {
+    ) -> ResolvedViewportCommand {
         let resolved = self.engine.layout(scene, scene_revision);
         let Some(item) = resolved.items.iter().find(|item| item.view_id == view) else {
-            return 0;
+            return ResolvedViewportCommand::Scroll {
+                direction: ViewportMoveDirection::Down,
+                lines: 0,
+            };
         };
         let height = item.rect.height.max(0) as usize;
-        if height == 0 {
-            return 0;
-        }
-        match command.amount {
-            ViewportMoveAmount::HalfPage => (height / 2).max(1),
-            ViewportMoveAmount::FullPage => height,
+        match command {
+            ViewportCommand::Scroll {
+                direction, amount, ..
+            } => {
+                let lines = if height == 0 {
+                    0
+                } else {
+                    match amount {
+                        ViewportMoveAmount::HalfPage => (height / 2).max(1),
+                        ViewportMoveAmount::FullPage => height,
+                    }
+                };
+                ResolvedViewportCommand::Scroll { direction, lines }
+            }
+            ViewportCommand::Align { alignment } => ResolvedViewportCommand::SetTopRow {
+                top_row: cursor_row.saturating_sub(alignment.row_offset(height)),
+            },
         }
     }
 
-    pub fn apply_viewport_command(&mut self, view: ViewId, command: ViewportCommand, lines: usize) {
+    pub fn apply_viewport_command(&mut self, view: ViewId, command: ResolvedViewportCommand) {
         let viewport = self.viewports.entry(view).or_insert_with(Viewport::origin);
-        match command.direction {
-            ViewportMoveDirection::Up => viewport.scroll_up(lines),
-            ViewportMoveDirection::Down => viewport.scroll_down(lines),
+        match command {
+            ResolvedViewportCommand::Scroll { direction, lines } => match direction {
+                ViewportMoveDirection::Up => viewport.scroll_up(lines),
+                ViewportMoveDirection::Down => viewport.scroll_down(lines),
+            },
+            ResolvedViewportCommand::SetTopRow { top_row } => viewport.set_top_row(top_row),
         }
     }
 }
@@ -588,6 +606,7 @@ mod tests {
     use crate::protocol::ids::{ContentId, ViewId};
     use crate::protocol::selection::{Selection, Selections, TextOffset};
     use crate::protocol::status::StatusMessage;
+    use crate::protocol::viewport::ViewportAlignment;
     use crate::terminal::output::Output;
     use crate::tui::test_scene::{editor_scene, split_editor_scene};
     use std::collections::HashMap;
@@ -997,19 +1016,57 @@ mod tests {
             ViewportMoveAmount::HalfPage,
             crate::protocol::viewport::ViewportCursorBehavior::Move,
         );
-        let half = renderer.resolve_viewport_command(&scene, Revision(0), ViewId(0), half_command);
-        renderer.apply_viewport_command(ViewId(0), half_command, half);
+        let half =
+            renderer.resolve_viewport_command(&scene, Revision(0), ViewId(0), 0, half_command);
+        renderer.apply_viewport_command(ViewId(0), half);
         let full_command = ViewportCommand::new(
             ViewportMoveDirection::Down,
             ViewportMoveAmount::FullPage,
             crate::protocol::viewport::ViewportCursorBehavior::Move,
         );
-        let full = renderer.resolve_viewport_command(&scene, Revision(0), ViewId(0), full_command);
-        renderer.apply_viewport_command(ViewId(0), full_command, full);
+        let full =
+            renderer.resolve_viewport_command(&scene, Revision(0), ViewId(0), 0, full_command);
+        renderer.apply_viewport_command(ViewId(0), full);
 
-        assert_eq!(half, 2);
-        assert_eq!(full, 4);
+        assert_eq!(
+            half,
+            ResolvedViewportCommand::Scroll {
+                direction: ViewportMoveDirection::Up,
+                lines: 2,
+            }
+        );
+        assert_eq!(
+            full,
+            ResolvedViewportCommand::Scroll {
+                direction: ViewportMoveDirection::Down,
+                lines: 4,
+            }
+        );
         assert_eq!(renderer.viewports[&ViewId(0)].top_row, 12);
+    }
+
+    #[test]
+    fn viewport_alignment_uses_cursor_row_and_layout_height() {
+        let (scene, _editor) = editor_scene(40, 5, ViewId(0), ViewId(1));
+        let mut renderer = SceneRenderer::new();
+
+        let center = renderer.resolve_viewport_command(
+            &scene,
+            Revision(0),
+            ViewId(0),
+            10,
+            ViewportCommand::align(ViewportAlignment::Center),
+        );
+        let bottom = renderer.resolve_viewport_command(
+            &scene,
+            Revision(0),
+            ViewId(0),
+            10,
+            ViewportCommand::align(ViewportAlignment::Bottom),
+        );
+
+        assert_eq!(center, ResolvedViewportCommand::SetTopRow { top_row: 9 });
+        assert_eq!(bottom, ResolvedViewportCommand::SetTopRow { top_row: 7 });
     }
 
     #[test]

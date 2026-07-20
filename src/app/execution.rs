@@ -10,7 +10,7 @@ use crate::core::transaction::TransactionDirection;
 use crate::protocol::ids::{ContentId, ViewId};
 use crate::protocol::revision::Revision;
 use crate::protocol::selection::Selections;
-use crate::protocol::viewport::ViewportCommand;
+use crate::protocol::viewport::ResolvedViewportCommand;
 
 const DEFAULT_OPERATION_BUDGET: usize = 256;
 const DEFAULT_NESTED_MODE_BUDGET: usize = 256;
@@ -52,8 +52,7 @@ pub(super) enum PreparedEffect {
     },
     Viewport {
         view: ViewId,
-        command: ViewportCommand,
-        lines: usize,
+        command: ResolvedViewportCommand,
     },
     Quit,
 }

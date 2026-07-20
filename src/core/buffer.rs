@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use crate::core::action::{ContentAction, ContentEditPlan};
 use crate::core::command::{CharSearchDirection, EditCommand};
 use crate::core::motion::{
-    TextRange, TextTarget, forward_word_start, line_end_insert, resolve_target,
+    OperatorCommand, TextOperator, TextRange, TextTarget, forward_word_end, forward_word_start,
+    line_end_insert, resolve_operator,
 };
 use crate::core::transaction::{
     Affinity, TextChangeSet, TextEdit, TextStateId, TextTransactionData, TextTransactionError,
@@ -19,8 +20,8 @@ mod navigation;
 mod ranges;
 
 use navigation::{
-    backward_word_start, first_non_blank_in_line, forward_word_end, line_break_width_before,
-    line_content_len, line_end_char, next_paragraph, prev_paragraph,
+    backward_word_start, first_non_blank_in_line, line_break_width_before, line_content_len,
+    line_end_char, next_paragraph, prev_paragraph,
 };
 use ranges::merge_ranges;
 
@@ -518,6 +519,14 @@ impl Buffer {
     pub fn move_head_to_line(&self, sel: &mut Selection, line_index: usize) {
         let row = line_index.min(self.rope.len_lines().saturating_sub(1));
         sel.head.char_index = self.rope.line_to_char(row);
+        self.clamp_offset(&mut sel.head);
+    }
+
+    pub fn move_head_to_line_preserving_column(&self, sel: &mut Selection, line_index: usize) {
+        let column = self.text_point(sel.head).col;
+        let row = line_index.min(self.rope.len_lines().saturating_sub(1));
+        sel.head.char_index =
+            self.rope.line_to_char(row) + column.min(line_content_len(&self.rope, row));
         self.clamp_offset(&mut sel.head);
     }
 
@@ -1171,6 +1180,49 @@ impl Buffer {
         }
     }
 
+    pub fn change_lines_at_selections(&mut self, selections: &mut Selections, lines: usize) {
+        self.reconcile_selections(selections);
+        let max_row = self.rope.len_lines().saturating_sub(1);
+        let lines = lines.max(1);
+        let rows: Vec<usize> = selections
+            .all()
+            .map(|selection| {
+                self.rope
+                    .char_to_line(selection.head.char_index.min(self.rope.len_chars()))
+            })
+            .collect();
+        let destinations: Vec<usize> = rows
+            .iter()
+            .map(|row| self.rope.line_to_char(*row))
+            .collect();
+        let ranges: Vec<(usize, usize)> = rows
+            .iter()
+            .map(|row| {
+                let end_row = row.saturating_add(lines - 1).min(max_row);
+                (
+                    self.rope.line_to_char(*row),
+                    line_end_insert(&self.rope, end_row),
+                )
+            })
+            .collect();
+        let normalized = merge_ranges(ranges);
+        self.apply_text_edits(
+            normalized
+                .iter()
+                .map(|&(start, end)| TextEdit::new(start..end, ""))
+                .collect(),
+        )
+        .expect("valid line change");
+        let change = self.last_change.clone();
+        for (selection, destination) in selections.all_mut().zip(destinations) {
+            selection.head.char_index = change.as_ref().map_or(destination, |change| {
+                change.map_position(destination, Affinity::Before)
+            });
+            self.clamp_offset(&mut selection.head);
+            Self::collapse_to_head(selection);
+        }
+    }
+
     fn preferred_line_ending(&self) -> &'static str {
         for row in 0..self.rope.len_lines().saturating_sub(1) {
             let line = self.rope.line(row);
@@ -1211,7 +1263,14 @@ impl Buffer {
         let destinations_and_ranges: Vec<(usize, (usize, usize))> = selections
             .all()
             .map(|selection| {
-                let outcome = resolve_target(&self.rope, selection.head.char_index, target);
+                let outcome = resolve_operator(
+                    &self.rope,
+                    selection.head.char_index,
+                    OperatorCommand {
+                        operator: TextOperator::Delete,
+                        target,
+                    },
+                );
                 let TextRange::Charwise(range) = outcome.covered else {
                     unreachable!("motion target resolves to a charwise range")
                 };

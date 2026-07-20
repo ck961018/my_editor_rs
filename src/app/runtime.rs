@@ -23,10 +23,12 @@ use crate::core::command::EditCommand;
 use crate::core::content::{ContentActionResult, ContentEffect, ContentInput, ContentResult};
 use crate::core::transaction::TransactionDirection;
 use crate::frontend::Frontend;
-use crate::protocol::content_query::RenderQuery;
+use crate::protocol::content_query::{ContentData, ContentQuery, RenderQuery};
 use crate::protocol::frontend_event::FrontendEvent;
 use crate::protocol::ids::{ContentId, ViewId};
-use crate::protocol::viewport::{ViewportCommand, ViewportCursorBehavior, ViewportMoveDirection};
+use crate::protocol::viewport::{
+    ResolvedViewportCommand, ViewportCommand, ViewportCursorBehavior, ViewportMoveDirection,
+};
 
 #[cfg(test)]
 impl PreparedEffect {
@@ -39,14 +41,9 @@ impl PreparedEffect {
                 revision: snapshot.revision,
                 state: snapshot.state,
             },
-            Self::Viewport {
-                view,
-                command,
-                lines,
-            } => EffectBehavior::Viewport {
+            Self::Viewport { view, command } => EffectBehavior::Viewport {
                 view: *view,
                 command: *command,
-                lines: *lines,
             },
             Self::Quit => EffectBehavior::Quit,
         }
@@ -345,12 +342,8 @@ impl<F: Frontend> App<F> {
                 PreparedEffect::Save { content, snapshot } => {
                     self.kernel.queue_save(content, snapshot);
                 }
-                PreparedEffect::Viewport {
-                    view,
-                    command,
-                    lines,
-                } => {
-                    self.frontend.apply_viewport_command(view, command, lines);
+                PreparedEffect::Viewport { view, command } => {
+                    self.frontend.apply_viewport_command(view, command);
                 }
                 PreparedEffect::Quit => self.kernel.cancel(),
             }
@@ -533,31 +526,68 @@ impl<F: Frontend> App<F> {
                     }
                     ViewOperation::Apply(action) => self.apply_view_action(view, action, frame),
                     ViewOperation::Viewport(command) => {
-                        let lines = self.frontend.resolve_viewport_command(
+                        let cursor_row = if matches!(command, ViewportCommand::Align { .. }) {
+                            let cursor = self
+                                .session
+                                .view(view)
+                                .and_then(|view| view.selections())
+                                .map(|selections| selections.primary().head())
+                                .ok_or_else(|| {
+                                    io::Error::new(
+                                        io::ErrorKind::InvalidInput,
+                                        "viewport alignment requires a text cursor",
+                                    )
+                                })?;
+                            let ContentData::TextPoints(points) = self
+                                .kernel
+                                .contents()
+                                .query(content, ContentQuery::TextPoints(vec![cursor]))
+                            else {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidInput,
+                                    "viewport alignment requires text content",
+                                ));
+                            };
+                            points
+                                .into_iter()
+                                .next()
+                                .ok_or_else(|| {
+                                    io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "text query omitted the viewport cursor point",
+                                    )
+                                })?
+                                .row
+                        } else {
+                            0
+                        };
+                        let resolved = self.frontend.resolve_viewport_command(
                             self.session.scene(),
                             self.session.scene_revision(),
                             view,
+                            cursor_row,
                             command,
                         )?;
-                        if lines > 0 {
+                        let has_effect =
+                            !matches!(resolved, ResolvedViewportCommand::Scroll { lines: 0, .. });
+                        if has_effect {
                             self.prepare_effect(
                                 frame,
                                 PreparedEffect::Viewport {
                                     view,
-                                    command,
-                                    lines,
+                                    command: resolved,
                                 },
                             );
-                            prepend_operations(
-                                &mut queue,
-                                origin,
-                                vec![OperationRequest::View {
-                                    target: ViewTarget::Current,
-                                    operation: ViewOperation::Edit(viewport_cursor_edit(
-                                        command, lines,
-                                    )),
-                                }],
-                            );
+                            if let Some(edit) = viewport_cursor_edit(command, resolved) {
+                                prepend_operations(
+                                    &mut queue,
+                                    origin,
+                                    vec![OperationRequest::View {
+                                        target: ViewTarget::Current,
+                                        operation: ViewOperation::Edit(edit),
+                                    }],
+                                );
+                            }
                         }
                         Ok(())
                     }
@@ -1126,8 +1156,20 @@ impl<F: Frontend> App<F> {
     }
 }
 
-fn viewport_cursor_edit(command: ViewportCommand, lines: usize) -> EditCommand {
-    match (command.direction, command.cursor_behavior) {
+fn viewport_cursor_edit(
+    command: ViewportCommand,
+    resolved: ResolvedViewportCommand,
+) -> Option<EditCommand> {
+    let ViewportCommand::Scroll {
+        cursor_behavior, ..
+    } = command
+    else {
+        return None;
+    };
+    let ResolvedViewportCommand::Scroll { direction, lines } = resolved else {
+        return None;
+    };
+    Some(match (direction, cursor_behavior) {
         (ViewportMoveDirection::Up, ViewportCursorBehavior::Move) => EditCommand::MoveUpBy(lines),
         (ViewportMoveDirection::Down, ViewportCursorBehavior::Move) => {
             EditCommand::MoveDownBy(lines)
@@ -1138,5 +1180,5 @@ fn viewport_cursor_edit(command: ViewportCommand, lines: usize) -> EditCommand {
         (ViewportMoveDirection::Down, ViewportCursorBehavior::Extend) => {
             EditCommand::ExtendDownBy(lines)
         }
-    }
+    })
 }

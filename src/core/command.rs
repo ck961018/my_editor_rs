@@ -20,6 +20,9 @@ pub enum EditCommand {
     MoveToLine {
         line_index: usize,
     },
+    MoveToLinePreservingColumn {
+        line_index: usize,
+    },
     MoveToChar {
         target: char,
         direction: CharSearchDirection,
@@ -43,6 +46,9 @@ pub enum EditCommand {
     ExtendUpBy(usize),
     ExtendDownBy(usize),
     ExtendToLine {
+        line_index: usize,
+    },
+    ExtendToLinePreservingColumn {
         line_index: usize,
     },
     ExtendToChar {
@@ -89,6 +95,9 @@ pub enum EditCommand {
     InsertNewLineAbove,
     MoveAfterLineEnd,
     DeleteLineContent,
+    ChangeLines {
+        lines: usize,
+    },
     DeleteInclusiveSelection,
     DeleteSelectedLines,
 }
