@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::io;
 
 use crate::app::kernel::Kernel;
@@ -90,13 +89,9 @@ pub(super) fn bootstrap_editor(
         } else {
             editor_modes.push(name);
         }
-        modes.register(mode);
+        modes.register(mode).map_err(io::Error::other)?;
     }
-    let mut kernel = Kernel::new(
-        contents,
-        modes,
-        HashMap::from([(editor_content, editor_modes.clone())]),
-    );
+    let mut kernel = Kernel::new(contents, modes);
     let (contents, modes, mode_contents) = kernel.mode_attachment_parts();
     let session = ClientSession::editor(
         contents,

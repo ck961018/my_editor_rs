@@ -124,8 +124,6 @@ pub struct ViewData {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContentQuery {
-    #[allow(dead_code, reason = "dynamic content analyzers need exact source text")]
-    Text,
     TextRows(RowRange),
     TextPoints(Vec<TextOffset>),
     DocumentStatus,
@@ -134,7 +132,6 @@ pub enum ContentQuery {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContentData {
-    Text(String),
     TextRows(Vec<String>),
     TextPoints(Vec<TextPoint>),
     DocumentStatus(DocumentStatus),

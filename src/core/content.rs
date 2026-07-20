@@ -5,8 +5,13 @@ use crate::core::buffer::{Buffer, BufferTransactionData};
 use crate::core::command::EditCommand;
 use crate::core::content_view_state::ContentViewState;
 use crate::core::status_bar::StatusBar;
+use crate::core::text_snapshot::TextSnapshot;
 use crate::core::transaction::{TextChangeSet, TextStateId, TextTransactionError};
-use crate::protocol::content_query::ContentPresentation;
+use crate::protocol::content_query::{
+    ContentData, ContentPresentation, ContentQuery, DocumentStatus, RowRange, StatusBarData,
+};
+use crate::protocol::ids::ContentId;
+use crate::protocol::revision::Revision;
 use crate::protocol::selection::Selections;
 use crate::protocol::status::StatusMessage;
 
@@ -116,7 +121,77 @@ pub enum Content {
     StatusBar(StatusBar),
 }
 
+pub(crate) struct ContentDependencyQuery {
+    pub id: ContentId,
+    pub query: ContentQuery,
+}
+
 impl Content {
+    pub fn text_snapshot(&self) -> Option<TextSnapshot> {
+        match self {
+            Self::Buffer(buffer) => Some(TextSnapshot::new(buffer.slice())),
+            Self::StatusBar(_) => None,
+        }
+    }
+
+    pub(crate) fn revision_dependency(&self) -> Option<ContentId> {
+        match self {
+            Self::Buffer(_) => None,
+            Self::StatusBar(status_bar) => Some(status_bar.target_content_id()),
+        }
+    }
+
+    pub(crate) fn effective_revision(
+        &self,
+        own: Revision,
+        dependency: Option<Revision>,
+    ) -> Revision {
+        match self {
+            Self::Buffer(_) => own,
+            Self::StatusBar(_) => dependency.map_or(own, |revision| own.max(revision)),
+        }
+    }
+
+    pub(crate) fn dependency_query(&self, query: &ContentQuery) -> Option<ContentDependencyQuery> {
+        match (self, query) {
+            (Self::StatusBar(status_bar), ContentQuery::StatusBarData) => {
+                Some(ContentDependencyQuery {
+                    id: status_bar.target_content_id(),
+                    query: ContentQuery::DocumentStatus,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn query(
+        &self,
+        query: ContentQuery,
+        dependency: Option<ContentData>,
+    ) -> ContentData {
+        match (self, query) {
+            (Self::Buffer(buffer), ContentQuery::TextRows(range)) => {
+                ContentData::TextRows(text_rows(buffer, range))
+            }
+            (Self::Buffer(buffer), ContentQuery::TextPoints(offsets)) => ContentData::TextPoints(
+                offsets
+                    .into_iter()
+                    .map(|offset| buffer.text_point(offset))
+                    .collect(),
+            ),
+            (Self::Buffer(buffer), ContentQuery::DocumentStatus) => {
+                ContentData::DocumentStatus(document_status(buffer))
+            }
+            (Self::StatusBar(_), ContentQuery::StatusBarData) => {
+                ContentData::StatusBarData(match dependency {
+                    Some(ContentData::DocumentStatus(status)) => status,
+                    _ => default_status_bar_data(),
+                })
+            }
+            _ => ContentData::Unsupported,
+        }
+    }
+
     pub fn plan_edit(
         &self,
         command: EditCommand,
@@ -245,6 +320,37 @@ impl Content {
             }
             (Self::StatusBar(_), _) => ContentResult::NotHandled,
         }
+    }
+}
+
+fn text_rows(buffer: &Buffer, range: RowRange) -> Vec<String> {
+    let total = buffer.len_lines();
+    let start = range.start.min(total);
+    let end = range.end.min(total).max(start);
+    (start..end)
+        .map(|row| {
+            buffer
+                .line(row)
+                .trim_end_matches('\n')
+                .trim_end_matches('\r')
+                .to_string()
+        })
+        .collect()
+}
+
+fn document_status(buffer: &Buffer) -> DocumentStatus {
+    DocumentStatus {
+        file_name: buffer.file_name().map(str::to_string),
+        modified: buffer.modified(),
+        message: buffer.status(),
+    }
+}
+
+fn default_status_bar_data() -> StatusBarData {
+    StatusBarData {
+        file_name: None,
+        modified: false,
+        message: StatusMessage::None,
     }
 }
 

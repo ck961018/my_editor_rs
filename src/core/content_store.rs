@@ -8,15 +8,11 @@ use crate::core::content::{
     ContentTransactionError,
 };
 use crate::core::content_view_state::ContentViewState;
-use crate::core::text_snapshot::TextSnapshot;
 use crate::core::transaction::TransactionDirection;
-use crate::protocol::content_query::{
-    ContentData, ContentPresentation, ContentQuery, DocumentStatus, RowRange, StatusBarData,
-};
+use crate::protocol::content_query::{ContentData, ContentPresentation, ContentQuery};
 use crate::protocol::ids::ContentId;
 use crate::protocol::revision::Revision;
 use crate::protocol::selection::Selections;
-use crate::protocol::status::StatusMessage;
 
 #[derive(Default)]
 pub struct ContentStore {
@@ -161,56 +157,27 @@ impl ContentStore {
 
     pub fn revision(&self, id: ContentId) -> Option<Revision> {
         let entry = self.entries.get(&id)?;
-        match &entry.content {
-            Content::StatusBar(status_bar) => Some(
-                self.entries
-                    .get(&status_bar.target_content_id())
-                    .map_or(entry.revision, |target| entry.revision.max(target.revision)),
-            ),
-            Content::Buffer(_) => Some(entry.revision),
-        }
+        let dependency = entry
+            .content
+            .revision_dependency()
+            .and_then(|id| self.entries.get(&id))
+            .map(|entry| entry.revision);
+        Some(entry.content.effective_revision(entry.revision, dependency))
     }
 
-    pub fn text_snapshot(&self, id: ContentId) -> Option<TextSnapshot> {
-        match &self.entries.get(&id)?.content {
-            Content::Buffer(buffer) => Some(TextSnapshot::new(buffer.slice())),
-            Content::StatusBar(_) => None,
-        }
+    pub fn text_snapshot(&self, id: ContentId) -> Option<crate::core::text_snapshot::TextSnapshot> {
+        self.entries.get(&id)?.content.text_snapshot()
     }
 
     pub fn query(&self, id: ContentId, query: ContentQuery) -> ContentData {
-        match (self.entries.get(&id).map(|entry| &entry.content), query) {
-            (Some(Content::Buffer(buffer)), ContentQuery::Text) => {
-                ContentData::Text(buffer.slice().to_string())
-            }
-            (Some(Content::Buffer(buffer)), ContentQuery::TextRows(range)) => {
-                ContentData::TextRows(text_rows(buffer, range))
-            }
-            (Some(Content::Buffer(buffer)), ContentQuery::TextPoints(offsets)) => {
-                ContentData::TextPoints(
-                    offsets
-                        .into_iter()
-                        .map(|offset| buffer.text_point(offset))
-                        .collect(),
-                )
-            }
-            (Some(Content::Buffer(buffer)), ContentQuery::DocumentStatus) => {
-                ContentData::DocumentStatus(document_status(buffer))
-            }
-            (Some(Content::StatusBar(status_bar)), ContentQuery::StatusBarData) => {
-                ContentData::StatusBarData(
-                    match self.query(status_bar.target_content_id(), ContentQuery::DocumentStatus) {
-                        ContentData::DocumentStatus(status) => status,
-                        ContentData::Text(_)
-                        | ContentData::TextRows(_)
-                        | ContentData::TextPoints(_)
-                        | ContentData::StatusBarData(_)
-                        | ContentData::Unsupported => default_status_bar_data(),
-                    },
-                )
-            }
-            _ => ContentData::Unsupported,
-        }
+        let Some(entry) = self.entries.get(&id) else {
+            return ContentData::Unsupported;
+        };
+        let dependency = entry
+            .content
+            .dependency_query(&query)
+            .map(|dependency| self.query(dependency.id, dependency.query));
+        entry.content.query(query, dependency)
     }
 }
 
@@ -222,37 +189,6 @@ impl fmt::Display for DuplicateContentId {
 
 impl std::error::Error for DuplicateContentId {}
 
-fn text_rows(buffer: &crate::core::buffer::Buffer, range: RowRange) -> Vec<String> {
-    let total = buffer.len_lines();
-    let start = range.start.min(total);
-    let end = range.end.min(total).max(start);
-    (start..end)
-        .map(|row| {
-            buffer
-                .line(row)
-                .trim_end_matches('\n')
-                .trim_end_matches('\r')
-                .to_string()
-        })
-        .collect()
-}
-
-fn document_status(buffer: &crate::core::buffer::Buffer) -> DocumentStatus {
-    DocumentStatus {
-        file_name: buffer.file_name().map(str::to_string),
-        modified: buffer.modified(),
-        message: buffer.status(),
-    }
-}
-
-fn default_status_bar_data() -> StatusBarData {
-    StatusBarData {
-        file_name: None,
-        modified: false,
-        message: StatusMessage::None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,9 +199,10 @@ mod tests {
     use crate::core::status_bar::StatusBar;
     use crate::core::transaction::{TextChangeSet, TextEdit};
     use crate::protocol::content_query::{
-        ContentData, ContentPresentation, ContentQuery, RowRange,
+        ContentData, ContentPresentation, ContentQuery, RowRange, StatusBarData,
     };
     use crate::protocol::ids::ContentId;
+    use crate::protocol::status::StatusMessage;
 
     fn apply_planned_edit(store: &mut ContentStore, id: ContentId, command: EditCommand) {
         let selections = store
@@ -373,6 +310,48 @@ mod tests {
             store.query(status_bar_id, ContentQuery::StatusBarData),
             ContentData::StatusBarData(_)
         ));
+    }
+
+    #[test]
+    fn status_bar_uses_default_data_when_its_target_is_missing() {
+        let status_bar_id = ContentId(1);
+        let missing = ContentId(99);
+        let mut store = ContentStore::default();
+        store
+            .insert(status_bar_id, Content::StatusBar(StatusBar::new(missing)))
+            .unwrap();
+
+        assert_eq!(
+            store.query(status_bar_id, ContentQuery::StatusBarData),
+            ContentData::StatusBarData(StatusBarData {
+                file_name: None,
+                modified: false,
+                message: StatusMessage::None,
+            })
+        );
+        assert_eq!(store.revision(status_bar_id), Some(Revision(0)));
+    }
+
+    #[test]
+    fn status_bar_uses_default_data_for_a_non_document_target() {
+        let target = ContentId(1);
+        let status_bar_id = ContentId(2);
+        let mut store = ContentStore::default();
+        store
+            .insert(target, Content::StatusBar(StatusBar::new(ContentId(0))))
+            .unwrap();
+        store
+            .insert(status_bar_id, Content::StatusBar(StatusBar::new(target)))
+            .unwrap();
+
+        assert_eq!(
+            store.query(status_bar_id, ContentQuery::StatusBarData),
+            ContentData::StatusBarData(StatusBarData {
+                file_name: None,
+                modified: false,
+                message: StatusMessage::None,
+            })
+        );
     }
 
     #[test]
@@ -522,9 +501,6 @@ mod tests {
             store.query(id, ContentQuery::TextRows(RowRange { start: 0, end: 2 })),
             ContentData::TextRows(vec!["a".to_string(), "b".to_string()])
         );
-        assert_eq!(
-            store.query(id, ContentQuery::Text),
-            ContentData::Text("a\r\nb".to_string())
-        );
+        assert_eq!(store.text_snapshot(id).unwrap().to_owned_string(), "a\r\nb");
     }
 }

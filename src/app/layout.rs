@@ -1,5 +1,4 @@
 use crate::app::application::App;
-use crate::app::mode::{ModeRegistry, ModeViewInstance};
 use crate::app::scene_model::{CloseResult, SceneError, SplitResult};
 use crate::app::view::View;
 use crate::core::content_store::ContentStore;
@@ -24,33 +23,21 @@ impl<F: Frontend> App<F> {
         direction: SplitDirection,
         focus_new: bool,
     ) -> Result<SplitResult, LayoutError> {
-        let mode_names = self
-            .session
-            .view_for_space(target)
-            .filter(|view| {
-                self.session
-                    .view(*view)
-                    .is_some_and(|view| view.content() == content)
-            })
-            .map(|view| self.session.view_modes().mode_names(view))
-            .unwrap_or_else(|| self.kernel.mode_chain_for_new_view(content));
-        let view = create_view(
-            content,
-            self.kernel.contents(),
-            self.kernel.modes(),
-            &mode_names,
-        )
-        .ok_or(LayoutError::MissingContent(content))?;
-        let (contents, content_modes) = self.kernel.mode_runtime_parts();
+        let mode_names = self.session.mode_chain_for_new_view(content);
+        let view = create_view(content, self.kernel.contents(), &mode_names)
+            .ok_or(LayoutError::MissingContent(content))?;
+        let (contents, modes, content_modes) = self.kernel.mode_attachment_parts();
         let result = self.session.split_space(
             target,
             view,
             focusable,
             direction,
             focus_new,
+            modes,
             content_modes,
             contents,
         )?;
+        self.kernel.schedule_mode_jobs();
         self.session
             .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
         Ok(result)
@@ -93,30 +80,23 @@ impl<F: Frontend> App<F> {
         content: ContentId,
         focusable: bool,
     ) -> Result<(), LayoutError> {
-        let mode_names = self
-            .session
-            .view_for_space(target)
-            .filter(|view| {
-                self.session
-                    .view(*view)
-                    .is_some_and(|view| view.content() == content)
-            })
-            .map(|view| self.session.view_modes().mode_names(view))
-            .unwrap_or_else(|| self.kernel.mode_chain_for_new_view(content));
-        let view = create_view(
-            content,
-            self.kernel.contents(),
-            self.kernel.modes(),
-            &mode_names,
-        )
-        .ok_or(LayoutError::MissingContent(content))?;
+        let mode_names = self.session.mode_chain_for_new_view(content);
+        let view = create_view(content, self.kernel.contents(), &mode_names)
+            .ok_or(LayoutError::MissingContent(content))?;
         let removed = self
             .session
             .view_for_space(target)
             .and_then(|view| self.session.view(view).map(|data| (view, data.content())));
-        let (contents, content_modes) = self.kernel.mode_runtime_parts();
-        self.session
-            .replace_space_content(target, view, focusable, content_modes, contents)?;
+        let (contents, modes, content_modes) = self.kernel.mode_attachment_parts();
+        self.session.replace_space_content(
+            target,
+            view,
+            focusable,
+            modes,
+            content_modes,
+            contents,
+        )?;
+        self.kernel.schedule_mode_jobs();
         if let Some((view, content)) = removed
             && self.kernel.active_transaction_owner(content) == Some(Some(view))
         {
@@ -160,7 +140,6 @@ impl From<SceneError> for LayoutError {
 pub(super) fn create_view(
     content: ContentId,
     contents: &ContentStore,
-    modes: &ModeRegistry,
     mode_names: &[crate::app::mode_name::ModeName],
 ) -> Option<NewView> {
     if !contents.contains(content) {
@@ -169,23 +148,15 @@ pub(super) fn create_view(
     let state = contents
         .create_view_state(content)
         .expect("existing content creates view state");
-    let modes = mode_names
-        .iter()
-        .map(|name| {
-            modes
-                .instantiate(name)
-                .expect("new-view mode must be registered")
-        })
-        .collect();
     Some(NewView {
         view: View::new(content, state),
-        modes,
+        mode_names: mode_names.to_vec(),
     })
 }
 
 pub(super) struct NewView {
     pub(super) view: View,
-    pub(super) modes: Vec<ModeViewInstance>,
+    pub(super) mode_names: Vec<crate::app::mode_name::ModeName>,
 }
 
 fn collect_view_spaces(scene: &Scene, sid: SpaceId, out: &mut Vec<(SpaceId, ViewId)>) {

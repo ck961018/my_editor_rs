@@ -18,6 +18,10 @@ impl TextSnapshot {
         self.rope.len_chars()
     }
 
+    pub fn len_lines(&self) -> usize {
+        self.rope.len_lines()
+    }
+
     pub fn char_range_for_rows(&self, start: usize, end: usize) -> std::ops::Range<usize> {
         let len_lines = self.rope.len_lines();
         let start = start.min(len_lines);

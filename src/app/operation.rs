@@ -4,7 +4,7 @@ use std::fmt;
 use crate::app::action::{TransactionIntent, ViewAction};
 use crate::app::command::{AppCommand, ContentCommand, ModeCommand, TransactionCommand};
 use crate::app::dispatcher::DispatchCommand;
-use crate::app::mode::{ModeEffect, ModeId, ResolvedViewEdit};
+use crate::app::mode::ModeId;
 use crate::core::action::ContentAction;
 use crate::core::command::EditCommand;
 use crate::protocol::ids::{ContentId, ViewId};
@@ -43,6 +43,10 @@ pub enum ViewTarget {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModeTarget {
+    #[allow(
+        dead_code,
+        reason = "content-scoped nested modes are an extension contract"
+    )]
     CurrentContent,
     CurrentView,
 }
@@ -70,6 +74,7 @@ pub enum OperationRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContentOperation {
+    #[allow(dead_code, reason = "content-scoped modes emit typed content actions")]
     Apply(ContentAction),
     Save,
 }
@@ -77,8 +82,10 @@ pub enum ContentOperation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ViewOperation {
     Edit(EditCommand),
+    #[allow(dead_code, reason = "preplanned edits are an extension contract")]
     ApplyPlan(ViewEditPlan),
     ApplyContent(ContentAction),
+    #[allow(dead_code, reason = "modes can emit selection-only view actions")]
     Apply(ViewAction),
     Viewport(ViewportCommand),
 }
@@ -92,7 +99,6 @@ pub struct ModeInvocation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppOperation {
     Command(AppCommand),
-    Noop,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -183,16 +189,6 @@ impl OperationOrigin {
     }
 }
 
-impl ViewEditPlan {
-    fn from_legacy(edit: ResolvedViewEdit) -> Self {
-        Self {
-            expected: ViewPrecondition::Selections(edit.before),
-            content: edit.content,
-            view: edit.view,
-        }
-    }
-}
-
 impl OperationError {
     pub fn new(message: impl Into<String>) -> Self {
         Self(message.into())
@@ -254,42 +250,21 @@ pub fn adapt_dispatch_command(
                 operation: ViewOperation::Viewport(command),
             }],
         ),
-        DispatchCommand::ModeContentEffects { effects, content } => {
-            let origin = OperationOrigin::content(content, None);
-            let mut requests = vec![OperationRequest::App(AppOperation::Noop)];
-            requests.extend(adapt_mode_effects(effects, origin.scope)?);
-            (origin, requests)
-        }
-        DispatchCommand::ModeEffects {
+        DispatchCommand::ModeContentOperations {
+            operations,
+            content,
+        } => (OperationOrigin::content(content, None), operations),
+        DispatchCommand::ModeOperations {
             operations,
             view,
             content,
-        } => {
-            let origin = OperationOrigin::view(view, content);
-            let mut requests = vec![OperationRequest::App(AppOperation::Noop)];
-            requests.extend(adapt_mode_effects(operations, origin.scope)?);
-            (origin, requests)
-        }
-        DispatchCommand::Noop => (
-            OperationOrigin::app(),
-            vec![OperationRequest::App(AppOperation::Noop)],
-        ),
+        } => (OperationOrigin::view(view, content), operations),
+        DispatchCommand::Noop => (OperationOrigin::app(), Vec::new()),
     };
     Ok(requests
         .into_iter()
         .map(|request| QueuedOperation { request, origin })
         .collect())
-}
-
-pub fn adapt_mode_effects(
-    effects: Vec<ModeEffect>,
-    scope: OperationOriginScope,
-) -> Result<Vec<OperationRequest>, OperationError> {
-    let mut requests = Vec::new();
-    for effect in effects {
-        requests.extend(adapt_mode_effect(effect, scope)?);
-    }
-    Ok(requests)
 }
 
 pub fn prepend_operations(
@@ -317,7 +292,7 @@ fn adapt_content_command(
         ContentCommand::Undo if with_view => Ok(vec![history_request(TransactionIntent::Undo)]),
         ContentCommand::Redo if with_view => Ok(vec![history_request(TransactionIntent::Redo)]),
         ContentCommand::Sequence(commands) if with_view => {
-            let mut requests = vec![OperationRequest::App(AppOperation::Noop)];
+            let mut requests = Vec::new();
             for command in commands.into_commands() {
                 requests.extend(adapt_content_command(command, true)?);
             }
@@ -331,91 +306,6 @@ fn adapt_content_command(
             "content command is incompatible with its execution origin",
         )),
     }
-}
-
-fn adapt_mode_effect(
-    effect: ModeEffect,
-    scope: OperationOriginScope,
-) -> Result<Vec<OperationRequest>, OperationError> {
-    let (legacy_nested, request) = match effect {
-        ModeEffect::Operation(request) => (false, request),
-        ModeEffect::Edit(edit) if scope == OperationOriginScope::View => (
-            false,
-            OperationRequest::View {
-                target: ViewTarget::Current,
-                operation: ViewOperation::ApplyPlan(ViewEditPlan::from_legacy(edit)),
-            },
-        ),
-        ModeEffect::DeferredEdit(command) if scope == OperationOriginScope::View => (
-            false,
-            OperationRequest::View {
-                target: ViewTarget::Current,
-                operation: ViewOperation::Edit(command),
-            },
-        ),
-        ModeEffect::View(action) if scope == OperationOriginScope::View => (
-            false,
-            OperationRequest::View {
-                target: ViewTarget::Current,
-                operation: ViewOperation::Apply(action),
-            },
-        ),
-        ModeEffect::Content(action) if scope == OperationOriginScope::View => (
-            false,
-            OperationRequest::View {
-                target: ViewTarget::Current,
-                operation: ViewOperation::ApplyContent(action),
-            },
-        ),
-        ModeEffect::Content(action) if scope == OperationOriginScope::Content => (
-            false,
-            OperationRequest::Content {
-                target: ContentTarget::Current,
-                operation: ContentOperation::Apply(action),
-            },
-        ),
-        ModeEffect::Transaction(intent) => (false, history_request(intent)),
-        ModeEffect::App(command) => (true, OperationRequest::App(AppOperation::Command(command))),
-        ModeEffect::Mode(command) => (
-            true,
-            OperationRequest::Mode {
-                target: if scope == OperationOriginScope::View {
-                    ModeTarget::CurrentView
-                } else {
-                    ModeTarget::CurrentContent
-                },
-                invocation: ModeInvocation {
-                    command,
-                    nested: true,
-                },
-            },
-        ),
-        ModeEffect::Viewport(command) if scope == OperationOriginScope::View => (
-            true,
-            OperationRequest::View {
-                target: ViewTarget::Current,
-                operation: ViewOperation::Viewport(command),
-            },
-        ),
-        ModeEffect::Save => (
-            true,
-            OperationRequest::Content {
-                target: ContentTarget::Current,
-                operation: ContentOperation::Save,
-            },
-        ),
-        _ => {
-            return Err(OperationError::new(
-                "mode effect is incompatible with its execution origin",
-            ));
-        }
-    };
-    let mut requests = Vec::with_capacity(usize::from(legacy_nested) + 1);
-    if legacy_nested {
-        requests.push(OperationRequest::App(AppOperation::Noop));
-    }
-    requests.push(request);
-    Ok(requests)
 }
 
 fn history_request(operation: TransactionIntent) -> OperationRequest {
@@ -436,7 +326,6 @@ fn transaction_intent(command: TransactionCommand) -> TransactionIntent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::selection::{Selection, TextOffset};
 
     #[test]
     fn sequence_adapter_preserves_order_and_one_origin() {
@@ -453,27 +342,23 @@ mod tests {
 
         let operations = adapt_dispatch_command(command).unwrap();
 
-        assert_eq!(operations.len(), 4);
+        assert_eq!(operations.len(), 3);
         assert!(matches!(
             operations[0].request,
-            OperationRequest::App(AppOperation::Noop)
-        ));
-        assert!(matches!(
-            operations[1].request,
             OperationRequest::History {
                 operation: TransactionIntent::Begin,
                 ..
             }
         ));
         assert!(matches!(
-            operations[2].request,
+            operations[1].request,
             OperationRequest::View {
                 operation: ViewOperation::Edit(EditCommand::MoveLeftBy(1)),
                 ..
             }
         ));
         assert!(matches!(
-            operations[3].request,
+            operations[2].request,
             OperationRequest::History {
                 operation: TransactionIntent::Undo,
                 ..
@@ -485,32 +370,11 @@ mod tests {
     }
 
     #[test]
-    fn content_scope_rejects_view_only_effects() {
-        let error = adapt_mode_effects(
-            vec![ModeEffect::View(ViewAction::SetSelections(
-                Selections::single(Selection::collapsed(TextOffset::origin())),
-            ))],
-            OperationOriginScope::Content,
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("incompatible"));
-    }
-
-    #[test]
-    fn legacy_nested_effect_keeps_its_adapter_budget_step() {
-        let requests =
-            adapt_mode_effects(vec![ModeEffect::Save], OperationOriginScope::View).unwrap();
-
-        assert!(matches!(
-            requests.as_slice(),
-            [
-                OperationRequest::App(AppOperation::Noop),
-                OperationRequest::Content {
-                    operation: ContentOperation::Save,
-                    ..
-                }
-            ]
-        ));
+    fn noop_dispatch_has_no_operations() {
+        assert!(
+            adapt_dispatch_command(DispatchCommand::Noop)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

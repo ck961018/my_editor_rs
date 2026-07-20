@@ -15,8 +15,8 @@ use deno_ast::{
 
 use crate::app::command::{Command, ModeCommand, ModeValue};
 use crate::app::mode::{
-    CursorDomain, Mode, ModeContentContext, ModeEffect, ModeError, ModeJobRequest, ModeJobResult,
-    ModeResult, ModeState, ModeViewContext, ModeViewPolicy,
+    CursorDomain, Mode, ModeContentContext, ModeError, ModeJobRequest, ModeJobResult, ModeResult,
+    ModeState, ModeViewContext, ModeViewPolicy,
 };
 use crate::app::mode_name::{ModeActionName, ModeName};
 use crate::core::keymap::Keymap;
@@ -654,14 +654,6 @@ impl Mode for ScriptMode {
         self.faces.clone()
     }
 
-    fn new_content_state(&self) -> Box<dyn ModeState> {
-        Box::new(ScriptModeState::new(serde_json::Value::Null))
-    }
-
-    fn new_view_state(&self) -> Box<dyn ModeState> {
-        Box::new(ScriptModeState::new(serde_json::Value::Null))
-    }
-
     fn create_content_state(
         &self,
         context: &ModeContentContext<'_>,
@@ -919,22 +911,6 @@ impl Mode for ScriptMode {
                 mode: self.name.clone(),
                 message: error.to_string(),
             })
-    }
-
-    fn execute_view_with_content(
-        &self,
-        content_state: &mut dyn ModeState,
-        view_state: &mut dyn ModeState,
-        context: &ModeViewContext<'_>,
-        action: &ModeActionName,
-    ) -> Result<ModeResult, ModeError> {
-        self.execute_view_with_arguments(
-            content_state,
-            view_state,
-            context,
-            action,
-            &ModeValue::Null,
-        )
     }
 }
 
@@ -1447,7 +1423,7 @@ fn mode_value_to_json(value: &ModeValue) -> serde_json::Value {
 fn parse_action_result(
     scope: &mut v8::PinScope,
     value: v8::Local<v8::Value>,
-    operations: Vec<ModeEffect>,
+    operations: Vec<crate::app::operation::OperationRequest>,
 ) -> Result<ModeResult, ScriptError> {
     if value.is_null_or_undefined() {
         return Ok(ModeResult::operations(operations));
@@ -2137,14 +2113,15 @@ editor.modes.define({
             .create_view_state(content_state.as_ref(), &context)
             .unwrap();
         let result = mode
-            .execute_view_with_content(
+            .execute_view_with_arguments(
                 content_state.as_mut(),
                 view_state.as_mut(),
                 &context,
                 &ModeActionName::new("quote"),
+                &ModeValue::Null,
             )
             .unwrap();
-        let (flow, effects) = result.into_parts();
+        let (flow, operations) = result.into_parts();
 
         assert_eq!(flow, InputFlow::Stop);
         assert_eq!(
@@ -2164,15 +2141,13 @@ editor.modes.define({
             &serde_json::json!({ "initial": 1 })
         );
         assert!(matches!(
-            effects.as_slice(),
-            [crate::app::mode::ModeEffect::Operation(
-                crate::app::operation::OperationRequest::View {
-                    operation: crate::app::operation::ViewOperation::Edit(
-                        EditCommand::InsertText(text)
-                    ),
-                    ..
-                }
-            )] if text == "\"\""
+            operations.as_slice(),
+            [crate::app::operation::OperationRequest::View {
+                operation: crate::app::operation::ViewOperation::Edit(
+                    EditCommand::InsertText(text)
+                ),
+                ..
+            }] if text == "\"\""
         ));
     }
 
@@ -2228,11 +2203,12 @@ editor.modes.define({
             .unwrap();
 
         let throwing = mode
-            .execute_view_with_content(
+            .execute_view_with_arguments(
                 content_state.as_mut(),
                 view_state.as_mut(),
                 &context,
                 &ModeActionName::new("throwing"),
+                &ModeValue::Null,
             )
             .unwrap_err()
             .to_string();
@@ -2252,11 +2228,12 @@ editor.modes.define({
         );
 
         let invalid = mode
-            .execute_view_with_content(
+            .execute_view_with_arguments(
                 content_state.as_mut(),
                 view_state.as_mut(),
                 &context,
                 &ModeActionName::new("invalid"),
+                &ModeValue::Null,
             )
             .unwrap_err()
             .to_string();
@@ -2336,24 +2313,26 @@ editor.modes.define({
         let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
         let context = ModeViewContext::new(ViewId(0), &view, &contents);
         let before = context.text_snapshot().unwrap();
-        let mut content_state = mode.new_content_state();
-        let mut view_state = mode.new_view_state();
-        let (_, effects) = mode
-            .execute_view_with_content(
+        let content_context = ModeContentContext::new(content_id, &contents);
+        let mut content_state = mode.create_content_state(&content_context).unwrap();
+        let mut view_state = mode
+            .create_view_state(content_state.as_ref(), &context)
+            .unwrap();
+        let (_, operations) = mode
+            .execute_view_with_arguments(
                 content_state.as_mut(),
                 view_state.as_mut(),
                 &context,
                 &ModeActionName::new("replace"),
+                &ModeValue::Null,
             )
             .unwrap()
             .into_parts();
-        let crate::app::mode::ModeEffect::Operation(
-            crate::app::operation::OperationRequest::View {
-                operation:
-                    crate::app::operation::ViewOperation::ApplyContent(ContentAction::Text(change)),
-                ..
-            },
-        ) = &effects[0]
+        let crate::app::operation::OperationRequest::View {
+            operation:
+                crate::app::operation::ViewOperation::ApplyContent(ContentAction::Text(change)),
+            ..
+        } = &operations[0]
         else {
             panic!("script action should return a text content effect");
         };
@@ -2397,22 +2376,27 @@ editor.modes.define({
             .unwrap();
         let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
         let context = ModeViewContext::new(ViewId(0), &view, &contents);
-        let mut content_state = mode.new_content_state();
-        let mut view_state = mode.new_view_state();
+        let content_context = ModeContentContext::new(content_id, &contents);
+        let mut content_state = mode.create_content_state(&content_context).unwrap();
+        let mut view_state = mode
+            .create_view_state(content_state.as_ref(), &context)
+            .unwrap();
 
-        mode.execute_view_with_content(
+        mode.execute_view_with_arguments(
             content_state.as_mut(),
             view_state.as_mut(),
             &context,
             &ModeActionName::new("retain"),
+            &ModeValue::Null,
         )
         .unwrap();
         let error = mode
-            .execute_view_with_content(
+            .execute_view_with_arguments(
                 content_state.as_mut(),
                 view_state.as_mut(),
                 &context,
                 &ModeActionName::new("reuse"),
+                &ModeValue::Null,
             )
             .unwrap_err()
             .to_string();

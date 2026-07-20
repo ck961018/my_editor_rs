@@ -1,6 +1,7 @@
 # Core 依赖方向设计
 
-**状态：** 已实施
+**状态：** 已实施的历史决策；当前依赖边界见
+[`editor-kernel-architecture.md`](editor-kernel-architecture.md)
 **日期：** 2026-07-17
 **对应路线图：** R04
 
@@ -30,7 +31,8 @@ text data <- motion <- buffer
 
 - `Command` 的执行归属和 R03 契约不变。
 - `Mode` 仍持有 Vim action、count、operator、capture 和 keymap 构造。
-- Buffer 仍持有文本、selection、编辑与历史状态，不引入 Vim 按键语义。
+- Buffer 持有文本和编辑领域状态，不持有 View selection 或 history；
+  不引入 Vim 按键语义。
 - 只移动或收紧依赖，不改变运动、编辑和输入行为。
 
 ## 4. 验收

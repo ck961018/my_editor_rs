@@ -140,10 +140,11 @@ impl BehaviorSnapshot {
             .iter()
             .copied()
             .map(|content| {
-                let text = match app.kernel.contents().query(content, ContentQuery::Text) {
-                    ContentData::Text(text) => Some(text),
-                    _ => None,
-                };
+                let text = app
+                    .kernel
+                    .contents()
+                    .text_snapshot(content)
+                    .map(|snapshot| snapshot.to_owned_string());
                 let document_status = match app
                     .kernel
                     .contents()

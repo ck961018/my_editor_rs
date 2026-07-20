@@ -1,7 +1,11 @@
 # 可组合 Mode 架构设计
 
-**状态：** 已确认，基础架构已实现
+**状态：** 历史设计；当前 Mode contract 已由
+[`editor-kernel-architecture.md`](editor-kernel-architecture.md) 取代
 **更新日期：** 2026-07-20
+
+本文保留可组合 Mode 迁移时的设计依据，其中的 `ModeEffect`、
+`ResolvedViewEdit` 和同步全文查询不再是当前接口。
 
 当前默认 Mode 已全部迁移为 TypeScript 插件。Rust 只持有统一 Mode contract、
 registry、state store、effect executor、后台任务和 presentation cache；不注册或

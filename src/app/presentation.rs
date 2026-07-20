@@ -8,12 +8,15 @@ use crate::protocol::revision::Revision;
 
 pub(crate) struct ContentPresentationLayer {
     pub(crate) source_revision: Revision,
+    pub(crate) mode_revision: Revision,
     pub(crate) decorations: Vec<NamedTextDecoration>,
 }
 
 pub(crate) struct ViewPresentationLayer {
     pub(crate) content_revision: Revision,
     pub(crate) view_revision: Revision,
+    pub(crate) content_mode_revision: Revision,
+    pub(crate) view_mode_revision: Revision,
     pub(crate) policy: ModeViewPolicy,
     pub(crate) decorations: Vec<NamedTextDecoration>,
 }
@@ -27,17 +30,72 @@ pub(crate) struct PresentationLayerStore {
 }
 
 impl PresentationLayerStore {
-    pub(crate) fn replace(
+    pub(crate) fn begin_refresh(&mut self) {
+        self.view_contents.clear();
+        self.view_order.clear();
+    }
+
+    pub(crate) fn set_view(&mut self, view: ViewId, content: ContentId, order: Vec<ModeId>) {
+        self.view_contents.insert(view, content);
+        self.view_order.insert(view, order);
+    }
+
+    pub(crate) fn content_is_current(
+        &self,
+        mode: ModeId,
+        content: ContentId,
+        source_revision: Revision,
+        mode_revision: Revision,
+    ) -> bool {
+        self.content_layers
+            .get(&(mode, content))
+            .is_some_and(|layer| {
+                layer.source_revision == source_revision && layer.mode_revision == mode_revision
+            })
+    }
+
+    pub(crate) fn set_content_layer(
         &mut self,
-        content_layers: HashMap<(ModeId, ContentId), ContentPresentationLayer>,
-        view_layers: HashMap<(ModeId, ViewId), ViewPresentationLayer>,
-        view_contents: HashMap<ViewId, ContentId>,
-        view_order: HashMap<ViewId, Vec<ModeId>>,
+        mode: ModeId,
+        content: ContentId,
+        layer: ContentPresentationLayer,
     ) {
-        self.content_layers = content_layers;
-        self.view_layers = view_layers;
-        self.view_contents = view_contents;
-        self.view_order = view_order;
+        self.content_layers.insert((mode, content), layer);
+    }
+
+    pub(crate) fn view_is_current(
+        &self,
+        mode: ModeId,
+        view: ViewId,
+        content_revision: Revision,
+        view_revision: Revision,
+        content_mode_revision: Revision,
+        view_mode_revision: Revision,
+    ) -> bool {
+        self.view_layers.get(&(mode, view)).is_some_and(|layer| {
+            layer.content_revision == content_revision
+                && layer.view_revision == view_revision
+                && layer.content_mode_revision == content_mode_revision
+                && layer.view_mode_revision == view_mode_revision
+        })
+    }
+
+    pub(crate) fn set_view_layer(
+        &mut self,
+        mode: ModeId,
+        view: ViewId,
+        layer: ViewPresentationLayer,
+    ) {
+        self.view_layers.insert((mode, view), layer);
+    }
+
+    pub(crate) fn finish_refresh(
+        &mut self,
+        content: &HashSet<(ModeId, ContentId)>,
+        views: &HashSet<(ModeId, ViewId)>,
+    ) {
+        self.content_layers.retain(|key, _| content.contains(key));
+        self.view_layers.retain(|key, _| views.contains(key));
     }
 
     pub(crate) fn policy(
@@ -129,28 +187,4 @@ fn visible_decorations(
         })
         .cloned()
         .collect()
-}
-
-pub(crate) struct PresentationRefresh {
-    pub(crate) content_layers: HashMap<(ModeId, ContentId), ContentPresentationLayer>,
-    pub(crate) view_layers: HashMap<(ModeId, ViewId), ViewPresentationLayer>,
-    pub(crate) view_contents: HashMap<ViewId, ContentId>,
-    pub(crate) view_order: HashMap<ViewId, Vec<ModeId>>,
-    refreshed_content: HashSet<(ModeId, ContentId)>,
-}
-
-impl PresentationRefresh {
-    pub(crate) fn new() -> Self {
-        Self {
-            content_layers: HashMap::new(),
-            view_layers: HashMap::new(),
-            view_contents: HashMap::new(),
-            view_order: HashMap::new(),
-            refreshed_content: HashSet::new(),
-        }
-    }
-
-    pub(crate) fn needs_content(&mut self, mode: ModeId, content: ContentId) -> bool {
-        self.refreshed_content.insert((mode, content))
-    }
 }

@@ -60,12 +60,12 @@ pub(crate) enum DispatchCommand {
             reason = "extension callbacks can emit content-scoped effects"
         )
     )]
-    ModeContentEffects {
-        effects: Vec<crate::app::mode::ModeEffect>,
+    ModeContentOperations {
+        operations: Vec<crate::app::operation::OperationRequest>,
         content: ContentId,
     },
-    ModeEffects {
-        operations: Vec<crate::app::mode::ModeEffect>,
+    ModeOperations {
+        operations: Vec<crate::app::operation::OperationRequest>,
         view: ViewId,
         content: ContentId,
     },
@@ -79,8 +79,8 @@ impl DispatchCommand {
             | Self::ContentWithView { content, .. }
             | Self::Mode { content, .. }
             | Self::Viewport { content, .. }
-            | Self::ModeContentEffects { content, .. }
-            | Self::ModeEffects { content, .. } => Some(*content),
+            | Self::ModeContentOperations { content, .. }
+            | Self::ModeOperations { content, .. } => Some(*content),
             Self::App(_) | Self::Noop => None,
         }
     }
@@ -90,10 +90,11 @@ impl DispatchCommand {
             Self::ContentWithView { view, .. }
             | Self::Mode { view, .. }
             | Self::Viewport { view, .. }
-            | Self::ModeEffects { view, .. } => Some(*view),
-            Self::App(_) | Self::Content { .. } | Self::ModeContentEffects { .. } | Self::Noop => {
-                None
-            }
+            | Self::ModeOperations { view, .. } => Some(*view),
+            Self::App(_)
+            | Self::Content { .. }
+            | Self::ModeContentOperations { .. }
+            | Self::Noop => None,
         }
     }
 }
@@ -365,7 +366,7 @@ impl Dispatcher {
                             .timeout_at(view, index, &context, content_modes, drafts)
                             .map(|operations| {
                                 self.record_view_mode_revision(view, views[&view].revision());
-                                DispatchCommand::ModeEffects {
+                                DispatchCommand::ModeOperations {
                                     operations,
                                     view,
                                     content,
@@ -917,11 +918,12 @@ mod tests {
             &self.actions
         }
 
-        fn keymap(
-            &self,
-            _state: &dyn crate::app::mode::ModeState,
+        fn input_keymap<'a>(
+            &'a self,
+            _content_state: &dyn crate::app::mode::ModeState,
+            _view_state: &dyn crate::app::mode::ModeState,
             _context: &ModeViewContext<'_>,
-        ) -> &Keymap<Command> {
+        ) -> &'a Keymap<Command> {
             &self.keymap
         }
     }
@@ -946,7 +948,7 @@ mod tests {
             .insert(status, Content::StatusBar(StatusBar::new(editor)))
             .unwrap();
         let mut modes = ModeRegistry::new();
-        modes.register(DispatcherTestMode::new());
+        modes.register(DispatcherTestMode::new()).unwrap();
         let mut builder = SceneBuilder::new();
         let (scene, focused) =
             build_editor_scene(&mut builder, 40, 5, ViewId(0), ViewId(1)).unwrap();

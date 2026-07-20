@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::app::action::ViewAction;
@@ -13,7 +13,7 @@ use crate::app::mode::{
     CursorDomain, FaceRegistry, ModeContentContext, ModeContentStore, ModeDraftJournal, ModeError,
     ModeRegistry, ModeResult, ModeViewContext, ModeViewStore,
 };
-use crate::app::presentation::{PresentationLayerStore, PresentationRefresh};
+use crate::app::presentation::PresentationLayerStore;
 use crate::app::scene_model::{
     CloseResult, SceneBuilder, SceneError, SplitResult, build_editor_scene,
 };
@@ -31,6 +31,7 @@ pub(super) struct ClientSession {
     scene_builder: SceneBuilder,
     scene_revision: Revision,
     views: HashMap<ViewId, View>,
+    mode_profiles: HashMap<ContentId, Vec<crate::app::mode_name::ModeName>>,
     view_modes: ModeViewStore,
     faces: FaceRegistry,
     presentation: PresentationLayerStore,
@@ -60,41 +61,51 @@ impl ClientSession {
         height: usize,
         init: EditorSessionInit,
     ) -> Self {
-        let editor = create_view(init.editor.content, contents, modes, &init.editor.modes)
+        let editor = create_view(init.editor.content, contents, &init.editor.modes)
             .expect("editor content exists");
-        let status = create_view(init.status.content, contents, modes, &init.status.modes)
+        let status = create_view(init.status.content, contents, &init.status.modes)
             .expect("status content exists");
+        let mode_profiles = HashMap::from([
+            (init.editor.content, init.editor.modes),
+            (init.status.content, init.status.modes),
+        ]);
         let mut views = HashMap::new();
         let mut view_modes = ModeViewStore::default();
         let mut faces = FaceRegistry::default();
         let editor_content = editor.view.content();
         views.insert(init.editor.view, editor.view);
-        for mut mode in editor.modes {
-            mode.register_faces(&mut faces);
+        for name in editor.mode_names {
             let content_context = ModeContentContext::new(editor_content, contents);
             let view_context =
                 ModeViewContext::new(init.editor.view, &views[&init.editor.view], contents);
-            mode_contents.attach_view_with_context(
-                editor_content,
-                &mut mode,
-                &content_context,
-                &view_context,
-            );
+            let mode = modes
+                .instantiate_with_context(
+                    &name,
+                    editor_content,
+                    mode_contents,
+                    &content_context,
+                    &view_context,
+                )
+                .expect("initial mode must be registered");
+            mode.register_faces(&mut faces);
             view_modes.insert(init.editor.view, mode);
         }
         let status_content = status.view.content();
         views.insert(init.status.view, status.view);
-        for mut mode in status.modes {
-            mode.register_faces(&mut faces);
+        for name in status.mode_names {
             let content_context = ModeContentContext::new(status_content, contents);
             let view_context =
                 ModeViewContext::new(init.status.view, &views[&init.status.view], contents);
-            mode_contents.attach_view_with_context(
-                status_content,
-                &mut mode,
-                &content_context,
-                &view_context,
-            );
+            let mode = modes
+                .instantiate_with_context(
+                    &name,
+                    status_content,
+                    mode_contents,
+                    &content_context,
+                    &view_context,
+                )
+                .expect("initial mode must be registered");
+            mode.register_faces(&mut faces);
             view_modes.insert(init.status.view, mode);
         }
         let mut scene_builder = SceneBuilder::new();
@@ -113,6 +124,7 @@ impl ClientSession {
             scene_builder,
             scene_revision: Revision::default(),
             views,
+            mode_profiles,
             view_modes,
             faces,
             presentation: PresentationLayerStore::default(),
@@ -140,8 +152,19 @@ impl ClientSession {
         &self.views
     }
 
+    #[cfg(test)]
     pub(super) fn view_modes(&self) -> &ModeViewStore {
         &self.view_modes
+    }
+
+    pub(super) fn mode_chain_for_new_view(
+        &self,
+        content: ContentId,
+    ) -> Vec<crate::app::mode_name::ModeName> {
+        self.mode_profiles
+            .get(&content)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub(super) fn commit_mode_drafts(&mut self, drafts: &mut ModeDraftJournal) {
@@ -173,42 +196,79 @@ impl ClientSession {
         contents: &ContentStore,
         mode_contents: &ModeContentStore,
     ) {
-        let mut refresh = PresentationRefresh::new();
-        let visible_rows = RowRange {
-            start: 0,
-            end: usize::MAX,
-        };
+        let mut active_content = HashSet::new();
+        let mut active_views = HashSet::new();
+        let mut visited_content = HashSet::new();
+        self.presentation.begin_refresh();
         for (&view, view_data) in &self.views {
             let content = view_data.content();
-            refresh.view_contents.insert(view, content);
             let order = self.view_modes.mode_ids(view).to_vec();
-            refresh.view_order.insert(view, order.clone());
+            self.presentation.set_view(view, content, order.clone());
+            let source_rows =
+                contents
+                    .text_snapshot(content)
+                    .map_or(RowRange { start: 0, end: 0 }, |snapshot| RowRange {
+                        start: 0,
+                        end: snapshot.len_lines(),
+                    });
             for mode in order {
-                if refresh.needs_content(mode, content)
-                    && let Some(layer) =
-                        mode_contents.presentation_layer(mode, content, contents, visible_rows)
+                let content_key = (mode, content);
+                if visited_content.insert(content_key)
+                    && let (Some(source_revision), Some(mode_revision)) = (
+                        contents.revision(content),
+                        mode_contents.revision(mode, content),
+                    )
                 {
-                    refresh.content_layers.insert((mode, content), layer);
+                    if self.presentation.content_is_current(
+                        mode,
+                        content,
+                        source_revision,
+                        mode_revision,
+                    ) {
+                        active_content.insert(content_key);
+                    } else if let Some(layer) =
+                        mode_contents.presentation_layer(mode, content, contents, source_rows)
+                    {
+                        self.presentation.set_content_layer(mode, content, layer);
+                        active_content.insert(content_key);
+                    }
                 }
                 let context = ModeViewContext::new(view, view_data, contents);
-                if let Some(layer) = self.view_modes.presentation_layer(
-                    mode,
-                    view,
-                    &context,
-                    mode_contents,
-                    view_data.revision(),
-                    visible_rows,
+                let view_key = (mode, view);
+                if let (
+                    Some(content_revision),
+                    Some(content_mode_revision),
+                    Some(view_mode_revision),
+                ) = (
+                    contents.revision(content),
+                    mode_contents.revision(mode, content),
+                    self.view_modes.revision(mode, view),
                 ) {
-                    refresh.view_layers.insert((mode, view), layer);
+                    if self.presentation.view_is_current(
+                        mode,
+                        view,
+                        content_revision,
+                        view_data.revision(),
+                        content_mode_revision,
+                        view_mode_revision,
+                    ) {
+                        active_views.insert(view_key);
+                    } else if let Some(layer) = self.view_modes.presentation_layer(
+                        mode,
+                        view,
+                        &context,
+                        mode_contents,
+                        view_data.revision(),
+                        source_rows,
+                    ) {
+                        self.presentation.set_view_layer(mode, view, layer);
+                        active_views.insert(view_key);
+                    }
                 }
             }
         }
-        self.presentation.replace(
-            refresh.content_layers,
-            refresh.view_layers,
-            refresh.view_contents,
-            refresh.view_order,
-        );
+        self.presentation
+            .finish_refresh(&active_content, &active_views);
     }
 
     pub(super) fn snapshot_input(&self) -> DispatcherInputSnapshot {
@@ -476,30 +536,34 @@ impl ClientSession {
         mode_contents: &mut ModeContentStore,
         contents: &ContentStore,
     ) -> bool {
+        if !contents.contains(content) || registry.resolve_mode(name).is_none() {
+            return false;
+        }
+        let profile = self.mode_profiles.entry(content).or_default();
+        if !profile.contains(name) {
+            profile.push(name.clone());
+        }
         let views: Vec<_> = self
             .views
             .iter()
             .filter_map(|(view, data)| (data.content() == content).then_some(*view))
             .collect();
-        if views.is_empty() || registry.resolve_mode(name).is_none() {
-            return false;
-        }
         for view in views {
             if self.view_modes.contains(view, name) {
                 continue;
             }
-            let mut mode = registry
-                .instantiate(name)
-                .expect("resolved mode can create view state");
-            mode.register_faces(&mut self.faces);
             let content_context = ModeContentContext::new(content, contents);
             let view_context = ModeViewContext::new(view, &self.views[&view], contents);
-            mode_contents.attach_view_with_context(
-                content,
-                &mut mode,
-                &content_context,
-                &view_context,
-            );
+            let mode = registry
+                .instantiate_with_context(
+                    name,
+                    content,
+                    mode_contents,
+                    &content_context,
+                    &view_context,
+                )
+                .expect("resolved mode can create view state");
+            mode.register_faces(&mut self.faces);
             self.view_modes.insert(view, mode);
             self.dispatcher.invalidate_mode_chain(view);
             self.views
@@ -521,6 +585,7 @@ impl ClientSession {
         focusable: bool,
         direction: SplitDirection,
         focus_new: bool,
+        registry: &ModeRegistry,
         content_modes: &mut ModeContentStore,
         contents: &ContentStore,
     ) -> Result<SplitResult, LayoutError> {
@@ -529,7 +594,7 @@ impl ClientSession {
             .view_for_space(previous)
             .expect("focused space hosts a view");
         let previous_content = self.views[&previous_view].content();
-        let view = self.insert_view(view, content_modes, contents);
+        let view = self.insert_view(view, registry, content_modes, contents);
         let result =
             match self
                 .scene_builder
@@ -612,6 +677,7 @@ impl ClientSession {
         target: SpaceId,
         view: NewView,
         focusable: bool,
+        registry: &ModeRegistry,
         content_modes: &mut ModeContentStore,
         contents: &ContentStore,
     ) -> Result<(), LayoutError> {
@@ -626,7 +692,7 @@ impl ClientSession {
             .view_for_space(target)
             .ok_or(SceneError::ExpectedContentLeaf(target))?;
         let input_source_changed = target == self.focused;
-        let new_view = self.insert_view(view, content_modes, contents);
+        let new_view = self.insert_view(view, registry, content_modes, contents);
         if let Err(error) =
             self.scene_builder
                 .replace_view(&mut self.scene, target, new_view, focusable)
@@ -678,6 +744,7 @@ impl ClientSession {
     fn insert_view(
         &mut self,
         view: NewView,
+        registry: &ModeRegistry,
         mode_contents: &mut ModeContentStore,
         contents: &ContentStore,
     ) -> ViewId {
@@ -688,16 +755,19 @@ impl ClientSession {
             self.views.insert(id, view.view).is_none(),
             "view id must be unique"
         );
-        for mut mode in view.modes {
-            mode.register_faces(&mut self.faces);
+        for name in view.mode_names {
             let content_context = ModeContentContext::new(content, contents);
             let view_context = ModeViewContext::new(id, &self.views[&id], contents);
-            mode_contents.attach_view_with_context(
-                content,
-                &mut mode,
-                &content_context,
-                &view_context,
-            );
+            let mode = registry
+                .instantiate_with_context(
+                    &name,
+                    content,
+                    mode_contents,
+                    &content_context,
+                    &view_context,
+                )
+                .expect("new-view mode must be registered");
+            mode.register_faces(&mut self.faces);
             self.view_modes.insert(id, mode);
         }
         id

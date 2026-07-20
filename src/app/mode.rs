@@ -6,13 +6,11 @@ use std::sync::LazyLock;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::app::action::{TransactionIntent, ViewAction};
-use crate::app::command::{AppCommand, Command, ModeCommand, ModeValue};
+use crate::app::command::{Command, ModeValue};
 use crate::app::mode_name::{ModeActionName, ModeName};
+use crate::app::operation::OperationRequest;
 use crate::app::presentation::{ContentPresentationLayer, ViewPresentationLayer};
 use crate::app::view::View;
-use crate::core::action::ContentAction;
-use crate::core::command::EditCommand;
 use crate::core::content::ContentChange;
 use crate::core::content_store::ContentStore;
 use crate::core::input::{InputDecision, InputStatus};
@@ -25,7 +23,6 @@ use crate::protocol::ids::{ContentId, ViewId};
 use crate::protocol::key_event::KeyEvent;
 use crate::protocol::revision::Revision;
 use crate::protocol::selection::Selections;
-use crate::protocol::viewport::ViewportCommand;
 
 static EMPTY_KEYMAP: LazyLock<Keymap<Command>> = LazyLock::new(Keymap::new);
 
@@ -239,6 +236,7 @@ impl ModeDraftJournal {
             instance.state = draft.state;
             instance.faulted = draft.faulted;
             instance.background_job_dirty = draft.background_job_dirty;
+            instance.revision.next();
         }
     }
 
@@ -250,6 +248,7 @@ impl ModeDraftJournal {
                 .expect("drafted mode view still exists");
             instance.state = draft.state;
             instance.faulted = draft.faulted;
+            instance.revision.next();
         }
     }
 }
@@ -359,7 +358,7 @@ impl<'a> ModeViewContext<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModeResult {
     flow: InputFlow,
-    operations: Vec<ModeEffect>,
+    operations: Vec<OperationRequest>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -381,7 +380,7 @@ impl ModeResult {
     }
 
     #[allow(dead_code, reason = "Mode results are an extension-facing API")]
-    pub fn operations(operations: Vec<ModeEffect>) -> Self {
+    pub fn operations(operations: Vec<OperationRequest>) -> Self {
         Self {
             flow: InputFlow::Stop,
             operations,
@@ -389,42 +388,20 @@ impl ModeResult {
     }
 
     #[allow(dead_code, reason = "dynamic modes can pass input to the next mode")]
-    pub fn continue_with(operations: Vec<ModeEffect>) -> Self {
+    pub fn continue_with(operations: Vec<OperationRequest>) -> Self {
         Self {
             flow: InputFlow::Continue,
             operations,
         }
     }
 
-    fn into_operations(self) -> Vec<ModeEffect> {
+    fn into_operations(self) -> Vec<OperationRequest> {
         self.operations
     }
 
-    pub(crate) fn into_parts(self) -> (InputFlow, Vec<ModeEffect>) {
+    pub(crate) fn into_parts(self) -> (InputFlow, Vec<OperationRequest>) {
         (self.flow, self.operations)
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResolvedViewEdit {
-    pub content: Option<ContentAction>,
-    pub view: Option<ViewAction>,
-    pub before: Selections,
-}
-
-#[allow(dead_code, reason = "Mode effects are an extension-facing API")]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ModeEffect {
-    Operation(crate::app::operation::OperationRequest),
-    Edit(ResolvedViewEdit),
-    DeferredEdit(EditCommand),
-    View(ViewAction),
-    Content(ContentAction),
-    Transaction(TransactionIntent),
-    App(AppCommand),
-    Mode(ModeCommand),
-    Viewport(ViewportCommand),
-    Save,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -466,44 +443,30 @@ pub trait Mode {
     fn action_scope(&self, _action: &ModeActionName) -> ModeActionScope {
         ModeActionScope::View
     }
-    fn new_content_state(&self) -> Box<dyn ModeState> {
-        Box::new(())
-    }
     fn create_content_state(
         &self,
         _context: &ModeContentContext<'_>,
     ) -> Result<Box<dyn ModeState>, ModeError> {
-        Ok(self.new_content_state())
-    }
-    fn new_view_state(&self) -> Box<dyn ModeState> {
-        Box::new(())
+        Ok(Box::new(()))
     }
     fn create_view_state(
         &self,
         _content_state: &dyn ModeState,
         _context: &ModeViewContext<'_>,
     ) -> Result<Box<dyn ModeState>, ModeError> {
-        Ok(self.new_view_state())
+        Ok(Box::new(()))
     }
-    fn execute_content(
+    fn execute_content_with_arguments(
         &self,
         _state: &mut dyn ModeState,
         _context: &ModeContentContext<'_>,
         action: &ModeActionName,
+        _arguments: &ModeValue,
     ) -> Result<ModeResult, ModeError> {
         Err(ModeError::UnknownAction {
             mode: self.name().clone(),
             action: action.clone(),
         })
-    }
-    fn execute_content_with_arguments(
-        &self,
-        state: &mut dyn ModeState,
-        context: &ModeContentContext<'_>,
-        action: &ModeActionName,
-        _arguments: &ModeValue,
-    ) -> Result<ModeResult, ModeError> {
-        self.execute_content(state, context, action)
     }
     fn on_content_changed(
         &self,
@@ -538,15 +501,6 @@ pub trait Mode {
     ) -> Result<(), ModeError> {
         Ok(())
     }
-    fn decorations(
-        &self,
-        _content_state: &dyn ModeState,
-        _view_state: &dyn ModeState,
-        _context: &ModeViewContext<'_>,
-        _visible_rows: RowRange,
-    ) -> Vec<NamedTextDecoration> {
-        Vec::new()
-    }
     fn content_decorations(
         &self,
         _content_state: &dyn ModeState,
@@ -557,12 +511,12 @@ pub trait Mode {
     }
     fn view_decorations(
         &self,
-        content_state: &dyn ModeState,
-        view_state: &dyn ModeState,
-        context: &ModeViewContext<'_>,
-        visible_rows: RowRange,
+        _content_state: &dyn ModeState,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+        _visible_rows: RowRange,
     ) -> Vec<NamedTextDecoration> {
-        self.decorations(content_state, view_state, context, visible_rows)
+        Vec::new()
     }
     fn view_policy(
         &self,
@@ -572,113 +526,96 @@ pub trait Mode {
     ) -> ModeViewPolicy {
         ModeViewPolicy::default()
     }
-    fn keymap(&self, _state: &dyn ModeState, _context: &ModeViewContext<'_>) -> &Keymap<Command> {
-        &EMPTY_KEYMAP
-    }
     fn input_keymap<'a>(
         &'a self,
         _content_state: &dyn ModeState,
-        view_state: &dyn ModeState,
-        context: &ModeViewContext<'_>,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
     ) -> &'a Keymap<Command> {
-        self.keymap(view_state, context)
+        &EMPTY_KEYMAP
     }
-    fn typing(
+    fn input_typing(
         &self,
-        _state: &dyn ModeState,
+        _content_state: &dyn ModeState,
+        _view_state: &dyn ModeState,
         _context: &ModeViewContext<'_>,
         _key: KeyEvent,
     ) -> Option<Command> {
         None
     }
-    fn input_typing(
-        &self,
-        _content_state: &dyn ModeState,
-        view_state: &dyn ModeState,
-        context: &ModeViewContext<'_>,
-        key: KeyEvent,
-    ) -> Option<Command> {
-        self.typing(view_state, context, key)
-    }
-    fn input_status(&self, _state: &dyn ModeState, _context: &ModeViewContext<'_>) -> InputStatus {
-        InputStatus::Ready
-    }
     fn mode_input_status(
         &self,
         _content_state: &dyn ModeState,
-        view_state: &dyn ModeState,
-        context: &ModeViewContext<'_>,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
     ) -> InputStatus {
-        self.input_status(view_state, context)
+        InputStatus::Ready
     }
-    fn capture(
+    fn input_capture(
         &self,
-        _state: &mut dyn ModeState,
+        _content_state: &mut dyn ModeState,
+        _view_state: &mut dyn ModeState,
         _context: &ModeViewContext<'_>,
         _key: KeyEvent,
     ) -> InputDecision<Command> {
         InputDecision::Pass
     }
-    fn input_capture(
-        &self,
-        _content_state: &mut dyn ModeState,
-        view_state: &mut dyn ModeState,
-        context: &ModeViewContext<'_>,
-        key: KeyEvent,
-    ) -> InputDecision<Command> {
-        self.capture(view_state, context, key)
-    }
-    fn on_timeout(&self, _state: &mut dyn ModeState, _context: &ModeViewContext<'_>) -> ModeResult {
-        ModeResult::none()
-    }
     fn input_timeout(
         &self,
         _content_state: &mut dyn ModeState,
-        view_state: &mut dyn ModeState,
-        context: &ModeViewContext<'_>,
+        _view_state: &mut dyn ModeState,
+        _context: &ModeViewContext<'_>,
     ) -> ModeResult {
-        self.on_timeout(view_state, context)
+        ModeResult::none()
     }
-    fn cancel(&self, _state: &mut dyn ModeState, _context: &ModeViewContext<'_>) {}
     fn input_cancel(
         &self,
         _content_state: &mut dyn ModeState,
-        view_state: &mut dyn ModeState,
-        context: &ModeViewContext<'_>,
+        _view_state: &mut dyn ModeState,
+        _context: &ModeViewContext<'_>,
     ) {
-        self.cancel(view_state, context);
     }
-    fn execute_view(
+    fn execute_view_with_arguments(
         &self,
-        _state: &mut dyn ModeState,
+        _content_state: &mut dyn ModeState,
+        _view_state: &mut dyn ModeState,
         _context: &ModeViewContext<'_>,
         action: &ModeActionName,
+        _arguments: &ModeValue,
     ) -> Result<ModeResult, ModeError> {
         Err(ModeError::UnknownAction {
             mode: self.name().clone(),
             action: action.clone(),
         })
     }
-    fn execute_view_with_content(
-        &self,
-        _content_state: &mut dyn ModeState,
-        view_state: &mut dyn ModeState,
-        context: &ModeViewContext<'_>,
-        action: &ModeActionName,
-    ) -> Result<ModeResult, ModeError> {
-        self.execute_view(view_state, context, action)
-    }
-    fn execute_view_with_arguments(
-        &self,
-        content_state: &mut dyn ModeState,
-        view_state: &mut dyn ModeState,
-        context: &ModeViewContext<'_>,
-        action: &ModeActionName,
-        _arguments: &ModeValue,
-    ) -> Result<ModeResult, ModeError> {
-        self.execute_view_with_content(content_state, view_state, context, action)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ModeRegistrationError {
+    DuplicateMode(ModeName),
+    DuplicateAction {
+        mode: ModeName,
+        action: ModeActionName,
+    },
+}
+
+impl fmt::Display for ModeRegistrationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateMode(mode) => {
+                write!(formatter, "mode '{}' is already registered", mode.as_str())
+            }
+            Self::DuplicateAction { mode, action } => write!(
+                formatter,
+                "mode '{}' defines action '{}' more than once",
+                mode.as_str(),
+                action.as_str()
+            ),
+        }
     }
 }
+
+impl std::error::Error for ModeRegistrationError {}
 
 pub(crate) struct ModeRegistry {
     definitions: HashMap<ModeId, Rc<ModeRegistration>>,
@@ -697,6 +634,7 @@ pub(crate) struct ModeViewInstance {
     registered: Rc<ModeRegistration>,
     state: Box<dyn ModeState>,
     faulted: bool,
+    revision: Revision,
 }
 
 impl ModeRegistry {
@@ -708,7 +646,10 @@ impl ModeRegistry {
         }
     }
 
-    pub(crate) fn register(&mut self, mode: impl Mode + 'static) -> ModeId {
+    pub(crate) fn register(
+        &mut self,
+        mode: impl Mode + 'static,
+    ) -> Result<ModeId, ModeRegistrationError> {
         let name = mode.name().clone();
         let actions = mode.actions().to_vec();
         self.register_definition(name, actions, Box::new(mode))
@@ -719,18 +660,19 @@ impl ModeRegistry {
         name: ModeName,
         action_names: Vec<ModeActionName>,
         definition: Box<dyn Mode>,
-    ) -> ModeId {
-        assert!(
-            !self.ids_by_name.contains_key(&name),
-            "mode name must be unique"
-        );
+    ) -> Result<ModeId, ModeRegistrationError> {
+        if self.ids_by_name.contains_key(&name) {
+            return Err(ModeRegistrationError::DuplicateMode(name));
+        }
         let mut actions = HashMap::new();
-        for (index, name) in action_names.iter().cloned().enumerate() {
+        for (index, action_name) in action_names.iter().cloned().enumerate() {
             let action = ModeActionId(u32::try_from(index).expect("mode action id overflow"));
-            assert!(
-                actions.insert(name, action).is_none(),
-                "mode action name must be unique"
-            );
+            if actions.insert(action_name.clone(), action).is_some() {
+                return Err(ModeRegistrationError::DuplicateAction {
+                    mode: name,
+                    action: action_name,
+                });
+            }
         }
         let id = ModeId(self.next_id);
         self.next_id = self.next_id.checked_add(1).expect("mode id overflow");
@@ -742,7 +684,7 @@ impl ModeRegistry {
         });
         self.ids_by_name.insert(name, id);
         self.definitions.insert(id, registered);
-        id
+        Ok(id)
     }
 
     pub(crate) fn resolve_mode(&self, name: &ModeName) -> Option<ModeId> {
@@ -783,14 +725,36 @@ impl ModeRegistry {
         Ok(self.definitions[&mode_id].mode().action_scope(action))
     }
 
+    #[cfg(test)]
     pub(crate) fn instantiate(&self, name: &ModeName) -> Option<ModeViewInstance> {
         let id = self.resolve_mode(name)?;
         let registered = self.definitions.get(&id)?.clone();
         Some(ModeViewInstance {
-            state: registered.definition.new_view_state(),
+            state: Box::new(()),
             registered,
             faulted: false,
+            revision: Revision::default(),
         })
+    }
+
+    pub(crate) fn instantiate_with_context(
+        &self,
+        name: &ModeName,
+        content: ContentId,
+        mode_contents: &mut ModeContentStore,
+        content_context: &ModeContentContext<'_>,
+        view_context: &ModeViewContext<'_>,
+    ) -> Option<ModeViewInstance> {
+        let id = self.resolve_mode(name)?;
+        let registered = self.definitions.get(&id)?.clone();
+        let mut mode = ModeViewInstance {
+            state: Box::new(()),
+            registered,
+            faulted: false,
+            revision: Revision::default(),
+        };
+        mode_contents.attach_view_with_context(content, &mut mode, content_context, view_context);
+        Some(mode)
     }
 }
 
@@ -807,6 +771,7 @@ pub(crate) struct ModeContentInstance {
     attachments: usize,
     faulted: bool,
     background_job_dirty: bool,
+    revision: Revision,
 }
 
 impl ModeContentInstance {
@@ -883,10 +848,10 @@ impl ModeContentStore {
                 .instances
                 .get(&(mode, content))
                 .expect("collected mode content exists");
-            let draft = drafts.content_mut(mode, content, instance);
-            if draft.faulted || !draft.background_job_dirty {
+            if instance.faulted || !instance.background_job_dirty {
                 continue;
             }
+            let draft = drafts.content_mut(mode, content, instance);
             draft.background_job_dirty = false;
             let context = ModeContentContext::new(content, contents);
             if let Some(job) = instance
@@ -953,6 +918,7 @@ impl ModeContentStore {
         let context = ModeContentContext::new(content, contents);
         Some(ContentPresentationLayer {
             source_revision: context.content_revision()?,
+            mode_revision: instance.revision,
             decorations: instance.registered.mode().content_decorations(
                 instance.state.as_ref(),
                 &context,
@@ -968,15 +934,23 @@ impl ModeContentStore {
             existing.attachments += 1;
             return;
         }
+        let contents = ContentStore::default();
+        let context = ModeContentContext::new(content, &contents);
+        let state = mode
+            .registered
+            .mode()
+            .create_content_state(&context)
+            .expect("test mode creates content state");
         self.instances.insert(
             (id, content),
             ModeContentInstance {
                 content,
                 registered: mode.registered.clone(),
-                state: mode.registered.mode().new_content_state(),
+                state,
                 attachments: 1,
                 faulted: false,
                 background_job_dirty: true,
+                revision: Revision::default(),
             },
         );
     }
@@ -1006,6 +980,7 @@ impl ModeContentStore {
                     attachments: 1,
                     faulted,
                     background_job_dirty: !faulted,
+                    revision: Revision::default(),
                 },
             );
         }
@@ -1076,6 +1051,10 @@ impl ModeContentStore {
 
     fn instance(&self, mode: ModeId, content: ContentId) -> Option<&ModeContentInstance> {
         self.instances.get(&(mode, content))
+    }
+
+    pub(crate) fn revision(&self, mode: ModeId, content: ContentId) -> Option<Revision> {
+        Some(self.instance(mode, content)?.revision)
     }
 
     pub(crate) fn execute(
@@ -1217,6 +1196,10 @@ impl ModeViewStore {
             .is_some_and(|chain| !chain.is_empty())
     }
 
+    pub(crate) fn revision(&self, mode: ModeId, view: ViewId) -> Option<Revision> {
+        Some(self.instances.get(&(mode, view))?.revision)
+    }
+
     pub(crate) fn insert(&mut self, view: ViewId, mode: ModeViewInstance) {
         let id = mode.registered.id;
         let chain = self.chains.entry(view).or_default();
@@ -1240,6 +1223,7 @@ impl ModeViewStore {
         self.chains.get(&view).map_or(&[], Vec::as_slice)
     }
 
+    #[cfg(test)]
     pub(crate) fn mode_names(&self, view: ViewId) -> Vec<ModeName> {
         self.mode_ids(view)
             .iter()
@@ -1320,6 +1304,8 @@ impl ModeViewStore {
         Some(ViewPresentationLayer {
             content_revision: context.content_revision()?,
             view_revision,
+            content_mode_revision: content_instance.revision,
+            view_mode_revision: view_instance.revision,
             policy: definition.view_policy(
                 content_instance.state.as_ref(),
                 view_instance.state.as_ref(),
@@ -1459,7 +1445,7 @@ impl ModeViewStore {
         context: &ModeViewContext<'_>,
         mode_contents: &ModeContentStore,
         drafts: &mut ModeDraftJournal,
-    ) -> Option<Vec<ModeEffect>> {
+    ) -> Option<Vec<OperationRequest>> {
         let mode = self.mode_ids(view).get(index).copied()?;
         let content_state = mode_contents.instance(mode, context.content_id())?;
         let instance = self.instances.get(&(mode, view))?;
@@ -1641,15 +1627,19 @@ mod tests {
             ModeActionScope::Content
         }
 
-        fn new_content_state(&self) -> Box<dyn ModeState> {
-            Box::new(0_u8)
+        fn create_content_state(
+            &self,
+            _context: &ModeContentContext<'_>,
+        ) -> Result<Box<dyn ModeState>, ModeError> {
+            Ok(Box::new(0_u8))
         }
 
-        fn execute_content(
+        fn execute_content_with_arguments(
             &self,
             state: &mut dyn ModeState,
             _context: &ModeContentContext<'_>,
             _action: &ModeActionName,
+            _arguments: &ModeValue,
         ) -> Result<ModeResult, ModeError> {
             *state.as_any_mut().downcast_mut::<u8>().unwrap() += 1;
             Ok(ModeResult::none())
@@ -1697,10 +1687,12 @@ mod tests {
         let calls = Rc::new(Cell::new(0));
         let name = ModeName::new("counting-jobs");
         let mut registry = ModeRegistry::new();
-        registry.register(CountingJobMode {
-            name: name.clone(),
-            calls: calls.clone(),
-        });
+        registry
+            .register(CountingJobMode {
+                name: name.clone(),
+                calls: calls.clone(),
+            })
+            .unwrap();
         let mode = registry.instantiate(&name).unwrap();
         let mut content_modes = ModeContentStore::default();
         content_modes.attach_view(ContentId(1), &mode);
@@ -1712,15 +1704,40 @@ mod tests {
     }
 
     #[test]
+    fn last_view_detaches_shared_content_state() {
+        let name = ModeName::new("counting-jobs");
+        let mut registry = ModeRegistry::new();
+        let mode_id = registry
+            .register(CountingJobMode {
+                name: name.clone(),
+                calls: Rc::new(Cell::new(0)),
+            })
+            .unwrap();
+        let mode = registry.instantiate(&name).unwrap();
+        let content = ContentId(1);
+        let mut content_modes = ModeContentStore::default();
+
+        content_modes.attach_view(content, &mode);
+        content_modes.attach_view(content, &mode);
+        content_modes.detach_view(content, mode_id);
+        assert!(content_modes.instance(mode_id, content).is_some());
+
+        content_modes.detach_view(content, mode_id);
+        assert!(content_modes.instance(mode_id, content).is_none());
+    }
+
+    #[test]
     fn content_state_draft_is_visible_in_frame_and_published_only_on_commit() {
         let name = ModeName::new("draft-state");
         let action = ModeActionName::new("advance");
         let mut registry = ModeRegistry::new();
-        registry.register(DraftStateMode {
-            name: name.clone(),
-            actions: vec![action.clone()],
-            fail_observer: false,
-        });
+        registry
+            .register(DraftStateMode {
+                name: name.clone(),
+                actions: vec![action.clone()],
+                fail_observer: false,
+            })
+            .unwrap();
         let mode = registry.instantiate(&name).unwrap();
         let mode_id = mode.registered.id;
         let content = ContentId(1);
@@ -1765,11 +1782,13 @@ mod tests {
     fn passive_callback_fault_is_published_only_with_its_frame() {
         let name = ModeName::new("faulting-observer-draft");
         let mut registry = ModeRegistry::new();
-        registry.register(DraftStateMode {
-            name: name.clone(),
-            actions: vec![ModeActionName::new("advance")],
-            fail_observer: true,
-        });
+        registry
+            .register(DraftStateMode {
+                name: name.clone(),
+                actions: vec![ModeActionName::new("advance")],
+                fail_observer: true,
+            })
+            .unwrap();
         let mode = registry.instantiate(&name).unwrap();
         let mode_id = mode.registered.id;
         let content = ContentId(1);
@@ -1807,5 +1826,34 @@ mod tests {
             content_modes.state_for_test::<u8>(mode_id, content),
             Some(&0)
         );
+    }
+
+    #[test]
+    fn registration_rejects_duplicate_mode_and_action_names() {
+        let mut registry = ModeRegistry::new();
+        registry
+            .register(DraftStateMode {
+                name: ModeName::new("duplicate"),
+                actions: vec![ModeActionName::new("run")],
+                fail_observer: false,
+            })
+            .unwrap();
+
+        assert!(matches!(
+            registry.register(DraftStateMode {
+                name: ModeName::new("duplicate"),
+                actions: vec![ModeActionName::new("other")],
+                fail_observer: false,
+            }),
+            Err(ModeRegistrationError::DuplicateMode(_))
+        ));
+        assert!(matches!(
+            registry.register(DraftStateMode {
+                name: ModeName::new("duplicate-action"),
+                actions: vec![ModeActionName::new("run"), ModeActionName::new("run")],
+                fail_observer: false,
+            }),
+            Err(ModeRegistrationError::DuplicateAction { .. })
+        ));
     }
 }

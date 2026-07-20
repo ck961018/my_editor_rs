@@ -1,15 +1,15 @@
 # Mode 与 Action 所有权设计
 
-**状态：** 历史基线；Mode 类型模型已被可组合 Mode 架构取代
+**状态：** 历史基线；当前 Mode 类型模型见
+[`editor-kernel-architecture.md`](editor-kernel-architecture.md)
 
 **日期：** 2026-07-17
 
 ## 1. 目标
 
 本文保留早期 Mode、View、Content 和顶层路由的能力边界决策。
-`ContentMode`/`ViewMode` 二选一模型已被
-`composable-mode-architecture.md` 的统一 Mode contract 取代，不再描述
-当前实现。
+`ContentMode`/`ViewMode` 二选一模型已被当前统一 Mode contract 取代，
+不再描述当前实现。
 
 核心规则是：Mode 负责解释输入和编排操作，View 保存会话状态，Content
 保存领域数据，app 验证目标并执行有序结果。

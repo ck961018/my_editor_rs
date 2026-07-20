@@ -10,7 +10,6 @@ use crate::app::mode::{
     ModeContentStore, ModeDraftJournal, ModeError, ModeId, ModeJobKey, ModeJobRequest,
     ModeJobResult, ModeJobRunner, ModeRegistry, ModeResult,
 };
-use crate::app::mode_name::ModeName;
 use crate::app::tasks::AppTasks;
 use crate::app::transaction::{
     TransactionManager, TransactionManagerError, TransactionRecord, TransactionSnapshot,
@@ -30,7 +29,6 @@ pub(super) struct Kernel {
     modes: ModeRegistry,
     content_modes: ModeContentStore,
     transactions: TransactionManager,
-    new_view_modes: HashMap<ContentId, Vec<ModeName>>,
     message_tx: mpsc::UnboundedSender<AppMessage>,
     message_rx: mpsc::UnboundedReceiver<AppMessage>,
     tasks: AppTasks,
@@ -40,18 +38,13 @@ pub(super) struct Kernel {
 }
 
 impl Kernel {
-    pub(super) fn new(
-        contents: ContentStore,
-        modes: ModeRegistry,
-        new_view_modes: HashMap<ContentId, Vec<ModeName>>,
-    ) -> Self {
+    pub(super) fn new(contents: ContentStore, modes: ModeRegistry) -> Self {
         let (message_tx, message_rx) = mpsc::unbounded_channel();
         Self {
             contents,
             modes,
             content_modes: ModeContentStore::default(),
             transactions: TransactionManager::default(),
-            new_view_modes,
             message_tx,
             message_rx,
             tasks: AppTasks::new(),
@@ -80,13 +73,6 @@ impl Kernel {
 
     pub(super) fn modes(&self) -> &ModeRegistry {
         &self.modes
-    }
-
-    pub(super) fn mode_chain_for_new_view(&self, content: ContentId) -> Vec<ModeName> {
-        self.new_view_modes
-            .get(&content)
-            .cloned()
-            .unwrap_or_default()
     }
 
     pub(super) fn content_modes(&self) -> &ModeContentStore {
@@ -549,8 +535,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn newer_mode_job_cancels_the_running_version() {
         let mut modes = ModeRegistry::new();
-        let mode = modes.register(TestMode(ModeName::new("test")));
-        let mut kernel = Kernel::new(ContentStore::default(), modes, HashMap::new());
+        let mode = modes.register(TestMode(ModeName::new("test"))).unwrap();
+        let mut kernel = Kernel::new(ContentStore::default(), modes);
         let key = ModeJobKey {
             mode,
             content: ContentId(0),
@@ -577,8 +563,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn stale_mode_job_completion_is_ignored() {
         let mut modes = ModeRegistry::new();
-        let mode = modes.register(TestMode(ModeName::new("test")));
-        let mut kernel = Kernel::new(ContentStore::default(), modes, HashMap::new());
+        let mode = modes.register(TestMode(ModeName::new("test"))).unwrap();
+        let mut kernel = Kernel::new(ContentStore::default(), modes);
         let key = ModeJobKey {
             mode,
             content: ContentId(0),

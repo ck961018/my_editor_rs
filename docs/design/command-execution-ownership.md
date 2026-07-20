@@ -1,6 +1,7 @@
 # Command 与执行所有权设计
 
-**状态：** 已实施
+**状态：** 已实施的历史决策；当前执行模型见
+[`editor-kernel-architecture.md`](editor-kernel-architecture.md)
 
 **日期：** 2026-07-17
 

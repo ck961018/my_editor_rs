@@ -680,7 +680,6 @@ mod tests {
                 message: StatusMessage::None,
             };
             match query {
-                ContentQuery::Text => ContentData::Text(self.lines.join("\n")),
                 ContentQuery::TextRows(range) => {
                     assert_eq!(cid, self.editor_cid, "only editor content has lines");
                     ContentData::TextRows(
@@ -733,7 +732,6 @@ mod tests {
                 message: StatusMessage::None,
             };
             match query {
-                ContentQuery::Text => ContentData::Text(self.lines.join("\n")),
                 ContentQuery::TextRows(range) => {
                     assert_eq!(cid, ContentId(0));
                     ContentData::TextRows(

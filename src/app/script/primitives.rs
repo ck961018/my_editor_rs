@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::app::command::{AppCommand, ModeCommand, ModeValue};
-use crate::app::mode::{ModeEffect, ModeViewContext};
+use crate::app::mode::ModeViewContext;
 use crate::app::mode_name::{ModeActionName, ModeName};
 use crate::app::operation::{
     AppOperation, ContentOperation, ContentTarget, ModeInvocation, ModeTarget, OperationRequest,
@@ -162,7 +162,7 @@ impl PrimitiveRuntime {
         Ok(id)
     }
 
-    pub(super) fn finish(&mut self, id: u64) -> Result<Vec<ModeEffect>, ScriptError> {
+    pub(super) fn finish(&mut self, id: u64) -> Result<Vec<OperationRequest>, ScriptError> {
         let invocation = self
             .current
             .take()
@@ -172,11 +172,7 @@ impl PrimitiveRuntime {
                 "script primitive invocation changed unexpectedly",
             ));
         }
-        Ok(invocation
-            .effects
-            .into_iter()
-            .map(ModeEffect::Operation)
-            .collect())
+        Ok(invocation.effects)
     }
 }
 
@@ -532,7 +528,7 @@ fn history(operation: crate::app::action::TransactionIntent) -> OperationRequest
 }
 
 fn nested(operation: OperationRequest) -> Vec<OperationRequest> {
-    vec![OperationRequest::App(AppOperation::Noop), operation]
+    vec![operation]
 }
 
 fn delete_operator(target: TextTarget) -> EditCommand {

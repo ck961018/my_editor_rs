@@ -15,7 +15,7 @@ use crate::app::operation::{
     AppOperation, ContentOperation, ContentTarget, ModeTarget, OperationError, OperationOrigin,
     OperationOriginScope, OperationRequest, QueuedOperation, ResolvedModeScope, ResolvedOperation,
     ViewEditPlan, ViewOperation, ViewPrecondition, ViewTarget, adapt_dispatch_command,
-    adapt_mode_effects, prepend_operations,
+    prepend_operations,
 };
 use crate::app::query::AppQuery;
 use crate::app::transaction::{TransactionData, TransactionRecord, ViewTransactionData};
@@ -488,7 +488,6 @@ impl<F: Frontend> App<F> {
                     }
                     Ok(())
                 }
-                ResolvedOperation::App(AppOperation::Noop) => Ok(()),
                 ResolvedOperation::Content { content, operation } => match operation {
                     ContentOperation::Apply(action) => {
                         self.execute_content_action(action, content, frame)
@@ -620,14 +619,11 @@ impl<F: Frontend> App<F> {
                                 .map_err(|error| {
                                     io::Error::new(io::ErrorKind::InvalidData, error)
                                 })?;
-                            let (flow, effects) = result.into_parts();
+                            let (flow, operations) = result.into_parts();
                             input_flow = flow;
                             let mut effect_origin = OperationOrigin::content(content, source_view);
                             effect_origin.mode = Some(mode);
-                            let requests =
-                                adapt_mode_effects(effects, OperationOriginScope::Content)
-                                    .map_err(operation_error)?;
-                            prepend_operations(&mut queue, effect_origin, requests);
+                            prepend_operations(&mut queue, effect_origin, operations);
                             Ok(())
                         }
                         ResolvedModeScope::View { view, content } => {
@@ -651,14 +647,12 @@ impl<F: Frontend> App<F> {
                                 .map_err(|error| {
                                     io::Error::new(io::ErrorKind::InvalidData, error)
                                 })?;
-                            let (flow, effects) = result.into_parts();
+                            let (flow, operations) = result.into_parts();
                             input_flow = flow;
                             frame.record_view_touch(view, revision_before);
                             let mut effect_origin = OperationOrigin::view(view, content);
                             effect_origin.mode = Some(mode);
-                            let requests = adapt_mode_effects(effects, OperationOriginScope::View)
-                                .map_err(operation_error)?;
-                            prepend_operations(&mut queue, effect_origin, requests);
+                            prepend_operations(&mut queue, effect_origin, operations);
                             Ok(())
                         }
                     }
