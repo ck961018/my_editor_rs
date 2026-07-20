@@ -3,9 +3,7 @@ use std::time::{Duration, Instant};
 
 use crate::app::command::{AppCommand, Command, ContentCommand, ModeCommand};
 use crate::app::command_resolver::{focused_view_id, resolve_command};
-use crate::app::mode::{
-    ModeContentStore, ModeId, ModeStateSnapshot, ModeViewContext, ModeViewStore,
-};
+use crate::app::mode::{ModeContentStore, ModeDraftJournal, ModeViewContext, ModeViewStore};
 use crate::app::view::View;
 use crate::core::content_store::ContentStore;
 use crate::core::input::{
@@ -25,18 +23,12 @@ pub struct Dispatcher {
     global_keymap: Keymap<Command>,
     coordinator: InputCoordinator<CommandSource>,
     sequence_config: KeySequenceConfig,
-    input_mode_snapshots: Vec<InputModeSnapshot>,
     view_mode_revisions: Vec<(ViewId, Revision)>,
 }
 
 #[derive(Clone)]
 pub(crate) struct DispatcherInputSnapshot {
     coordinator: InputCoordinator<CommandSource>,
-}
-
-pub(crate) enum InputModeSnapshot {
-    Content(ModeId, ContentId, ModeStateSnapshot),
-    View(ModeId, ViewId, ModeStateSnapshot),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,7 +145,6 @@ impl Dispatcher {
             global_keymap,
             coordinator: InputCoordinator::default(),
             sequence_config,
-            input_mode_snapshots: Vec::new(),
             view_mode_revisions: Vec::new(),
         }
     }
@@ -177,7 +168,7 @@ impl Dispatcher {
         clippy::too_many_arguments,
         reason = "dispatcher borrows split app-owned stores"
     )]
-    pub fn dispatch(
+    pub fn dispatch_in_draft(
         &mut self,
         input: DispatchInput,
         now: Instant,
@@ -187,8 +178,8 @@ impl Dispatcher {
         modes: &mut ModeViewStore,
         content_modes: &mut ModeContentStore,
         contents: &ContentStore,
+        drafts: &mut ModeDraftJournal,
     ) -> DispatchOutcome {
-        self.input_mode_snapshots.clear();
         self.view_mode_revisions.clear();
         let focused_view = match focused_view_id(scene, focused) {
             Some(view) => view,
@@ -204,9 +195,14 @@ impl Dispatcher {
                 modes,
                 content_modes,
                 contents,
+                drafts,
             ),
             DispatchInput::Unmapped(key) => {
-                fallback(key, 0, focused_view, views, modes, content_modes, contents)
+                let Some(view_data) = views.get(&focused_view) else {
+                    return DispatchOutcome::Consumed;
+                };
+                let context = ModeViewContext::new(focused_view, view_data, contents);
+                fallback(key, 0, &context, views, modes, content_modes, drafts)
             }
             DispatchInput::Continue { key, mode_index } => self.start_sequence(
                 key,
@@ -217,8 +213,39 @@ impl Dispatcher {
                 modes,
                 content_modes,
                 contents,
+                drafts,
             ),
         }
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch(
+        &mut self,
+        input: DispatchInput,
+        now: Instant,
+        focused: SpaceId,
+        scene: &Scene,
+        views: &HashMap<ViewId, View>,
+        modes: &mut ModeViewStore,
+        content_modes: &mut ModeContentStore,
+        contents: &ContentStore,
+    ) -> DispatchOutcome {
+        let mut drafts = ModeDraftJournal::default();
+        let outcome = self.dispatch_in_draft(
+            input,
+            now,
+            focused,
+            scene,
+            views,
+            modes,
+            content_modes,
+            contents,
+            &mut drafts,
+        );
+        drafts.commit_content(content_modes);
+        drafts.commit_views(modes);
+        outcome
     }
 
     pub fn sync_mode(
@@ -235,30 +262,6 @@ impl Dispatcher {
 
     pub fn take_view_mode_revisions(&mut self) -> Vec<(ViewId, Revision)> {
         std::mem::take(&mut self.view_mode_revisions)
-    }
-
-    pub fn take_input_mode_snapshots(&mut self) -> Vec<InputModeSnapshot> {
-        std::mem::take(&mut self.input_mode_snapshots)
-    }
-
-    fn record_input_mode_snapshot(&mut self, snapshot: InputModeSnapshot) {
-        let already_recorded =
-            self.input_mode_snapshots
-                .iter()
-                .any(|current| match (current, &snapshot) {
-                    (
-                        InputModeSnapshot::Content(current_mode, current, _),
-                        InputModeSnapshot::Content(next_mode, next, _),
-                    ) => current_mode == next_mode && current == next,
-                    (
-                        InputModeSnapshot::View(current_mode, current, _),
-                        InputModeSnapshot::View(next_mode, next, _),
-                    ) => current_mode == next_mode && current == next,
-                    _ => false,
-                });
-        if !already_recorded {
-            self.input_mode_snapshots.push(snapshot);
-        }
     }
 
     fn record_view_mode_revision(&mut self, view: ViewId, revision: Revision) {
@@ -317,15 +320,17 @@ impl Dispatcher {
         content_modes: &ModeContentStore,
         contents: &ContentStore,
     ) -> Option<Instant> {
-        self.coordinator
-            .next_deadline(|source| context_status(views, modes, content_modes, contents, *source))
+        let drafts = ModeDraftJournal::default();
+        self.coordinator.next_deadline(|source| {
+            context_status(views, modes, content_modes, contents, &drafts, *source)
+        })
     }
 
     #[allow(
         clippy::too_many_arguments,
         reason = "dispatcher borrows split app-owned stores"
     )]
-    pub fn dispatch_timeout(
+    pub fn dispatch_timeout_in_draft(
         &mut self,
         now: Instant,
         focused: SpaceId,
@@ -334,15 +339,15 @@ impl Dispatcher {
         modes: &mut ModeViewStore,
         content_modes: &mut ModeContentStore,
         contents: &crate::core::content_store::ContentStore,
+        drafts: &mut ModeDraftJournal,
     ) -> DispatchOutcome {
-        self.input_mode_snapshots.clear();
         self.view_mode_revisions.clear();
         let focused_view = match focused_view_id(scene, focused) {
             Some(view) => view,
             None => return DispatchOutcome::Consumed,
         };
         let Some(due) = self.coordinator.next_due(now, |source| {
-            context_status(views, modes, content_modes, contents, *source)
+            context_status(views, modes, content_modes, contents, drafts, *source)
         }) else {
             return DispatchOutcome::Waiting;
         };
@@ -350,9 +355,6 @@ impl Dispatcher {
             AwaitingSource::Context(source) => {
                 if let CommandSource::Mode { view, index } = source {
                     let content = views.get(&view).map(View::content);
-                    for snapshot in snapshot_context_modes(views, modes, content_modes, source) {
-                        self.record_input_mode_snapshot(snapshot);
-                    }
                     let command = content.and_then(|content| {
                         let context = ModeViewContext::new(
                             view,
@@ -360,7 +362,7 @@ impl Dispatcher {
                             contents,
                         );
                         modes
-                            .timeout_at(view, index, &context, content_modes)
+                            .timeout_at(view, index, &context, content_modes, drafts)
                             .map(|operations| {
                                 self.record_view_mode_revision(view, views[&view].revision());
                                 DispatchCommand::ModeEffects {
@@ -370,7 +372,8 @@ impl Dispatcher {
                                 }
                             })
                     });
-                    let status = context_status(views, modes, content_modes, contents, source);
+                    let status =
+                        context_status(views, modes, content_modes, contents, drafts, source);
                     self.coordinator.sync_context(source, status, true, now);
                     if let Some(command) = command {
                         return DispatchOutcome::Emit {
@@ -398,9 +401,38 @@ impl Dispatcher {
                     modes,
                     content_modes,
                     contents,
+                    drafts,
                 )
             }
         }
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_timeout(
+        &mut self,
+        now: Instant,
+        focused: SpaceId,
+        scene: &Scene,
+        views: &HashMap<ViewId, View>,
+        modes: &mut ModeViewStore,
+        content_modes: &mut ModeContentStore,
+        contents: &ContentStore,
+    ) -> DispatchOutcome {
+        let mut drafts = ModeDraftJournal::default();
+        let outcome = self.dispatch_timeout_in_draft(
+            now,
+            focused,
+            scene,
+            views,
+            modes,
+            content_modes,
+            contents,
+            &mut drafts,
+        );
+        drafts.commit_content(content_modes);
+        drafts.commit_views(modes);
+        outcome
     }
 
     #[expect(
@@ -422,6 +454,7 @@ impl Dispatcher {
         let Some(pending) = self.coordinator.pending_sequence() else {
             return HashSet::new();
         };
+        let drafts = ModeDraftJournal::default();
         self.with_sequence_layer(
             pending.owner,
             view,
@@ -429,6 +462,7 @@ impl Dispatcher {
             modes,
             content_modes,
             contents,
+            &drafts,
             |layer| continuations(std::slice::from_ref(layer), &pending.keys),
         )
         .unwrap_or_default()
@@ -448,6 +482,7 @@ impl Dispatcher {
         modes: &mut ModeViewStore,
         content_modes: &mut ModeContentStore,
         contents: &ContentStore,
+        drafts: &mut ModeDraftJournal,
     ) -> DispatchOutcome {
         let Some(view) = views.get(&focused_view) else {
             return DispatchOutcome::Consumed;
@@ -458,26 +493,12 @@ impl Dispatcher {
                 view: focused_view,
                 index,
             };
-            let status = modes.status_at(focused_view, index, &context, content_modes);
+            let status = modes.status_at(focused_view, index, &context, content_modes, drafts);
             if !matches!(status, InputStatus::Ready) {
-                let mode = modes.mode_ids(focused_view)[index];
-                if let Some(snapshot) = content_modes.snapshot_for(mode, context.content_id()) {
-                    self.record_input_mode_snapshot(InputModeSnapshot::Content(
-                        mode,
-                        context.content_id(),
-                        snapshot,
-                    ));
-                }
-                if let Some(snapshot) = modes.snapshot_for(mode, focused_view) {
-                    self.record_input_mode_snapshot(InputModeSnapshot::View(
-                        mode,
-                        focused_view,
-                        snapshot,
-                    ));
-                }
-                let decision = modes.capture_at(focused_view, index, &context, content_modes, key);
+                let decision =
+                    modes.capture_at(focused_view, index, &context, content_modes, drafts, key);
                 let handled = !matches!(decision, InputDecision::Pass);
-                let status = modes.status_at(focused_view, index, &context, content_modes);
+                let status = modes.status_at(focused_view, index, &context, content_modes, drafts);
                 self.coordinator.sync_context(source, status, handled, now);
                 if handled {
                     self.record_view_mode_revision(focused_view, view.revision());
@@ -514,9 +535,12 @@ impl Dispatcher {
                     modes,
                     content_modes,
                     contents,
+                    drafts,
                 );
             }
-            if let Some(keymap) = modes.keymap_at(focused_view, index, &context, content_modes) {
+            if let Some(keymap) =
+                modes.keymap_at(focused_view, index, &context, content_modes, drafts)
+            {
                 let layer = [KeymapLayer { source, keymap }];
                 if let Some(matched) = match_sequence(&layer, &[key]) {
                     if matched.has_children {
@@ -534,7 +558,7 @@ impl Dispatcher {
                 }
             }
             if let Some(action) =
-                modes.fallback_at(focused_view, index, &context, content_modes, key)
+                modes.fallback_at(focused_view, index, &context, content_modes, drafts, key)
             {
                 let Some(command) = resolve_command(action, source, focused_view, views) else {
                     return DispatchOutcome::Consumed;
@@ -563,6 +587,7 @@ impl Dispatcher {
                 modes,
                 content_modes,
                 contents,
+                drafts,
             );
         }
         let layer = [KeymapLayer {
@@ -600,6 +625,7 @@ impl Dispatcher {
         modes: &ModeViewStore,
         content_modes: &ModeContentStore,
         contents: &ContentStore,
+        drafts: &ModeDraftJournal,
     ) -> DispatchOutcome {
         let pending = self
             .coordinator
@@ -616,6 +642,7 @@ impl Dispatcher {
                 modes,
                 content_modes,
                 contents,
+                drafts,
                 |layer| match_sequence(std::slice::from_ref(layer), &keys),
             )
             .flatten();
@@ -651,6 +678,7 @@ impl Dispatcher {
                     modes,
                     content_modes,
                     contents,
+                    drafts,
                 )
             }
         }
@@ -670,6 +698,7 @@ impl Dispatcher {
         modes: &ModeViewStore,
         content_modes: &ModeContentStore,
         contents: &ContentStore,
+        drafts: &ModeDraftJournal,
     ) -> DispatchOutcome {
         let complete = self
             .with_sequence_layer(
@@ -679,6 +708,7 @@ impl Dispatcher {
                 modes,
                 content_modes,
                 contents,
+                drafts,
                 |layer| longest_complete(std::slice::from_ref(layer), &keys),
             )
             .flatten();
@@ -728,13 +758,14 @@ impl Dispatcher {
         modes: &ModeViewStore,
         content_modes: &ModeContentStore,
         contents: &ContentStore,
+        drafts: &ModeDraftJournal,
         query: impl FnOnce(&KeymapLayer<'_, Command, CommandSource>) -> R,
     ) -> Option<R> {
         match source {
             CommandSource::Mode { view, index } => {
                 let view_data = views.get(&view)?;
                 let context = ModeViewContext::new(view, view_data, contents);
-                let keymap = modes.keymap_at(view, index, &context, content_modes)?;
+                let keymap = modes.keymap_at(view, index, &context, content_modes, drafts)?;
                 Some(query(&KeymapLayer { source, keymap }))
             }
             CommandSource::Global => Some(query(&KeymapLayer {
@@ -762,46 +793,19 @@ fn emit_resolved(
     }
 }
 
-fn snapshot_context_modes(
-    views: &HashMap<ViewId, View>,
-    modes: &ModeViewStore,
-    content_modes: &ModeContentStore,
-    source: CommandSource,
-) -> Vec<InputModeSnapshot> {
-    let view = match source {
-        CommandSource::Mode { view, .. } => view,
-        CommandSource::Global => return Vec::new(),
-    };
-    let Some(content) = views.get(&view).map(View::content) else {
-        return Vec::new();
-    };
-    let mode_ids = modes.mode_ids(view);
-    let mut snapshots: Vec<_> = content_modes
-        .snapshots(content, mode_ids)
-        .into_iter()
-        .map(|(mode, snapshot)| InputModeSnapshot::Content(mode, content, snapshot))
-        .collect();
-    snapshots.extend(
-        modes
-            .snapshots(view)
-            .into_iter()
-            .map(|(mode, snapshot)| InputModeSnapshot::View(mode, view, snapshot)),
-    );
-    snapshots
-}
-
 fn context_status(
     views: &HashMap<ViewId, View>,
     modes: &ModeViewStore,
     content_modes: &ModeContentStore,
     contents: &ContentStore,
+    drafts: &ModeDraftJournal,
     source: CommandSource,
 ) -> InputStatus {
     match source {
         CommandSource::Mode { view, index } => {
             views.get(&view).map_or(InputStatus::Ready, |view_data| {
                 let context = ModeViewContext::new(view, view_data, contents);
-                modes.status_at(view, index, &context, content_modes)
+                modes.status_at(view, index, &context, content_modes, drafts)
             })
         }
         CommandSource::Global => InputStatus::Ready,
@@ -811,26 +815,19 @@ fn context_status(
 fn fallback(
     key: KeyEvent,
     start_mode: usize,
-    focused_view: ViewId,
+    context: &ModeViewContext<'_>,
     views: &HashMap<ViewId, View>,
     modes: &ModeViewStore,
     content_modes: &ModeContentStore,
-    contents: &ContentStore,
+    drafts: &ModeDraftJournal,
 ) -> DispatchOutcome {
-    let Some(_content) = views.get(&focused_view).map(View::content) else {
-        return DispatchOutcome::Consumed;
-    };
-    let context = ModeViewContext::new(
-        focused_view,
-        views.get(&focused_view).expect("focused view exists"),
-        contents,
-    );
+    let focused_view = context.view_id();
     let action = modes.fallback_in_chain(
         focused_view,
         start_mode,
-        &context,
+        context,
         content_modes,
-        contents,
+        drafts,
         key,
     );
     let Some((index, action)) = action else {
@@ -1023,7 +1020,6 @@ mod tests {
             ),
             DispatchOutcome::Waiting
         );
-        assert!(dispatcher.take_input_mode_snapshots().is_empty());
     }
 
     #[test]

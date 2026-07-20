@@ -10,8 +10,8 @@ use crate::app::layout::{
     view_for_space, view_space_focusable,
 };
 use crate::app::mode::{
-    CursorDomain, FaceRegistry, ModeContentContext, ModeContentStore, ModeError, ModeId,
-    ModeRegistry, ModeResult, ModeStateSnapshot, ModeViewContext, ModeViewStore,
+    CursorDomain, FaceRegistry, ModeContentContext, ModeContentStore, ModeDraftJournal, ModeError,
+    ModeRegistry, ModeResult, ModeViewContext, ModeViewStore,
 };
 use crate::app::scene_model::{
     CloseResult, SceneBuilder, SceneError, SplitResult, build_editor_scene,
@@ -138,6 +138,22 @@ impl ClientSession {
         &self.view_modes
     }
 
+    pub(super) fn commit_mode_drafts(&mut self, drafts: &mut ModeDraftJournal) {
+        drafts.commit_views(&mut self.view_modes);
+    }
+
+    pub(super) fn commit_view_touches(&mut self, touches: HashMap<ViewId, Revision>) {
+        for (view, revision_before) in touches {
+            let target = self
+                .views
+                .get_mut(&view)
+                .expect("touched view still exists");
+            if target.revision() == revision_before {
+                target.touch();
+            }
+        }
+    }
+
     pub(super) fn faces(&self) -> &FaceRegistry {
         &self.faces
     }
@@ -160,6 +176,7 @@ impl ClientSession {
         self.dispatcher.is_pending()
     }
 
+    #[cfg(test)]
     pub(super) fn view_mut(&mut self, view: ViewId) -> Option<&mut View> {
         self.views.get_mut(&view)
     }
@@ -176,16 +193,17 @@ impl ClientSession {
         }
     }
 
-    pub(super) fn cursor_domain(
+    pub(super) fn cursor_domain_in_draft(
         &self,
         view: ViewId,
         mode_contents: &ModeContentStore,
         contents: &ContentStore,
+        drafts: &ModeDraftJournal,
     ) -> CursorDomain {
         let view_data = self.views.get(&view).expect("target view exists");
         let context = crate::app::mode::ModeViewContext::new(view, view_data, contents);
         self.view_modes
-            .view_policy(view, &context, mode_contents)
+            .view_policy_in_draft(view, &context, mode_contents, drafts)
             .cursor_domain
             .unwrap_or(CursorDomain::InsertionPoint)
     }
@@ -250,28 +268,18 @@ impl ClientSession {
         contents: &ContentStore,
         command: &ModeCommand,
         mode_contents: &mut ModeContentStore,
+        drafts: &mut ModeDraftJournal,
     ) -> Result<ModeResult, ModeError> {
         let view_data = self.views.get(&view).expect("target view exists");
         let context = crate::app::mode::ModeViewContext::new(view, view_data, contents);
-        self.view_modes
-            .execute_with_context(view, registry, command, &context, mode_contents)
-    }
-
-    pub(super) fn snapshot_mode_view_for(
-        &self,
-        mode: ModeId,
-        view: ViewId,
-    ) -> Option<ModeStateSnapshot> {
-        self.view_modes.snapshot_for(mode, view)
-    }
-
-    pub(super) fn restore_mode_view_for(
-        &mut self,
-        mode: ModeId,
-        view: ViewId,
-        snapshot: ModeStateSnapshot,
-    ) {
-        self.view_modes.restore_for(mode, view, snapshot);
+        self.view_modes.execute_with_context(
+            view,
+            registry,
+            command,
+            &context,
+            mode_contents,
+            drafts,
+        )
     }
 
     pub(super) fn view_for_space(&self, space: SpaceId) -> Option<ViewId> {
@@ -299,12 +307,9 @@ impl ClientSession {
         now: Instant,
         content_modes: &mut ModeContentStore,
         contents: &ContentStore,
-    ) -> (
-        DispatchOutcome,
-        Vec<crate::app::dispatcher::InputModeSnapshot>,
-        Vec<(ViewId, Revision)>,
-    ) {
-        let outcome = self.dispatcher.dispatch(
+        drafts: &mut ModeDraftJournal,
+    ) -> (DispatchOutcome, Vec<(ViewId, Revision)>) {
+        let outcome = self.dispatcher.dispatch_in_draft(
             input,
             now,
             self.focused,
@@ -313,12 +318,9 @@ impl ClientSession {
             &mut self.view_modes,
             content_modes,
             contents,
+            drafts,
         );
-        (
-            outcome,
-            self.dispatcher.take_input_mode_snapshots(),
-            self.dispatcher.take_view_mode_revisions(),
-        )
+        (outcome, self.dispatcher.take_view_mode_revisions())
     }
 
     pub(super) fn dispatch_timeout(
@@ -326,12 +328,9 @@ impl ClientSession {
         now: Instant,
         content_modes: &mut ModeContentStore,
         contents: &ContentStore,
-    ) -> (
-        DispatchOutcome,
-        Vec<crate::app::dispatcher::InputModeSnapshot>,
-        Vec<(ViewId, Revision)>,
-    ) {
-        let outcome = self.dispatcher.dispatch_timeout(
+        drafts: &mut ModeDraftJournal,
+    ) -> (DispatchOutcome, Vec<(ViewId, Revision)>) {
+        let outcome = self.dispatcher.dispatch_timeout_in_draft(
             now,
             self.focused,
             &self.scene,
@@ -339,19 +338,17 @@ impl ClientSession {
             &mut self.view_modes,
             content_modes,
             contents,
+            drafts,
         );
-        (
-            outcome,
-            self.dispatcher.take_input_mode_snapshots(),
-            self.dispatcher.take_view_mode_revisions(),
-        )
+        (outcome, self.dispatcher.take_view_mode_revisions())
     }
 
-    pub(super) fn sync_focused_input(
+    pub(super) fn sync_focused_input_in_draft(
         &mut self,
         now: Instant,
         content_modes: &ModeContentStore,
         contents: &ContentStore,
+        drafts: &ModeDraftJournal,
     ) {
         let Some(view_id) = self.view_for_space(self.focused) else {
             return;
@@ -361,9 +358,23 @@ impl ClientSession {
         for index in 0..self.view_modes.mode_ids(view_id).len() {
             let status = self
                 .view_modes
-                .status_at(view_id, index, &context, content_modes);
+                .status_at(view_id, index, &context, content_modes, drafts);
             self.dispatcher.sync_mode(view_id, index, status, true, now);
         }
+    }
+
+    pub(super) fn sync_focused_input(
+        &mut self,
+        now: Instant,
+        content_modes: &ModeContentStore,
+        contents: &ContentStore,
+    ) {
+        self.sync_focused_input_in_draft(
+            now,
+            content_modes,
+            contents,
+            &ModeDraftJournal::default(),
+        );
     }
 
     pub(super) fn transform_content_views(
@@ -392,9 +403,16 @@ impl ClientSession {
         mode_contents: &mut ModeContentStore,
         contents: &ContentStore,
         change: &ContentChange,
+        drafts: &mut ModeDraftJournal,
     ) {
-        self.view_modes
-            .notify_changed(&self.views, content, mode_contents, contents, change);
+        self.view_modes.notify_changed(
+            &self.views,
+            content,
+            mode_contents,
+            contents,
+            change,
+            drafts,
+        );
     }
 
     pub(super) fn attach_mode_to_content_views(

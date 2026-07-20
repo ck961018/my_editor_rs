@@ -8,7 +8,7 @@ use crate::app::application::App;
 #[cfg(test)]
 use crate::app::behavior::EffectBehavior;
 use crate::app::command::AppCommand;
-use crate::app::dispatcher::{DispatchCommand, DispatchInput, DispatchOutcome, InputModeSnapshot};
+use crate::app::dispatcher::{DispatchCommand, DispatchInput, DispatchOutcome};
 use crate::app::execution::{ExecutionFrame, InputCheckpoint, PreparedEffect, StateRollback};
 use crate::app::mode::{CursorDomain, InputFlow};
 use crate::app::operation::{
@@ -26,7 +26,6 @@ use crate::frontend::Frontend;
 use crate::protocol::content_query::RenderQuery;
 use crate::protocol::frontend_event::FrontendEvent;
 use crate::protocol::ids::{ContentId, ViewId};
-use crate::protocol::revision::Revision;
 use crate::protocol::viewport::{ViewportCommand, ViewportCursorBehavior, ViewportMoveDirection};
 
 #[cfg(test)]
@@ -201,17 +200,11 @@ impl<F: Frontend> App<F> {
         result: io::Result<T>,
     ) -> io::Result<T> {
         let success = result.is_ok();
-        let (checkpoints, effects) = frame.into_parts();
+        let (checkpoints, mut mode_drafts, view_touches, effects) = frame.into_parts();
         if !success {
             let (content, selections, input, state_rollbacks) = checkpoints.into_parts();
             for rollback in state_rollbacks.into_iter().rev() {
                 match rollback {
-                    StateRollback::ModeContent(mode, content, snapshot) => self
-                        .kernel
-                        .restore_mode_content_for(mode, content, snapshot),
-                    StateRollback::ModeView(mode, view, snapshot) => {
-                        self.session.restore_mode_view_for(mode, view, snapshot);
-                    }
                     StateRollback::Text(record, direction) => {
                         let inverse = match direction {
                             TransactionDirection::Forward => TransactionDirection::Inverse,
@@ -230,9 +223,13 @@ impl<F: Frontend> App<F> {
                 self.session.restore_selections(snapshot);
             }
             if let Some(input) = input {
-                self.restore_input_modes(input.modes);
                 self.session.restore_input(input.dispatcher);
             }
+        }
+        if success {
+            self.kernel.commit_mode_drafts(&mut mode_drafts);
+            self.session.commit_mode_drafts(&mut mode_drafts);
+            self.session.commit_view_touches(view_touches);
         }
         self.kernel.finish_command_transaction(success);
         if success {
@@ -250,30 +247,10 @@ impl<F: Frontend> App<F> {
         let input_snapshot = self.session.snapshot_input();
         let view = self.session.view_for_space(self.session.focused());
         let content = view.and_then(|view| self.session.view(view).map(|view| view.content()));
-        let mode_snapshots = view.map_or_else(Vec::new, |view| {
-            let content = self.session.views()[&view].content();
-            let modes = self.session.view_modes().mode_ids(view);
-            let mut snapshots: Vec<_> = self
-                .kernel
-                .content_modes()
-                .snapshots(content, modes)
-                .into_iter()
-                .map(|(mode, snapshot)| InputModeSnapshot::Content(mode, content, snapshot))
-                .collect();
-            snapshots.extend(
-                self.session
-                    .view_modes()
-                    .snapshots(view)
-                    .into_iter()
-                    .map(|(mode, snapshot)| InputModeSnapshot::View(mode, view, snapshot)),
-            );
-            snapshots
-        });
         let mut frame = self.begin_execution_frame(
             content,
             Some(InputCheckpoint {
                 dispatcher: input_snapshot,
-                modes: mode_snapshots,
             }),
         );
         let mut queue = VecDeque::from([input]);
@@ -285,8 +262,9 @@ impl<F: Frontend> App<F> {
             };
             let now = Instant::now();
             let (contents, mode_contents) = self.kernel.mode_runtime_parts();
-            let (outcome, _, mode_revisions) =
-                self.session.dispatch(input, now, mode_contents, contents);
+            let (outcome, mode_revisions) =
+                self.session
+                    .dispatch(input, now, mode_contents, contents, frame.mode_drafts_mut());
             match outcome {
                 DispatchOutcome::Waiting | DispatchOutcome::Consumed => {}
                 DispatchOutcome::Replay(replay) => {
@@ -302,10 +280,11 @@ impl<F: Frontend> App<F> {
                     continuation,
                 } => match self.execute_command_inner(command, &mut frame) {
                     Ok(flow) => {
-                        self.session.sync_focused_input(
+                        self.session.sync_focused_input_in_draft(
                             now,
                             self.kernel.content_modes(),
                             self.kernel.contents(),
+                            frame.mode_drafts_mut(),
                         );
                         if let Err(error) = frame.consume_replayed_inputs(replay.len()) {
                             result = Err(error);
@@ -322,16 +301,20 @@ impl<F: Frontend> App<F> {
                 },
             }
             if result.is_ok() {
-                self.touch_unchanged_mode_views(&mode_revisions);
+                for (view, revision) in mode_revisions {
+                    frame.record_view_touch(view, revision);
+                }
             }
         }
 
         if result.is_ok()
             && let (Some(view), Some(content)) = (view, content)
-            && self
-                .session
-                .cursor_domain(view, self.kernel.content_modes(), self.kernel.contents())
-                == CursorDomain::Character
+            && self.session.cursor_domain_in_draft(
+                view,
+                self.kernel.content_modes(),
+                self.kernel.contents(),
+                frame.mode_drafts_mut(),
+            ) == CursorDomain::Character
         {
             result = self.execute_edit(
                 EditCommand::ClampCursorToCharacter,
@@ -389,10 +372,11 @@ impl<F: Frontend> App<F> {
                 continuation,
             } => {
                 let flow = self.execute_command_in_frame(command, true, frame)?;
-                self.session.sync_focused_input(
+                self.session.sync_focused_input_in_draft(
                     now,
                     self.kernel.content_modes(),
                     self.kernel.contents(),
+                    frame.mode_drafts_mut(),
                 );
                 frame.consume_replayed_inputs(replay.len())?;
                 prepend_inputs(queue, replay);
@@ -417,44 +401,30 @@ impl<F: Frontend> App<F> {
                 return Ok(());
             }
             let input_snapshot = self.session.snapshot_input();
-            let (contents, content_modes) = self.kernel.mode_runtime_parts();
-            let (outcome, mode_snapshots, mode_revisions) =
-                self.session.dispatch_timeout(now, content_modes, contents);
-            let content = match &outcome {
-                DispatchOutcome::Emit { command, .. } => command.content(),
-                DispatchOutcome::Waiting
-                | DispatchOutcome::Consumed
-                | DispatchOutcome::Replay(_) => self
-                    .session
-                    .view_for_space(self.session.focused())
-                    .and_then(|view| self.session.view(view).map(|view| view.content())),
-            };
+            let content = self
+                .session
+                .view_for_space(self.session.focused())
+                .and_then(|view| self.session.view(view).map(|view| view.content()));
             let mut frame = self.begin_execution_frame(
                 content,
                 Some(InputCheckpoint {
                     dispatcher: input_snapshot,
-                    modes: mode_snapshots,
                 }),
             );
+            let (contents, content_modes) = self.kernel.mode_runtime_parts();
+            let (outcome, mode_revisions) = self.session.dispatch_timeout(
+                now,
+                content_modes,
+                contents,
+                frame.mode_drafts_mut(),
+            );
+            for (view, revision) in mode_revisions {
+                frame.record_view_touch(view, revision);
+            }
             let mut replay = VecDeque::new();
             let result = self.apply_dispatch_outcome(outcome, &mut replay, now, &mut frame);
             self.finish_execution_frame(frame, result)?;
-            self.touch_unchanged_mode_views(&mode_revisions);
             self.process_input_queue(replay)?;
-        }
-    }
-
-    fn restore_input_modes(&mut self, snapshots: Vec<InputModeSnapshot>) {
-        for snapshot in snapshots.into_iter().rev() {
-            match snapshot {
-                InputModeSnapshot::Content(mode, content, snapshot) => {
-                    self.kernel
-                        .restore_mode_content_for(mode, content, snapshot);
-                }
-                InputModeSnapshot::View(mode, view, snapshot) => {
-                    self.session.restore_mode_view_for(mode, view, snapshot);
-                }
-            }
         }
     }
 
@@ -478,10 +448,12 @@ impl<F: Frontend> App<F> {
         if enforce_cursor_domain
             && result.is_ok()
             && let (Some(view), Some(content)) = (view, content)
-            && self
-                .session
-                .cursor_domain(view, self.kernel.content_modes(), self.kernel.contents())
-                == CursorDomain::Character
+            && self.session.cursor_domain_in_draft(
+                view,
+                self.kernel.content_modes(),
+                self.kernel.contents(),
+                frame.mode_drafts_mut(),
+            ) == CursorDomain::Character
         {
             let flow = *result.as_ref().expect("checked successful result");
             result = self
@@ -505,22 +477,12 @@ impl<F: Frontend> App<F> {
         mut queue: VecDeque<QueuedOperation>,
         frame: &mut ExecutionFrame,
     ) -> io::Result<InputFlow> {
-        let mut mode_revisions: Vec<(ViewId, Revision)> = Vec::new();
         let mut input_flow = InputFlow::Stop;
 
         while let Some(queued) = queue.pop_front() {
-            if let Err(error) = frame.consume_operation() {
-                self.touch_unchanged_mode_views(&mode_revisions);
-                return Err(error);
-            }
+            frame.consume_operation()?;
             let origin = queued.origin;
-            let operation = match self.resolve_operation(queued) {
-                Ok(operation) => operation,
-                Err(error) => {
-                    self.touch_unchanged_mode_views(&mode_revisions);
-                    return Err(error);
-                }
-            };
+            let operation = self.resolve_operation(queued)?;
             let result = match operation {
                 ResolvedOperation::App(AppOperation::Command(command)) => {
                     match command {
@@ -614,17 +576,13 @@ impl<F: Frontend> App<F> {
                             content,
                             source_view,
                         } => {
-                            if !frame.has_mode_content_checkpoint(mode, content)
-                                && let Some(snapshot) =
-                                    self.kernel.snapshot_mode_content_for(mode, content)
-                            {
-                                frame.record_state_rollback(StateRollback::ModeContent(
-                                    mode, content, snapshot,
-                                ));
-                            }
                             let result = self
                                 .kernel
-                                .execute_mode_content_action(content, &invocation.command)
+                                .execute_mode_content_action_in_draft(
+                                    content,
+                                    &invocation.command,
+                                    frame.mode_drafts_mut(),
+                                )
                                 .map_err(|error| {
                                     io::Error::new(io::ErrorKind::InvalidData, error)
                                 })?;
@@ -639,14 +597,6 @@ impl<F: Frontend> App<F> {
                             Ok(())
                         }
                         ResolvedModeScope::View { view, content } => {
-                            if !frame.has_mode_view_checkpoint(mode, view)
-                                && let Some(snapshot) =
-                                    self.session.snapshot_mode_view_for(mode, view)
-                            {
-                                frame.record_state_rollback(StateRollback::ModeView(
-                                    mode, view, snapshot,
-                                ));
-                            }
                             let revision_before = self
                                 .session
                                 .view(view)
@@ -662,15 +612,14 @@ impl<F: Frontend> App<F> {
                                     contents,
                                     &invocation.command,
                                     mode_contents,
+                                    frame.mode_drafts_mut(),
                                 )
                                 .map_err(|error| {
                                     io::Error::new(io::ErrorKind::InvalidData, error)
                                 })?;
                             let (flow, effects) = result.into_parts();
                             input_flow = flow;
-                            if !mode_revisions.iter().any(|(recorded, _)| *recorded == view) {
-                                mode_revisions.push((view, revision_before));
-                            }
+                            frame.record_view_touch(view, revision_before);
                             let mut effect_origin = OperationOrigin::view(view, content);
                             effect_origin.mode = Some(mode);
                             let requests = adapt_mode_effects(effects, OperationOriginScope::View)
@@ -681,12 +630,8 @@ impl<F: Frontend> App<F> {
                     }
                 }
             };
-            if let Err(error) = result {
-                self.touch_unchanged_mode_views(&mode_revisions);
-                return Err(error);
-            }
+            result?;
         }
-        self.touch_unchanged_mode_views(&mode_revisions);
         Ok(input_flow)
     }
 
@@ -946,7 +891,7 @@ impl<F: Frontend> App<F> {
             }
         }
         if let Some(change) = &outcome.change {
-            self.notify_mode_content_changed(content, change);
+            self.notify_mode_content_changed(content, change, frame);
         }
         if let Some(transaction) = transaction {
             let after = self
@@ -1008,7 +953,7 @@ impl<F: Frontend> App<F> {
         if let Some(change) = &outcome.change {
             self.session
                 .transform_content_views(self.kernel.contents(), content, None, change);
-            self.notify_mode_content_changed(content, change);
+            self.notify_mode_content_changed(content, change, frame);
         }
         if let Some(transaction) = transaction {
             let record = TransactionRecord {
@@ -1121,7 +1066,7 @@ impl<F: Frontend> App<F> {
                 source.as_ref().map(|(view, _)| *view),
                 change,
             );
-            self.notify_mode_content_changed(record.target, change);
+            self.notify_mode_content_changed(record.target, change, frame);
         }
         Ok(())
     }
@@ -1130,11 +1075,17 @@ impl<F: Frontend> App<F> {
         &mut self,
         content: ContentId,
         change: &crate::core::content::ContentChange,
+        frame: &mut ExecutionFrame,
     ) {
         let (contents, mode_contents) = self.kernel.mode_runtime_parts();
-        mode_contents.notify_changed(content, contents, change);
-        self.session
-            .notify_mode_content_changed(content, mode_contents, contents, change);
+        mode_contents.notify_changed(content, contents, change, frame.mode_drafts_mut());
+        self.session.notify_mode_content_changed(
+            content,
+            mode_contents,
+            contents,
+            change,
+            frame.mode_drafts_mut(),
+        );
     }
 
     fn apply_view_action(
@@ -1153,15 +1104,6 @@ impl<F: Frontend> App<F> {
             .apply_view_action(view, action, self.kernel.contents())
             .map(|_| ())
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid view action"))
-    }
-
-    fn touch_unchanged_mode_views(&mut self, revisions: &[(ViewId, Revision)]) {
-        for &(view, revision_before) in revisions {
-            let target_view = self.session.view_mut(view).expect("target view exists");
-            if target_view.revision() == revision_before {
-                target_view.touch();
-            }
-        }
     }
 
     pub(super) fn render(&mut self) -> io::Result<()> {

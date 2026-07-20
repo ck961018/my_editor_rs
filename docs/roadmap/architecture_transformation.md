@@ -1,6 +1,6 @@
 # 架构改造 Roadmap
 
-**状态：** 待确认
+**状态：** 执行中（P0 至 P3 已完成）
 
 **范围：** 执行事务、Mode state、Presentation 与后续插件演进
 
@@ -183,7 +183,7 @@ HistoryTransaction
 | P0 | 固化语义级行为基线 | 不变 | 已完成 |
 | P1 | 提取统一 ExecutionFrame | 不变 | 已完成 |
 | P2 | 统一 scoped operation | 不变 | 已完成 |
-| P3 | Mode callback state draft 化 | 不变 | 未开始 |
+| P3 | Mode callback state draft 化 | 不变 | 已完成 |
 | P4 | 建立 PresentationLayerStore | 原则上不变 | 未开始 |
 
 P0 至 P4 是当前架构改造范围。后续插件和 crate 事项放在本文末尾，
@@ -657,6 +657,8 @@ frame。删除类型不能改变 sequence 的原子性和顺序。
 
 # P3：Mode callback state draft 化
 
+状态：已完成（2026-07-20）。
+
 现有 Mode 同时拥有 per-content state 和 per-view state，这个模型保持不变。
 需要改变的是 callback 对持久 state 的写入时机。
 
@@ -742,7 +744,7 @@ callback/error validation fails
 -> restore frame checkpoints
 ```
 
-被动 callback 包括 content observer 和 presentation refresh：
+本阶段的被动 callback 包括 content observer 和 view content observer：
 
 ```text
 callback fails
@@ -753,6 +755,9 @@ callback fails
 
 若外层 frame 后续又失败，因本次已回滚的 change 产生的 fault 也不应发布。
 因此 fault transition 应和其他 state draft 一样在 frame commit 时确认。
+
+presentation refresh 也应采用相同的局部失败原则，但它依赖 P4 的
+`PresentationLayerStore`。P3 不提前引入另一份 presentation cache。
 
 ## 4. Presentation refresh 时机
 
@@ -769,12 +774,41 @@ refresh 在主循环的受控阶段执行。失败只 fault 对应 presentation 
 
 ## 5. 完成标准
 
-- callback 对持久 Mode state 的修改只在 frame commit 时可见；
+- 执行 frame 中的 callback 只在 frame commit 时发布 Mode state；
 - v1 native/script Mode 都通过明确 adapter 工作；
 - 文档不承诺未经验证的零复制 state 方案；
 - 主动与被动 callback 的错误语义有独立测试；
 - 一个 Mode action 可以产生有序的 Content 与 View operation；
-- renderer 不参与 Mode callback。
+- renderer 不参与可变 Mode callback；只读 presentation callback 在 P4
+  迁出 renderer。
+
+## 6. 实现记录
+
+- `ExecutionFrame` 持有唯一 `ModeDraftJournal`。content/view state 第一次
+  写入时通过 `clone_box()` 建立 owned draft；同一 frame 的后续 callback
+  读取最新 draft，成功时分别提交到 Kernel 和 ClientSession，失败时直接
+  丢弃。
+- input capture、timeout、显式 content/view action 和 nested Mode invocation
+  都使用 frame draft。dispatcher 的输入 checkpoint 只保留 dispatcher
+  状态，不再复制整条 Mode chain；旧 `ModeStateSnapshot` rollback 路径已
+  删除。
+- content/view observer 在 callback 前保存局部 draft checkpoint。observer
+  失败只撤销该 callback 的 state 写入并在 draft 中记录 attachment fault；
+  外层 frame 失败时 fault 也随 draft 丢弃，成功文本修改不会因 observer
+  失败而回滚。
+- input cancel、后台任务提取和后台结果安装发生在用户 frame 外，但仍通过
+  短生命周期 `ModeDraftJournal` 执行，并在各自受控生命周期边界一次提交。
+  后台结果失败只提交 fault transition，不发布 callback 的部分 state。
+- native Mode 和 `ScriptModeState` 复用同一 first-write clone adapter；本阶段
+  没有引入未经 profiling 验证的 COW 或零复制协议。
+- Mode state 引起的 View revision touch 随 frame 延迟到 commit，避免失败
+  输入留下仅 revision 可见的痕迹。
+- 新增 Mode draft 单元测试，直接验证同 frame 可见性、commit 前隔离、drop
+  回滚和被动 fault 的提交时机；既有 app/script 测试继续覆盖主动失败、
+  observer 隔离、有序 Content/View operation 和脚本 callback 原子性。
+- `view_policy` 与 decorations 仍是 render-time 只读 Mode 查询。它们没有
+  可变 state 权限，也不会进入 V8；P4 将用 `PresentationLayerStore` 移除这
+  最后一条 render-to-Mode 依赖。
 
 ---
 

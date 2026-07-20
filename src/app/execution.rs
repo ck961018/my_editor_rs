@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::io;
 
-use crate::app::dispatcher::{DispatcherInputSnapshot, InputModeSnapshot};
-use crate::app::mode::{ModeId, ModeStateSnapshot};
+use crate::app::dispatcher::DispatcherInputSnapshot;
+use crate::app::mode::ModeDraftJournal;
 use crate::app::transaction::TransactionRecord;
 use crate::core::content::SaveSnapshot;
 use crate::core::content_store::ContentSnapshot;
@@ -18,6 +18,8 @@ const DEFAULT_REPLAYED_INPUT_BUDGET: usize = 256;
 
 pub(super) struct ExecutionFrame {
     checkpoints: CheckpointJournal,
+    mode_drafts: ModeDraftJournal,
+    view_touches: HashMap<ViewId, Revision>,
     prepared_effects: Vec<PreparedEffect>,
     budget: ExecutionBudget,
 }
@@ -34,12 +36,9 @@ pub(super) type SelectionCheckpoint = HashMap<ViewId, (Selections, Revision)>;
 
 pub(super) struct InputCheckpoint {
     pub dispatcher: DispatcherInputSnapshot,
-    pub modes: Vec<InputModeSnapshot>,
 }
 
 pub(super) enum StateRollback {
-    ModeContent(ModeId, ContentId, ModeStateSnapshot),
-    ModeView(ModeId, ViewId, ModeStateSnapshot),
     Text(TransactionRecord, TransactionDirection),
 }
 
@@ -75,6 +74,8 @@ impl ExecutionFrame {
                 input,
                 state_rollbacks: Vec::new(),
             },
+            mode_drafts: ModeDraftJournal::default(),
+            view_touches: HashMap::new(),
             prepared_effects: Vec::new(),
             budget: ExecutionBudget::default(),
         }
@@ -108,26 +109,6 @@ impl ExecutionFrame {
         self.checkpoints.selections = Some(selections);
     }
 
-    pub(super) fn has_mode_content_checkpoint(&self, mode: ModeId, content: ContentId) -> bool {
-        self.checkpoints.state_rollbacks.iter().any(|rollback| {
-            matches!(
-                rollback,
-                StateRollback::ModeContent(recorded_mode, recorded_content, _)
-                    if *recorded_mode == mode && *recorded_content == content
-            )
-        })
-    }
-
-    pub(super) fn has_mode_view_checkpoint(&self, mode: ModeId, view: ViewId) -> bool {
-        self.checkpoints.state_rollbacks.iter().any(|rollback| {
-            matches!(
-                rollback,
-                StateRollback::ModeView(recorded_mode, recorded_view, _)
-                    if *recorded_mode == mode && *recorded_view == view
-            )
-        })
-    }
-
     pub(super) fn consume_operation(&mut self) -> io::Result<()> {
         self.budget.consume_operation()
     }
@@ -140,8 +121,28 @@ impl ExecutionFrame {
         self.budget.consume_replayed_inputs(count)
     }
 
-    pub(super) fn into_parts(self) -> (CheckpointJournal, Vec<PreparedEffect>) {
-        (self.checkpoints, self.prepared_effects)
+    pub(super) fn mode_drafts_mut(&mut self) -> &mut ModeDraftJournal {
+        &mut self.mode_drafts
+    }
+
+    pub(super) fn record_view_touch(&mut self, view: ViewId, revision: Revision) {
+        self.view_touches.entry(view).or_insert(revision);
+    }
+
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        CheckpointJournal,
+        ModeDraftJournal,
+        HashMap<ViewId, Revision>,
+        Vec<PreparedEffect>,
+    ) {
+        (
+            self.checkpoints,
+            self.mode_drafts,
+            self.view_touches,
+            self.prepared_effects,
+        )
     }
 }
 

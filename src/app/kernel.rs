@@ -7,8 +7,8 @@ use tokio::sync::mpsc;
 use crate::app::command::ModeCommand;
 use crate::app::message::AppMessage;
 use crate::app::mode::{
-    ModeContentStore, ModeError, ModeId, ModeJobKey, ModeJobRequest, ModeJobResult, ModeJobRunner,
-    ModeRegistry, ModeResult, ModeStateSnapshot,
+    ModeContentStore, ModeDraftJournal, ModeError, ModeId, ModeJobKey, ModeJobRequest,
+    ModeJobResult, ModeJobRunner, ModeRegistry, ModeResult,
 };
 use crate::app::mode_name::ModeName;
 use crate::app::tasks::AppTasks;
@@ -93,6 +93,10 @@ impl Kernel {
         &self.content_modes
     }
 
+    pub(super) fn commit_mode_drafts(&mut self, drafts: &mut ModeDraftJournal) {
+        drafts.commit_content(&mut self.content_modes);
+    }
+
     pub(super) fn mode_runtime_parts(&mut self) -> (&ContentStore, &mut ModeContentStore) {
         (&self.contents, &mut self.content_modes)
     }
@@ -103,30 +107,28 @@ impl Kernel {
         (&self.contents, &self.modes, &mut self.content_modes)
     }
 
+    pub(super) fn execute_mode_content_action_in_draft(
+        &mut self,
+        content: ContentId,
+        command: &ModeCommand,
+        drafts: &mut ModeDraftJournal,
+    ) -> Result<ModeResult, ModeError> {
+        self.content_modes
+            .execute(&self.modes, &self.contents, content, command, drafts)
+    }
+
+    #[cfg(test)]
     pub(super) fn execute_mode_content_action(
         &mut self,
         content: ContentId,
         command: &ModeCommand,
     ) -> Result<ModeResult, ModeError> {
-        self.content_modes
-            .execute(&self.modes, &self.contents, content, command)
-    }
-
-    pub(super) fn snapshot_mode_content_for(
-        &self,
-        mode: ModeId,
-        content: ContentId,
-    ) -> Option<ModeStateSnapshot> {
-        self.content_modes.snapshot_for(mode, content)
-    }
-
-    pub(super) fn restore_mode_content_for(
-        &mut self,
-        mode: ModeId,
-        content: ContentId,
-        snapshot: ModeStateSnapshot,
-    ) {
-        self.content_modes.restore_for(mode, content, snapshot);
+        let mut drafts = ModeDraftJournal::default();
+        let result = self.execute_mode_content_action_in_draft(content, command, &mut drafts);
+        if result.is_ok() {
+            self.commit_mode_drafts(&mut drafts);
+        }
+        result
     }
 
     #[cfg(test)]
