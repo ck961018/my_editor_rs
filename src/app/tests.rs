@@ -1,6 +1,10 @@
 use std::io;
 
 use super::App;
+use super::behavior::{
+    BehaviorSnapshot, EffectBehavior, ExecutionOutcome, ModeFaultBehavior, ModeFaultScope,
+    ModeProbeBehavior,
+};
 use super::bootstrap::create_editor_session;
 use super::command_resolver::default_global_keymap;
 use super::dispatcher::{DispatchCommand, Dispatcher};
@@ -36,7 +40,9 @@ use crate::protocol::scene::Scene;
 use crate::protocol::selection::{Selection, Selections, TextOffset, TextPoint};
 use crate::protocol::space::{Sizing, SpaceKind, SplitDirection};
 use crate::protocol::status::StatusMessage;
-use crate::protocol::viewport::{ViewportCommand, ViewportCursorBehavior};
+use crate::protocol::viewport::{
+    ViewportCommand, ViewportCursorBehavior, ViewportMoveAmount, ViewportMoveDirection,
+};
 use std::collections::VecDeque;
 
 struct ScriptedFrontend {
@@ -1327,6 +1333,175 @@ fn document_status(app: &App<ScriptedFrontend>, content: ContentId) -> DocumentS
         ContentData::DocumentStatus(status) => status,
         data => panic!("expected document status, got {data:?}"),
     }
+}
+
+async fn successful_behavior_snapshot(path: &std::path::Path) -> BehaviorSnapshot {
+    std::fs::write(path, "").unwrap();
+    let mut app = make_app(vec![], path.to_str());
+    app.behavior.reset();
+    let view = view_id(&app, app.session.focused());
+    let viewport = ViewportCommand::new(
+        ViewportMoveDirection::Down,
+        ViewportMoveAmount::HalfPage,
+        ViewportCursorBehavior::Move,
+    );
+    let result = app.execute_command(DispatchCommand::ModeEffects {
+        operations: vec![
+            ModeEffect::DeferredEdit(EditCommand::InsertText("abc".to_string())),
+            ModeEffect::Transaction(TransactionIntent::Commit),
+            ModeEffect::Save,
+            ModeEffect::Viewport(viewport),
+        ],
+        view,
+        content: editor_cid(),
+    });
+    let snapshot =
+        BehaviorSnapshot::capture(&app, ExecutionOutcome::from_result(&result), Vec::new());
+    app.shutdown_tasks().await.unwrap();
+    snapshot
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn behavior_snapshot_normalizes_successful_execution_semantics() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("behavior.txt");
+
+    let first = successful_behavior_snapshot(&path).await;
+    let second = successful_behavior_snapshot(&path).await;
+
+    assert_eq!(first, second);
+    assert_eq!(first.outcome, ExecutionOutcome::Succeeded);
+    assert_eq!(first.prepared_effects, first.published_effects);
+    assert!(matches!(
+        first.prepared_effects.as_slice(),
+        [
+            EffectBehavior::HistoryCommit { content: ContentId(0) },
+            EffectBehavior::Save {
+                content: ContentId(0),
+                bytes,
+                ..
+            },
+            EffectBehavior::Viewport {
+                view: ViewId(0),
+                lines: 2,
+                ..
+            }
+        ] if bytes == "abc"
+    ));
+    let history = first
+        .history
+        .iter()
+        .find(|history| history.content == editor_cid())
+        .unwrap();
+    assert_eq!(history.undo_depth, 1);
+    assert_eq!(history.redo_depth, 0);
+}
+
+#[test]
+fn behavior_snapshot_distinguishes_prepared_from_published_effects_on_failure() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let mut app = make_app(vec![], file.path().to_str());
+    app.behavior.reset();
+    let view = view_id(&app, app.session.focused());
+    let result = app.execute_command(DispatchCommand::ModeEffects {
+        operations: vec![
+            ModeEffect::DeferredEdit(EditCommand::InsertText("x".to_string())),
+            ModeEffect::Save,
+            ModeEffect::Mode(ModeCommand::new(
+                ModeName::new("missing"),
+                ModeActionName::new("run"),
+            )),
+        ],
+        view,
+        content: editor_cid(),
+    });
+
+    let snapshot =
+        BehaviorSnapshot::capture(&app, ExecutionOutcome::from_result(&result), Vec::new());
+
+    assert!(matches!(
+        snapshot.outcome,
+        ExecutionOutcome::Failed(ref message) if message.contains("unknown mode 'missing'")
+    ));
+    assert!(matches!(
+        snapshot.prepared_effects.as_slice(),
+        [EffectBehavior::Save { bytes, .. }] if bytes == "x"
+    ));
+    assert!(snapshot.published_effects.is_empty());
+    assert_eq!(
+        snapshot
+            .contents
+            .iter()
+            .find(|content| content.content == editor_cid())
+            .and_then(|content| content.text.as_deref()),
+        Some("")
+    );
+    let history = snapshot
+        .history
+        .iter()
+        .find(|history| history.content == editor_cid())
+        .unwrap();
+    assert_eq!((history.undo_depth, history.redo_depth), (0, 0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn behavior_snapshot_uses_explicit_mode_probes_and_reports_faults() {
+    let mut app = make_app(vec![], None);
+    let shared = ModeName::new("shared-content");
+    app.kernel.modes_mut().register(SharedContentMode::new());
+    assert!(app.attach_mode_to_content(editor_cid(), &shared));
+    let shared_id = app.kernel.modes().resolve_mode(&shared).unwrap();
+    let view = view_id(&app, app.session.focused());
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('z')))
+        .await
+        .unwrap();
+
+    let faulting = ModeName::new("faulting-highlight");
+    app.kernel.modes_mut().register(FaultingHighlightMode {
+        name: faulting.clone(),
+    });
+    assert!(app.attach_mode_to_content(editor_cid(), &faulting));
+    app.behavior.reset();
+    let result = app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("x".to_string())),
+        view,
+        content: editor_cid(),
+    });
+
+    let content_state = app
+        .kernel
+        .content_modes()
+        .state_for_test::<SharedContentState>(shared_id, editor_cid())
+        .unwrap();
+    let view_state = app
+        .session
+        .view_modes()
+        .state_for_test::<SharedViewState>(shared_id, view)
+        .unwrap();
+    let snapshot = BehaviorSnapshot::capture(
+        &app,
+        ExecutionOutcome::from_result(&result),
+        vec![
+            ModeProbeBehavior::new("shared.view.awaiting", view_state.awaiting.to_string()),
+            ModeProbeBehavior::new(
+                "shared.content.executions",
+                content_state.executions.to_string(),
+            ),
+        ],
+    );
+
+    assert_eq!(
+        snapshot.mode_probes,
+        vec![
+            ModeProbeBehavior::new("shared.content.executions", "1"),
+            ModeProbeBehavior::new("shared.view.awaiting", "false"),
+        ]
+    );
+    assert!(snapshot.faults.contains(&ModeFaultBehavior {
+        mode: faulting.as_str().to_owned(),
+        scope: ModeFaultScope::Content(editor_cid()),
+    }));
 }
 
 #[test]

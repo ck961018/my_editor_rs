@@ -58,6 +58,11 @@ impl ContentStore {
         self.entries.contains_key(&id)
     }
 
+    #[cfg(test)]
+    pub(crate) fn ids_for_test(&self) -> Vec<ContentId> {
+        self.entries.keys().copied().collect()
+    }
+
     pub(crate) fn snapshot(&self, id: ContentId) -> Option<ContentSnapshot> {
         self.entries
             .get(&id)

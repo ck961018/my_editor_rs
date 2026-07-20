@@ -5,6 +5,8 @@ use std::time::Instant;
 
 use crate::app::action::{TransactionIntent, ViewAction};
 use crate::app::application::App;
+#[cfg(test)]
+use crate::app::behavior::EffectBehavior;
 use crate::app::command::{AppCommand, ContentCommand, TransactionCommand};
 use crate::app::dispatcher::{DispatchCommand, DispatchInput, DispatchOutcome, InputModeSnapshot};
 use crate::app::mode::{
@@ -39,6 +41,27 @@ enum DeferredEffect {
     Quit,
 }
 
+#[cfg(test)]
+impl DeferredEffect {
+    fn behavior(&self) -> EffectBehavior {
+        match self {
+            Self::HistoryCommit(content) => EffectBehavior::HistoryCommit { content: *content },
+            Self::Save(content, snapshot) => EffectBehavior::Save {
+                content: *content,
+                bytes: snapshot.bytes.clone(),
+                revision: snapshot.revision,
+                state: snapshot.state,
+            },
+            Self::Viewport(view, command, lines) => EffectBehavior::Viewport {
+                view: *view,
+                command: *command,
+                lines: *lines,
+            },
+            Self::Quit => EffectBehavior::Quit,
+        }
+    }
+}
+
 async fn wait_for_input_deadline(deadline: Option<Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
@@ -53,6 +76,16 @@ fn prepend_inputs(queue: &mut VecDeque<DispatchInput>, inputs: Vec<DispatchInput
 }
 
 impl<F: Frontend> App<F> {
+    fn prepare_deferred_effect(
+        &mut self,
+        effects: &mut Vec<DeferredEffect>,
+        effect: DeferredEffect,
+    ) {
+        #[cfg(test)]
+        self.behavior.record_prepared(effect.behavior());
+        effects.push(effect);
+    }
+
     pub async fn run(&mut self) -> io::Result<()> {
         let run_result = self.run_loop().await;
         let shutdown_result = self.shutdown_tasks().await;
@@ -277,6 +310,8 @@ impl<F: Frontend> App<F> {
 
     fn publish_deferred_effects(&mut self, effects: Vec<DeferredEffect>) {
         for effect in effects {
+            #[cfg(test)]
+            self.behavior.record_published(effect.behavior());
             match effect {
                 DeferredEffect::HistoryCommit(content) => {
                     self.kernel.commit_transaction(content);
@@ -457,7 +492,9 @@ impl<F: Frontend> App<F> {
             let next = match command {
                 DispatchCommand::App(command) => {
                     match command {
-                        AppCommand::Quit => deferred_effects.push(DeferredEffect::Quit),
+                        AppCommand::Quit => {
+                            self.prepare_deferred_effect(deferred_effects, DeferredEffect::Quit)
+                        }
                         AppCommand::FocusNext | AppCommand::FocusPrev => {}
                     }
                     None
@@ -473,7 +510,10 @@ impl<F: Frontend> App<F> {
                     if let ContentResult::Handled(outcome) = result
                         && let ContentEffect::Save(snapshot) = outcome.effect
                     {
-                        deferred_effects.push(DeferredEffect::Save(content, snapshot));
+                        self.prepare_deferred_effect(
+                            deferred_effects,
+                            DeferredEffect::Save(content, snapshot),
+                        );
                     }
                     if let Some(owner) = active_owner {
                         self.kernel.begin_transaction(content, owner);
@@ -580,7 +620,10 @@ impl<F: Frontend> App<F> {
                     if lines == 0 {
                         None
                     } else {
-                        deferred_effects.push(DeferredEffect::Viewport(view, command, lines));
+                        self.prepare_deferred_effect(
+                            deferred_effects,
+                            DeferredEffect::Viewport(view, command, lines),
+                        );
                         Some(DispatchCommand::ContentWithView {
                             command: ContentCommand::Edit(viewport_cursor_edit(command, lines)),
                             view,
@@ -667,7 +710,10 @@ impl<F: Frontend> App<F> {
                         self.kernel.begin_transaction(content, Some(view));
                     }
                     TransactionCommand::Commit => {
-                        deferred_effects.push(DeferredEffect::HistoryCommit(content));
+                        self.prepare_deferred_effect(
+                            deferred_effects,
+                            DeferredEffect::HistoryCommit(content),
+                        );
                     }
                     TransactionCommand::Rollback => {
                         if let Some(record) = self.kernel.rollback_transaction(content) {
@@ -1067,7 +1113,10 @@ impl<F: Frontend> App<F> {
                 self.kernel.begin_transaction(content, owner);
             }
             TransactionIntent::Commit => {
-                deferred_effects.push(DeferredEffect::HistoryCommit(content));
+                self.prepare_deferred_effect(
+                    deferred_effects,
+                    DeferredEffect::HistoryCommit(content),
+                );
             }
             TransactionIntent::Rollback => {
                 if let Some(record) = self.kernel.rollback_transaction(content) {

@@ -198,6 +198,14 @@ impl Kernel {
         self.transactions.active_owner(content)
     }
 
+    #[cfg(test)]
+    pub(super) fn history_behavior_for_test(
+        &self,
+        content: ContentId,
+    ) -> (bool, Option<ViewId>, usize, usize) {
+        self.transactions.behavior_for_test(content)
+    }
+
     pub(super) fn start_command_transaction(&mut self, target: Option<ContentId>) {
         assert!(self.command_transaction.is_none());
         self.command_transaction = target.map(|target| CommandTransaction {
@@ -561,6 +569,33 @@ mod tests {
         let slot = &kernel.mode_jobs[&key];
         assert!(slot.running.as_ref().unwrap().cancellation.is_cancelled());
         assert_eq!(slot.queued.as_ref().unwrap().version, 2);
+        kernel.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stale_mode_job_completion_is_ignored() {
+        let mut modes = ModeRegistry::new();
+        let mode = modes.register(TestMode(ModeName::new("test")));
+        let mut kernel = Kernel::new(ContentStore::default(), modes, HashMap::new());
+        let key = ModeJobKey {
+            mode,
+            content: ContentId(0),
+            slot: "parse".to_owned(),
+        };
+        kernel.queue_mode_job(
+            mode,
+            ContentId(0),
+            ModeJobRequest::new("parse", 2, |_| Ok(Box::new(()))),
+        );
+
+        assert!(!kernel.complete_mode_job(key.clone(), 1, Ok(Box::new(()))));
+        assert_eq!(
+            kernel.mode_jobs[&key]
+                .running
+                .as_ref()
+                .map(|running| running.version),
+            Some(2)
+        );
         kernel.cancel();
     }
 }

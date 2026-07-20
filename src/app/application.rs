@@ -1,6 +1,8 @@
 use std::io;
 use std::time::Instant;
 
+#[cfg(test)]
+use crate::app::behavior::BehaviorRecorder;
 use crate::app::bootstrap::bootstrap_editor;
 use crate::app::kernel::Kernel;
 use crate::app::mode_name::ModeName;
@@ -14,6 +16,8 @@ pub struct App<F: Frontend> {
     pub(super) kernel: Kernel,
     pub(super) session: ClientSession,
     pub(super) frontend: F,
+    #[cfg(test)]
+    pub(super) behavior: BehaviorRecorder,
 }
 
 impl<F: Frontend> App<F> {
@@ -54,6 +58,8 @@ impl<F: Frontend> App<F> {
             kernel: bootstrap.kernel,
             session: bootstrap.session,
             frontend,
+            #[cfg(test)]
+            behavior: BehaviorRecorder::default(),
         })
     }
 

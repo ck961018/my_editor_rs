@@ -789,6 +789,33 @@ pub(crate) struct ModeContentStore {
 }
 
 impl ModeContentStore {
+    #[cfg(test)]
+    pub(crate) fn faults_for_test(&self) -> Vec<(String, ContentId)> {
+        self.instances
+            .values()
+            .filter(|instance| instance.faulted)
+            .map(|instance| {
+                (
+                    instance.registered.mode().name().as_str().to_owned(),
+                    instance.content,
+                )
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn state_for_test<T: 'static>(
+        &self,
+        mode: ModeId,
+        content: ContentId,
+    ) -> Option<&T> {
+        self.instances
+            .get(&(mode, content))?
+            .state
+            .as_any()
+            .downcast_ref()
+    }
+
     pub(crate) fn take_background_jobs(
         &mut self,
         contents: &ContentStore,
@@ -1168,6 +1195,24 @@ pub(crate) struct ModeViewStore {
 }
 
 impl ModeViewStore {
+    #[cfg(test)]
+    pub(crate) fn faults_for_test(&self) -> Vec<(String, ViewId)> {
+        self.instances
+            .iter()
+            .filter(|(_, instance)| instance.faulted)
+            .map(|((_, view), instance)| (instance.name().as_str().to_owned(), *view))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn state_for_test<T: 'static>(&self, mode: ModeId, view: ViewId) -> Option<&T> {
+        self.instances
+            .get(&(mode, view))?
+            .state
+            .as_any()
+            .downcast_ref()
+    }
+
     pub(crate) fn is_active(&self, view: ViewId) -> bool {
         self.chains
             .get(&view)

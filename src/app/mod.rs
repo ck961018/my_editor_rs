@@ -6,6 +6,8 @@
 
 mod action;
 mod application;
+#[cfg(test)]
+mod behavior;
 mod bootstrap;
 pub(crate) mod command;
 mod command_resolver;

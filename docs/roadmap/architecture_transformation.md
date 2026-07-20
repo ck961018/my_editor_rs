@@ -178,13 +178,13 @@ HistoryTransaction
 
 # 三、分阶段 Roadmap
 
-| 阶段 | 核心目标 | 用户行为 |
-| --- | --- | --- |
-| P0 | 固化语义级行为基线 | 不变 |
-| P1 | 提取统一 ExecutionFrame | 不变 |
-| P2 | 统一 scoped operation | 不变 |
-| P3 | Mode callback state draft 化 | 不变 |
-| P4 | 建立 PresentationLayerStore | 原则上不变 |
+| 阶段 | 核心目标 | 用户行为 | 状态 |
+| --- | --- | --- | --- |
+| P0 | 固化语义级行为基线 | 不变 | 已完成 |
+| P1 | 提取统一 ExecutionFrame | 不变 | 未开始 |
+| P2 | 统一 scoped operation | 不变 | 未开始 |
+| P3 | Mode callback state draft 化 | 不变 | 未开始 |
+| P4 | 建立 PresentationLayerStore | 原则上不变 | 未开始 |
 
 P0 至 P4 是当前架构改造范围。后续插件和 crate 事项放在本文末尾，
 作为独立候选项目。
@@ -192,6 +192,8 @@ P0 至 P4 是当前架构改造范围。后续插件和 crate 事项放在本文
 ---
 
 # P0：建立语义级行为基线
+
+状态：已完成（2026-07-20）。
 
 仓库已经有较多单元测试和 app 集成测试。P0 不追求把所有内部步骤做成
 golden trace，而是确认迁移期间真正稳定的可观察语义。
@@ -276,6 +278,32 @@ context.app
 - 新旧路径可以比较 `BehaviorSnapshot`；
 - 测试不依赖将被替换的内部类型；
 - 任何行为变化都有单独说明，而不是混入架构 PR。
+
+## 5. 实现记录
+
+P0 已增加测试专用的 [`BehaviorSnapshot`][9]。它只读取稳定语义，
+不会进入非测试构建，也不要求生产类型实现通用序列化：
+
+- 内容、View 和 history 能力按 ID 排序并规范化；
+- Mode state 由测试显式构造 `ModeProbeBehavior`；
+- Mode fault 按 content attachment 和 view attachment 记录；
+- effect 分别记录 prepared 和 published 边界；
+- outcome 只区分成功和规范化后的错误信息。
+
+[`app` 集成测试][10]新增以下语义基线：
+
+- 相同场景可生成完全相等的快照；
+- 失败 frame 保留 prepared effect 证据，但不发布 effect；
+- 失败 frame 回滚内容和 history；
+- 显式 Mode probe 与被动 callback fault 可同时观察。
+
+TypeScript 测试补充了 callback 抛异常和非法 state 的状态不发布语义；
+Kernel 测试补充了过期 worker completion 被拒绝；插件测试固定 manifest
+顺序。其余矩阵继续由已有 Vim、selection、split view、history、dispatcher、
+save、viewport、presentation 和 worker 测试覆盖。
+
+P0 只增加测试观察接缝。运行时中的 effect 记录均受 `cfg(test)` 约束，
+没有新增生产 API 或改变用户行为。
 
 ---
 
@@ -1040,3 +1068,5 @@ Plugin API v2、plugin lifecycle、crate 拆分和新显示能力不属于这条
 [6]: ../../src/frontend/mod.rs
 [7]: ../../runtime/editor.d.ts
 [8]: ../scripting.md
+[9]: ../../src/app/behavior.rs
+[10]: ../../src/app/tests.rs

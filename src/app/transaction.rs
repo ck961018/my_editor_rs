@@ -247,6 +247,22 @@ impl TransactionManager {
             .and_then(|flow| flow.active.as_ref())
             .map(|active| active.owner)
     }
+
+    #[cfg(test)]
+    pub(crate) fn behavior_for_test(
+        &self,
+        target: ContentId,
+    ) -> (bool, Option<ViewId>, usize, usize) {
+        let Some(flow) = self.flows.get(&target) else {
+            return (false, None, 0, 0);
+        };
+        (
+            flow.active.is_some(),
+            flow.active.as_ref().and_then(|active| active.owner),
+            flow.cursor,
+            flow.history.len() - flow.cursor,
+        )
+    }
 }
 
 #[cfg(test)]

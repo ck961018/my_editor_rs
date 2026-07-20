@@ -2162,6 +2162,124 @@ editor.modes.define({
     }
 
     #[test]
+    fn script_action_faults_do_not_publish_mutated_mode_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.ts");
+        fs::write(
+            &config,
+            r#"
+editor.modes.define({
+  name: "faulty-state",
+  content: { create: () => ({ calls: 0 }) },
+  view: {
+    create: () => ({
+      calls: 0,
+      viewPolicy: { cursorStyle: "block" },
+    }),
+  },
+  actions: {
+    throwing(context) {
+      context.contentState.calls++;
+      context.viewState.calls++;
+      throw new Error("action exploded");
+    },
+    invalid(context) {
+      context.contentState.calls++;
+      context.viewState.calls++;
+      context.viewState.viewPolicy.cursorStyle = 42;
+      return context.handled();
+    },
+  },
+});
+"#,
+        )
+        .unwrap();
+
+        let mut host = ScriptHost::new();
+        host.execute_module(&config).unwrap();
+        let host = Rc::new(RefCell::new(host));
+        let mode = ScriptHost::script_modes(&host).pop().unwrap();
+        let content_id = ContentId(0);
+        let mut contents = ContentStore::default();
+        contents
+            .insert(content_id, Content::Buffer(Buffer::new()))
+            .unwrap();
+        let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
+        let context = ModeViewContext::new(ViewId(0), &view, &contents);
+        let content_context = ModeContentContext::new(content_id, &contents);
+        let mut content_state = mode.create_content_state(&content_context).unwrap();
+        let mut view_state = mode
+            .create_view_state(content_state.as_ref(), &context)
+            .unwrap();
+
+        let throwing = mode
+            .execute_view_with_content(
+                content_state.as_mut(),
+                view_state.as_mut(),
+                &context,
+                &ModeActionName::new("throwing"),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(throwing.contains("action exploded"), "{throwing}");
+        assert_eq!(
+            script_state(content_state.as_ref(), mode.name())
+                .unwrap()
+                .data,
+            serde_json::json!({ "calls": 0 })
+        );
+        assert_eq!(
+            script_state(view_state.as_ref(), mode.name()).unwrap().data,
+            serde_json::json!({
+                "calls": 0,
+                "viewPolicy": { "cursorStyle": "block" },
+            })
+        );
+
+        let invalid = mode
+            .execute_view_with_content(
+                content_state.as_mut(),
+                view_state.as_mut(),
+                &context,
+                &ModeActionName::new("invalid"),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            invalid.contains("cursorStyle must be a string"),
+            "{invalid}"
+        );
+        assert_eq!(
+            script_state(content_state.as_ref(), mode.name())
+                .unwrap()
+                .data,
+            serde_json::json!({ "calls": 0 })
+        );
+        assert_eq!(
+            script_state(view_state.as_ref(), mode.name()).unwrap().data,
+            serde_json::json!({
+                "calls": 0,
+                "viewPolicy": { "cursorStyle": "block" },
+            })
+        );
+    }
+
+    #[test]
+    fn default_plugins_follow_manifest_order() {
+        let host = load_default_plugins().unwrap();
+        let host = host.borrow();
+        let definitions = host.definitions.borrow();
+
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|definition| definition.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["vim", "syntax-highlighting"]
+        );
+    }
+
+    #[test]
     fn native_apply_edits_converts_utf16_positions_to_content_action() {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.ts");
