@@ -42,7 +42,7 @@ impl<F: Frontend> App<F> {
         )
         .ok_or(LayoutError::MissingContent(content))?;
         let (contents, content_modes) = self.kernel.mode_runtime_parts();
-        self.session.split_space(
+        let result = self.session.split_space(
             target,
             view,
             focusable,
@@ -50,7 +50,10 @@ impl<F: Frontend> App<F> {
             focus_new,
             content_modes,
             contents,
-        )
+        )?;
+        self.session
+            .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
+        Ok(result)
     }
 
     #[cfg_attr(
@@ -72,6 +75,8 @@ impl<F: Frontend> App<F> {
         {
             self.kernel.commit_transaction(content);
         }
+        self.session
+            .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
         Ok(result)
     }
 
@@ -117,6 +122,8 @@ impl<F: Frontend> App<F> {
         {
             self.kernel.commit_transaction(content);
         }
+        self.session
+            .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
         Ok(())
     }
 

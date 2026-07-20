@@ -65,8 +65,7 @@ mod tests {
     struct Fixture {
         contents: ContentStore,
         views: HashMap<ViewId, View>,
-        view_modes: crate::app::mode::ModeViewStore,
-        mode_contents: crate::app::mode::ModeContentStore,
+        presentation: crate::app::presentation::PresentationLayerStore,
         faces: crate::app::mode::FaceRegistry,
     }
 
@@ -81,8 +80,7 @@ mod tests {
             Self {
                 contents,
                 views: HashMap::from([(ViewId(0), view)]),
-                view_modes: crate::app::mode::ModeViewStore::default(),
-                mode_contents: crate::app::mode::ModeContentStore::default(),
+                presentation: crate::app::presentation::PresentationLayerStore::default(),
                 faces: crate::app::mode::FaceRegistry::default(),
             }
         }
@@ -91,8 +89,7 @@ mod tests {
             AppQuery {
                 contents: &self.contents,
                 views: &self.views,
-                view_modes: &self.view_modes,
-                mode_contents: &self.mode_contents,
+                presentation: &self.presentation,
                 faces: &self.faces,
             }
         }

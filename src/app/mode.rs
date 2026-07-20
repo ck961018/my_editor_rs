@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::app::action::{TransactionIntent, ViewAction};
 use crate::app::command::{AppCommand, Command, ModeCommand, ModeValue};
 use crate::app::mode_name::{ModeActionName, ModeName};
+use crate::app::presentation::{ContentPresentationLayer, ViewPresentationLayer};
 use crate::app::view::View;
 use crate::core::action::ContentAction;
 use crate::core::command::EditCommand;
@@ -18,7 +19,7 @@ use crate::core::input::{InputDecision, InputStatus};
 use crate::core::keymap::Keymap;
 use crate::protocol::content_query::{
     ContentData, ContentQuery, CursorStyle, Face, FaceName, NamedTextDecoration, RowRange,
-    SelectionShape, TextDecoration,
+    SelectionShape,
 };
 use crate::protocol::ids::{ContentId, ViewId};
 use crate::protocol::key_event::KeyEvent;
@@ -441,7 +442,7 @@ pub struct ModeViewPolicy {
 }
 
 impl ModeViewPolicy {
-    fn merge_missing(&mut self, next: Self) {
+    pub(crate) fn merge_missing(&mut self, next: Self) {
         self.cursor_style = self.cursor_style.or(next.cursor_style);
         self.cursor_domain = self.cursor_domain.or(next.cursor_domain);
         self.selection_shape = self.selection_shape.or(next.selection_shape);
@@ -545,6 +546,23 @@ pub trait Mode {
         _visible_rows: RowRange,
     ) -> Vec<NamedTextDecoration> {
         Vec::new()
+    }
+    fn content_decorations(
+        &self,
+        _content_state: &dyn ModeState,
+        _context: &ModeContentContext<'_>,
+        _visible_rows: RowRange,
+    ) -> Vec<NamedTextDecoration> {
+        Vec::new()
+    }
+    fn view_decorations(
+        &self,
+        content_state: &dyn ModeState,
+        view_state: &dyn ModeState,
+        context: &ModeViewContext<'_>,
+        visible_rows: RowRange,
+    ) -> Vec<NamedTextDecoration> {
+        self.decorations(content_state, view_state, context, visible_rows)
     }
     fn view_policy(
         &self,
@@ -921,6 +939,28 @@ impl ModeContentStore {
         changed
     }
 
+    pub(crate) fn presentation_layer(
+        &self,
+        mode: ModeId,
+        content: ContentId,
+        contents: &ContentStore,
+        visible_rows: RowRange,
+    ) -> Option<ContentPresentationLayer> {
+        let instance = self.instance(mode, content)?;
+        if instance.faulted {
+            return None;
+        }
+        let context = ModeContentContext::new(content, contents);
+        Some(ContentPresentationLayer {
+            source_revision: context.content_revision()?,
+            decorations: instance.registered.mode().content_decorations(
+                instance.state.as_ref(),
+                &context,
+                visible_rows,
+            ),
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn attach_view(&mut self, content: ContentId, mode: &ModeViewInstance) {
         let id = mode.registered.id;
@@ -1262,44 +1302,36 @@ impl ModeViewStore {
         }
     }
 
-    pub(crate) fn decorations(
+    pub(crate) fn presentation_layer(
         &self,
+        mode: ModeId,
         view: ViewId,
         context: &ModeViewContext<'_>,
         mode_contents: &ModeContentStore,
-        faces: &FaceRegistry,
+        view_revision: Revision,
         visible_rows: RowRange,
-    ) -> Vec<TextDecoration> {
-        let mut decorations = Vec::new();
-        for mode in self.mode_ids(view).iter().rev() {
-            let Some(content_instance) = mode_contents.instance(*mode, context.content_id()) else {
-                continue;
-            };
-            let Some(view_instance) = self.instances.get(&(*mode, view)) else {
-                continue;
-            };
-            if content_instance.faulted || view_instance.faulted {
-                continue;
-            }
-            decorations.extend(
-                view_instance
-                    .registered
-                    .mode()
-                    .decorations(
-                        content_instance.state.as_ref(),
-                        view_instance.state.as_ref(),
-                        context,
-                        visible_rows,
-                    )
-                    .into_iter()
-                    .map(|decoration| TextDecoration {
-                        start: decoration.start,
-                        end: decoration.end,
-                        face: faces.resolve(&decoration.face),
-                    }),
-            );
+    ) -> Option<ViewPresentationLayer> {
+        let content_instance = mode_contents.instance(mode, context.content_id())?;
+        let view_instance = self.instances.get(&(mode, view))?;
+        if content_instance.faulted || view_instance.faulted {
+            return None;
         }
-        decorations
+        let definition = view_instance.registered.mode();
+        Some(ViewPresentationLayer {
+            content_revision: context.content_revision()?,
+            view_revision,
+            policy: definition.view_policy(
+                content_instance.state.as_ref(),
+                view_instance.state.as_ref(),
+                context,
+            ),
+            decorations: definition.view_decorations(
+                content_instance.state.as_ref(),
+                view_instance.state.as_ref(),
+                context,
+                visible_rows,
+            ),
+        })
     }
 
     pub(crate) fn contains(&self, view: ViewId, name: &ModeName) -> bool {
@@ -1511,15 +1543,6 @@ impl ModeViewStore {
         }
         drafts.commit_content(mode_contents);
         drafts.commit_views(self);
-    }
-
-    pub(crate) fn view_policy(
-        &self,
-        view: ViewId,
-        context: &ModeViewContext<'_>,
-        mode_contents: &ModeContentStore,
-    ) -> ModeViewPolicy {
-        self.view_policy_in_draft(view, context, mode_contents, &ModeDraftJournal::default())
     }
 
     pub(crate) fn view_policy_in_draft(

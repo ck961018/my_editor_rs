@@ -36,6 +36,8 @@ impl<F: Frontend> App<F> {
                 changed
             }
         };
+        self.session
+            .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
         Ok(changed)
     }
 

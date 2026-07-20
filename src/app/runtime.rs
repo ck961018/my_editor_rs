@@ -89,6 +89,8 @@ impl<F: Frontend> App<F> {
 
     async fn run_loop(&mut self) -> io::Result<()> {
         self.kernel.schedule_mode_jobs();
+        self.session
+            .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
         self.render()?;
         loop {
             let input_deadline = self
@@ -235,6 +237,8 @@ impl<F: Frontend> App<F> {
         if success {
             self.publish_prepared_effects(effects);
             self.kernel.schedule_mode_jobs();
+            self.session
+                .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
         }
         result
     }
@@ -1110,8 +1114,7 @@ impl<F: Frontend> App<F> {
         let query = AppQuery {
             contents: self.kernel.contents(),
             views: self.session.views(),
-            view_modes: self.session.view_modes(),
-            mode_contents: self.kernel.content_modes(),
+            presentation: self.session.presentation(),
             faces: self.session.faces(),
         };
         self.frontend.render(

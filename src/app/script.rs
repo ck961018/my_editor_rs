@@ -858,9 +858,23 @@ impl Mode for ScriptMode {
             })
     }
 
-    fn decorations(
+    fn content_decorations(
         &self,
         content_state: &dyn ModeState,
+        context: &ModeContentContext<'_>,
+        visible_rows: RowRange,
+    ) -> Vec<NamedTextDecoration> {
+        let Some(snapshot) = context.text_snapshot() else {
+            return Vec::new();
+        };
+        script_state(content_state, &self.name)
+            .map(|state| state.decorations.visible(&snapshot, visible_rows))
+            .unwrap_or_default()
+    }
+
+    fn view_decorations(
+        &self,
+        _content_state: &dyn ModeState,
         view_state: &dyn ModeState,
         context: &ModeViewContext<'_>,
         visible_rows: RowRange,
@@ -868,13 +882,9 @@ impl Mode for ScriptMode {
         let Some(snapshot) = context.text_snapshot() else {
             return Vec::new();
         };
-        let mut decorations = script_state(content_state, &self.name)
+        script_state(view_state, &self.name)
             .map(|state| state.decorations.visible(&snapshot, visible_rows))
-            .unwrap_or_default();
-        if let Ok(state) = script_state(view_state, &self.name) {
-            decorations.extend(state.decorations.visible(&snapshot, visible_rows));
-        }
-        decorations
+            .unwrap_or_default()
     }
 
     fn execute_view_with_arguments(

@@ -1,4 +1,6 @@
+use std::cell::Cell;
 use std::io;
+use std::rc::Rc;
 
 use super::App;
 use super::behavior::{
@@ -106,6 +108,11 @@ struct HighlightMode {
     name: ModeName,
 }
 
+struct PresentationProbeMode {
+    name: ModeName,
+    calls: Rc<Cell<usize>>,
+}
+
 struct FaultingHighlightMode {
     name: ModeName,
 }
@@ -200,6 +207,37 @@ impl Mode for HighlightMode {
             end: TextOffset { char_index: 1 },
             face: FaceName::new("syntax.test"),
         }]
+    }
+}
+
+impl Mode for PresentationProbeMode {
+    fn name(&self) -> &ModeName {
+        &self.name
+    }
+
+    fn actions(&self) -> &[ModeActionName] {
+        &[]
+    }
+
+    fn view_policy(
+        &self,
+        _content_state: &dyn ModeState,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) -> ModeViewPolicy {
+        self.calls.set(self.calls.get() + 1);
+        ModeViewPolicy::default()
+    }
+
+    fn decorations(
+        &self,
+        _content_state: &dyn ModeState,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+        _visible_rows: RowRange,
+    ) -> Vec<NamedTextDecoration> {
+        self.calls.set(self.calls.get() + 1);
+        Vec::new()
     }
 }
 
@@ -985,8 +1023,7 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
     let query = AppQuery {
         contents: app.kernel.contents(),
         views: app.session.views(),
-        view_modes: app.session.view_modes(),
-        mode_contents: app.kernel.content_modes(),
+        presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
     let decorations = query.decorations(view, RowRange { start: 0, end: 1 });
@@ -1007,8 +1044,7 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
     let query = AppQuery {
         contents: app.kernel.contents(),
         views: app.session.views(),
-        view_modes: app.session.view_modes(),
-        mode_contents: app.kernel.content_modes(),
+        presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
     let decorations = query.decorations(view, RowRange { start: 0, end: 2 });
@@ -1036,8 +1072,7 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
     let query = AppQuery {
         contents: app.kernel.contents(),
         views: app.session.views(),
-        view_modes: app.session.view_modes(),
-        mode_contents: app.kernel.content_modes(),
+        presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
     let decorations = query.decorations(view, RowRange { start: 0, end: 1 });
@@ -1080,8 +1115,7 @@ async fn markdown_and_fenced_rust_are_highlighted() {
     let query = AppQuery {
         contents: app.kernel.contents(),
         views: app.session.views(),
-        view_modes: app.session.view_modes(),
-        mode_contents: app.kernel.content_modes(),
+        presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
     let decorations = query.decorations(view, RowRange { start: 0, end: 6 });
@@ -1156,8 +1190,7 @@ async fn rust_highlighting_survives_crlf_comment_edits() {
     let query = AppQuery {
         contents: app.kernel.contents(),
         views: app.session.views(),
-        view_modes: app.session.view_modes(),
-        mode_contents: app.kernel.content_modes(),
+        presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
     let decorations = query.decorations(view, RowRange { start: 0, end: 2 });
@@ -1198,6 +1231,8 @@ fn replace_view_mode_for_test(
     }
     mode_contents.attach_view(content, &mode);
     app.session.view_modes_mut_for_test().insert(view, mode);
+    app.session
+        .refresh_presentation(app.kernel.contents(), app.kernel.content_modes());
 }
 
 fn text_presentation(view: &ViewData) -> &TextPresentation {
@@ -1517,8 +1552,7 @@ fn content_query_reads_buffer_and_view() {
     let query = AppQuery {
         contents: app.kernel.contents(),
         views: app.session.views(),
-        view_modes: app.session.view_modes(),
-        mode_contents: app.kernel.content_modes(),
+        presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
     assert_eq!(
@@ -1616,8 +1650,7 @@ fn recursive_mode_command_chain_stops_at_the_execution_limit() {
     let query = AppQuery {
         contents: app.kernel.contents(),
         views: app.session.views(),
-        view_modes: app.session.view_modes(),
-        mode_contents: app.kernel.content_modes(),
+        presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
     assert_eq!(
@@ -1780,8 +1813,7 @@ async fn failed_capture_output_restores_the_pre_input_mode_state() {
     let query = AppQuery {
         contents: app.kernel.contents(),
         views: app.session.views(),
-        view_modes: app.session.view_modes(),
-        mode_contents: app.kernel.content_modes(),
+        presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
     assert_eq!(
@@ -1814,8 +1846,7 @@ fn failed_timeout_output_restores_the_pre_timeout_mode_state() {
     let query = AppQuery {
         contents: app.kernel.contents(),
         views: app.session.views(),
-        view_modes: app.session.view_modes(),
-        mode_contents: app.kernel.content_modes(),
+        presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
     assert_eq!(
@@ -1859,6 +1890,51 @@ async fn mutable_view_mode_callbacks_advance_revision_after_success() {
     assert!(timed_out.session.views()[&timeout_view].revision() > timeout_revision);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_view_presentation_layer_is_not_observed() {
+    let mut app = make_app(vec![], None);
+    let mode = {
+        let modes = app.kernel.modes_mut();
+        modes.register(PresentationMutationMode::new());
+        modes
+            .instantiate(&ModeName::new("presentation-mutation"))
+            .unwrap()
+    };
+    let view = view_id(&app, app.session.focused());
+    replace_view_mode_for_test(&mut app, view, mode);
+    app.session.sync_focused_input(
+        std::time::Instant::now(),
+        app.kernel.content_modes(),
+        app.kernel.contents(),
+    );
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('x')))
+        .await
+        .unwrap();
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+    assert_eq!(
+        text_presentation(&query.view(view)).cursor_style,
+        CursorStyle::Bar
+    );
+
+    app.session.view_mut(view).unwrap().touch();
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+    assert_eq!(
+        text_presentation(&query.view(view)).cursor_style,
+        CursorStyle::Default
+    );
+}
+
 #[test]
 fn status_bar_view_data_has_no_text_selection_or_mode_cursor() {
     let app = make_app(vec![], None);
@@ -1871,8 +1947,7 @@ fn status_bar_view_data_has_no_text_selection_or_mode_cursor() {
     let query = AppQuery {
         contents: app.kernel.contents(),
         views: app.session.views(),
-        view_modes: app.session.view_modes(),
-        mode_contents: app.kernel.content_modes(),
+        presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
 
@@ -1892,18 +1967,29 @@ async fn two_views_of_one_buffer_keep_independent_mode_instances() {
         .unwrap();
     let left_id = view_id(&app, left);
     let left_revision = app.session.views()[&left_id].revision();
+    let content_layer_count = app.session.presentation().content_layer_count();
+    let view_layer_count = app.session.presentation().view_layer_count();
+    assert!(content_layer_count > 0);
+    assert!(view_layer_count > 0);
     let right = app
         .split_space(left, editor_cid(), true, SplitDirection::Right, true)
         .unwrap()
         .new_space;
+    assert_eq!(
+        app.session.presentation().content_layer_count(),
+        content_layer_count
+    );
+    assert_eq!(
+        app.session.presentation().view_layer_count(),
+        view_layer_count * 2
+    );
     assert_eq!(app.session.focused(), right);
     assert!(app.session.views()[&left_id].revision() > left_revision);
 
     let query = AppQuery {
         contents: app.kernel.contents(),
         views: app.session.views(),
-        view_modes: app.session.view_modes(),
-        mode_contents: app.kernel.content_modes(),
+        presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
     let right_id = view_id(&app, right);
@@ -1945,8 +2031,7 @@ async fn content_mode_binding_is_shared_and_coexists_with_view_modes() {
     let query = AppQuery {
         contents: app.kernel.contents(),
         views: app.session.views(),
-        view_modes: app.session.view_modes(),
-        mode_contents: app.kernel.content_modes(),
+        presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
     for space in [left, right] {
@@ -2069,8 +2154,7 @@ fn mode_decorations_are_resolved_through_named_faces() {
     let query = AppQuery {
         contents: app.kernel.contents(),
         views: app.session.views(),
-        view_modes: app.session.view_modes(),
-        mode_contents: app.kernel.content_modes(),
+        presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
 
@@ -2091,6 +2175,24 @@ fn mode_decorations_are_resolved_through_named_faces() {
 }
 
 #[test]
+fn render_reads_cached_presentation_without_calling_mode() {
+    let mut app = make_app(vec![], None);
+    let calls = Rc::new(Cell::new(0));
+    let name = ModeName::new("presentation-probe");
+    app.kernel.modes_mut().register(PresentationProbeMode {
+        name: name.clone(),
+        calls: calls.clone(),
+    });
+    assert!(app.attach_mode_to_content(editor_cid(), &name));
+    let calls_after_refresh = calls.get();
+    assert!(calls_after_refresh > 0);
+
+    app.render().unwrap();
+
+    assert_eq!(calls.get(), calls_after_refresh);
+}
+
+#[test]
 fn passive_mode_failure_does_not_rollback_text_and_suspends_presentation() {
     let mut app = make_app(vec![], None);
     let mode = ModeName::new("faulting-highlight");
@@ -2103,8 +2205,7 @@ fn passive_mode_failure_does_not_rollback_text_and_suspends_presentation() {
         let query = AppQuery {
             contents: app.kernel.contents(),
             views: app.session.views(),
-            view_modes: app.session.view_modes(),
-            mode_contents: app.kernel.content_modes(),
+            presentation: app.session.presentation(),
             faces: app.session.faces(),
         };
         assert_eq!(
@@ -2124,8 +2225,7 @@ fn passive_mode_failure_does_not_rollback_text_and_suspends_presentation() {
     let query = AppQuery {
         contents: app.kernel.contents(),
         views: app.session.views(),
-        view_modes: app.session.view_modes(),
-        mode_contents: app.kernel.content_modes(),
+        presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
     assert!(
@@ -2162,8 +2262,7 @@ fn mode_factory_failures_suspend_only_the_failed_attachments() {
     let query = AppQuery {
         contents: app.kernel.contents(),
         views: app.session.views(),
-        view_modes: app.session.view_modes(),
-        mode_contents: app.kernel.content_modes(),
+        presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
     assert!(

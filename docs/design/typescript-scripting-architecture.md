@@ -386,9 +386,9 @@ Mode。
 -异常 message 和 stack；
 -超时、heap limit、转换或 effect 验证失败类别。
 
-主动 callback 错误映射为 `ModeError`，交给现有 InputExecutionFrame 恢复本次
-编辑器状态。被动 callback 错误使用现有 attachment fault isolation，不阻止基础
-文本编辑。
+主动 callback 错误映射为 `ModeError`，交给当前 `ExecutionFrame` 丢弃 Mode
+draft，并恢复本次输入的 Content、View、input 和 transaction checkpoint。
+被动 callback 错误使用 attachment fault isolation，不阻止基础文本编辑。
 
 V8 exception 不自动销毁整个 runtime。timeout 终止传播完成后，runtime 只有在
 V8 允许恢复执行时才继续使用，否则禁用脚本层并保留 native 编辑能力。

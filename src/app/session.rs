@@ -13,12 +13,14 @@ use crate::app::mode::{
     CursorDomain, FaceRegistry, ModeContentContext, ModeContentStore, ModeDraftJournal, ModeError,
     ModeRegistry, ModeResult, ModeViewContext, ModeViewStore,
 };
+use crate::app::presentation::{PresentationLayerStore, PresentationRefresh};
 use crate::app::scene_model::{
     CloseResult, SceneBuilder, SceneError, SplitResult, build_editor_scene,
 };
 use crate::app::view::View;
 use crate::core::content::ContentChange;
 use crate::core::content_store::ContentStore;
+use crate::protocol::content_query::RowRange;
 use crate::protocol::ids::{ContentId, SpaceId, ViewId};
 use crate::protocol::revision::Revision;
 use crate::protocol::scene::Scene;
@@ -31,6 +33,7 @@ pub(super) struct ClientSession {
     views: HashMap<ViewId, View>,
     view_modes: ModeViewStore,
     faces: FaceRegistry,
+    presentation: PresentationLayerStore,
     next_view_id: u64,
     focused: SpaceId,
     dispatcher: Dispatcher,
@@ -105,17 +108,20 @@ impl ClientSession {
         .expect("valid editor scene");
         let focused = resolve_focus(&scene, editor_space, Some(editor_space))
             .expect("initial scene has a focusable content space");
-        Self {
+        let mut session = Self {
             scene,
             scene_builder,
             scene_revision: Revision::default(),
             views,
             view_modes,
             faces,
+            presentation: PresentationLayerStore::default(),
             next_view_id: init.next_view_id,
             focused,
             dispatcher: Dispatcher::new(default_global_keymap()),
-        }
+        };
+        session.refresh_presentation(contents, mode_contents);
+        session
     }
 
     pub(super) fn scene(&self) -> &Scene {
@@ -156,6 +162,53 @@ impl ClientSession {
 
     pub(super) fn faces(&self) -> &FaceRegistry {
         &self.faces
+    }
+
+    pub(super) fn presentation(&self) -> &PresentationLayerStore {
+        &self.presentation
+    }
+
+    pub(super) fn refresh_presentation(
+        &mut self,
+        contents: &ContentStore,
+        mode_contents: &ModeContentStore,
+    ) {
+        let mut refresh = PresentationRefresh::new();
+        let visible_rows = RowRange {
+            start: 0,
+            end: usize::MAX,
+        };
+        for (&view, view_data) in &self.views {
+            let content = view_data.content();
+            refresh.view_contents.insert(view, content);
+            let order = self.view_modes.mode_ids(view).to_vec();
+            refresh.view_order.insert(view, order.clone());
+            for mode in order {
+                if refresh.needs_content(mode, content)
+                    && let Some(layer) =
+                        mode_contents.presentation_layer(mode, content, contents, visible_rows)
+                {
+                    refresh.content_layers.insert((mode, content), layer);
+                }
+                let context = ModeViewContext::new(view, view_data, contents);
+                if let Some(layer) = self.view_modes.presentation_layer(
+                    mode,
+                    view,
+                    &context,
+                    mode_contents,
+                    view_data.revision(),
+                    visible_rows,
+                ) {
+                    refresh.view_layers.insert((mode, view), layer);
+                }
+            }
+        }
+        self.presentation.replace(
+            refresh.content_layers,
+            refresh.view_layers,
+            refresh.view_contents,
+            refresh.view_order,
+        );
     }
 
     pub(super) fn snapshot_input(&self) -> DispatcherInputSnapshot {

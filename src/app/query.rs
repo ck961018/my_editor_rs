@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use crate::app::mode::{FaceRegistry, ModeContentStore, ModeViewStore};
+use crate::app::mode::FaceRegistry;
+use crate::app::presentation::PresentationLayerStore;
 use crate::app::view::View;
 use crate::core::content_store::ContentStore;
 use crate::protocol::content_query::{
@@ -12,8 +13,7 @@ use crate::protocol::ids::{ContentId, ViewId};
 pub(super) struct AppQuery<'a> {
     pub(super) contents: &'a ContentStore,
     pub(super) views: &'a HashMap<ViewId, View>,
-    pub(super) view_modes: &'a ModeViewStore,
-    pub(super) mode_contents: &'a ModeContentStore,
+    pub(super) presentation: &'a PresentationLayerStore,
     pub(super) faces: &'a FaceRegistry,
 }
 
@@ -31,13 +31,16 @@ impl RenderQuery for AppQuery<'_> {
             .expect("view references existing content")
         {
             ContentPresentation::Text => {
-                let context = crate::app::mode::ModeViewContext::new(id, view, self.contents);
                 let selections = view
                     .selections()
                     .expect("text content creates selection-backed view state");
+                let content_revision = self
+                    .contents
+                    .revision(content)
+                    .expect("view references existing content");
                 let policy = self
-                    .view_modes
-                    .view_policy(id, &context, self.mode_contents);
+                    .presentation
+                    .policy(id, content_revision, view.revision());
                 ViewPresentation::Text(TextPresentation {
                     selections: selections.clone(),
                     cursor_style: policy.cursor_style.unwrap_or(CursorStyle::Default),
@@ -64,8 +67,27 @@ impl RenderQuery for AppQuery<'_> {
         let Some(view) = self.views.get(&id) else {
             return Vec::new();
         };
-        let context = crate::app::mode::ModeViewContext::new(id, view, self.contents);
-        self.view_modes
-            .decorations(id, &context, self.mode_contents, self.faces, visible_rows)
+        let content = view.content();
+        let Some(content_revision) = self.contents.revision(content) else {
+            return Vec::new();
+        };
+        let Some(snapshot) = self.contents.text_snapshot(content) else {
+            return Vec::new();
+        };
+        self.presentation
+            .decorations(
+                id,
+                content_revision,
+                view.revision(),
+                &snapshot,
+                visible_rows,
+            )
+            .into_iter()
+            .map(|decoration| TextDecoration {
+                start: decoration.start,
+                end: decoration.end,
+                face: self.faces.resolve(&decoration.face),
+            })
+            .collect()
     }
 }

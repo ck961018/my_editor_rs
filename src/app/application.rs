@@ -78,6 +78,8 @@ impl<F: Frontend> App<F> {
         self.session
             .sync_focused_input(Instant::now(), mode_contents, contents);
         self.kernel.schedule_mode_jobs();
+        self.session
+            .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
         true
     }
 }

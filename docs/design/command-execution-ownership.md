@@ -56,8 +56,9 @@ protocol 只保存跨前后端需要共享的中立数据，不承载 app 命令
 
 结果是有序 operation 列表。执行器不得根据 operation 集合猜测顺序。
 
-ModeState 在一次 ordered result 执行期间是 provisional。执行失败时恢复
-调用前 snapshot；成功后才确认新状态。该 snapshot 不进入 undo history。
+ModeState 在一次 ordered result 执行期间写入 `ModeDraftJournal`。同一 frame
+内后续 callback 读取最新 draft；执行失败时丢弃，成功后一次提交。Mode state
+不进入 undo history。
 
 ## 4. Content 输入
 
@@ -111,9 +112,9 @@ app 在应用 ordered result 时逐项验证：
 - TransactionIntent 生命周期；
 - AppAction 权限和布局约束。
 
-任一步失败时，执行器反向恢复该结果已经修改的 Content，并恢复调用前的
-ModeState、View selections 和 TransactionManager 快照。历史来源 View 已关闭
-时只跳过其 selections 快照，Content 历史仍正常遍历。
+任一步失败时，执行器恢复该 frame 已修改的 Content、View selections、input
+和 TransactionManager checkpoint，并丢弃 Mode state draft。历史来源 View
+已关闭时只跳过其 selections 快照，Content 历史仍正常遍历。
 
 成功的 ViewMode 可变回调如果没有通过 ViewAction 改变 View revision，app
 仍递增一次 revision，使 presentation 等纯 ModeState 变化能够触发重绘。
