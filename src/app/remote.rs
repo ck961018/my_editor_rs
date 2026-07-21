@@ -10,11 +10,16 @@ use super::query::AppQuery;
 pub(super) fn respond(query: &AppQuery<'_>, request: Request) -> Response {
     let result = match request.data {
         RequestData::View { view } => match query.views.get(&view) {
-            Some(local_view) => Ok(ResponseData::View {
-                view,
-                revision: local_view.revision(),
-                data: query.view(view),
-            }),
+            Some(local_view) => query
+                .view(view)
+                .map(|data| ResponseData::View {
+                    view,
+                    revision: local_view.revision(),
+                    data,
+                })
+                .map_err(|error| {
+                    ProtocolError::new(ProtocolErrorCode::InvalidViewState, error.to_string())
+                }),
             None => Err(ProtocolError::new(
                 ProtocolErrorCode::UnknownView,
                 format!("unknown view {}", view.0),

@@ -1,5 +1,7 @@
 //! 前端 pull 后端内容的契约。同进程同步调用，返回 owned 数据。
 
+use std::fmt;
+
 use crate::protocol::ids::{ContentId, ViewId};
 use crate::protocol::selection::{Selections, TextOffset, TextPoint};
 use crate::protocol::status::StatusMessage;
@@ -109,13 +111,6 @@ pub enum ViewPresentation {
     StatusBar,
 }
 
-/// Content 声明的呈现类别；ViewPresentation 在此基础上附加会话状态。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ContentPresentation {
-    Text,
-    StatusBar,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewData {
     pub content: ContentId,
@@ -139,10 +134,35 @@ pub enum ContentData {
     Unsupported,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderQueryError {
+    MissingView(ViewId),
+    MissingContent(ContentId),
+    IncompatibleContentViewState { view: ViewId, content: ContentId },
+}
+
+impl fmt::Display for RenderQueryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingView(view) => write!(formatter, "view {} does not exist", view.0),
+            Self::MissingContent(content) => {
+                write!(formatter, "content {} does not exist", content.0)
+            }
+            Self::IncompatibleContentViewState { view, content } => write!(
+                formatter,
+                "view {} has state incompatible with content {}",
+                view.0, content.0
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RenderQueryError {}
+
 /// 前端通过消息拉取后端内容的只读契约。
 pub trait RenderQuery {
     fn content(&self, id: ContentId, query: ContentQuery) -> ContentData;
-    fn view(&self, id: ViewId) -> ViewData;
+    fn view(&self, id: ViewId) -> Result<ViewData, RenderQueryError>;
     fn decorations(&self, _view: ViewId, _visible_rows: RowRange) -> Vec<TextDecoration> {
         Vec::new()
     }

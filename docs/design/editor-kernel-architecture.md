@@ -2,7 +2,7 @@
 
 **状态：** 当前实现架构
 
-**更新日期：** 2026-07-20
+**更新日期：** 2026-07-21
 
 ## 1. 文档定位
 
@@ -103,7 +103,16 @@ enum Content {
     Buffer(Buffer),
     StatusBar(StatusBar),
 }
+
+enum ContentKind {
+    Buffer,
+    StatusBar,
+}
 ```
+
+`ContentKind` 是与 `Content` 一一对应的封闭判别值，由 `Content::kind()`
+穷尽映射。它不是插件字符串或动态 registry key；新增 Content 时必须同步处理
+所有静态分派位置。
 
 `ContentStore` 是唯一 Content 表，每个 entry 保存 Content 与 Revision。
 Content 自己分派具体变体的 presentation、view state、snapshot、query 和
@@ -120,8 +129,9 @@ change 映射到绑定同一 Content 的全部 View。
 文本渲染只查询行范围或指定 offset；Mode 后台分析通过 `TextSnapshot`
 读取稳定快照，不经过同步全文查询。`StatusBar` 显式声明目标 Content 的
 `DocumentStatus` 依赖，Store 负责协调查询和有效 revision。Content 还声明
-`ContentPresentation::{Text, StatusBar}`，`AppQuery` 据此组装
-`ViewPresentation`，不通过 selection 是否存在猜测 Content 类型。
+`ContentKind`；`AppQuery` 穷尽匹配 `(ContentKind, ContentViewState)` 组装
+`ViewPresentation`。种类错配返回 `RenderQueryError`，不通过 selection
+是否存在猜测 Content 类型，也不在渲染路径 panic。
 
 ### 5.2 View
 
@@ -132,8 +142,11 @@ View
 └── Revision
 ```
 
-文本 View 的 `ContentViewState` 保存 `Selections`；无状态 View 没有
-selection。View 不保存 Mode instance、presentation layer 或 history。
+`ContentViewState` 是与封闭 Content 对齐的显式枚举：Buffer View 持有
+`BufferViewState { selections }`，StatusBar View 持有
+`StatusBarViewState`。因此 Buffer View 始终具有 selections，StatusBar View
+不能误用文本状态。Content 与 View state 种类不匹配时返回结构化错误，不在
+生产路径 panic。View 不保存 Mode instance、presentation layer 或 history。
 Mode chain、输入状态和呈现缓存由 `ClientSession` 中的集中 store 管理。
 
 ## 6. Mode 模型
@@ -299,6 +312,7 @@ render(&Scene, Revision, &dyn RenderQuery, focused)
 ## 13. 当前不变量
 
 - Content 共享状态与 View 会话状态分离；
+- `Content`、`ContentKind` 和 `ContentViewState` 保持封闭且一一对应；
 - ContentStore 是唯一 Content 表；
 - 一个 View 可以附加多个有序 Mode；
 - Mode content state 按 Content 共享，view state 按 View 隔离；

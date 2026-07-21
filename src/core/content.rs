@@ -8,7 +8,7 @@ use crate::core::status_bar::StatusBar;
 use crate::core::text_snapshot::TextSnapshot;
 use crate::core::transaction::{TextChangeSet, TextStateId, TextTransactionError};
 use crate::protocol::content_query::{
-    ContentData, ContentPresentation, ContentQuery, DocumentStatus, RowRange, StatusBarData,
+    ContentData, ContentQuery, DocumentStatus, RowRange, StatusBarData,
 };
 use crate::protocol::ids::ContentId;
 use crate::protocol::revision::Revision;
@@ -121,12 +121,25 @@ pub enum Content {
     StatusBar(StatusBar),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ContentKind {
+    Buffer,
+    StatusBar,
+}
+
 pub(crate) struct ContentDependencyQuery {
     pub id: ContentId,
     pub query: ContentQuery,
 }
 
 impl Content {
+    pub fn kind(&self) -> ContentKind {
+        match self {
+            Self::Buffer(_) => ContentKind::Buffer,
+            Self::StatusBar(_) => ContentKind::StatusBar,
+        }
+    }
+
     pub fn text_snapshot(&self) -> Option<TextSnapshot> {
         match self {
             Self::Buffer(buffer) => Some(TextSnapshot::new(buffer.slice())),
@@ -223,17 +236,10 @@ impl Content {
         }
     }
 
-    pub fn presentation(&self) -> ContentPresentation {
-        match self {
-            Self::Buffer(_) => ContentPresentation::Text,
-            Self::StatusBar(_) => ContentPresentation::StatusBar,
-        }
-    }
-
     pub fn create_view_state(&self) -> ContentViewState {
         match self {
-            Self::Buffer(_) => ContentViewState::text(),
-            Self::StatusBar(_) => ContentViewState::stateless(),
+            Self::Buffer(_) => ContentViewState::buffer(),
+            Self::StatusBar(_) => ContentViewState::status_bar(),
         }
     }
 
@@ -241,18 +247,24 @@ impl Content {
         &self,
         state: &mut ContentViewState,
         change: &ContentChange,
-    ) -> bool {
-        match (self, change) {
-            (Self::Buffer(buffer), ContentChange::Text(change)) => buffer.transform_selections(
-                state
-                    .selections_mut()
-                    .expect("text content requires selection-backed view state"),
-                change,
-            ),
-            (Self::StatusBar(_), _) => {
-                assert!(state.selections().is_none(), "content/view state mismatch");
-                false
+    ) -> Result<bool, crate::core::content_view_state::ContentViewStateError> {
+        let state_kind = state.kind();
+        match (self, state, change) {
+            (
+                Self::Buffer(buffer),
+                ContentViewState::Buffer(state),
+                ContentChange::Text(change),
+            ) => Ok(buffer.transform_selections(state.selections_mut(), change)),
+            (Self::StatusBar(_), ContentViewState::StatusBar(_), ContentChange::Text(_)) => {
+                Ok(false)
             }
+            (Self::Buffer(_), ContentViewState::StatusBar(_), ContentChange::Text(_))
+            | (Self::StatusBar(_), ContentViewState::Buffer(_), ContentChange::Text(_)) => Err(
+                crate::core::content_view_state::ContentViewStateError::KindMismatch {
+                    content: self.kind(),
+                    state: state_kind,
+                },
+            ),
         }
     }
 
@@ -368,15 +380,21 @@ mod tests {
     #[test]
     fn buffer_creates_text_view_state() {
         let content = Content::Buffer(Buffer::new());
-        assert_eq!(content.presentation(), ContentPresentation::Text);
-        assert!(content.create_view_state().selections().is_some());
+        assert_eq!(content.kind(), ContentKind::Buffer);
+        assert!(matches!(
+            content.create_view_state(),
+            ContentViewState::Buffer(_)
+        ));
     }
 
     #[test]
     fn status_bar_creates_stateless_view() {
         let content = Content::StatusBar(StatusBar::new(ContentId(0)));
-        assert_eq!(content.presentation(), ContentPresentation::StatusBar);
-        assert!(content.create_view_state().selections().is_none());
+        assert_eq!(content.kind(), ContentKind::StatusBar);
+        assert!(matches!(
+            content.create_view_state(),
+            ContentViewState::StatusBar(_)
+        ));
     }
 
     #[test]

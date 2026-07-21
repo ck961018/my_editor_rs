@@ -27,6 +27,9 @@ impl View {
     pub fn selections(&self) -> Option<&Selections> {
         self.state.selections()
     }
+    pub fn state(&self) -> &ContentViewState {
+        &self.state
+    }
     pub fn state_mut(&mut self) -> &mut ContentViewState {
         &mut self.state
     }
@@ -62,14 +65,14 @@ mod tests {
 
     #[test]
     fn status_bar_view_has_no_selections() {
-        let v = View::new(ContentId(0), ContentViewState::stateless());
+        let v = View::new(ContentId(0), ContentViewState::status_bar());
         assert_eq!(v.content(), ContentId(0));
         assert!(v.selections().is_none());
     }
 
     #[test]
     fn touch_advances_view_revision() {
-        let mut view = View::new(ContentId(0), ContentViewState::stateless());
+        let mut view = View::new(ContentId(0), ContentViewState::status_bar());
 
         view.touch();
 

@@ -31,12 +31,14 @@ use crate::core::action::ContentAction;
 use crate::core::buffer::Buffer;
 use crate::core::command::EditCommand;
 use crate::core::content::{Content, ContentChange};
+use crate::core::content_view_state::ContentViewState;
 use crate::core::keymap::Keymap;
 use crate::core::transaction::{TextChangeSet, TextEdit};
 use crate::frontend::Frontend;
 use crate::protocol::content_query::{
     Color, ContentData, ContentQuery, CursorStyle, DocumentStatus, Face, FaceName,
-    NamedTextDecoration, RenderQuery, RowRange, TextPresentation, ViewData, ViewPresentation,
+    NamedTextDecoration, RenderQuery, RenderQueryError, RowRange, TextPresentation, ViewData,
+    ViewPresentation,
 };
 use crate::protocol::frontend_event::{FrontendEvent, ResizeEvent};
 use crate::protocol::ids::{ContentId, SpaceId, ViewId};
@@ -1456,7 +1458,7 @@ async fn sessions_sharing_one_kernel_keep_client_state_independent() {
 }
 
 #[test]
-fn production_content_paths_have_no_dynamic_type_probes() {
+fn production_content_paths_use_closed_static_dispatch() {
     let app = [
         include_str!("application.rs"),
         include_str!("kernel.rs"),
@@ -1487,15 +1489,118 @@ fn production_content_paths_have_no_dynamic_type_probes() {
     for fragment in forbidden {
         assert!(!content_view_state.contains(&fragment), "{fragment}");
     }
-    for concrete_content in ["Buffer", "StatusBar"] {
-        assert!(!content_view_state.contains(concrete_content));
-    }
+    assert!(content_view_state.contains("pub enum ContentViewState"));
+    assert!(content_view_state.contains("Buffer(BufferViewState)"));
+    assert!(content_view_state.contains("StatusBar(StatusBarViewState)"));
+    assert!(!content_view_state.contains("Option<Selections>"));
     assert!(!view.contains("match self.state"));
     assert!(!view.contains("match &mut self.state"));
     for concrete_transaction in ["BufferTransactionData", "TransactionData::Buffer"] {
         assert!(!app.contains(concrete_transaction));
         assert!(!transaction.contains(concrete_transaction));
     }
+}
+
+#[test]
+fn edit_rejects_mismatched_content_view_state_without_mutating_content() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    *app.session.view_mut(view).unwrap().state_mut() = ContentViewState::status_bar();
+
+    let error = app
+        .execute_command(DispatchCommand::ContentWithView {
+            command: ContentCommand::Edit(EditCommand::InsertText("x".to_string())),
+            view,
+            content: editor_cid(),
+        })
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("editable view has no buffer state")
+    );
+    assert_eq!(text_rows(&app, editor_cid()), vec![""]);
+}
+
+#[test]
+fn edit_rolls_back_when_another_view_has_mismatched_state() {
+    let mut app = make_app(vec![], None);
+    let left = app.session.focused();
+    let source = view_id(&app, left);
+    let right = app
+        .split_space(left, editor_cid(), true, SplitDirection::Right, false)
+        .unwrap()
+        .new_space;
+    let incompatible = view_id(&app, right);
+    *app.session.view_mut(incompatible).unwrap().state_mut() = ContentViewState::status_bar();
+    let content_revision = app.kernel.contents().revision(editor_cid());
+    let source_revision = app.session.views()[&source].revision();
+    let source_selections = app.session.views()[&source].selections().unwrap().clone();
+    let history = app.kernel.history_behavior_for_test(editor_cid());
+
+    let error = app
+        .execute_command(DispatchCommand::ContentWithView {
+            command: ContentCommand::Edit(EditCommand::InsertText("x".to_string())),
+            view: source,
+            content: editor_cid(),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("content kind Buffer"));
+    assert_eq!(text_rows(&app, editor_cid()), vec![""]);
+    assert_eq!(
+        app.kernel.contents().revision(editor_cid()),
+        content_revision
+    );
+    assert_eq!(app.session.views()[&source].revision(), source_revision);
+    assert_eq!(
+        app.session.views()[&source].selections(),
+        Some(&source_selections)
+    );
+    assert_eq!(app.kernel.history_behavior_for_test(editor_cid()), history);
+}
+
+#[test]
+fn render_query_rejects_mismatched_content_view_state() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    let status_view = app
+        .session
+        .views()
+        .iter()
+        .find_map(|(id, view)| (view.content() == ContentId(1)).then_some(*id))
+        .unwrap();
+    *app.session.view_mut(view).unwrap().state_mut() = ContentViewState::status_bar();
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+
+    assert_eq!(
+        query.view(view),
+        Err(RenderQueryError::IncompatibleContentViewState {
+            view,
+            content: editor_cid(),
+        })
+    );
+
+    *app.session.view_mut(status_view).unwrap().state_mut() = ContentViewState::buffer();
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+    assert_eq!(
+        query.view(status_view),
+        Err(RenderQueryError::IncompatibleContentViewState {
+            view: status_view,
+            content: ContentId(1),
+        })
+    );
 }
 
 fn text_rows(app: &App<ScriptedFrontend>, content: ContentId) -> Vec<String> {
@@ -1734,7 +1839,7 @@ fn content_query_reads_buffer_and_view() {
         ),
         ContentData::TextRows(vec!["hi".to_string()])
     );
-    let view = query.view(focused_view);
+    let view = query.view(focused_view).unwrap();
     let text = text_presentation(&view);
     assert_eq!(text.selections.primary().head().char_index, 2);
     assert_eq!(text.cursor_style, CursorStyle::Block);
@@ -1823,7 +1928,7 @@ fn recursive_mode_command_chain_stops_at_the_execution_limit() {
         faces: app.session.faces(),
     };
     assert_eq!(
-        text_presentation(&query.view(view)).cursor_style,
+        text_presentation(&query.view(view).unwrap()).cursor_style,
         CursorStyle::Default
     );
 }
@@ -1986,7 +2091,7 @@ async fn failed_capture_output_restores_the_pre_input_mode_state() {
         faces: app.session.faces(),
     };
     assert_eq!(
-        text_presentation(&query.view(view)).cursor_style,
+        text_presentation(&query.view(view).unwrap()).cursor_style,
         CursorStyle::Default
     );
 }
@@ -2019,7 +2124,7 @@ fn failed_timeout_output_restores_the_pre_timeout_mode_state() {
         faces: app.session.faces(),
     };
     assert_eq!(
-        text_presentation(&query.view(view)).cursor_style,
+        text_presentation(&query.view(view).unwrap()).cursor_style,
         CursorStyle::Default
     );
 }
@@ -2087,7 +2192,7 @@ async fn stale_view_presentation_layer_is_not_observed() {
         faces: app.session.faces(),
     };
     assert_eq!(
-        text_presentation(&query.view(view)).cursor_style,
+        text_presentation(&query.view(view).unwrap()).cursor_style,
         CursorStyle::Bar
     );
 
@@ -2099,7 +2204,7 @@ async fn stale_view_presentation_layer_is_not_observed() {
         faces: app.session.faces(),
     };
     assert_eq!(
-        text_presentation(&query.view(view)).cursor_style,
+        text_presentation(&query.view(view).unwrap()).cursor_style,
         CursorStyle::Default
     );
 }
@@ -2120,7 +2225,7 @@ fn status_bar_view_data_has_no_text_selection_or_mode_cursor() {
         faces: app.session.faces(),
     };
 
-    let view = query.view(status_view);
+    let view = query.view(status_view).unwrap();
     assert_eq!(view.presentation, ViewPresentation::StatusBar);
 }
 
@@ -2162,8 +2267,8 @@ async fn two_views_of_one_buffer_keep_independent_mode_instances() {
         faces: app.session.faces(),
     };
     let right_id = view_id(&app, right);
-    let left_view = query.view(left_id);
-    let right_view = query.view(right_id);
+    let left_view = query.view(left_id).unwrap();
+    let right_view = query.view(right_id).unwrap();
     let left_text = text_presentation(&left_view);
     let right_text = text_presentation(&right_view);
 
@@ -2207,7 +2312,7 @@ async fn content_mode_binding_is_shared_and_coexists_with_view_modes() {
         faces: app.session.faces(),
     };
     for space in [left, right] {
-        let view = query.view(view_id(&app, space));
+        let view = query.view(view_id(&app, space)).unwrap();
         assert_eq!(text_presentation(&view).cursor_style, CursorStyle::Block);
     }
 
@@ -2366,7 +2471,7 @@ fn mode_decorations_are_resolved_through_named_faces() {
         faces: app.session.faces(),
     };
 
-    let view_data = query.view(view);
+    let view_data = query.view(view).unwrap();
     let presentation = text_presentation(&view_data);
     let decorations = query.decorations(view, RowRange { start: 0, end: 1 });
 
@@ -5189,6 +5294,33 @@ fn raw_view_mode_content_action_maps_its_source_view() {
             .primary()
             .head(),
         TextOffset::origin()
+    );
+}
+
+#[test]
+fn status_bar_view_content_operation_returns_error_instead_of_panicking() {
+    let mut app = make_app(vec![], None);
+    let status_view = app
+        .session
+        .views()
+        .iter()
+        .find_map(|(id, view)| (view.content() == ContentId(1)).then_some(*id))
+        .unwrap();
+    let change = TextChangeSet::from_edits(0, vec![TextEdit::new(0..0, "x")]).unwrap();
+
+    let error = app
+        .execute_command(DispatchCommand::ModeOperations {
+            operations: vec![view_content(ContentAction::Text(change))],
+            view: status_view,
+            content: ContentId(1),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(
+        error
+            .to_string()
+            .contains("view content operation requires buffer view state")
     );
 }
 

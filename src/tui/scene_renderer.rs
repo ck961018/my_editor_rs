@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 
 use crate::protocol::content_query::{
-    ContentData, ContentQuery, Face, RenderQuery, RowRange, SelectionShape, TextPresentation,
-    ViewData, ViewPresentation,
+    ContentData, ContentQuery, Face, RenderQuery, RenderQueryError, RowRange, SelectionShape,
+    TextPresentation, ViewData, ViewPresentation,
 };
 use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::revision::Revision;
@@ -69,8 +69,9 @@ impl SceneRenderer {
         let views: HashMap<ViewId, ViewData> = resolved
             .items
             .iter()
-            .map(|item| (item.view_id, query.view(item.view_id)))
-            .collect();
+            .map(|item| query.view(item.view_id).map(|view| (item.view_id, view)))
+            .collect::<Result<_, RenderQueryError>>()
+            .map_err(io::Error::other)?;
         canvas.hide_cursor()?;
         // 焦点 viewport 跟随
         let focused_item = resolved.items.iter().find(|item| item.space_id == focused);
@@ -706,8 +707,8 @@ mod tests {
                 }
             }
         }
-        fn view(&self, view: ViewId) -> ViewData {
-            if view == ViewId(1) {
+        fn view(&self, view: ViewId) -> Result<ViewData, RenderQueryError> {
+            Ok(if view == ViewId(1) {
                 status_view(ContentId(1))
             } else {
                 text_view(
@@ -715,7 +716,7 @@ mod tests {
                     self.selections.clone(),
                     CursorStyle::Default,
                 )
-            }
+            })
         }
     }
 
@@ -759,11 +760,12 @@ mod tests {
             }
         }
 
-        fn view(&self, view: ViewId) -> ViewData {
-            self.selections
+        fn view(&self, view: ViewId) -> Result<ViewData, RenderQueryError> {
+            Ok(self
+                .selections
                 .get(&view)
                 .cloned()
-                .unwrap_or_else(|| status_view(ContentId(1)))
+                .unwrap_or_else(|| status_view(ContentId(1))))
         }
     }
 

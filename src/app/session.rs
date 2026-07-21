@@ -20,6 +20,7 @@ use crate::app::scene_model::{
 use crate::app::view::View;
 use crate::core::content::ContentChange;
 use crate::core::content_store::ContentStore;
+use crate::core::content_view_state::ContentViewStateError;
 use crate::protocol::content_query::RowRange;
 use crate::protocol::ids::{ContentId, SpaceId, ViewId};
 use crate::protocol::revision::Revision;
@@ -496,18 +497,16 @@ impl ClientSession {
         content: ContentId,
         except: Option<ViewId>,
         change: &ContentChange,
-    ) {
+    ) -> Result<(), ContentViewStateError> {
         for (view_id, view) in &mut self.views {
             if Some(*view_id) == except || view.content() != content {
                 continue;
             }
-            if contents
-                .transform_view_state(content, view.state_mut(), change)
-                .expect("view content exists")
-            {
+            if contents.transform_view_state(content, view.state_mut(), change)? {
                 view.touch();
             }
         }
+        Ok(())
     }
 
     pub(super) fn notify_mode_content_changed(

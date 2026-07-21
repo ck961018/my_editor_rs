@@ -510,7 +510,11 @@ impl<F: Frontend> App<F> {
                             .session
                             .view(view)
                             .and_then(|view| view.selections())
-                            .expect("editable mode view has selections")
+                            .ok_or_else(|| {
+                                invalid_operation(
+                                    "view content operation requires buffer view state",
+                                )
+                            })?
                             .clone();
                         self.apply_view_edit_plan(
                             ViewEditPlan {
@@ -826,12 +830,12 @@ impl<F: Frontend> App<F> {
             .session
             .view(view)
             .and_then(|view| view.selections())
-            .expect("editable view has selections")
+            .ok_or_else(|| invalid_operation("editable view has no buffer state"))?
             .clone();
         let plan = self
             .kernel
             .plan_edit(content, command, &before)
-            .expect("editable content plans edits");
+            .ok_or_else(|| invalid_operation("content does not support text edits"))?;
         self.apply_view_edit_plan(
             ViewEditPlan {
                 expected: ViewPrecondition::Selections(before),
@@ -856,7 +860,10 @@ impl<F: Frontend> App<F> {
             content: content_action,
             view: view_action,
         } = plan;
-        let target_view = self.session.view(view).expect("target view exists");
+        let target_view = self
+            .session
+            .view(view)
+            .ok_or_else(|| invalid_operation("operation targets missing view"))?;
         let stale = match &expected {
             ViewPrecondition::Selections(expected) => target_view.selections() != Some(expected),
             ViewPrecondition::Revision(expected) => target_view.revision() != *expected,
@@ -869,7 +876,7 @@ impl<F: Frontend> App<F> {
         }
         let before = target_view
             .selections()
-            .expect("editable view has selections")
+            .ok_or_else(|| invalid_operation("editable view has no buffer state"))?
             .clone();
         let Some(action) = content_action else {
             if let Some(action) = view_action {
@@ -899,22 +906,21 @@ impl<F: Frontend> App<F> {
             Some(action) => {
                 self.apply_view_action(view, action, frame)?;
                 if let Some(change) = &outcome.change {
-                    self.session.transform_content_views(
-                        self.kernel.contents(),
-                        content,
-                        Some(view),
-                        change,
-                    );
+                    self.session
+                        .transform_content_views(
+                            self.kernel.contents(),
+                            content,
+                            Some(view),
+                            change,
+                        )
+                        .map_err(invalid_content_view_state)?;
                 }
             }
             None => {
                 if let Some(change) = &outcome.change {
-                    self.session.transform_content_views(
-                        self.kernel.contents(),
-                        content,
-                        None,
-                        change,
-                    );
+                    self.session
+                        .transform_content_views(self.kernel.contents(), content, None, change)
+                        .map_err(invalid_content_view_state)?;
                 }
             }
         }
@@ -926,7 +932,7 @@ impl<F: Frontend> App<F> {
                 .session
                 .view(view)
                 .and_then(|view| view.selections())
-                .expect("editable view has selections")
+                .ok_or_else(|| invalid_operation("editable view lost its buffer state"))?
                 .clone();
             let record = TransactionRecord {
                 target: content,
@@ -980,7 +986,8 @@ impl<F: Frontend> App<F> {
         };
         if let Some(change) = &outcome.change {
             self.session
-                .transform_content_views(self.kernel.contents(), content, None, change);
+                .transform_content_views(self.kernel.contents(), content, None, change)
+                .map_err(invalid_content_view_state)?;
             self.notify_mode_content_changed(content, change, frame);
         }
         if let Some(transaction) = transaction {
@@ -1088,12 +1095,14 @@ impl<F: Frontend> App<F> {
             self.apply_view_action(*view, ViewAction::SetSelections(selections.clone()), frame)?;
         }
         if let Some(change) = &change {
-            self.session.transform_content_views(
-                self.kernel.contents(),
-                record.target,
-                source.as_ref().map(|(view, _)| *view),
-                change,
-            );
+            self.session
+                .transform_content_views(
+                    self.kernel.contents(),
+                    record.target,
+                    source.as_ref().map(|(view, _)| *view),
+                    change,
+                )
+                .map_err(invalid_content_view_state)?;
             self.notify_mode_content_changed(record.target, change, frame);
         }
         Ok(())
@@ -1148,6 +1157,12 @@ impl<F: Frontend> App<F> {
             self.session.focused(),
         )
     }
+}
+
+fn invalid_content_view_state(
+    error: crate::core::content_view_state::ContentViewStateError,
+) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
 fn viewport_cursor_edit(

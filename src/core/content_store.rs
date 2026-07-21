@@ -4,12 +4,12 @@ use std::fmt;
 use crate::core::action::{ContentAction, ContentEditPlan};
 use crate::core::command::EditCommand;
 use crate::core::content::{
-    Content, ContentActionResult, ContentChange, ContentResult, ContentTransaction,
+    Content, ContentActionResult, ContentChange, ContentKind, ContentResult, ContentTransaction,
     ContentTransactionError,
 };
-use crate::core::content_view_state::ContentViewState;
+use crate::core::content_view_state::{ContentViewState, ContentViewStateError};
 use crate::core::transaction::TransactionDirection;
-use crate::protocol::content_query::{ContentData, ContentPresentation, ContentQuery};
+use crate::protocol::content_query::{ContentData, ContentQuery};
 use crate::protocol::ids::ContentId;
 use crate::protocol::revision::Revision;
 use crate::protocol::selection::Selections;
@@ -76,10 +76,8 @@ impl ContentStore {
             .map(|entry| entry.content.create_view_state())
     }
 
-    pub fn presentation(&self, id: ContentId) -> Option<ContentPresentation> {
-        self.entries
-            .get(&id)
-            .map(|entry| entry.content.presentation())
+    pub fn kind(&self, id: ContentId) -> Option<ContentKind> {
+        self.entries.get(&id).map(|entry| entry.content.kind())
     }
 
     pub fn transform_view_state(
@@ -87,10 +85,12 @@ impl ContentStore {
         id: ContentId,
         state: &mut ContentViewState,
         change: &ContentChange,
-    ) -> Option<bool> {
+    ) -> Result<bool, ContentViewStateError> {
         self.entries
             .get(&id)
-            .map(|entry| entry.content.transform_view_state(state, change))
+            .ok_or(ContentViewStateError::MissingContent(id))?
+            .content
+            .transform_view_state(state, change)
     }
 
     pub fn selections_are_valid(&self, id: ContentId, selections: &Selections) -> Option<bool> {
@@ -195,12 +195,10 @@ mod tests {
     use crate::core::action::ContentAction;
     use crate::core::buffer::Buffer;
     use crate::core::command::EditCommand;
-    use crate::core::content::Content;
+    use crate::core::content::{Content, ContentKind};
     use crate::core::status_bar::StatusBar;
     use crate::core::transaction::{TextChangeSet, TextEdit};
-    use crate::protocol::content_query::{
-        ContentData, ContentPresentation, ContentQuery, RowRange, StatusBarData,
-    };
+    use crate::protocol::content_query::{ContentData, ContentQuery, RowRange, StatusBarData};
     use crate::protocol::ids::ContentId;
     use crate::protocol::status::StatusMessage;
 
@@ -366,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn presentation_is_dispatched_by_content() {
+    fn kind_is_dispatched_by_content() {
         let buffer_id = ContentId(4);
         let status_bar_id = ContentId(5);
         let mut store = ContentStore::default();
@@ -377,15 +375,47 @@ mod tests {
             .insert(status_bar_id, Content::StatusBar(StatusBar::new(buffer_id)))
             .unwrap();
 
+        assert_eq!(store.kind(buffer_id), Some(ContentKind::Buffer));
+        assert_eq!(store.kind(status_bar_id), Some(ContentKind::StatusBar));
+        assert_eq!(store.kind(ContentId(99)), None);
+    }
+
+    #[test]
+    fn view_state_transform_rejects_missing_and_mismatched_content() {
+        let buffer = ContentId(4);
+        let status_bar = ContentId(5);
+        let missing = ContentId(6);
+        let mut store = ContentStore::default();
+        store
+            .insert(buffer, Content::Buffer(Buffer::new()))
+            .unwrap();
+        store
+            .insert(status_bar, Content::StatusBar(StatusBar::new(buffer)))
+            .unwrap();
+        let change = ContentChange::Text(
+            TextChangeSet::from_edits(0, vec![TextEdit::new(0..0, "x")]).unwrap(),
+        );
+        let mut buffer_state = ContentViewState::buffer();
+        let mut status_bar_state = ContentViewState::status_bar();
+
         assert_eq!(
-            store.presentation(buffer_id),
-            Some(ContentPresentation::Text)
+            store.transform_view_state(missing, &mut buffer_state, &change),
+            Err(ContentViewStateError::MissingContent(missing))
         );
         assert_eq!(
-            store.presentation(status_bar_id),
-            Some(ContentPresentation::StatusBar)
+            store.transform_view_state(buffer, &mut status_bar_state, &change),
+            Err(ContentViewStateError::KindMismatch {
+                content: ContentKind::Buffer,
+                state: ContentKind::StatusBar,
+            })
         );
-        assert_eq!(store.presentation(ContentId(99)), None);
+        assert_eq!(
+            store.transform_view_state(status_bar, &mut buffer_state, &change),
+            Err(ContentViewStateError::KindMismatch {
+                content: ContentKind::StatusBar,
+                state: ContentKind::Buffer,
+            })
+        );
     }
 
     #[test]

@@ -3,9 +3,11 @@ use std::collections::HashMap;
 use crate::app::mode::FaceRegistry;
 use crate::app::presentation::PresentationLayerStore;
 use crate::app::view::View;
+use crate::core::content::ContentKind;
 use crate::core::content_store::ContentStore;
+use crate::core::content_view_state::ContentViewState;
 use crate::protocol::content_query::{
-    ContentData, ContentPresentation, ContentQuery, CursorStyle, RenderQuery, RowRange,
+    ContentData, ContentQuery, CursorStyle, RenderQuery, RenderQueryError, RowRange,
     SelectionShape, TextDecoration, TextPresentation, ViewData, ViewPresentation,
 };
 use crate::protocol::ids::{ContentId, ViewId};
@@ -22,27 +24,27 @@ impl RenderQuery for AppQuery<'_> {
         self.contents.query(cid, query)
     }
 
-    fn view(&self, id: ViewId) -> ViewData {
-        let view = self.views.get(&id).expect("scene references existing view");
+    fn view(&self, id: ViewId) -> Result<ViewData, RenderQueryError> {
+        let view = self
+            .views
+            .get(&id)
+            .ok_or(RenderQueryError::MissingView(id))?;
         let content = view.content();
-        let presentation = match self
+        let content_kind = self
             .contents
-            .presentation(content)
-            .expect("view references existing content")
-        {
-            ContentPresentation::Text => {
-                let selections = view
-                    .selections()
-                    .expect("text content creates selection-backed view state");
+            .kind(content)
+            .ok_or(RenderQueryError::MissingContent(content))?;
+        let presentation = match (content_kind, view.state()) {
+            (ContentKind::Buffer, ContentViewState::Buffer(state)) => {
                 let content_revision = self
                     .contents
                     .revision(content)
-                    .expect("view references existing content");
+                    .ok_or(RenderQueryError::MissingContent(content))?;
                 let policy = self
                     .presentation
                     .policy(id, content_revision, view.revision());
                 ViewPresentation::Text(TextPresentation {
-                    selections: selections.clone(),
+                    selections: state.selections().clone(),
                     cursor_style: policy.cursor_style.unwrap_or(CursorStyle::Default),
                     selection_shape: policy.selection_shape.unwrap_or(SelectionShape::Character),
                     selection_face: policy
@@ -52,15 +54,16 @@ impl RenderQuery for AppQuery<'_> {
                         .unwrap_or_default(),
                 })
             }
-            ContentPresentation::StatusBar => {
-                debug_assert!(view.selections().is_none());
-                ViewPresentation::StatusBar
+            (ContentKind::StatusBar, ContentViewState::StatusBar(_)) => ViewPresentation::StatusBar,
+            (ContentKind::Buffer, ContentViewState::StatusBar(_))
+            | (ContentKind::StatusBar, ContentViewState::Buffer(_)) => {
+                return Err(RenderQueryError::IncompatibleContentViewState { view: id, content });
             }
         };
-        ViewData {
+        Ok(ViewData {
             content,
             presentation,
-        }
+        })
     }
 
     fn decorations(&self, id: ViewId, visible_rows: RowRange) -> Vec<TextDecoration> {
