@@ -49,7 +49,9 @@ fn define_mode(
                 let mut diagnostics = diagnostics.borrow_mut();
                 if !diagnostics.v1_deprecation_reported {
                     diagnostics.v1_deprecation_reported = true;
-                    diagnostics.messages.push(V1_DEPRECATION.to_owned());
+                    diagnostics
+                        .messages
+                        .push(ScriptDiagnostic::v1_deprecation());
                 }
             }
             definitions.borrow_mut().push(definition);

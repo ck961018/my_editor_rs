@@ -8,6 +8,7 @@
   "files": [
     "../plugins/tree-sitter/plugin.ts",
     "../plugins/vim/plugin.ts",
+    "../examples/v1-migration.ts",
     "v2-mode.ts"
   ]
 }

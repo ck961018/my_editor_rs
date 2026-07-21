@@ -17,7 +17,26 @@ deprecated fallbacks through version 0.1.x. Modeleaf emits one migration
 warning when it uses either fallback; they will be removed in 0.2.0.
 
 Use [editor.d.ts](../runtime/editor.d.ts) for editor and TypeScript tooling.
-The runtime transpiles TypeScript but does not type-check it.
+It is the canonical public schema and is embedded in `modeleaf-plugin-v8` as
+`TYPESCRIPT_DECLARATIONS`. CI type-checks the bundled plugins and migration
+examples against it. The runtime transpiles TypeScript but does not type-check
+it.
+
+Rust tests and headless tools can compile and load a source string without a
+terminal:
+
+```rust
+let loaded = modeleaf_plugin_v8::load_typescript_modes(
+    "file:///test.ts",
+    source,
+)?;
+assert!(loaded.diagnostics.is_empty());
+let modes = loaded.modes;
+```
+
+The result exposes only generic `Mode` objects and structured diagnostics;
+V8 types do not cross the crate boundary. `PLUGIN_API_VERSION` identifies the
+current schema version.
 
 ## Defining a mode
 
@@ -197,7 +216,15 @@ Migration is mechanical for ordinary Buffer Modes:
 - replace `forward()` with `pass()` and remove `handled()` returns.
 
 The bundled Vim and Tree-sitter plugins use v2 and therefore do not exercise
-the compatibility parser. v1 removal is a separate release decision.
+the compatibility parser. The
+[checked migration example](../runtime/examples/v1-migration.ts) is compiled
+by TypeScript and executed by the Rust host test.
+
+v1 is deprecated in 0.1.x, remains available with one structured warning in
+0.2.x, and will be removed in 0.3.0. Removal requires the checked migration
+example and all bundled plugins to remain on v2. The public
+`V1_REMOVAL_VERSION` constant and contract test keep the warning, declaration,
+and release policy aligned.
 
 ## Modules and trust boundary
 

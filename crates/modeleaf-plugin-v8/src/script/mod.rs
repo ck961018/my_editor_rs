@@ -9,6 +9,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
+use crate::api::{LoadedScriptModes, ScriptDiagnostic};
 use modeleaf_core::content::ContentKind;
 use modeleaf_core::keymap::Keymap;
 use modeleaf_mode::command::{Command, ModeCommand, ModeValue};
@@ -48,8 +49,6 @@ use worker::ScriptWorker;
 
 static V8_INIT: Once = Once::new();
 static LEGACY_CONFIG_WARNING: Once = Once::new();
-const V1_DEPRECATION: &str =
-    "TypeScript Mode v1 is deprecated; migrate to the on.buffer adapter schema";
 const V2_INPUT_ACTION: &str = "$input";
 const SCRIPT_CALLBACK_TIMEOUT: Duration = Duration::from_secs(2);
 const SCRIPT_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -140,7 +139,7 @@ enum ScriptApiVersion {
 
 #[derive(Clone, Default)]
 struct ScriptDiagnostics {
-    messages: Vec<String>,
+    messages: Vec<ScriptDiagnostic>,
     v1_deprecation_reported: bool,
 }
 
@@ -1094,7 +1093,7 @@ fn load_user_config() -> Result<Rc<RefCell<ScriptHost>>, ScriptError> {
 
     host.borrow_mut().execute_module(&path)?;
     for diagnostic in host.borrow_mut().take_diagnostics() {
-        eprintln!("warning: {diagnostic}");
+        eprintln!("warning: {}", diagnostic.message);
     }
     Ok(host)
 }
@@ -1113,6 +1112,21 @@ pub fn load_user_modes() -> Result<Vec<Box<dyn Mode>>, ScriptError> {
         .into_iter()
         .map(|mode| Box::new(mode) as Box<dyn Mode>)
         .collect())
+}
+
+pub fn load_typescript_modes(
+    specifier: &str,
+    source: &str,
+) -> Result<LoadedScriptModes, ScriptError> {
+    let mut host = ScriptHost::new();
+    host.execute_typescript(specifier, source)?;
+    let diagnostics = host.take_diagnostics();
+    let host = Rc::new(RefCell::new(host));
+    let modes = ScriptHost::script_modes(&host)
+        .into_iter()
+        .map(|mode| Box::new(mode) as Box<dyn Mode>)
+        .collect();
+    Ok(LoadedScriptModes { modes, diagnostics })
 }
 
 fn resolve_config_path(
@@ -2457,7 +2471,10 @@ editor.modes.define({ name: "legacy-two", actions: {} });
         )
         .unwrap();
 
-        assert_eq!(host.take_diagnostics(), vec![V1_DEPRECATION]);
+        assert_eq!(
+            host.take_diagnostics(),
+            vec![ScriptDiagnostic::v1_deprecation()]
+        );
         assert!(host.take_diagnostics().is_empty());
 
         host.execute_typescript(
@@ -2473,6 +2490,32 @@ editor.modes.define({ name: "legacy-two", actions: {} });
         )
         .unwrap();
         assert!(host.take_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn public_contract_executes_the_checked_v1_migration_example() {
+        let source = include_str!("../../../../runtime/examples/v1-migration.ts");
+        let loaded = load_typescript_modes("file:///v1-migration.ts", source).unwrap();
+        let names = loaded
+            .modes
+            .iter()
+            .map(|mode| mode.name().as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["migration-v1", "migration-v2"]);
+        assert_eq!(loaded.diagnostics, vec![ScriptDiagnostic::v1_deprecation()]);
+        assert_eq!(crate::PLUGIN_API_VERSION, 2);
+        assert_eq!(crate::V1_REMOVAL_VERSION, "0.3.0");
+        assert!(
+            loaded.diagnostics[0]
+                .message
+                .contains(crate::V1_REMOVAL_VERSION)
+        );
+        assert!(crate::TYPESCRIPT_DECLARATIONS.contains("interface ModeDefinitionV2"));
+        assert!(crate::TYPESCRIPT_DECLARATIONS.contains(&format!(
+            "@deprecated Removed in Modeleaf {}",
+            crate::V1_REMOVAL_VERSION
+        )));
     }
 
     #[test]

@@ -385,6 +385,7 @@ interface ContentJob {
   message: ScriptData;
 }
 
+/** @deprecated Removed in Modeleaf 0.3.0. Use ModeDefinitionV2. */
 interface ModeDefinition<
   ContentState,
   ViewState,
@@ -437,6 +438,7 @@ declare const editor: {
         StatusBarViewState
       >,
     ): void;
+    /** @deprecated Removed in Modeleaf 0.3.0. Use the `on` adapter schema. */
     define<ContentState, ViewState, WorkerResponse = ScriptData>(
       definition: ModeDefinition<ContentState, ViewState, WorkerResponse>,
     ): void;

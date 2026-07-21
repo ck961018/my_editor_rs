@@ -207,7 +207,7 @@ impl ScriptHost {
             .collect()
     }
 
-    pub(crate) fn take_diagnostics(&mut self) -> Vec<String> {
+    pub(crate) fn take_diagnostics(&mut self) -> Vec<ScriptDiagnostic> {
         std::mem::take(&mut self.diagnostics.borrow_mut().messages)
     }
 
