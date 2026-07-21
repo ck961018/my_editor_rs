@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 
 use crate::protocol::content_query::{
-    ContentData, ContentQuery, Face, RenderQuery, RenderQueryError, RowRange, SelectionShape,
-    TextPresentation, ViewData, ViewPresentation,
+    ContentData, ContentQuery, ContentQueryKind, Face, RenderQuery, RenderQueryError, RowRange,
+    SelectionShape, StatusBarData, TextPresentation, ViewData, ViewPresentation,
 };
 use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::revision::Revision;
@@ -82,17 +82,22 @@ impl SceneRenderer {
             ViewPresentation::Text(text) => Some(text),
             ViewPresentation::StatusBar => None,
         };
-        let focused_head = focused_text.map(|text| {
-            text_point(
-                query,
-                focused_view.content,
-                text.selections.primary().head(),
-            )
-        });
-        let focused_display_col = focused_head.map(|head| {
-            let line = text_row(query, focused_view.content, head.row);
-            display_width_before_col(&line, head.col)
-        });
+        let focused_head = focused_text
+            .map(|text| {
+                text_point(
+                    query,
+                    focused_view.content,
+                    text.selections.primary().head(),
+                )
+            })
+            .transpose()?;
+        let focused_display_col = match focused_head {
+            Some(head) => {
+                let line = text_row(query, focused_view.content, head.row)?;
+                Some(display_width_before_col(&line, head.col))
+            }
+            None => None,
+        };
         if let (Some(item), Some(focused_head), Some(focused_display_col)) =
             (focused_item, focused_head, focused_display_col)
         {
@@ -199,17 +204,16 @@ fn text_row(
     query: &dyn RenderQuery,
     content: crate::protocol::ids::ContentId,
     row: usize,
-) -> String {
-    let ContentData::TextRows(lines) = query.content(
+) -> io::Result<String> {
+    let lines = text_rows(
+        query,
         content,
-        ContentQuery::TextRows(RowRange {
+        RowRange {
             start: row,
             end: row.saturating_add(1),
-        }),
-    ) else {
-        panic!("text presentation must answer TextRows")
-    };
-    lines.into_iter().next().unwrap_or_default()
+        },
+    )?;
+    Ok(lines.into_iter().next().unwrap_or_default())
 }
 
 impl Default for SceneRenderer {
@@ -222,14 +226,60 @@ fn text_point(
     query: &dyn RenderQuery,
     content: crate::protocol::ids::ContentId,
     offset: TextOffset,
-) -> TextPoint {
-    let ContentData::TextPoints(mut points) =
-        query.content(content, ContentQuery::TextPoints(vec![offset]))
-    else {
-        panic!("text presentation must answer TextPoints")
-    };
-    assert_eq!(points.len(), 1, "one offset must produce one text point");
-    points.remove(0)
+) -> io::Result<TextPoint> {
+    let mut points = text_points(query, content, vec![offset])?;
+    if points.len() != 1 {
+        return Err(invalid_content_data(content, ContentQueryKind::TextPoints));
+    }
+    Ok(points.remove(0))
+}
+
+fn text_rows(
+    query: &dyn RenderQuery,
+    content: crate::protocol::ids::ContentId,
+    rows: RowRange,
+) -> io::Result<Vec<String>> {
+    match query
+        .content(content, ContentQuery::TextRows(rows))
+        .map_err(io::Error::other)?
+    {
+        ContentData::TextRows(lines) => Ok(lines),
+        _ => Err(invalid_content_data(content, ContentQueryKind::TextRows)),
+    }
+}
+
+fn text_points(
+    query: &dyn RenderQuery,
+    content: crate::protocol::ids::ContentId,
+    offsets: Vec<TextOffset>,
+) -> io::Result<Vec<TextPoint>> {
+    match query
+        .content(content, ContentQuery::TextPoints(offsets))
+        .map_err(io::Error::other)?
+    {
+        ContentData::TextPoints(points) => Ok(points),
+        _ => Err(invalid_content_data(content, ContentQueryKind::TextPoints)),
+    }
+}
+
+fn status_bar_data(
+    query: &dyn RenderQuery,
+    content: crate::protocol::ids::ContentId,
+) -> io::Result<StatusBarData> {
+    match query
+        .content(content, ContentQuery::StatusBarData)
+        .map_err(io::Error::other)?
+    {
+        ContentData::StatusBarData(data) => Ok(data),
+        _ => Err(invalid_content_data(content, ContentQueryKind::StatusBarData)),
+    }
+}
+
+fn invalid_content_data(
+    content: crate::protocol::ids::ContentId,
+    query: ContentQueryKind,
+) -> io::Error {
+    io::Error::other(RenderQueryError::InvalidContentData { content, query })
 }
 
 fn follow_viewport(
@@ -291,15 +341,14 @@ fn paint_text_item(
     let height = item.rect.height as usize;
     let width = item.rect.width as usize;
     let start = vp.top_row;
-    let ContentData::TextRows(lines) = query.content(
+    let lines = text_rows(
+        query,
         content,
-        ContentQuery::TextRows(RowRange {
+        RowRange {
             start,
             end: start + height,
-        }),
-    ) else {
-        panic!("text presentation must answer TextRows")
-    };
+        },
+    )?;
     let primary = text.selections.primary();
     let selection_offsets = match text.selection_shape {
         SelectionShape::Character => (primary.anchor != primary.head).then_some({
@@ -318,22 +367,25 @@ fn paint_text_item(
         }
         SelectionShape::Line => Some((primary.anchor, primary.head)),
     };
-    let selection = selection_offsets.map(|(start, end)| {
-        let ContentData::TextPoints(points) =
-            query.content(content, ContentQuery::TextPoints(vec![start, end]))
-        else {
-            panic!("text presentation must answer TextPoints")
-        };
-        assert_eq!(points.len(), 2, "two offsets must produce two text points");
-        (points[0], points[1])
-    });
-    let text_decorations = query.decorations(
-        vid,
-        RowRange {
-            start,
-            end: start + height,
-        },
-    );
+    let selection = match selection_offsets {
+        Some((start, end)) => {
+            let points = text_points(query, content, vec![start, end])?;
+            if points.len() != 2 {
+                return Err(invalid_content_data(content, ContentQueryKind::TextPoints));
+            }
+            Some((points[0], points[1]))
+        }
+        None => None,
+    };
+    let text_decorations = query
+        .decorations(
+            vid,
+            RowRange {
+                start,
+                end: start + height,
+            },
+        )
+        .map_err(io::Error::other)?;
     let decoration_offsets: Vec<_> = text_decorations
         .iter()
         .flat_map(|decoration| [decoration.start, decoration.end])
@@ -341,11 +393,11 @@ fn paint_text_item(
     let decoration_points = if decoration_offsets.is_empty() {
         Vec::new()
     } else {
-        let ContentData::TextPoints(points) =
-            query.content(content, ContentQuery::TextPoints(decoration_offsets))
-        else {
-            panic!("text presentation must answer TextPoints")
-        };
+        let expected = decoration_offsets.len();
+        let points = text_points(query, content, decoration_offsets)?;
+        if points.len() != expected {
+            return Err(invalid_content_data(content, ContentQueryKind::TextPoints));
+        }
         points
     };
     let decorations: Vec<_> = text_decorations
@@ -441,10 +493,7 @@ fn paint_status_bar(
     content: crate::protocol::ids::ContentId,
     canvas: &mut dyn Canvas,
 ) -> io::Result<()> {
-    let ContentData::StatusBarData(data) = query.content(content, ContentQuery::StatusBarData)
-    else {
-        panic!("status bar presentation must answer StatusBarData")
-    };
+    let data = status_bar_data(query, content)?;
     let width = item.rect.width.max(0) as usize;
     clear_item_row(canvas, item.rect.y as usize, item.rect.x as usize, width)?;
     let line = sanitize_terminal_text(&status_line(
@@ -674,13 +723,17 @@ mod tests {
         selections: Selections,
     }
     impl RenderQuery for StubQuery {
-        fn content(&self, cid: ContentId, query: ContentQuery) -> ContentData {
+        fn content(
+            &self,
+            cid: ContentId,
+            query: ContentQuery,
+        ) -> Result<ContentData, RenderQueryError> {
             let status = StatusBarData {
                 file_name: Some("f.txt".to_string()),
                 modified: false,
                 message: StatusMessage::None,
             };
-            match query {
+            Ok(match query {
                 ContentQuery::TextRows(range) => {
                     assert_eq!(cid, self.editor_cid, "only editor content has lines");
                     ContentData::TextRows(
@@ -705,7 +758,7 @@ mod tests {
                     );
                     ContentData::StatusBarData(status)
                 }
-            }
+            })
         }
         fn view(&self, view: ViewId) -> Result<ViewData, RenderQueryError> {
             Ok(if view == ViewId(1) {
@@ -725,14 +778,38 @@ mod tests {
         selections: HashMap<ViewId, ViewData>,
     }
 
+    struct InvalidContentQuery;
+
+    impl RenderQuery for InvalidContentQuery {
+        fn content(
+            &self,
+            content: ContentId,
+            _query: ContentQuery,
+        ) -> Result<ContentData, RenderQueryError> {
+            if content == ContentId(7) {
+                Ok(ContentData::Unsupported)
+            } else {
+                Err(RenderQueryError::MissingContent(content))
+            }
+        }
+
+        fn view(&self, view: ViewId) -> Result<ViewData, RenderQueryError> {
+            Err(RenderQueryError::MissingView(view))
+        }
+    }
+
     impl RenderQuery for MultiSpaceQuery {
-        fn content(&self, cid: ContentId, query: ContentQuery) -> ContentData {
+        fn content(
+            &self,
+            cid: ContentId,
+            query: ContentQuery,
+        ) -> Result<ContentData, RenderQueryError> {
             let status = StatusBarData {
                 file_name: None,
                 modified: false,
                 message: StatusMessage::None,
             };
-            match query {
+            Ok(match query {
                 ContentQuery::TextRows(range) => {
                     assert_eq!(cid, ContentId(0));
                     ContentData::TextRows(
@@ -757,7 +834,7 @@ mod tests {
                     );
                     ContentData::StatusBarData(status)
                 }
-            }
+            })
         }
 
         fn view(&self, view: ViewId) -> Result<ViewData, RenderQueryError> {
@@ -767,6 +844,32 @@ mod tests {
                 .cloned()
                 .unwrap_or_else(|| status_view(ContentId(1))))
         }
+    }
+
+    #[test]
+    fn content_query_failures_return_render_errors() {
+        let content = ContentId(7);
+
+        let error = text_point(&InvalidContentQuery, content, TextOffset::origin()).unwrap_err();
+
+        assert_eq!(
+            error
+                .get_ref()
+                .and_then(|error| error.downcast_ref::<RenderQueryError>()),
+            Some(&RenderQueryError::InvalidContentData {
+                content,
+                query: ContentQueryKind::TextPoints,
+            })
+        );
+
+        let missing = ContentId(8);
+        let error = text_row(&InvalidContentQuery, missing, 0).unwrap_err();
+        assert_eq!(
+            error
+                .get_ref()
+                .and_then(|error| error.downcast_ref::<RenderQueryError>()),
+            Some(&RenderQueryError::MissingContent(missing))
+        );
     }
 
     #[test]

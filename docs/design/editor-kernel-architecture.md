@@ -130,8 +130,11 @@ change 映射到绑定同一 Content 的全部 View。
 读取稳定快照，不经过同步全文查询。`StatusBar` 显式声明目标 Content 的
 `DocumentStatus` 依赖，Store 负责协调查询和有效 revision。Content 还声明
 `ContentKind`；`AppQuery` 穷尽匹配 `(ContentKind, ContentViewState)` 组装
-`ViewPresentation`。种类错配返回 `RenderQueryError`，不通过 selection
-是否存在猜测 Content 类型，也不在渲染路径 panic。
+`ViewPresentation`。`RenderQuery` 的 content、view 和
+decoration 查询都返回 `Result`；缺失 ID、不支持的查询、错误的
+数据变体和种类错配统一返回 `RenderQueryError`。渲染路径不
+通过 selection 是否存在猜测 Content 类型，也不因查询契约错误
+而 panic。
 
 ### 5.2 View
 

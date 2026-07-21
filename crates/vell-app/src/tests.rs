@@ -39,9 +39,9 @@ use vell_core::transaction::{TextChangeSet, TextEdit};
 use vell_frontend::Frontend;
 use vell_plugin_v8::ScriptHost;
 use vell_protocol::content_query::{
-    Color, ContentData, ContentQuery, CursorStyle, DocumentStatus, Face, FaceName,
-    NamedTextDecoration, RenderQuery, RenderQueryError, RowRange, TextPresentation, ViewData,
-    ViewPresentation,
+    Color, ContentData, ContentQuery, ContentQueryKind, CursorStyle, DocumentStatus, Face,
+    FaceName, NamedTextDecoration, RenderQuery, RenderQueryError, RowRange, TextPresentation,
+    ViewData, ViewPresentation,
 };
 use vell_protocol::frontend_event::{FrontendEvent, ResizeEvent};
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
@@ -1598,7 +1598,9 @@ editor.modes.define({
         presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
-    let decorations = query.decorations(view, RowRange { start: 0, end: 1 });
+    let decorations = query
+        .decorations(view, RowRange { start: 0, end: 1 })
+        .unwrap();
     assert_eq!(decorations.len(), 1, "{decorations:#?}");
     assert_eq!(decorations[0].face.foreground, Some(Color::Ansi(2)));
 }
@@ -1627,7 +1629,9 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
         presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
-    let decorations = query.decorations(view, RowRange { start: 0, end: 1 });
+    let decorations = query
+        .decorations(view, RowRange { start: 0, end: 1 })
+        .unwrap();
     assert!(decorations.iter().any(|decoration| {
         decoration.start.char_index == 0
             && decoration.end.char_index == 2
@@ -1648,7 +1652,9 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
         presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
-    let decorations = query.decorations(view, RowRange { start: 0, end: 2 });
+    let decorations = query
+        .decorations(view, RowRange { start: 0, end: 2 })
+        .unwrap();
     assert!(!decorations.iter().any(|decoration| {
         decoration.start.char_index == 0
             && decoration.end.char_index == 2
@@ -1676,7 +1682,9 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
         presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
-    let decorations = query.decorations(view, RowRange { start: 0, end: 1 });
+    let decorations = query
+        .decorations(view, RowRange { start: 0, end: 1 })
+        .unwrap();
     assert!(
         decorations.iter().any(|decoration| {
             decoration.start.char_index == 0
@@ -1719,7 +1727,9 @@ async fn markdown_and_fenced_rust_are_highlighted() {
         presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
-    let decorations = query.decorations(view, RowRange { start: 0, end: 6 });
+    let decorations = query
+        .decorations(view, RowRange { start: 0, end: 6 })
+        .unwrap();
     assert!(decorations.iter().any(|decoration| {
         decoration.start.char_index == 0
             && decoration.end.char_index == "# Heading".len()
@@ -1794,7 +1804,9 @@ async fn rust_highlighting_survives_crlf_comment_edits() {
         presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
-    let decorations = query.decorations(view, RowRange { start: 0, end: 2 });
+    let decorations = query
+        .decorations(view, RowRange { start: 0, end: 2 })
+        .unwrap();
     assert!(
         decorations.iter().any(|decoration| {
             decoration.start.char_index == 0
@@ -2276,13 +2288,32 @@ fn content_query_reads_buffer_and_view() {
         query.content(
             editor_cid(),
             ContentQuery::TextRows(RowRange { start: 0, end: 5 })
-        ),
+        )
+        .unwrap(),
         ContentData::TextRows(vec!["hi".to_string()])
     );
     let view = query.view(focused_view).unwrap();
     let text = text_presentation(&view);
     assert_eq!(text.selections.primary().head().char_index, 2);
     assert_eq!(text.cursor_style, CursorStyle::Block);
+    assert_eq!(
+        query.content(editor_cid(), ContentQuery::StatusBarData),
+        Err(RenderQueryError::UnsupportedContentQuery {
+            content: editor_cid(),
+            query: ContentQueryKind::StatusBarData,
+        })
+    );
+    assert_eq!(
+        query.content(
+            ContentId(99),
+            ContentQuery::TextRows(RowRange { start: 0, end: 1 }),
+        ),
+        Err(RenderQueryError::MissingContent(ContentId(99)))
+    );
+    assert_eq!(
+        query.decorations(ViewId(99), RowRange { start: 0, end: 1 }),
+        Err(RenderQueryError::MissingView(ViewId(99)))
+    );
 }
 
 #[test]
@@ -3285,7 +3316,9 @@ fn mode_decorations_are_resolved_through_named_faces() {
 
     let view_data = query.view(view).unwrap();
     let presentation = text_presentation(&view_data);
-    let decorations = query.decorations(view, RowRange { start: 0, end: 1 });
+    let decorations = query
+        .decorations(view, RowRange { start: 0, end: 1 })
+        .unwrap();
 
     assert_eq!(decorations.len(), 1);
     assert_eq!(
@@ -3448,7 +3481,10 @@ fn passive_mode_failure_does_not_rollback_text_and_suspends_presentation() {
             faces: app.session.faces(),
         };
         assert_eq!(
-            query.decorations(view, RowRange { start: 0, end: 1 }).len(),
+            query
+                .decorations(view, RowRange { start: 0, end: 1 })
+                .unwrap()
+                .len(),
             1
         );
     }
@@ -3470,6 +3506,7 @@ fn passive_mode_failure_does_not_rollback_text_and_suspends_presentation() {
     assert!(
         query
             .decorations(view, RowRange { start: 0, end: 1 })
+            .unwrap()
             .is_empty()
     );
 }
@@ -3510,6 +3547,7 @@ fn mode_factory_failures_suspend_only_the_failed_attachments() {
     assert!(
         query
             .decorations(view, RowRange { start: 0, end: 1 })
+            .unwrap()
             .is_empty()
     );
 }

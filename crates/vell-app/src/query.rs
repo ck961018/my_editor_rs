@@ -7,8 +7,8 @@ use vell_core::content::ContentKind;
 use vell_core::content_store::ContentStore;
 use vell_core::content_view_state::ContentViewState;
 use vell_protocol::content_query::{
-    ContentData, ContentQuery, CursorStyle, RenderQuery, RenderQueryError, RowRange,
-    SelectionShape, TextDecoration, TextPresentation, ViewData, ViewPresentation,
+    ContentData, ContentQuery, ContentQueryKind, CursorStyle, RenderQuery, RenderQueryError,
+    RowRange, SelectionShape, TextDecoration, TextPresentation, ViewData, ViewPresentation,
 };
 use vell_protocol::ids::{ContentId, ViewId};
 
@@ -20,8 +20,22 @@ pub(super) struct AppQuery<'a> {
 }
 
 impl RenderQuery for AppQuery<'_> {
-    fn content(&self, cid: ContentId, query: ContentQuery) -> ContentData {
-        self.contents.query(cid, query)
+    fn content(
+        &self,
+        cid: ContentId,
+        query: ContentQuery,
+    ) -> Result<ContentData, RenderQueryError> {
+        if !self.contents.contains(cid) {
+            return Err(RenderQueryError::MissingContent(cid));
+        }
+        let query_kind = query.kind();
+        match self.contents.query(cid, query) {
+            ContentData::Unsupported => Err(RenderQueryError::UnsupportedContentQuery {
+                content: cid,
+                query: query_kind,
+            }),
+            data => Ok(data),
+        }
     }
 
     fn view(&self, id: ViewId) -> Result<ViewData, RenderQueryError> {
@@ -66,18 +80,43 @@ impl RenderQuery for AppQuery<'_> {
         })
     }
 
-    fn decorations(&self, id: ViewId, visible_rows: RowRange) -> Vec<TextDecoration> {
-        let Some(view) = self.views.get(&id) else {
-            return Vec::new();
-        };
+    fn decorations(
+        &self,
+        id: ViewId,
+        visible_rows: RowRange,
+    ) -> Result<Vec<TextDecoration>, RenderQueryError> {
+        let view = self
+            .views
+            .get(&id)
+            .ok_or(RenderQueryError::MissingView(id))?;
         let content = view.content();
-        let Some(content_revision) = self.contents.revision(content) else {
-            return Vec::new();
-        };
-        let Some(snapshot) = self.contents.text_snapshot(content) else {
-            return Vec::new();
-        };
-        self.presentation
+        let content_kind = self
+            .contents
+            .kind(content)
+            .ok_or(RenderQueryError::MissingContent(content))?;
+        match (content_kind, view.state()) {
+            (ContentKind::StatusBar, ContentViewState::StatusBar(_)) => return Ok(Vec::new()),
+            (ContentKind::Buffer, ContentViewState::Buffer(_)) => {}
+            (ContentKind::Buffer, ContentViewState::StatusBar(_))
+            | (ContentKind::StatusBar, ContentViewState::Buffer(_)) => {
+                return Err(RenderQueryError::IncompatibleContentViewState {
+                    view: id,
+                    content,
+                });
+            }
+        }
+        let content_revision = self
+            .contents
+            .revision(content)
+            .ok_or(RenderQueryError::MissingContent(content))?;
+        let snapshot = self.contents.text_snapshot(content).ok_or(
+            RenderQueryError::InvalidContentData {
+                content,
+                query: ContentQueryKind::TextRows,
+            },
+        )?;
+        Ok(self
+            .presentation
             .decorations(
                 id,
                 content_revision,
@@ -91,6 +130,6 @@ impl RenderQuery for AppQuery<'_> {
                 end: decoration.end,
                 face: self.faces.resolve(&decoration.face),
             })
-            .collect()
+            .collect())
     }
 }

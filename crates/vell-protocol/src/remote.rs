@@ -50,6 +50,7 @@ pub enum ProtocolErrorCode {
     UnknownContent,
     UnsupportedQuery,
     InvalidViewState,
+    InvalidContentData,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

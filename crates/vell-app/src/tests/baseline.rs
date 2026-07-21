@@ -187,7 +187,7 @@ editor.modes.define({
     let started = Instant::now();
     let mut visible_decorations = 0;
     for _ in 0..PRESENTATION_ITERATIONS {
-        visible_decorations += query.decorations(view, visible_rows).len();
+        visible_decorations += query.decorations(view, visible_rows).unwrap().len();
     }
     assert_eq!(visible_decorations, PRESENTATION_ITERATIONS * 50);
     report(

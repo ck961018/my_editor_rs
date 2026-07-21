@@ -1,6 +1,6 @@
 #![allow(dead_code)] // The local adapter is exercised by tests until a remote frontend is wired.
 
-use vell_protocol::content_query::{ContentData, RenderQuery};
+use vell_protocol::content_query::{RenderQuery, RenderQueryError};
 use vell_protocol::remote::{
     ProtocolError, ProtocolErrorCode, Request, RequestData, Response, ResponseData,
 };
@@ -29,17 +29,14 @@ pub(super) fn respond(query: &AppQuery<'_>, request: Request) -> Response {
             content,
             query: content_query,
         } => match query.contents.revision(content) {
-            Some(revision) => match query.content(content, content_query) {
-                ContentData::Unsupported => Err(ProtocolError::new(
-                    ProtocolErrorCode::UnsupportedQuery,
-                    format!("content {} does not support the query", content.0),
-                )),
-                data => Ok(ResponseData::Content {
+            Some(revision) => query
+                .content(content, content_query)
+                .map(|data| ResponseData::Content {
                     content,
                     revision,
                     data,
-                }),
-            },
+                })
+                .map_err(content_query_protocol_error),
             None => Err(ProtocolError::new(
                 ProtocolErrorCode::UnknownContent,
                 format!("unknown content {}", content.0),
@@ -53,6 +50,19 @@ pub(super) fn respond(query: &AppQuery<'_>, request: Request) -> Response {
     }
 }
 
+fn content_query_protocol_error(error: RenderQueryError) -> ProtocolError {
+    let code = match error {
+        RenderQueryError::MissingContent(_) => ProtocolErrorCode::UnknownContent,
+        RenderQueryError::UnsupportedContentQuery { .. } => ProtocolErrorCode::UnsupportedQuery,
+        RenderQueryError::InvalidContentData { .. }
+        | RenderQueryError::MissingView(_)
+        | RenderQueryError::IncompatibleContentViewState { .. } => {
+            ProtocolErrorCode::InvalidContentData
+        }
+    };
+    ProtocolError::new(code, error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -62,7 +72,7 @@ mod tests {
     use vell_core::buffer::Buffer;
     use vell_core::content::Content;
     use vell_core::content_store::ContentStore;
-    use vell_protocol::content_query::{ContentQuery, RowRange, ViewPresentation};
+    use vell_protocol::content_query::{ContentData, ContentQuery, RowRange, ViewPresentation};
     use vell_protocol::ids::{ContentId, ViewId};
     use vell_protocol::remote::RequestId;
     use vell_protocol::revision::Revision;
