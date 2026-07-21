@@ -2,9 +2,9 @@
 
 use std::fmt;
 
-use crate::protocol::ids::{ContentId, ViewId};
-use crate::protocol::selection::{Selections, TextOffset, TextPoint};
-use crate::protocol::status::StatusMessage;
+use crate::ids::{ContentId, ViewId};
+use crate::selection::{Selections, TextOffset, TextPoint};
+use crate::status::StatusMessage;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FaceName(String);

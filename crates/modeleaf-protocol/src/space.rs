@@ -1,6 +1,6 @@
 //! 空间节点：布局意图。纯数据，前后端共享。不含 viewport/cursor（前端持）。
 
-use crate::protocol::ids::ViewId;
+use crate::ids::ViewId;
 
 #[derive(Clone)]
 pub struct Space {
@@ -17,31 +17,9 @@ pub enum SpaceKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitDirection {
-    #[expect(
-        dead_code,
-        reason = "all split directions belong to the layout mutation contract"
-    )]
     Left,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "all split directions belong to the layout mutation contract"
-        )
-    )]
     Right,
-    #[expect(
-        dead_code,
-        reason = "all split directions belong to the layout mutation contract"
-    )]
     Up,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "all split directions belong to the layout mutation contract"
-        )
-    )]
     Down,
 }
 
@@ -76,20 +54,8 @@ pub enum Axis {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Align {
     Stretch,
-    #[expect(
-        dead_code,
-        reason = "alignment variants belong to the neutral layout contract"
-    )]
     Start,
-    #[expect(
-        dead_code,
-        reason = "alignment variants belong to the neutral layout contract"
-    )]
     Center,
-    #[expect(
-        dead_code,
-        reason = "alignment variants belong to the neutral layout contract"
-    )]
     End,
 }
 
@@ -103,29 +69,8 @@ pub enum Sizing {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Layer {
     Base = 0,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "layer variants belong to the neutral scene contract"
-        )
-    )]
     Overlay = 10,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "layer variants belong to the neutral scene contract"
-        )
-    )]
     Modal = 20,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "layer variants belong to the neutral scene contract"
-        )
-    )]
     Debug = 100,
 }
 

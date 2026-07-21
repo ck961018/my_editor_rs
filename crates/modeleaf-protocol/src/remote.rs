@@ -1,8 +1,8 @@
 #![allow(dead_code)] // Semantic wire contract; transport integration is intentionally deferred.
 
-use crate::protocol::content_query::{ContentData, ContentQuery, ViewData};
-use crate::protocol::ids::{ContentId, ViewId};
-use crate::protocol::revision::Revision;
+use crate::content_query::{ContentData, ContentQuery, ViewData};
+use crate::ids::{ContentId, ViewId};
+use crate::revision::Revision;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RequestId(pub u64);

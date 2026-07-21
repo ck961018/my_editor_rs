@@ -1,3 +1,8 @@
+[workspace]
+resolver = "3"
+members = ["crates/modeleaf-protocol"]
+default-members = ["."]
+
 [package]
 name = "modeleaf"
 version = "0.1.0"
@@ -14,6 +19,7 @@ taffy = "0.11"
 tempfile = "3"
 unicode-width = "0.2"
 serde_json = "1"
+modeleaf-protocol = { path = "crates/modeleaf-protocol" }
 deno_ast = { version = "0.50.3", features = ["transpiling"] }
 v8 = { version = "=149.3.0", default-features = false, features = [
     "simdutf",

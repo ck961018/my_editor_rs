@@ -1109,6 +1109,7 @@ dependencies = [
  "crossterm",
  "deno_ast",
  "futures",
+ "modeleaf-protocol",
  "ropey",
  "serde_json",
  "taffy",
@@ -1118,6 +1119,10 @@ dependencies = [
  "unicode-width 0.2.2",
  "v8",
 ]
+
+[[package]]
+name = "modeleaf-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "new_debug_unreachable"

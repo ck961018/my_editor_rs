@@ -16,10 +16,6 @@ impl KeyModifiers {
             shift: false,
         }
     }
-    #[expect(
-        dead_code,
-        reason = "Alt-only bindings are supported by the neutral key protocol"
-    )]
     pub fn alt() -> Self {
         Self {
             ctrl: false,
@@ -27,7 +23,6 @@ impl KeyModifiers {
             shift: false,
         }
     }
-    #[cfg(test)]
     pub fn shift() -> Self {
         Self {
             ctrl: false,
@@ -35,10 +30,6 @@ impl KeyModifiers {
             shift: true,
         }
     }
-    #[expect(
-        dead_code,
-        reason = "combined modifiers are supported by the neutral key protocol"
-    )]
     pub fn ctrl_shift() -> Self {
         Self {
             ctrl: true,
@@ -92,21 +83,15 @@ impl KeyEvent {
     pub fn ctrl(c: char) -> Self {
         Self::modified(KeyCode::Char(c.to_ascii_lowercase()), KeyModifiers::ctrl())
     }
-    #[cfg(test)]
     pub fn arrow(arrow: ArrowKey) -> Self {
         Self::plain(KeyCode::Arrow(arrow))
     }
-    #[cfg(test)]
     pub fn shift_arrow(arrow: ArrowKey) -> Self {
         Self::modified(KeyCode::Arrow(arrow), KeyModifiers::shift())
     }
     pub fn modified(code: KeyCode, modifiers: KeyModifiers) -> Self {
         Self { code, modifiers }
     }
-    #[expect(
-        dead_code,
-        reason = "unknown keys are representable at the terminal protocol boundary"
-    )]
     pub fn unknown() -> Self {
         Self::plain(KeyCode::Unknown)
     }

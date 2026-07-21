@@ -35,13 +35,6 @@ impl Selection {
             head: at,
         }
     }
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "selection predicates are part of the neutral selection contract"
-        )
-    )]
     pub fn is_empty(&self) -> bool {
         self.anchor == self.head
     }
@@ -85,9 +78,8 @@ impl Selections {
         self.primary_index = 0;
     }
 
-    /// 测试构造器：多 ranges + 指定 primary_index。
-    #[cfg(test)]
-    pub(crate) fn from_parts(ranges: Vec<Selection>, primary_index: usize) -> Self {
+    /// 构造多选区集合；`primary_index` 必须指向一个 range。
+    pub fn from_parts(ranges: Vec<Selection>, primary_index: usize) -> Self {
         assert!(primary_index < ranges.len());
         Self {
             ranges,

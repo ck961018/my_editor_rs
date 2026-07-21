@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 
-use crate::protocol::geometry::Size;
-use crate::protocol::ids::SpaceId;
-use crate::protocol::space::Space;
+use crate::geometry::Size;
+use crate::ids::SpaceId;
+use crate::space::Space;
 
 #[derive(Clone)]
 pub struct SpaceNode {
@@ -36,5 +36,13 @@ impl Scene {
 
     pub fn node(&self, id: SpaceId) -> &SpaceNode {
         self.nodes.get(&id).expect("space id exists")
+    }
+
+    pub fn nodes(&self) -> impl Iterator<Item = (SpaceId, &SpaceNode)> {
+        self.nodes.iter().map(|(id, node)| (*id, node))
+    }
+
+    pub fn into_parts(self) -> (SpaceId, Size, HashMap<SpaceId, SpaceNode>) {
+        (self.root, self.size, self.nodes)
     }
 }

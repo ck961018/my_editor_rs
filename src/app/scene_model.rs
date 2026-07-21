@@ -9,14 +9,36 @@ use crate::protocol::space::{
     Align, Arrangement, Axis, Layer, Sizing, Space, SpaceKind, SplitDirection,
 };
 
-fn contains_view_except(scene: &Scene, view: ViewId, excluded_space: Option<SpaceId>) -> bool {
+struct MutableScene {
+    root: SpaceId,
+    size: Size,
+    nodes: HashMap<SpaceId, SpaceNode>,
+}
+
+impl MutableScene {
+    fn take(scene: &mut Scene) -> Self {
+        let placeholder = Scene::from_parts(scene.root(), scene.size, HashMap::new());
+        let (root, size, nodes) = std::mem::replace(scene, placeholder).into_parts();
+        Self { root, size, nodes }
+    }
+
+    fn into_scene(self) -> Scene {
+        Scene::from_parts(self.root, self.size, self.nodes)
+    }
+}
+
+fn contains_view_except(
+    scene: &MutableScene,
+    view: ViewId,
+    excluded_space: Option<SpaceId>,
+) -> bool {
     scene.nodes.iter().any(|(space, node)| {
         Some(*space) != excluded_space
             && matches!(&node.space.kind, SpaceKind::Content { view: current, .. } if *current == view)
     })
 }
 
-fn is_tree_valid(scene: &Scene) -> bool {
+fn is_tree_valid(scene: &MutableScene) -> bool {
     let Some(root) = scene.nodes.get(&scene.root) else {
         return false;
     };
@@ -97,7 +119,7 @@ impl SceneBuilder {
 
     fn add_view(
         &mut self,
-        scene: &mut Scene,
+        scene: &mut MutableScene,
         view: ViewId,
         focusable: bool,
         sizing: Sizing,
@@ -107,14 +129,14 @@ impl SceneBuilder {
 
     fn add_container(
         &mut self,
-        scene: &mut Scene,
+        scene: &mut MutableScene,
         arrangement: Arrangement,
         sizing: Sizing,
     ) -> SpaceId {
         self.add_node(scene, SpaceKind::Container { arrangement }, sizing)
     }
 
-    fn add_node(&mut self, scene: &mut Scene, kind: SpaceKind, sizing: Sizing) -> SpaceId {
+    fn add_node(&mut self, scene: &mut MutableScene, kind: SpaceKind, sizing: Sizing) -> SpaceId {
         let id = self.alloc();
         scene.nodes.insert(
             id,
@@ -131,7 +153,13 @@ impl SceneBuilder {
         id
     }
 
-    fn insert_child(&mut self, scene: &mut Scene, parent: SpaceId, child: SpaceId, index: usize) {
+    fn insert_child(
+        &mut self,
+        scene: &mut MutableScene,
+        parent: SpaceId,
+        child: SpaceId,
+        index: usize,
+    ) {
         scene
             .nodes
             .get_mut(&parent)
@@ -141,7 +169,13 @@ impl SceneBuilder {
         scene.nodes.get_mut(&child).expect("child exists").parent = Some(parent);
     }
 
-    fn replace_child(&mut self, scene: &mut Scene, parent: SpaceId, index: usize, child: SpaceId) {
+    fn replace_child(
+        &mut self,
+        scene: &mut MutableScene,
+        parent: SpaceId,
+        index: usize,
+        child: SpaceId,
+    ) {
         scene
             .nodes
             .get_mut(&parent)
@@ -150,7 +184,7 @@ impl SceneBuilder {
         scene.nodes.get_mut(&child).expect("child exists").parent = Some(parent);
     }
 
-    fn set_children(&mut self, scene: &mut Scene, parent: SpaceId, children: &[SpaceId]) {
+    fn set_children(&mut self, scene: &mut MutableScene, parent: SpaceId, children: &[SpaceId]) {
         scene
             .nodes
             .get_mut(&parent)
@@ -164,6 +198,20 @@ impl SceneBuilder {
     pub fn split(
         &mut self,
         scene: &mut Scene,
+        target: SpaceId,
+        view: ViewId,
+        focusable: bool,
+        direction: SplitDirection,
+    ) -> Result<SplitResult, SceneError> {
+        let mut draft = MutableScene::take(scene);
+        let result = self.split_draft(&mut draft, target, view, focusable, direction);
+        *scene = draft.into_scene();
+        result
+    }
+
+    fn split_draft(
+        &mut self,
+        scene: &mut MutableScene,
         target: SpaceId,
         view: ViewId,
         focusable: bool,
@@ -254,6 +302,17 @@ impl SceneBuilder {
     }
 
     pub fn close(&mut self, scene: &mut Scene, target: SpaceId) -> Result<CloseResult, SceneError> {
+        let mut draft = MutableScene::take(scene);
+        let result = self.close_draft(&mut draft, target);
+        *scene = draft.into_scene();
+        result
+    }
+
+    fn close_draft(
+        &mut self,
+        scene: &mut MutableScene,
+        target: SpaceId,
+    ) -> Result<CloseResult, SceneError> {
         if !is_tree_valid(scene) {
             return Err(SceneError::InvalidTree);
         }
@@ -360,6 +419,19 @@ impl SceneBuilder {
         view: ViewId,
         focusable: bool,
     ) -> Result<(), SceneError> {
+        let mut draft = MutableScene::take(scene);
+        let result = self.replace_view_draft(&mut draft, target, view, focusable);
+        *scene = draft.into_scene();
+        result
+    }
+
+    fn replace_view_draft(
+        &mut self,
+        scene: &mut MutableScene,
+        target: SpaceId,
+        view: ViewId,
+        focusable: bool,
+    ) -> Result<(), SceneError> {
         if !is_tree_valid(scene) {
             return Err(SceneError::InvalidTree);
         }
@@ -395,6 +467,18 @@ impl SceneBuilder {
         target: SpaceId,
         sizing: Sizing,
     ) -> Result<(), SceneError> {
+        let mut draft = MutableScene::take(scene);
+        let result = self.set_sizing_draft(&mut draft, target, sizing);
+        *scene = draft.into_scene();
+        result
+    }
+
+    fn set_sizing_draft(
+        &mut self,
+        scene: &mut MutableScene,
+        target: SpaceId,
+        sizing: Sizing,
+    ) -> Result<(), SceneError> {
         if !is_tree_valid(scene) {
             return Err(SceneError::InvalidTree);
         }
@@ -426,7 +510,11 @@ pub fn build_editor_scene(
     if editor == status {
         return Err(SceneError::DuplicateView(editor));
     }
-    let mut scene = Scene::from_parts(SpaceId(u64::MAX), Size { width, height }, HashMap::new());
+    let mut scene = MutableScene {
+        root: SpaceId(u64::MAX),
+        size: Size { width, height },
+        nodes: HashMap::new(),
+    };
     let editor_space = builder.add_view(&mut scene, editor, true, Sizing::Grow(1));
     let status_space = builder.add_view(&mut scene, status, false, Sizing::Fixed(1));
     let root = builder.add_container(
@@ -441,7 +529,7 @@ pub fn build_editor_scene(
     scene.root = root;
     builder.set_children(&mut scene, root, &[editor_space, status_space]);
     debug_assert!(is_tree_valid(&scene));
-    Ok((scene, editor_space))
+    Ok((scene.into_scene(), editor_space))
 }
 
 #[cfg(test)]
@@ -691,6 +779,6 @@ mod tests {
             }
         }
 
-        assert_eq!(visited.len(), scene.nodes.len());
+        assert_eq!(visited.len(), scene.nodes().count());
     }
 }
