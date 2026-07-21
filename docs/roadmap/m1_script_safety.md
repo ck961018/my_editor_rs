@@ -21,7 +21,7 @@ TypeScript/module file  4 MiB
 module graph            16 MiB
 structured input        32 MiB
 state/callback result   4 MiB
-staged operations       10,000
+staged operations       255
 decorations             100,000
 ```
 

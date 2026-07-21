@@ -7,12 +7,12 @@ use crate::transaction::TransactionRecord;
 use vell_core::content::SaveSnapshot;
 use vell_core::content_store::ContentSnapshot;
 use vell_core::transaction::TransactionDirection;
+use vell_mode::operation::MAX_OPERATIONS_PER_FRAME;
 use vell_protocol::ids::{ContentId, ViewId};
 use vell_protocol::revision::Revision;
 use vell_protocol::selection::Selections;
 use vell_protocol::viewport::ResolvedViewportCommand;
 
-const DEFAULT_OPERATION_BUDGET: usize = 256;
 const DEFAULT_NESTED_MODE_BUDGET: usize = 256;
 const DEFAULT_REPLAYED_INPUT_BUDGET: usize = 256;
 
@@ -166,7 +166,7 @@ impl CheckpointJournal {
 impl Default for ExecutionBudget {
     fn default() -> Self {
         Self {
-            operations: DEFAULT_OPERATION_BUDGET,
+            operations: MAX_OPERATIONS_PER_FRAME,
             nested_mode_calls: DEFAULT_NESTED_MODE_BUDGET,
             replayed_inputs: DEFAULT_REPLAYED_INPUT_BUDGET,
         }
@@ -177,14 +177,14 @@ impl ExecutionBudget {
     fn consume_operation(&mut self) -> io::Result<()> {
         consume(
             &mut self.operations,
-            "command chain exceeded the limit of 256 commands",
+            || format!("command chain exceeded the limit of {MAX_OPERATIONS_PER_FRAME} commands"),
         )
     }
 
     fn consume_nested_mode_call(&mut self) -> io::Result<()> {
         consume(
             &mut self.nested_mode_calls,
-            "nested mode calls exceeded the limit of 256 calls",
+            || "nested mode calls exceeded the limit of 256 calls".to_owned(),
         )
     }
 
@@ -200,9 +200,9 @@ impl ExecutionBudget {
     }
 }
 
-fn consume(remaining: &mut usize, message: &'static str) -> io::Result<()> {
+fn consume(remaining: &mut usize, message: impl FnOnce() -> String) -> io::Result<()> {
     let Some(next) = remaining.checked_sub(1) else {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, message));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, message()));
     };
     *remaining = next;
     Ok(())
@@ -216,7 +216,7 @@ mod tests {
     fn frame_owns_the_operation_budget() {
         let mut frame = ExecutionFrame::new(None, None);
 
-        for _ in 0..DEFAULT_OPERATION_BUDGET {
+        for _ in 0..MAX_OPERATIONS_PER_FRAME {
             frame.consume_operation().unwrap();
         }
 

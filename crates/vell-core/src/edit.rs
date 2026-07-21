@@ -86,35 +86,41 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
                 }
             }
         }
-        EditCommand::MoveWordForward => {
-            collapse_or_move(
-                buffer,
-                selections,
-                CollapseEdge::Lower,
-                |buffer, selection| {
-                    buffer.move_head_word_forward(selection);
-                },
-            );
+        EditCommand::MoveWordForwardBy(count) => {
+            for _ in 0..count {
+                collapse_or_move(
+                    buffer,
+                    selections,
+                    CollapseEdge::Lower,
+                    |buffer, selection| {
+                        buffer.move_head_word_forward(selection);
+                    },
+                );
+            }
         }
-        EditCommand::MoveWordBackward => {
-            collapse_or_move(
-                buffer,
-                selections,
-                CollapseEdge::Upper,
-                |buffer, selection| {
-                    buffer.move_head_word_backward(selection);
-                },
-            );
+        EditCommand::MoveWordBackwardBy(count) => {
+            for _ in 0..count {
+                collapse_or_move(
+                    buffer,
+                    selections,
+                    CollapseEdge::Upper,
+                    |buffer, selection| {
+                        buffer.move_head_word_backward(selection);
+                    },
+                );
+            }
         }
-        EditCommand::MoveWordEnd => {
-            collapse_or_move(
-                buffer,
-                selections,
-                CollapseEdge::Lower,
-                |buffer, selection| {
-                    buffer.move_head_word_end(selection);
-                },
-            );
+        EditCommand::MoveWordEndBy(count) => {
+            for _ in 0..count {
+                collapse_or_move(
+                    buffer,
+                    selections,
+                    CollapseEdge::Lower,
+                    |buffer, selection| {
+                        buffer.move_head_word_end(selection);
+                    },
+                );
+            }
         }
         EditCommand::MoveToLineStart => {
             collapse_or_move(
@@ -166,25 +172,29 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
                 },
             );
         }
-        EditCommand::MoveToPrevParagraph => {
-            collapse_or_move(
-                buffer,
-                selections,
-                CollapseEdge::Lower,
-                |buffer, selection| {
-                    buffer.move_head_to_prev_paragraph(selection);
-                },
-            );
+        EditCommand::MoveToPrevParagraphBy(count) => {
+            for _ in 0..count {
+                collapse_or_move(
+                    buffer,
+                    selections,
+                    CollapseEdge::Lower,
+                    |buffer, selection| {
+                        buffer.move_head_to_prev_paragraph(selection);
+                    },
+                );
+            }
         }
-        EditCommand::MoveToNextParagraph => {
-            collapse_or_move(
-                buffer,
-                selections,
-                CollapseEdge::Upper,
-                |buffer, selection| {
-                    buffer.move_head_to_next_paragraph(selection);
-                },
-            );
+        EditCommand::MoveToNextParagraphBy(count) => {
+            for _ in 0..count {
+                collapse_or_move(
+                    buffer,
+                    selections,
+                    CollapseEdge::Upper,
+                    |buffer, selection| {
+                        buffer.move_head_to_next_paragraph(selection);
+                    },
+                );
+            }
         }
         EditCommand::MoveBy { chars, lines } => {
             move_and_collapse(buffer, selections, |buffer, selection| {
@@ -241,14 +251,20 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
                 buffer.move_head_to_char(sel, target, direction, occurrence);
             }
         }
-        EditCommand::ExtendWordForward => {
-            extend(buffer, selections, Buffer::move_head_word_forward);
+        EditCommand::ExtendWordForwardBy(count) => {
+            for _ in 0..count {
+                extend(buffer, selections, Buffer::move_head_word_forward);
+            }
         }
-        EditCommand::ExtendWordBackward => {
-            extend(buffer, selections, Buffer::move_head_word_backward);
+        EditCommand::ExtendWordBackwardBy(count) => {
+            for _ in 0..count {
+                extend(buffer, selections, Buffer::move_head_word_backward);
+            }
         }
-        EditCommand::ExtendWordEnd => {
-            extend(buffer, selections, Buffer::move_head_word_end);
+        EditCommand::ExtendWordEndBy(count) => {
+            for _ in 0..count {
+                extend(buffer, selections, Buffer::move_head_word_end);
+            }
         }
         EditCommand::ExtendToLineStart => {
             extend(buffer, selections, Buffer::move_head_to_line_start);
@@ -262,11 +278,15 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
         EditCommand::ExtendToLastLine => {
             extend(buffer, selections, Buffer::move_head_to_last_line);
         }
-        EditCommand::ExtendToPrevParagraph => {
-            extend(buffer, selections, Buffer::move_head_to_prev_paragraph);
+        EditCommand::ExtendToPrevParagraphBy(count) => {
+            for _ in 0..count {
+                extend(buffer, selections, Buffer::move_head_to_prev_paragraph);
+            }
         }
-        EditCommand::ExtendToNextParagraph => {
-            extend(buffer, selections, Buffer::move_head_to_next_paragraph);
+        EditCommand::ExtendToNextParagraphBy(count) => {
+            for _ in 0..count {
+                extend(buffer, selections, Buffer::move_head_to_next_paragraph);
+            }
         }
         // Escape：collapse 到 head，并仅保留 primary selection。
         EditCommand::CollapseSelections => {
@@ -487,7 +507,7 @@ mod tests {
         buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "foo bar");
         let mut s = single_sel(TextOffset::origin());
 
-        apply_edit(EditCommand::ExtendWordForward, &mut buf, &mut s);
+        apply_edit(EditCommand::ExtendWordForwardBy(1), &mut buf, &mut s);
         assert_eq!(s.primary().anchor.char_index, 0);
         assert_eq!(s.primary().head.char_index, 4);
 
@@ -531,9 +551,25 @@ mod tests {
             buf.clamp_offset(&mut c);
             c
         });
-        apply_edit(EditCommand::MoveWordForward, &mut buf, &mut s);
+        apply_edit(EditCommand::MoveWordForwardBy(1), &mut buf, &mut s);
         assert_eq!(s.primary().head().char_index, 4);
         assert_eq!(s.primary().anchor, s.primary().head());
+    }
+
+    #[test]
+    fn counted_word_motion_stays_one_command_and_repeats_in_core() {
+        let mut buf = Buffer::new();
+        buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "one two three");
+        let mut selections = single_sel(TextOffset::origin());
+
+        apply_edit(
+            EditCommand::MoveWordForwardBy(2),
+            &mut buf,
+            &mut selections,
+        );
+
+        assert_eq!(selections.primary().head().char_index, 8);
+        assert_eq!(selections.primary().anchor, selections.primary().head());
     }
 
     #[test]
@@ -546,7 +582,7 @@ mod tests {
             buf.clamp_offset(&mut c);
             c
         });
-        apply_edit(EditCommand::MoveWordBackward, &mut buf, &mut s);
+        apply_edit(EditCommand::MoveWordBackwardBy(1), &mut buf, &mut s);
         assert_eq!(s.primary().head().char_index, 4);
         assert_eq!(s.primary().anchor, s.primary().head());
     }
@@ -561,7 +597,7 @@ mod tests {
             buf.clamp_offset(&mut c);
             c
         });
-        apply_edit(EditCommand::MoveWordEnd, &mut buf, &mut s);
+        apply_edit(EditCommand::MoveWordEndBy(1), &mut buf, &mut s);
         assert_eq!(s.primary().head().char_index, 2);
         assert_eq!(s.primary().anchor, s.primary().head());
     }
@@ -635,7 +671,7 @@ mod tests {
             buf.clamp_offset(&mut c);
             c
         });
-        apply_edit(EditCommand::MoveToPrevParagraph, &mut buf, &mut s);
+        apply_edit(EditCommand::MoveToPrevParagraphBy(1), &mut buf, &mut s);
         assert_eq!(s.primary().head().char_index, 4);
     }
 
@@ -644,7 +680,7 @@ mod tests {
         let mut buf = Buffer::new();
         buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "foo\n\nbar");
         let mut s = single_sel(TextOffset::origin());
-        apply_edit(EditCommand::MoveToNextParagraph, &mut buf, &mut s);
+        apply_edit(EditCommand::MoveToNextParagraphBy(1), &mut buf, &mut s);
         assert_eq!(s.primary().head().char_index, 4);
     }
 

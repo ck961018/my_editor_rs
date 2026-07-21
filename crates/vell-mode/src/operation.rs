@@ -7,6 +7,16 @@ use vell_protocol::revision::Revision;
 use vell_protocol::selection::Selections;
 use vell_protocol::viewport::ViewportCommand;
 
+/// Maximum number of operations one app execution frame will evaluate.
+///
+/// This lives in the shared extension contract so operation producers and the
+/// app executor cannot silently drift to different limits.
+pub const MAX_OPERATIONS_PER_FRAME: usize = 256;
+
+/// Maximum operations a single mode callback may append to its invoking
+/// operation. Nested callbacks still share the enclosing frame budget.
+pub const MAX_MODE_CALLBACK_OPERATIONS: usize = MAX_OPERATIONS_PER_FRAME - 1;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContentTarget {
     Current,

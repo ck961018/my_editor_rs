@@ -14,6 +14,7 @@ use vell_core::content::ContentKind;
 use vell_core::keymap::Keymap;
 use vell_mode::command::{Command, ModeCommand, ModeValue};
 use vell_mode::mode_name::{ModeActionName, ModeName};
+use vell_mode::operation::MAX_MODE_CALLBACK_OPERATIONS;
 use vell_mode::{
     Mode, ModeAdapters, ModeContentContext, ModeError, ModeJobRequest, ModeJobResult, ModeJobSlot,
     ModeResult, ModeState, ModeViewContext, ModeViewPolicy,
@@ -55,7 +56,7 @@ const MAX_SCRIPT_SOURCE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MODULE_GRAPH_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SCRIPT_JSON_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SCRIPT_INPUT_BYTES: usize = 32 * 1024 * 1024;
-const MAX_SCRIPT_OPERATIONS: usize = 10_000;
+const MAX_SCRIPT_OPERATIONS: usize = MAX_MODE_CALLBACK_OPERATIONS;
 const MAX_SCRIPT_DECORATIONS: usize = 100_000;
 const SCRIPT_HEAP_LIMIT_BYTES: usize = 128 * 1024 * 1024;
 const SCRIPT_HEAP_RECOVERY_BYTES: usize = 16 * 1024 * 1024;
@@ -1780,6 +1781,9 @@ editor.modes.define({
         delegate(ctx) {
           ctx.commands.invoke("pairs.quote");
         },
+        moveWords(ctx) {
+          ctx.cursor.moveWordForward(2);
+        },
       },
       keys: { "\"": "quote" },
     },
@@ -1847,6 +1851,26 @@ editor.modes.define({
             [vell_mode::operation::OperationRequest::Mode { invocation, .. }]
                 if invocation.command.mode.as_str() == "pairs"
                     && invocation.command.action.as_str() == "quote"
+        ));
+
+        let move_words = mode
+            .execute_view_with_arguments(
+                content_state.as_mut(),
+                view_state.as_mut(),
+                &context,
+                &ModeActionName::new("moveWords"),
+                &ModeValue::Null,
+            )
+            .unwrap();
+        let (_, operations) = move_words.into_parts();
+        assert!(matches!(
+            operations.as_slice(),
+            [vell_mode::operation::OperationRequest::View {
+                operation: vell_mode::operation::ViewOperation::Edit(
+                    EditCommand::MoveWordForwardBy(2)
+                ),
+                ..
+            }]
         ));
     }
 
@@ -2335,6 +2359,11 @@ editor.modes.define({{
       for (let index = 0; index < {}; index++) context.text.insert("x");
       return context.handled();
     }},
+    operationCount(context) {{
+      context.contentState.calls++;
+      context.cursor.moveWordForward({});
+      return context.handled();
+    }},
     decorations(context) {{
       context.contentState.calls++;
       return {{
@@ -2353,6 +2382,7 @@ editor.modes.define({{
   }},
 }});
 "#,
+                MAX_SCRIPT_OPERATIONS + 1,
                 MAX_SCRIPT_OPERATIONS + 1,
                 MAX_SCRIPT_DECORATIONS + 1
             ),
@@ -2375,6 +2405,7 @@ editor.modes.define({{
 
         for (action, expected) in [
             ("operations", "limit exceeded for operations"),
+            ("operationCount", "limit exceeded for operation count"),
             ("decorations", "limit exceeded for decorations"),
         ] {
             let error = mode

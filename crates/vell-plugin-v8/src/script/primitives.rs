@@ -404,14 +404,6 @@ fn primitive_effects(
             operation: ViewOperation::Edit(command),
         }]
     };
-    let repeated = |command: EditCommand, count: usize| {
-        (0..count)
-            .map(|_| OperationRequest::View {
-                target: ViewTarget::Current,
-                operation: ViewOperation::Edit(command.clone()),
-            })
-            .collect()
-    };
     Ok(match primitive {
         MoveLeft => deferred(EditCommand::MoveLeftBy(count(scope, arguments, 0)?)),
         MoveRight => deferred(EditCommand::MoveRightBy(count(scope, arguments, 0)?)),
@@ -465,38 +457,44 @@ fn primitive_effects(
             direction: CharSearchDirection::Backward,
             occurrence: count(scope, arguments, 1)?,
         }),
-        MoveWordForward => repeated(EditCommand::MoveWordForward, count(scope, arguments, 0)?),
-        MoveWordBackward => repeated(EditCommand::MoveWordBackward, count(scope, arguments, 0)?),
-        MoveWordEnd => repeated(EditCommand::MoveWordEnd, count(scope, arguments, 0)?),
-        ExtendWordForward => repeated(EditCommand::ExtendWordForward, count(scope, arguments, 0)?),
-        ExtendWordBackward => {
-            repeated(EditCommand::ExtendWordBackward, count(scope, arguments, 0)?)
-        }
-        ExtendWordEnd => repeated(EditCommand::ExtendWordEnd, count(scope, arguments, 0)?),
+        MoveWordForward => deferred(EditCommand::MoveWordForwardBy(bounded_count(
+            scope, arguments, 0,
+        )?)),
+        MoveWordBackward => deferred(EditCommand::MoveWordBackwardBy(bounded_count(
+            scope, arguments, 0,
+        )?)),
+        MoveWordEnd => deferred(EditCommand::MoveWordEndBy(bounded_count(
+            scope, arguments, 0,
+        )?)),
+        ExtendWordForward => deferred(EditCommand::ExtendWordForwardBy(bounded_count(
+            scope, arguments, 0,
+        )?)),
+        ExtendWordBackward => deferred(EditCommand::ExtendWordBackwardBy(bounded_count(
+            scope, arguments, 0,
+        )?)),
+        ExtendWordEnd => deferred(EditCommand::ExtendWordEndBy(bounded_count(
+            scope, arguments, 0,
+        )?)),
         MoveToLineStart => deferred(EditCommand::MoveToLineStart),
         MoveToFirstNonBlank => deferred(EditCommand::MoveToFirstNonBlank),
         MoveToLineEnd => deferred(EditCommand::MoveToLineEnd),
         MoveToLastLine => deferred(EditCommand::MoveToLastLine),
-        MoveToPrevParagraph => repeated(
-            EditCommand::MoveToPrevParagraph,
-            count(scope, arguments, 0)?,
-        ),
-        MoveToNextParagraph => repeated(
-            EditCommand::MoveToNextParagraph,
-            count(scope, arguments, 0)?,
-        ),
+        MoveToPrevParagraph => deferred(EditCommand::MoveToPrevParagraphBy(bounded_count(
+            scope, arguments, 0,
+        )?)),
+        MoveToNextParagraph => deferred(EditCommand::MoveToNextParagraphBy(bounded_count(
+            scope, arguments, 0,
+        )?)),
         ExtendToLineStart => deferred(EditCommand::ExtendToLineStart),
         ExtendToFirstNonBlank => deferred(EditCommand::ExtendToFirstNonBlank),
         ExtendToLineEnd => deferred(EditCommand::ExtendToLineEnd),
         ExtendToLastLine => deferred(EditCommand::ExtendToLastLine),
-        ExtendToPrevParagraph => repeated(
-            EditCommand::ExtendToPrevParagraph,
-            count(scope, arguments, 0)?,
-        ),
-        ExtendToNextParagraph => repeated(
-            EditCommand::ExtendToNextParagraph,
-            count(scope, arguments, 0)?,
-        ),
+        ExtendToPrevParagraph => deferred(EditCommand::ExtendToPrevParagraphBy(bounded_count(
+            scope, arguments, 0,
+        )?)),
+        ExtendToNextParagraph => deferred(EditCommand::ExtendToNextParagraphBy(bounded_count(
+            scope, arguments, 0,
+        )?)),
         MoveAfterLineEnd => deferred(EditCommand::MoveAfterLineEnd),
         CollapseSelections => deferred(EditCommand::CollapseSelections),
         Insert => deferred(EditCommand::InsertText(string(
@@ -717,6 +715,16 @@ fn count(
     if count == 0 {
         return Err(ScriptError::new("count must be greater than zero"));
     }
+    Ok(count)
+}
+
+fn bounded_count(
+    scope: &mut v8::PinScope,
+    arguments: &v8::FunctionCallbackArguments,
+    index: i32,
+) -> Result<usize, ScriptError> {
+    let count = count(scope, arguments, index)?;
+    ensure_count("operation count", count, MAX_SCRIPT_OPERATIONS)?;
     Ok(count)
 }
 
