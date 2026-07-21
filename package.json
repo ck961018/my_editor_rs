@@ -1,5 +1,5 @@
 {
-  "name": "my-editor-rs-development",
+  "name": "modeleaf-development",
   "private": true,
   "scripts": {
     "typecheck": "tsc --noEmit -p runtime/type-tests/tsconfig.json"

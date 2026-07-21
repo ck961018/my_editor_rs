@@ -47,6 +47,7 @@ use schema::install_editor_api;
 use worker::ScriptWorker;
 
 static V8_INIT: Once = Once::new();
+static LEGACY_CONFIG_WARNING: Once = Once::new();
 const V1_DEPRECATION: &str =
     "TypeScript Mode v1 is deprecated; migrate to the on.buffer adapter schema";
 const V2_INPUT_ACTION: &str = "$input";
@@ -1075,13 +1076,19 @@ fn default_plugin_entries() -> Result<Vec<(i64, &'static str, &'static str)>, Sc
 
 pub(crate) fn load_user_config() -> Result<Rc<RefCell<ScriptHost>>, ScriptError> {
     let host = load_default_plugins()?;
-    let explicit = std::env::var_os("MY_EDITOR_CONFIG").map(PathBuf::from);
-    let path = explicit.clone().or_else(default_config_path);
-    let Some(path) = path else {
+    let Some((path, legacy)) = resolve_config_path(
+        std::env::var_os("MODELEAF_CONFIG").map(PathBuf::from),
+        std::env::var_os("MY_EDITOR_CONFIG").map(PathBuf::from),
+        default_config_root(),
+    ) else {
         return Ok(host);
     };
-    if explicit.is_none() && !path.is_file() {
-        return Ok(host);
+    if legacy {
+        LEGACY_CONFIG_WARNING.call_once(|| {
+            eprintln!(
+                "warning: legacy my_editor_rs config paths are deprecated and will be removed in 0.2.0"
+            );
+        });
     }
 
     host.borrow_mut().execute_module(&path)?;
@@ -1091,7 +1098,27 @@ pub(crate) fn load_user_config() -> Result<Rc<RefCell<ScriptHost>>, ScriptError>
     Ok(host)
 }
 
-fn default_config_path() -> Option<PathBuf> {
+fn resolve_config_path(
+    primary: Option<PathBuf>,
+    legacy: Option<PathBuf>,
+    root: Option<PathBuf>,
+) -> Option<(PathBuf, bool)> {
+    if let Some(path) = primary {
+        return Some((path, false));
+    }
+    if let Some(path) = legacy {
+        return Some((path, true));
+    }
+    let root = root?;
+    let primary = root.join("modeleaf").join("config.ts");
+    if primary.is_file() {
+        return Some((primary, false));
+    }
+    let legacy = root.join("my_editor_rs").join("config.ts");
+    legacy.is_file().then_some((legacy, true))
+}
+
+fn default_config_root() -> Option<PathBuf> {
     #[cfg(windows)]
     let base = std::env::var_os("APPDATA").map(PathBuf::from);
     #[cfg(not(windows))]
@@ -1099,7 +1126,7 @@ fn default_config_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
 
-    base.map(|base| base.join("my_editor_rs").join("config.ts"))
+    base
 }
 
 fn initialize_v8() {
@@ -1343,6 +1370,43 @@ mod tests {
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].start.char_index, 0);
         assert_eq!(visible[1].start.char_index, 100);
+    }
+
+    #[test]
+    fn config_resolution_prefers_modeleaf_and_marks_legacy_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let explicit = root.join("explicit.ts");
+        let legacy_explicit = root.join("legacy-explicit.ts");
+
+        assert_eq!(
+            resolve_config_path(
+                Some(explicit.clone()),
+                Some(legacy_explicit.clone()),
+                Some(root.to_owned()),
+            ),
+            Some((explicit, false))
+        );
+        assert_eq!(
+            resolve_config_path(None, Some(legacy_explicit.clone()), Some(root.to_owned())),
+            Some((legacy_explicit, true))
+        );
+
+        let legacy = root.join("my_editor_rs").join("config.ts");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "").unwrap();
+        assert_eq!(
+            resolve_config_path(None, None, Some(root.to_owned())),
+            Some((legacy, true))
+        );
+
+        let primary = root.join("modeleaf").join("config.ts");
+        std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
+        std::fs::write(&primary, "").unwrap();
+        assert_eq!(
+            resolve_config_path(None, None, Some(root.to_owned())),
+            Some((primary, false))
+        );
     }
 
     #[test]

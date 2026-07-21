@@ -5,7 +5,7 @@
 
 ## 项目概览
 
-`my_editor_rs` 是一个 Rust 2024 终端文本编辑器，二进制 crate。
+`Modeleaf` 是一个 Rust 2024 终端文本编辑器，二进制 crate。
 当前核心能力包括打开文件、基本文本编辑、光标移动、`Shift+Arrow`
 扩展 selection、输入替换 selection、`Ctrl+S` 异步保存、`Ctrl+Q`
 退出、Emacs 风格键映射、终端 Resize 重绘，以及文本区 + 状态栏 +

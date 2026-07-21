@@ -6,11 +6,15 @@ registers the resulting generic Mode definitions; it does not select plugins
 by name or implement their behavior.
 
 One optional user `config.ts` is loaded after the bundled plugins. Set
-`MY_EDITOR_CONFIG` to an explicit file, or use the platform default:
+`MODELEAF_CONFIG` to an explicit file, or use the platform default:
 
-- Windows: `%APPDATA%\my_editor_rs\config.ts`
-- Linux and macOS: `$XDG_CONFIG_HOME/my_editor_rs/config.ts`
-- Home-directory fallback: `$HOME/.config/my_editor_rs/config.ts`
+- Windows: `%APPDATA%\modeleaf\config.ts`
+- Linux and macOS: `$XDG_CONFIG_HOME/modeleaf/config.ts`
+- Home-directory fallback: `$HOME/.config/modeleaf/config.ts`
+
+`MY_EDITOR_CONFIG` and the old `my_editor_rs` default directory remain as
+deprecated fallbacks through version 0.1.x. Modeleaf emits one migration
+warning when it uses either fallback; they will be removed in 0.2.0.
 
 Use [editor.d.ts](../runtime/editor.d.ts) for editor and TypeScript tooling.
 The runtime transpiles TypeScript but does not type-check it.
