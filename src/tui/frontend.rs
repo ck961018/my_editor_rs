@@ -1,4 +1,4 @@
-//! TUI 的 Frontend 实现：SceneRenderer + Output<W>。
+//! TUI 的 Frontend 实现：SceneRenderer + `Output<W>`。
 
 use std::io;
 

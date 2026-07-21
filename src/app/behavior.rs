@@ -133,7 +133,7 @@ impl BehaviorSnapshot {
         outcome: ExecutionOutcome,
         mut mode_probes: Vec<ModeProbeBehavior>,
     ) -> Self {
-        let mut content_ids = app.kernel.contents().ids_for_test();
+        let mut content_ids: Vec<_> = app.kernel.contents().ids().collect();
         content_ids.sort_by_key(|content| content.0);
 
         let contents = content_ids

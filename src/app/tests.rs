@@ -1820,8 +1820,8 @@ fn production_content_paths_use_closed_static_dispatch() {
         include_str!("save.rs"),
     ]
     .concat();
-    let content = include_str!("../core/content.rs");
-    let content_view_state = include_str!("../core/content_view_state.rs");
+    let content = include_str!("../../crates/modeleaf-core/src/content.rs");
+    let content_view_state = include_str!("../../crates/modeleaf-core/src/content_view_state.rs");
     let view = include_str!("view.rs");
     let transaction = include_str!("transaction.rs")
         .split("#[cfg(test)]")
@@ -4727,7 +4727,12 @@ async fn execute_save_uses_resolved_content_target() {
     let other_cid = ContentId(9);
     let mut other = Buffer::new();
     other.open_path(&other_path_str).unwrap();
-    other.insert_char(0, 'X');
+    let source_len = other.slice().len_chars();
+    other
+        .apply_content_change(
+            TextChangeSet::from_edits(source_len, vec![TextEdit::new(0..0, "X")]).unwrap(),
+        )
+        .unwrap();
     app.kernel
         .contents_mut()
         .insert(other_cid, Content::Buffer(other))
@@ -5256,12 +5261,14 @@ async fn vim_undo_restores_edit_start_and_redo_restores_edit_end() {
         content: editor_cid(),
     })
     .unwrap();
-    *app.session
+    app.session
         .view_mut(view)
         .unwrap()
         .state_mut()
-        .selections_mut()
-        .unwrap() = Selections::single(Selection::collapsed(TextOffset { char_index: 1 }));
+        .replace_selections(Selections::single(Selection::collapsed(TextOffset {
+            char_index: 1,
+        })))
+        .unwrap();
 
     for key in [
         KeyEvent::char('i'),
@@ -5796,21 +5803,23 @@ fn editing_shared_content_reconciles_other_view_selections() {
         .new_space;
     let right_view = view_id(&app, right);
     let right_revision = app.session.views()[&right_view].revision();
-    *app.session
+    app.session
         .view_mut(left_view)
         .unwrap()
         .state_mut()
-        .selections_mut()
-        .unwrap() = Selections::single(Selection {
-        anchor: TextOffset::origin(),
-        head: TextOffset { char_index: 3 },
-    });
-    *app.session
+        .replace_selections(Selections::single(Selection {
+            anchor: TextOffset::origin(),
+            head: TextOffset { char_index: 3 },
+        }))
+        .unwrap();
+    app.session
         .view_mut(right_view)
         .unwrap()
         .state_mut()
-        .selections_mut()
-        .unwrap() = Selections::single(Selection::collapsed(TextOffset { char_index: 3 }));
+        .replace_selections(Selections::single(Selection::collapsed(TextOffset {
+            char_index: 3,
+        })))
+        .unwrap();
 
     app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::Delete(-1)),
@@ -5848,12 +5857,14 @@ fn shared_view_positions_follow_text_change_affinity() {
         .new_space;
     let right_view = view_id(&app, right);
     for view in [left_view, right_view] {
-        *app.session
+        app.session
             .view_mut(view)
             .unwrap()
             .state_mut()
-            .selections_mut()
-            .unwrap() = Selections::single(Selection::collapsed(TextOffset { char_index: 1 }));
+            .replace_selections(Selections::single(Selection::collapsed(TextOffset {
+                char_index: 1,
+            })))
+            .unwrap();
     }
 
     app.execute_command(DispatchCommand::ContentWithView {
@@ -5891,12 +5902,14 @@ fn shared_view_positions_follow_undo_and_redo_changes() {
         .unwrap()
         .new_space;
     let right_view = view_id(&app, right);
-    *app.session
+    app.session
         .view_mut(right_view)
         .unwrap()
         .state_mut()
-        .selections_mut()
-        .unwrap() = Selections::single(Selection::collapsed(TextOffset { char_index: 3 }));
+        .replace_selections(Selections::single(Selection::collapsed(TextOffset {
+            char_index: 3,
+        })))
+        .unwrap();
 
     app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Undo,

@@ -1,5 +1,5 @@
 //! 前端核心：layout（TaffyEngine）+ viewport 跟随 + pull 可见行 + paint 到 Canvas。
-//! TuiFrontend 经此渲染；单元测试用 StubQuery + Output<Vec<u8>> 断言 VT 字节。
+//! TuiFrontend 经此渲染；单元测试用 StubQuery + `Output<Vec<u8>>` 断言 VT 字节。
 
 use std::collections::{HashMap, HashSet};
 use std::io;

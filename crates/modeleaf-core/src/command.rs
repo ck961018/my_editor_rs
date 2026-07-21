@@ -3,10 +3,6 @@ use crate::core::motion::OperatorCommand;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EditCommand {
     Operate(OperatorCommand),
-    #[expect(
-        dead_code,
-        reason = "generic relative motion is an executor-level extension seam"
-    )]
     MoveBy {
         chars: isize,
         lines: isize,
@@ -28,13 +24,6 @@ pub enum EditCommand {
         direction: CharSearchDirection,
         occurrence: usize,
     },
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "absolute motion is an executor-level extension seam"
-        )
-    )]
     MoveTo {
         char_idx: usize,
         line_idx: usize,
@@ -67,10 +56,6 @@ pub enum EditCommand {
     ExtendToNextParagraph,
     InsertText(String),
     Delete(isize),
-    #[expect(
-        dead_code,
-        reason = "direct line deletion remains part of the content editing command contract"
-    )]
     DeleteLines {
         lines: usize,
     },

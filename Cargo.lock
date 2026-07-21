@@ -1109,8 +1109,8 @@ dependencies = [
  "crossterm",
  "deno_ast",
  "futures",
+ "modeleaf-core",
  "modeleaf-protocol",
- "ropey",
  "serde_json",
  "taffy",
  "tempfile",
@@ -1118,6 +1118,15 @@ dependencies = [
  "tokio-util",
  "unicode-width 0.2.2",
  "v8",
+]
+
+[[package]]
+name = "modeleaf-core"
+version = "0.1.0"
+dependencies = [
+ "modeleaf-protocol",
+ "ropey",
+ "tempfile",
 ]
 
 [[package]]

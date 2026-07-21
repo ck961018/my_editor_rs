@@ -49,13 +49,6 @@ impl KeySequenceConfig {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "per-prefix timeouts are retained for runtime keymap configuration"
-        )
-    )]
     pub fn set_override(&mut self, sequence: impl AsRef<[KeyEvent]>, timeout: TimeoutPolicy) {
         let sequence = sequence.as_ref();
         assert!(!sequence.is_empty(), "timeout prefix must not be empty");

@@ -25,7 +25,7 @@ struct ContentEntry {
     revision: Revision,
 }
 
-pub(crate) struct ContentSnapshot {
+pub struct ContentSnapshot {
     id: ContentId,
     entry: ContentEntry,
 }
@@ -54,19 +54,18 @@ impl ContentStore {
         self.entries.contains_key(&id)
     }
 
-    #[cfg(test)]
-    pub(crate) fn ids_for_test(&self) -> Vec<ContentId> {
-        self.entries.keys().copied().collect()
+    pub fn ids(&self) -> impl Iterator<Item = ContentId> + '_ {
+        self.entries.keys().copied()
     }
 
-    pub(crate) fn snapshot(&self, id: ContentId) -> Option<ContentSnapshot> {
+    pub fn snapshot(&self, id: ContentId) -> Option<ContentSnapshot> {
         self.entries
             .get(&id)
             .cloned()
             .map(|entry| ContentSnapshot { id, entry })
     }
 
-    pub(crate) fn restore(&mut self, snapshot: ContentSnapshot) {
+    pub fn restore(&mut self, snapshot: ContentSnapshot) {
         self.entries.insert(snapshot.id, snapshot.entry);
     }
 

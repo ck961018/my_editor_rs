@@ -3,25 +3,11 @@ use std::collections::HashMap;
 use crate::protocol::key_event::KeyEvent;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "leader aliases are retained for runtime keymap configuration"
-    )
-)]
 pub enum KeyStroke {
     Key(KeyEvent),
     Leader,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "leader expansion is retained for runtime keymap configuration"
-    )
-)]
 pub fn expand_key_sequence(sequence: &[KeyStroke], leader: KeyEvent) -> Vec<KeyEvent> {
     sequence
         .iter()
@@ -96,13 +82,6 @@ impl<A> Keymap<A> {
         node.action.replace(action)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "unbind is retained for runtime keymap configuration"
-        )
-    )]
     pub fn unbind(&mut self, sequence: impl AsRef<[KeyEvent]>) -> Option<A> {
         let sequence = sequence.as_ref();
         let (first, rest) = sequence.split_first()?;

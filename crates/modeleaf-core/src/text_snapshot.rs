@@ -1,6 +1,5 @@
 use ropey::Rope;
 
-#[cfg(test)]
 use crate::core::transaction::{TextChangeSet, TextTransactionError};
 
 /// A cheaply cloned, immutable text snapshot for background analyzers.
@@ -12,6 +11,12 @@ pub struct TextSnapshot {
 impl TextSnapshot {
     pub(crate) fn new(rope: &Rope) -> Self {
         Self { rope: rope.clone() }
+    }
+
+    pub fn from_text(text: &str) -> Self {
+        Self {
+            rope: Rope::from_str(text),
+        }
     }
 
     pub fn len_chars(&self) -> usize {
@@ -65,7 +70,6 @@ impl TextSnapshot {
         (utf16_offset == character).then_some(char_offset)
     }
 
-    #[cfg(test)]
     pub fn apply(&self, change: &TextChangeSet) -> Result<Self, TextTransactionError> {
         let mut rope = self.rope.clone();
         change.apply(&mut rope)?;

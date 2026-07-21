@@ -1343,9 +1343,7 @@ mod tests {
 
     #[test]
     fn decoration_set_returns_only_spans_intersecting_visible_rows() {
-        let snapshot = crate::core::text_snapshot::TextSnapshot::new(&ropey::Rope::from_str(
-            &"a\n".repeat(100),
-        ));
+        let snapshot = crate::core::text_snapshot::TextSnapshot::from_text(&"a\n".repeat(100));
         let face = FaceName::new("syntax.test");
         let decorations = DecorationSet::new(vec![
             NamedTextDecoration {

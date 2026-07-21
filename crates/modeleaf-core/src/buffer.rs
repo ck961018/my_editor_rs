@@ -638,7 +638,7 @@ impl Buffer {
         sel.anchor = sel.head;
     }
 
-    /// 在每个 selection 插入文本：非空时先删 [min,max] 再插入，head 到插入末尾，collapse。
+    /// 在每个 selection 插入文本：非空时先删 `[min,max]` 再插入，head 到插入末尾，collapse。
     /// 空时在 head 点插入，head 前移 text_len，collapse。
     pub fn insert_at_selections(&mut self, selections: &mut Selections, text: &str) {
         self.reconcile_selections(selections);
@@ -677,7 +677,7 @@ impl Buffer {
         }
     }
 
-    /// 在每个 selection 删除：非空时删 [min,max]，head=min，collapse。
+    /// 在每个 selection 删除：非空时删 `[min,max]`，head=min，collapse。
     /// 空时按方向删 n，head 回退（backward）或不动（forward），collapse。
     pub fn delete_at_selections(&mut self, selections: &mut Selections, n: isize) {
         self.reconcile_selections(selections);

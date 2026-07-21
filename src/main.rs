@@ -1,9 +1,9 @@
 mod app;
-mod core;
 mod frontend;
 mod terminal;
 mod tui;
 
+use modeleaf_core as core;
 use modeleaf_protocol as protocol;
 
 use std::io;
