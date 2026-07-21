@@ -1288,6 +1288,163 @@ fn make_script_app(source: &str) -> App<ScriptedFrontend> {
     }
 }
 
+fn make_embedded_script_app(path: &str, source: &str) -> App<ScriptedFrontend> {
+    let mut host = ScriptHost::new();
+    host.execute_embedded_plugin(path, source).unwrap();
+    let host = Rc::new(RefCell::new(host));
+    let bootstrap =
+        bootstrap_editor(Buffer::new(), 40, 5, ScriptHost::script_modes(&host)).unwrap();
+    App {
+        kernel: bootstrap.kernel,
+        session: bootstrap.session,
+        frontend: ScriptedFrontend::new(Vec::new()),
+        behavior: BehaviorRecorder::default(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn completing_one_named_analysis_schedules_the_next() {
+    let mut app = make_embedded_script_app(
+        "tree-sitter/multi-analysis.ts",
+        r#"
+editor.modes.define({
+  name: "multi-analysis",
+  on: {
+    buffer: {
+      state: () => ({ completed: [] }),
+      analysis: {
+        first: {
+          worker: "worker.ts",
+          snapshot: "text",
+          input: (ctx) => ({
+            contentId: ctx.contentId,
+            language: "rust",
+            revision: ctx.revision,
+          }),
+          apply(ctx) { ctx.state.completed.push("first"); },
+        },
+        second: {
+          worker: "worker.ts",
+          snapshot: "text",
+          input: (ctx) => ({
+            contentId: ctx.contentId,
+            language: "rust",
+            revision: ctx.revision,
+          }),
+          apply(ctx) { ctx.state.completed.push("second"); },
+        },
+      },
+    },
+  },
+});
+"#,
+    );
+
+    app.kernel.schedule_mode_jobs();
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        app.kernel.receive_message(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    app.handle_app_message(first).unwrap();
+
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        app.kernel.receive_message(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    app.handle_app_message(second).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mode_state_change_replaces_analysis_at_the_same_content_revision() {
+    let mut app = make_embedded_script_app(
+        "tree-sitter/state-analysis.ts",
+        r#"
+editor.modes.define({
+  name: "state-analysis",
+  faces: {
+    rust: { foreground: 1 },
+    markdown: { foreground: 2 },
+  },
+  on: {
+    buffer: {
+      state: () => ({ language: "rust" }),
+      commands: {
+        markdown(ctx) { ctx.state.language = "markdown"; },
+      },
+      analysis: {
+        syntax: {
+          worker: "worker.ts",
+          snapshot: "text",
+          input: (ctx) => ({
+            contentId: ctx.contentId,
+            language: ctx.state.language,
+            revision: ctx.revision,
+          }),
+          apply(ctx) {
+            return { contentDecorations: {
+              revision: ctx.revision,
+              spans: [{
+                range: {
+                  start: { line: 0, character: 0 },
+                  end: { line: 0, character: 1 },
+                },
+                face: ctx.state.language,
+              }],
+            } };
+          },
+        },
+      },
+    },
+  },
+});
+"#,
+    );
+    let view = view_id(&app, app.session.focused());
+
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("x".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    app.execute_command(DispatchCommand::Mode {
+        command: ModeCommand::new(
+            ModeName::new("state-analysis"),
+            ModeActionName::new("markdown"),
+        ),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    for _ in 0..2 {
+        let message = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            app.kernel.receive_message(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        app.handle_app_message(message).unwrap();
+    }
+
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+    let decorations = query.decorations(view, RowRange { start: 0, end: 1 });
+    assert_eq!(decorations.len(), 1, "{decorations:#?}");
+    assert_eq!(decorations[0].face.foreground, Some(Color::Ansi(2)));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn rust_highlighting_is_parsed_and_updated_in_background() {
     let file = tempfile::Builder::new().suffix(".rs").tempfile().unwrap();

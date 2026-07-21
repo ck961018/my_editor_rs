@@ -1,11 +1,8 @@
 interface HighlightState {
   language: "markdown" | "rust" | null;
-  generation: number;
-  scheduledGeneration: number | null;
 }
 
 interface HighlightResult {
-  generation: number;
   revision: number;
   spans: TextDecorationSpan[];
 }
@@ -47,54 +44,38 @@ editor.modes.define<HighlightState, null, HighlightResult>({
   },
   on: {
     buffer: {
-      worker: "worker.ts",
       state(context) {
         return {
           language: languageFor(context.document?.fileName),
-          generation: 0,
-          scheduledGeneration: null,
         };
       },
-      changed(context) {
-        context.state.generation += 1;
-      },
-      job(context) {
-        const state = context.state;
-        if (
-          state.language === null ||
-          state.scheduledGeneration === state.generation ||
-          context.revision === undefined
-        ) {
-          return;
-        }
-        state.scheduledGeneration = state.generation;
-        return {
-          slot: "parse",
-          version: state.generation,
-          includeText: true,
-          message: {
-            contentId: context.contentId,
-            generation: state.generation,
-            language: state.language,
-            revision: context.revision,
+      analysis: {
+        syntax: {
+          worker: "worker.ts",
+          snapshot: "text",
+          input(context) {
+            if (
+              context.state.language === null ||
+              context.revision === undefined
+            ) {
+              return;
+            }
+            return {
+              contentId: context.contentId,
+              language: context.state.language,
+              revision: context.revision,
+            };
           },
-        };
-      },
-      applyJob(context) {
-        const result = context.arguments;
-        if (
-          context.jobVersion !== context.state.generation ||
-          result.generation !== context.state.generation ||
-          result.revision !== context.revision
-        ) {
-          return;
-        }
-        return {
-          contentDecorations: {
-            revision: result.revision,
-            spans: result.spans,
+          apply(context) {
+            const result = context.arguments;
+            return {
+              contentDecorations: {
+                revision: context.revision,
+                spans: result.spans,
+              },
+            };
           },
-        };
+        },
       },
     },
   },

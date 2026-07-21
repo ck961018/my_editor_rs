@@ -328,6 +328,7 @@ impl Kernel {
             key.mode,
             key.content,
             &self.contents,
+            &key.slot,
             version,
             result,
         );

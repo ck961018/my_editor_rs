@@ -33,6 +33,7 @@ impl<F: Frontend> App<F> {
                 if changed {
                     self.session.touch_content_views(content);
                 }
+                self.kernel.schedule_mode_jobs();
                 changed
             }
         };

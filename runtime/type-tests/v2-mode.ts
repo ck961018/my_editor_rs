@@ -46,6 +46,81 @@ editor.modes.define({
   },
 });
 
+editor.modes.define<
+  {
+    count: number;
+    nested: { language: string };
+    items: string[];
+  },
+  null,
+  { spans: TextDecorationSpan[] }
+>({
+  name: "analysis-types",
+  on: {
+    buffer: {
+      state: () => ({
+        count: 0,
+        nested: { language: "rust" },
+        items: [],
+      }),
+      analysis: {
+        syntax: {
+          worker: "worker.ts",
+          snapshot: "text",
+          input(ctx) {
+            // @ts-expect-error Analysis input receives read-only Mode state.
+            ctx.state.count++;
+            // @ts-expect-error Analysis input state is deeply read-only.
+            ctx.state.nested.language = "markdown";
+            // @ts-expect-error Analysis input arrays are read-only.
+            ctx.state.items.push("new");
+            return { revision: ctx.revision };
+          },
+          apply(ctx) {
+            ctx.state.count++;
+            return {
+              contentDecorations: {
+                revision: ctx.revision,
+                spans: ctx.arguments.spans,
+              },
+            };
+          },
+        },
+      },
+    },
+  },
+});
+
+// @ts-expect-error Text snapshot analysis input must return an object.
+const invalidTextMessage: BackgroundAnalysisDefinition<null, null> = {
+  worker: "worker.ts",
+  snapshot: "text",
+  input() { return 1; },
+  apply() {},
+};
+void invalidTextMessage;
+
+// @ts-expect-error The host owns the text snapshot message field.
+const reservedTextMessage: BackgroundAnalysisDefinition<null, null> = {
+  worker: "worker.ts",
+  snapshot: "text",
+  input() { return { text: "owned-by-host" }; },
+  apply() {},
+};
+void reservedTextMessage;
+
+// @ts-expect-error Raw worker lifecycle moved to named analysis.
+editor.modes.define({
+  name: "raw-analysis-lifecycle",
+  on: { buffer: { job() {} } },
+});
+
+// @ts-expect-error StatusBar adapters cannot declare analysis.
+editor.modes.define({
+  name: "status-analysis",
+  on: { statusBar: { analysis: {} } },
+});
+
 // @ts-expect-error V2 commands return only void or ctx.pass().
 editor.modes.define({
   name: "invalid-return",

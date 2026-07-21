@@ -128,18 +128,51 @@ Worker resources are read-only and restricted to the plugin directory.
 Absolute paths, parent traversal, network access, timers, and Node APIs are
 not provided.
 
-An advanced Buffer adapter may temporarily use `worker`, `job`, and
-`applyJob`. The `job` callback returns a JSON message, slot, and version. Set
-`includeText: true` to add the current document text to the worker message off
-the UI thread. The message must then be an object without a `text` field. The
-existing Mode job scheduler runs the worker off the UI thread. One job per
-`(Mode, Content, slot)` runs at a time, and only the latest queued request is
-kept. `applyJob` validates the generation and Content revision before
-publishing state or decorations.
+An advanced Buffer adapter declares named background analysis separately from
+ordinary commands and input:
+
+```ts
+analysis: {
+  syntax: {
+    worker: "worker.ts",
+    snapshot: "text",
+    input(ctx) {
+      if (ctx.state.language === null) return;
+      return { language: ctx.state.language, revision: ctx.revision };
+    },
+    apply(ctx) {
+      return {
+        contentDecorations: {
+          revision: ctx.revision,
+          spans: ctx.arguments.spans,
+        },
+      };
+    },
+  },
+}
+```
+
+The analysis name is its stable task identity. `input` must be pure; its return
+value is also the dependency signature. The host polls every named analysis
+before publishing any replacement, assigns monotonic generations, and captures
+the Content revision and input epoch. A changed message or `void` cancels
+superseded work, stale results never enter `apply`, and `apply` runs against
+transactional Mode state. The current analysis accepts its own post-apply
+signature, preventing a state update from self-triggering forever; other
+analyses rerun only when their messages change.
+
+`snapshot: "text"` adds the current document text to the worker message off the
+UI thread; `input` must return an object without a `text` field. Multiple named
+analyses keep independent cached decoration layers.
 
 Workers may return a Promise. The worker isolate pumps V8 microtasks, observes
 editor cancellation, and rejects a request that exceeds its execution budget.
 The main ScriptHost remains synchronous for input and command callbacks.
+
+Standalone commands remain intentionally deferred. There is no command palette
+or non-Mode invocation entry yet, so `context.commands.invoke()` resolves only
+registered Mode-local qualified commands instead of maintaining a second global
+script action table.
 
 ## Migrating a v1 mode
 

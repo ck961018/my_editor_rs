@@ -794,17 +794,18 @@ pub trait Mode {
     ) -> Result<(), ModeError> {
         Ok(())
     }
-    fn take_background_job(
+    fn take_background_jobs(
         &self,
         _state: &mut dyn ModeState,
         _context: &ModeContentContext<'_>,
-    ) -> Option<ModeJobRequest> {
-        None
+    ) -> Vec<ModeJobRequest> {
+        Vec::new()
     }
     fn apply_background_job(
         &self,
         _state: &mut dyn ModeState,
         _context: &ModeContentContext<'_>,
+        _slot: &str,
         _version: u64,
         _result: ModeJobResult,
     ) -> Result<bool, ModeError> {
@@ -1319,11 +1320,11 @@ impl ModeContentStore {
             let draft = drafts.content_mut(mode, content, instance);
             draft.background_job_dirty = false;
             let context = ModeContentContext::new(content, contents);
-            if let Some(job) = instance
+            let requests = instance
                 .adapter()
-                .take_background_job(draft.state.as_mut(), &context)
-            {
-                jobs.push((mode, content, job));
+                .take_background_jobs(draft.state.as_mut(), &context);
+            for request in requests {
+                jobs.push((mode, content, request));
             }
         }
         drafts.commit_content(self);
@@ -1335,6 +1336,7 @@ impl ModeContentStore {
         mode: ModeId,
         content: ContentId,
         contents: &ContentStore,
+        slot: &str,
         version: u64,
         result: ModeJobResult,
     ) -> bool {
@@ -1351,6 +1353,7 @@ impl ModeContentStore {
         let changed = match instance.adapter().apply_background_job(
             draft.state.as_mut(),
             &context,
+            slot,
             version,
             result,
         ) {
@@ -2230,13 +2233,13 @@ mod tests {
             ModeAdapters::buffer()
         }
 
-        fn take_background_job(
+        fn take_background_jobs(
             &self,
             _state: &mut dyn ModeState,
             _context: &ModeContentContext<'_>,
-        ) -> Option<ModeJobRequest> {
+        ) -> Vec<ModeJobRequest> {
             self.calls.set(self.calls.get() + 1);
-            None
+            Vec::new()
         }
     }
 

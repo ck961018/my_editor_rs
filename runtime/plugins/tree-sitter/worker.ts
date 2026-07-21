@@ -1,6 +1,5 @@
 interface ParseMessage {
   contentId: number;
-  generation: number;
   language: "markdown" | "rust";
   revision: number;
   text: string;
@@ -358,7 +357,6 @@ editor.worker.onMessage(async (message: ParseMessage) => {
     ? highlightRust(message.contentId, message.text, 0, positions, rust, rustQuery)
     : markdownSpans(message, positions, rust, rustQuery);
   return {
-    generation: message.generation,
     revision: message.revision,
     spans,
   };

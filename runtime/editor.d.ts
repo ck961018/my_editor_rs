@@ -6,6 +6,12 @@ type ScriptData =
   | ScriptData[]
   | { [key: string]: ScriptData };
 
+type DeepReadonly<T> = T extends readonly (infer Item)[]
+  ? readonly DeepReadonly<Item>[]
+  : T extends object
+    ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+    : T;
+
 interface EditorPosition {
   line: number;
   character: number;
@@ -249,18 +255,53 @@ interface BufferAdapterDefinition<
       state: ContentState;
     },
   ): void;
-  worker?: string;
-  job?(
-    context: BufferContentContext & { state: ContentState },
-  ): ContentJob | void;
-  applyJob?(
-    context: BufferContentContext & {
-      readonly jobVersion: number;
-      readonly arguments: WorkerResponse;
-      state: ContentState;
-    },
+  analysis?: Record<
+    string,
+    BackgroundAnalysisDefinition<ContentState, WorkerResponse>
+  >;
+}
+
+type BackgroundAnalysisInputContext<ContentState> = Omit<
+  BufferContentContext,
+  "revision"
+> & {
+  readonly revision: number;
+  readonly state: DeepReadonly<ContentState>;
+};
+
+type BackgroundAnalysisApplyContext<ContentState, WorkerResponse> = Omit<
+  BufferContentContext,
+  "revision"
+> & {
+  readonly revision: number;
+  readonly arguments: WorkerResponse;
+  state: ContentState;
+};
+
+interface BackgroundAnalysisBase<ContentState, WorkerResponse> {
+  worker: string;
+  apply(
+    context: BackgroundAnalysisApplyContext<ContentState, WorkerResponse>,
   ): Pick<ModeActionResult, "contentDecorations"> | void;
 }
+
+type TextSnapshotAnalysisMessage = Record<string, ScriptData> & {
+  readonly text?: never;
+};
+
+type BackgroundAnalysisDefinition<ContentState, WorkerResponse> =
+  | (BackgroundAnalysisBase<ContentState, WorkerResponse> & {
+      snapshot: "text";
+      input(
+        context: BackgroundAnalysisInputContext<ContentState>,
+      ): TextSnapshotAnalysisMessage | void;
+    })
+  | (BackgroundAnalysisBase<ContentState, WorkerResponse> & {
+      snapshot?: never;
+      input(
+        context: BackgroundAnalysisInputContext<ContentState>,
+      ): ScriptData | void;
+    });
 
 interface StatusBarAdapterDefinition<ContentState, ViewState> {
   state?(context: StatusBarContentContext): ContentState;
