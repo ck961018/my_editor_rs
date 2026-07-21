@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::app::mode_name::{ModeActionName, ModeName};
-use crate::core::command::EditCommand;
-use crate::protocol::viewport::ViewportCommand;
+use crate::mode_name::{ModeActionName, ModeName};
+use modeleaf_core::command::EditCommand;
+use modeleaf_protocol::viewport::ViewportCommand;
 
 #[allow(
     dead_code,
@@ -29,19 +29,19 @@ pub struct ModeCommand {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModeInputCommand {
     mode: ModeName,
-    key: crate::protocol::key_event::KeyEvent,
+    key: modeleaf_protocol::key_event::KeyEvent,
 }
 
 impl ModeInputCommand {
-    pub(crate) fn new(mode: ModeName, key: crate::protocol::key_event::KeyEvent) -> Self {
+    pub fn new(mode: ModeName, key: modeleaf_protocol::key_event::KeyEvent) -> Self {
         Self { mode, key }
     }
 
-    pub(crate) fn mode(&self) -> &ModeName {
+    pub fn mode(&self) -> &ModeName {
         &self.mode
     }
 
-    pub(crate) fn key(&self) -> crate::protocol::key_event::KeyEvent {
+    pub fn key(&self) -> modeleaf_protocol::key_event::KeyEvent {
         self.key
     }
 }
@@ -83,18 +83,7 @@ impl ModeCommand {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppCommand {
     Quit,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "focus commands are not bound by the built-in keymap"
-        )
-    )]
     FocusNext,
-    #[expect(
-        dead_code,
-        reason = "focus commands are not bound by the built-in keymap"
-    )]
     FocusPrev,
 }
 
@@ -125,7 +114,7 @@ pub struct ContentSequenceError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ContentCommandContext {
+pub enum ContentCommandContext {
     ContentOnly,
     WithViewState,
 }
@@ -139,7 +128,7 @@ impl ContentCommand {
         ContentSequence::try_new(commands).map(Self::Sequence)
     }
 
-    pub(crate) fn context(&self) -> ContentCommandContext {
+    pub fn context(&self) -> ContentCommandContext {
         match self {
             Self::Save => ContentCommandContext::ContentOnly,
             Self::Edit(_) | Self::Transaction(_) | Self::Undo | Self::Redo | Self::Sequence(_) => {
@@ -164,7 +153,7 @@ impl ContentSequence {
         Ok(Self(commands))
     }
 
-    pub(crate) fn into_commands(self) -> Vec<ContentCommand> {
+    pub fn into_commands(self) -> Vec<ContentCommand> {
         self.0
     }
 }
@@ -189,10 +178,6 @@ impl std::error::Error for ContentSequenceError {}
 pub enum TransactionCommand {
     Begin,
     Commit,
-    #[expect(
-        dead_code,
-        reason = "transaction rollback is reserved for cancelling compound edits"
-    )]
     Rollback,
 }
 

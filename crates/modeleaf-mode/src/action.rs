@@ -1,4 +1,4 @@
-use crate::protocol::selection::Selections;
+use modeleaf_protocol::selection::Selections;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ViewAction {

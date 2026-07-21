@@ -1,28 +1,28 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::app::mode::{ModeId, ModeViewPolicy};
-use crate::core::text_snapshot::TextSnapshot;
-use crate::protocol::content_query::{NamedTextDecoration, RowRange};
-use crate::protocol::ids::{ContentId, ViewId};
-use crate::protocol::revision::Revision;
+use crate::{ModeId, ModeViewPolicy};
+use modeleaf_core::text_snapshot::TextSnapshot;
+use modeleaf_protocol::content_query::{NamedTextDecoration, RowRange};
+use modeleaf_protocol::ids::{ContentId, ViewId};
+use modeleaf_protocol::revision::Revision;
 
-pub(crate) struct ContentPresentationLayer {
-    pub(crate) source_revision: Revision,
-    pub(crate) mode_revision: Revision,
-    pub(crate) decorations: Vec<NamedTextDecoration>,
+pub struct ContentPresentationLayer {
+    pub source_revision: Revision,
+    pub mode_revision: Revision,
+    pub decorations: Vec<NamedTextDecoration>,
 }
 
-pub(crate) struct ViewPresentationLayer {
-    pub(crate) content_revision: Revision,
-    pub(crate) view_revision: Revision,
-    pub(crate) content_mode_revision: Revision,
-    pub(crate) view_mode_revision: Revision,
-    pub(crate) policy: ModeViewPolicy,
-    pub(crate) decorations: Vec<NamedTextDecoration>,
+pub struct ViewPresentationLayer {
+    pub content_revision: Revision,
+    pub view_revision: Revision,
+    pub content_mode_revision: Revision,
+    pub view_mode_revision: Revision,
+    pub policy: ModeViewPolicy,
+    pub decorations: Vec<NamedTextDecoration>,
 }
 
 #[derive(Default)]
-pub(crate) struct PresentationLayerStore {
+pub struct PresentationLayerStore {
     content_layers: HashMap<(ModeId, ContentId), ContentPresentationLayer>,
     view_layers: HashMap<(ModeId, ViewId), ViewPresentationLayer>,
     view_contents: HashMap<ViewId, ContentId>,
@@ -30,17 +30,17 @@ pub(crate) struct PresentationLayerStore {
 }
 
 impl PresentationLayerStore {
-    pub(crate) fn begin_refresh(&mut self) {
+    pub fn begin_refresh(&mut self) {
         self.view_contents.clear();
         self.view_order.clear();
     }
 
-    pub(crate) fn set_view(&mut self, view: ViewId, content: ContentId, order: Vec<ModeId>) {
+    pub fn set_view(&mut self, view: ViewId, content: ContentId, order: Vec<ModeId>) {
         self.view_contents.insert(view, content);
         self.view_order.insert(view, order);
     }
 
-    pub(crate) fn content_is_current(
+    pub fn content_is_current(
         &self,
         mode: ModeId,
         content: ContentId,
@@ -54,7 +54,7 @@ impl PresentationLayerStore {
             })
     }
 
-    pub(crate) fn set_content_layer(
+    pub fn set_content_layer(
         &mut self,
         mode: ModeId,
         content: ContentId,
@@ -63,7 +63,7 @@ impl PresentationLayerStore {
         self.content_layers.insert((mode, content), layer);
     }
 
-    pub(crate) fn view_is_current(
+    pub fn view_is_current(
         &self,
         mode: ModeId,
         view: ViewId,
@@ -80,16 +80,11 @@ impl PresentationLayerStore {
         })
     }
 
-    pub(crate) fn set_view_layer(
-        &mut self,
-        mode: ModeId,
-        view: ViewId,
-        layer: ViewPresentationLayer,
-    ) {
+    pub fn set_view_layer(&mut self, mode: ModeId, view: ViewId, layer: ViewPresentationLayer) {
         self.view_layers.insert((mode, view), layer);
     }
 
-    pub(crate) fn finish_refresh(
+    pub fn finish_refresh(
         &mut self,
         content: &HashSet<(ModeId, ContentId)>,
         views: &HashSet<(ModeId, ViewId)>,
@@ -98,7 +93,7 @@ impl PresentationLayerStore {
         self.view_layers.retain(|key, _| views.contains(key));
     }
 
-    pub(crate) fn policy(
+    pub fn policy(
         &self,
         view: ViewId,
         content_revision: Revision,
@@ -117,7 +112,7 @@ impl PresentationLayerStore {
         policy
     }
 
-    pub(crate) fn decorations(
+    pub fn decorations(
         &self,
         view: ViewId,
         content_revision: Revision,
@@ -156,13 +151,13 @@ impl PresentationLayerStore {
         decorations
     }
 
-    #[cfg(test)]
-    pub(crate) fn content_layer_count(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn content_layer_count(&self) -> usize {
         self.content_layers.len()
     }
 
-    #[cfg(test)]
-    pub(crate) fn view_layer_count(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn view_layer_count(&self) -> usize {
         self.view_layers.len()
     }
 }

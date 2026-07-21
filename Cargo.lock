@@ -1109,6 +1109,7 @@ dependencies = [
  "deno_ast",
  "modeleaf-core",
  "modeleaf-frontend",
+ "modeleaf-mode",
  "modeleaf-protocol",
  "modeleaf-tui",
  "serde_json",
@@ -1132,6 +1133,15 @@ name = "modeleaf-frontend"
 version = "0.1.0"
 dependencies = [
  "modeleaf-protocol",
+]
+
+[[package]]
+name = "modeleaf-mode"
+version = "0.1.0"
+dependencies = [
+ "modeleaf-core",
+ "modeleaf-protocol",
+ "tokio-util",
 ]
 
 [[package]]

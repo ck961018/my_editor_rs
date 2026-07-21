@@ -3,30 +3,30 @@ use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 use std::sync::LazyLock;
-#[cfg(test)]
+#[cfg(feature = "test-support")]
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(test)]
+#[cfg(feature = "test-support")]
 use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::app::command::{Command, ModeValue};
-use crate::app::mode_name::{ModeActionName, ModeName};
-use crate::app::operation::OperationRequest;
-use crate::app::presentation::{ContentPresentationLayer, ViewPresentationLayer};
-use crate::core::content::{ContentChange, ContentKind};
-use crate::core::content_store::ContentStore;
-use crate::core::content_view_state::{BufferViewState, ContentViewState};
-use crate::core::input::{InputDecision, InputStatus};
-use crate::core::keymap::Keymap;
-use crate::protocol::content_query::{
+use crate::command::{Command, ModeValue};
+use crate::mode_name::{ModeActionName, ModeName};
+use crate::operation::OperationRequest;
+use crate::presentation::{ContentPresentationLayer, ViewPresentationLayer};
+use modeleaf_core::content::{ContentChange, ContentKind};
+use modeleaf_core::content_store::ContentStore;
+use modeleaf_core::content_view_state::{BufferViewState, ContentViewState};
+use modeleaf_core::input::{InputDecision, InputStatus};
+use modeleaf_core::keymap::Keymap;
+use modeleaf_protocol::content_query::{
     ContentData, ContentQuery, CursorStyle, DocumentStatus, Face, FaceName, NamedTextDecoration,
     RowRange, SelectionShape, StatusBarData,
 };
-use crate::protocol::ids::{ContentId, ViewId};
-use crate::protocol::key_event::KeyEvent;
-use crate::protocol::revision::Revision;
-use crate::protocol::selection::{Selections, TextOffset, TextPoint};
+use modeleaf_protocol::ids::{ContentId, ViewId};
+use modeleaf_protocol::key_event::KeyEvent;
+use modeleaf_protocol::revision::Revision;
+use modeleaf_protocol::selection::{Selections, TextOffset, TextPoint};
 
 static EMPTY_KEYMAP: LazyLock<Keymap<Command>> = LazyLock::new(Keymap::new);
 
@@ -147,29 +147,29 @@ pub trait ModeState: Any {
     fn clone_box(&self) -> Box<dyn ModeState>;
 }
 
-#[cfg(test)]
+#[cfg(feature = "test-support")]
 static MODE_STATE_CLONE_COUNT: AtomicU64 = AtomicU64::new(0);
-#[cfg(test)]
+#[cfg(feature = "test-support")]
 static MODE_STATE_CLONE_NANOS: AtomicU64 = AtomicU64::new(0);
-#[cfg(test)]
+#[cfg(feature = "test-support")]
 static MODE_STATE_CLONE_INLINE_BYTES: AtomicU64 = AtomicU64::new(0);
 
-#[cfg(test)]
-pub(crate) struct ModeStateCloneMetrics {
-    pub(crate) count: u64,
-    pub(crate) nanos: u64,
-    pub(crate) inline_bytes: u64,
+#[cfg(feature = "test-support")]
+pub struct ModeStateCloneMetrics {
+    pub count: u64,
+    pub nanos: u64,
+    pub inline_bytes: u64,
 }
 
-#[cfg(test)]
-pub(crate) fn reset_mode_state_clone_metrics() {
+#[cfg(feature = "test-support")]
+pub fn reset_mode_state_clone_metrics() {
     MODE_STATE_CLONE_COUNT.store(0, Ordering::Relaxed);
     MODE_STATE_CLONE_NANOS.store(0, Ordering::Relaxed);
     MODE_STATE_CLONE_INLINE_BYTES.store(0, Ordering::Relaxed);
 }
 
-#[cfg(test)]
-pub(crate) fn mode_state_clone_metrics() -> ModeStateCloneMetrics {
+#[cfg(feature = "test-support")]
+pub fn mode_state_clone_metrics() -> ModeStateCloneMetrics {
     ModeStateCloneMetrics {
         count: MODE_STATE_CLONE_COUNT.load(Ordering::Relaxed),
         nanos: MODE_STATE_CLONE_NANOS.load(Ordering::Relaxed),
@@ -178,13 +178,13 @@ pub(crate) fn mode_state_clone_metrics() -> ModeStateCloneMetrics {
 }
 
 pub type ModeJobResult = Result<Box<dyn Any + Send>, String>;
-pub(crate) type ModeJobRunner = Box<dyn FnOnce(CancellationToken) -> ModeJobResult + Send>;
+pub type ModeJobRunner = Box<dyn FnOnce(CancellationToken) -> ModeJobResult + Send>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ModeJobKey {
-    pub(crate) mode: ModeId,
-    pub(crate) content: ContentId,
-    pub(crate) slot: String,
+pub struct ModeJobKey {
+    pub mode: ModeId,
+    pub content: ContentId,
+    pub slot: String,
 }
 
 pub struct ModeJobRequest {
@@ -206,7 +206,7 @@ impl ModeJobRequest {
         }
     }
 
-    pub(crate) fn into_parts(self) -> (String, u64, ModeJobRunner) {
+    pub fn into_parts(self) -> (String, u64, ModeJobRunner) {
         (self.slot, self.version, self.run)
     }
 }
@@ -221,10 +221,10 @@ impl<T: Any + Clone> ModeState for T {
     }
 
     fn clone_box(&self) -> Box<dyn ModeState> {
-        #[cfg(test)]
+        #[cfg(feature = "test-support")]
         let started = Instant::now();
         let cloned: Box<dyn ModeState> = Box::new(self.clone());
-        #[cfg(test)]
+        #[cfg(feature = "test-support")]
         {
             let nanos = started.elapsed().as_nanos().min(u64::MAX.into()) as u64;
             let bytes = u64::try_from(std::mem::size_of_val(self)).unwrap_or(u64::MAX);
@@ -237,7 +237,7 @@ impl<T: Any + Clone> ModeState for T {
 }
 
 #[derive(Default)]
-pub(crate) struct ModeDraftJournal {
+pub struct ModeDraftJournal {
     content: HashMap<(ModeId, ContentId), ModeContentDraft>,
     views: HashMap<(ModeId, ViewId), ModeViewDraft>,
 }
@@ -321,7 +321,7 @@ impl ModeDraftJournal {
         (content_draft, view_draft)
     }
 
-    pub(crate) fn commit_content(&mut self, store: &mut ModeContentStore) {
+    pub fn commit_content(&mut self, store: &mut ModeContentStore) {
         for (key, draft) in self.content.drain() {
             let instance = store
                 .instances
@@ -334,7 +334,7 @@ impl ModeDraftJournal {
         }
     }
 
-    pub(crate) fn commit_views(&mut self, store: &mut ModeViewStore) {
+    pub fn commit_views(&mut self, store: &mut ModeViewStore) {
         for (key, draft) in self.views.drain() {
             let instance = store
                 .instances
@@ -348,7 +348,7 @@ impl ModeDraftJournal {
 }
 
 #[derive(Default)]
-pub(crate) struct FaceRegistry {
+pub struct FaceRegistry {
     faces: HashMap<FaceName, Face>,
 }
 
@@ -359,12 +359,12 @@ impl FaceRegistry {
         }
     }
 
-    pub(crate) fn resolve(&self, name: &FaceName) -> Face {
+    pub fn resolve(&self, name: &FaceName) -> Face {
         self.faces.get(name).cloned().unwrap_or_default()
     }
 
     #[allow(dead_code, reason = "theme and script adapters override named faces")]
-    pub(crate) fn set(&mut self, name: FaceName, face: Face) {
+    pub fn set(&mut self, name: FaceName, face: Face) {
         self.faces.insert(name, face);
     }
 }
@@ -395,7 +395,7 @@ pub struct StatusBarModeContentContext<'a> {
     reason = "native Mode content contexts are used by extensions"
 )]
 impl<'a> ModeContentContext<'a> {
-    pub(crate) fn new(content_id: ContentId, contents: &'a ContentStore) -> Self {
+    pub fn new(content_id: ContentId, contents: &'a ContentStore) -> Self {
         match contents
             .kind(content_id)
             .expect("mode content context references existing content")
@@ -479,7 +479,7 @@ impl BufferModeContentContext<'_> {
         }
     }
 
-    pub fn text_snapshot(&self) -> Option<crate::core::text_snapshot::TextSnapshot> {
+    pub fn text_snapshot(&self) -> Option<modeleaf_core::text_snapshot::TextSnapshot> {
         self.contents.text_snapshot(self.content_id)
     }
 }
@@ -520,7 +520,7 @@ pub struct StatusBarModeViewContext<'a> {
 
 #[allow(dead_code, reason = "reserved for generic Mode extensions")]
 impl<'a> ModeViewContext<'a> {
-    pub(crate) fn new(
+    pub fn new(
         view_id: ViewId,
         content_id: ContentId,
         state: &'a ContentViewState,
@@ -636,7 +636,7 @@ impl BufferModeViewContext<'_> {
         }
     }
 
-    pub fn text_snapshot(&self) -> Option<crate::core::text_snapshot::TextSnapshot> {
+    pub fn text_snapshot(&self) -> Option<modeleaf_core::text_snapshot::TextSnapshot> {
         self.contents.text_snapshot(self.content_id)
     }
 }
@@ -698,7 +698,7 @@ impl ModeResult {
         self.operations
     }
 
-    pub(crate) fn into_parts(self) -> (InputFlow, Vec<OperationRequest>) {
+    pub fn into_parts(self) -> (InputFlow, Vec<OperationRequest>) {
         (self.flow, self.operations)
     }
 }
@@ -718,7 +718,7 @@ pub struct ModeViewPolicy {
 }
 
 impl ModeViewPolicy {
-    pub(crate) fn merge_missing(&mut self, next: Self) {
+    pub fn merge_missing(&mut self, next: Self) {
         self.cursor_style = self.cursor_style.or(next.cursor_style);
         self.cursor_domain = self.cursor_domain.or(next.cursor_domain);
         self.selection_shape = self.selection_shape.or(next.selection_shape);
@@ -966,7 +966,7 @@ pub trait Mode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ModeRegistrationError {
+pub enum ModeRegistrationError {
     DuplicateMode(ModeName),
     MissingAdapter(ModeName),
     DuplicateAction {
@@ -1001,7 +1001,7 @@ impl fmt::Display for ModeRegistrationError {
 impl std::error::Error for ModeRegistrationError {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ModeAttachmentError {
+pub enum ModeAttachmentError {
     UnknownContent(ContentId),
     UnknownMode(ModeName),
     InvalidViewContext(ModeContextError),
@@ -1042,7 +1042,7 @@ impl From<ModeContextError> for ModeAttachmentError {
     }
 }
 
-pub(crate) struct ModeRegistry {
+pub struct ModeRegistry {
     definitions: HashMap<ModeId, Rc<ModeRegistration>>,
     ids_by_name: HashMap<ModeName, ModeId>,
     next_id: u32,
@@ -1061,7 +1061,7 @@ struct RegisteredModeAdapters {
     status_bar: Option<Rc<dyn Mode>>,
 }
 
-pub(crate) struct ModeViewInstance {
+pub struct ModeViewInstance {
     registered: Rc<ModeRegistration>,
     adapter_kind: ContentKind,
     state: Box<dyn ModeState>,
@@ -1070,7 +1070,7 @@ pub(crate) struct ModeViewInstance {
 }
 
 impl ModeRegistry {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             definitions: HashMap::new(),
             ids_by_name: HashMap::new(),
@@ -1078,10 +1078,7 @@ impl ModeRegistry {
         }
     }
 
-    pub(crate) fn register(
-        &mut self,
-        mode: impl Mode + 'static,
-    ) -> Result<ModeId, ModeRegistrationError> {
+    pub fn register(&mut self, mode: impl Mode + 'static) -> Result<ModeId, ModeRegistrationError> {
         let name = mode.name().clone();
         let actions = mode.actions().to_vec();
         self.register_definition(name, actions, Box::new(mode))
@@ -1131,15 +1128,15 @@ impl ModeRegistry {
         Ok(id)
     }
 
-    pub(crate) fn resolve_mode(&self, name: &ModeName) -> Option<ModeId> {
+    pub fn resolve_mode(&self, name: &ModeName) -> Option<ModeId> {
         self.ids_by_name.get(name).copied()
     }
 
-    pub(crate) fn adapter(&self, mode: ModeId, kind: ContentKind) -> Option<ModeAdapter<'_>> {
+    pub fn adapter(&self, mode: ModeId, kind: ContentKind) -> Option<ModeAdapter<'_>> {
         self.definitions.get(&mode)?.adapter(kind)
     }
 
-    pub(crate) fn ensure_adapter(
+    pub fn ensure_adapter(
         &self,
         name: &ModeName,
         content: ContentId,
@@ -1158,15 +1155,11 @@ impl ModeRegistry {
         Ok(())
     }
 
-    pub(crate) fn resolve_action(
-        &self,
-        mode: ModeId,
-        name: &ModeActionName,
-    ) -> Option<ModeActionId> {
+    pub fn resolve_action(&self, mode: ModeId, name: &ModeActionName) -> Option<ModeActionId> {
         self.definitions.get(&mode)?.actions.get(name).copied()
     }
 
-    pub(crate) fn resolve_command_checked(
+    pub fn resolve_command_checked(
         &self,
         mode: &ModeName,
         action: &ModeActionName,
@@ -1183,7 +1176,7 @@ impl ModeRegistry {
         Ok((mode_id, action_id))
     }
 
-    pub(crate) fn command_scope(
+    pub fn command_scope(
         &self,
         mode: &ModeName,
         action: &ModeActionName,
@@ -1200,8 +1193,8 @@ impl ModeRegistry {
         Ok(adapter.behavior().action_scope(action))
     }
 
-    #[cfg(test)]
-    pub(crate) fn instantiate(&self, name: &ModeName) -> Option<ModeViewInstance> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn instantiate(&self, name: &ModeName) -> Option<ModeViewInstance> {
         let id = self.resolve_mode(name)?;
         let registered = self.definitions.get(&id)?.clone();
         registered.adapter(ContentKind::Buffer)?;
@@ -1214,7 +1207,7 @@ impl ModeRegistry {
         })
     }
 
-    pub(crate) fn instantiate_with_context(
+    pub fn instantiate_with_context(
         &self,
         name: &ModeName,
         content: ContentId,
@@ -1250,6 +1243,12 @@ impl ModeRegistry {
     }
 }
 
+impl Default for ModeRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ModeRegistration {
     fn mode(&self) -> &dyn Mode {
         self.definition.as_ref()
@@ -1267,7 +1266,7 @@ impl ModeRegistration {
     }
 }
 
-pub(crate) struct ModeContentInstance {
+pub struct ModeContentInstance {
     content: ContentId,
     registered: Rc<ModeRegistration>,
     adapter_kind: ContentKind,
@@ -1314,13 +1313,13 @@ impl ModeContentInstance {
 }
 
 #[derive(Default)]
-pub(crate) struct ModeContentStore {
+pub struct ModeContentStore {
     instances: HashMap<(ModeId, ContentId), ModeContentInstance>,
 }
 
 impl ModeContentStore {
-    #[cfg(test)]
-    pub(crate) fn faults_for_test(&self) -> Vec<(String, ContentId)> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn faults_for_test(&self) -> Vec<(String, ContentId)> {
         self.instances
             .values()
             .filter(|instance| instance.faulted)
@@ -1333,12 +1332,8 @@ impl ModeContentStore {
             .collect()
     }
 
-    #[cfg(test)]
-    pub(crate) fn state_for_test<T: 'static>(
-        &self,
-        mode: ModeId,
-        content: ContentId,
-    ) -> Option<&T> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn state_for_test<T: 'static>(&self, mode: ModeId, content: ContentId) -> Option<&T> {
         self.instances
             .get(&(mode, content))?
             .state
@@ -1346,7 +1341,7 @@ impl ModeContentStore {
             .downcast_ref()
     }
 
-    pub(crate) fn take_background_jobs(
+    pub fn take_background_jobs(
         &mut self,
         contents: &ContentStore,
     ) -> Vec<(ModeId, ContentId, ModeJobRequest)> {
@@ -1375,7 +1370,7 @@ impl ModeContentStore {
         jobs
     }
 
-    pub(crate) fn apply_background_job(
+    pub fn apply_background_job(
         &mut self,
         mode: ModeId,
         content: ContentId,
@@ -1415,7 +1410,7 @@ impl ModeContentStore {
         changed
     }
 
-    pub(crate) fn presentation_layer(
+    pub fn presentation_layer(
         &self,
         mode: ModeId,
         content: ContentId,
@@ -1438,8 +1433,8 @@ impl ModeContentStore {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn attach_view(&mut self, content: ContentId, mode: &ModeViewInstance) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn attach_view(&mut self, content: ContentId, mode: &ModeViewInstance) {
         let id = mode.registered.id;
         if let Some(existing) = self.instances.get_mut(&(id, content)) {
             existing.attachments += 1;
@@ -1449,7 +1444,7 @@ impl ModeContentStore {
         contents
             .insert(
                 content,
-                crate::core::content::Content::Buffer(crate::core::buffer::Buffer::new()),
+                modeleaf_core::content::Content::Buffer(modeleaf_core::buffer::Buffer::new()),
             )
             .expect("test helper inserts one content");
         let context = ModeContentContext::new(content, &contents);
@@ -1472,7 +1467,7 @@ impl ModeContentStore {
         );
     }
 
-    pub(crate) fn attach_view_with_context(
+    pub fn attach_view_with_context(
         &mut self,
         content: ContentId,
         mode: &mut ModeViewInstance,
@@ -1512,7 +1507,7 @@ impl ModeContentStore {
         );
     }
 
-    pub(crate) fn detach_view(&mut self, content: ContentId, mode: ModeId) {
+    pub fn detach_view(&mut self, content: ContentId, mode: ModeId) {
         let key = (mode, content);
         let remove = self.instances.get_mut(&key).is_some_and(|instance| {
             instance.attachments -= 1;
@@ -1523,7 +1518,7 @@ impl ModeContentStore {
         }
     }
 
-    pub(crate) fn notify_changed(
+    pub fn notify_changed(
         &self,
         content: ContentId,
         contents: &ContentStore,
@@ -1569,16 +1564,16 @@ impl ModeContentStore {
         self.instances.get(&(mode, content))
     }
 
-    pub(crate) fn revision(&self, mode: ModeId, content: ContentId) -> Option<Revision> {
+    pub fn revision(&self, mode: ModeId, content: ContentId) -> Option<Revision> {
         Some(self.instance(mode, content)?.revision)
     }
 
-    pub(crate) fn execute(
+    pub fn execute(
         &mut self,
         registry: &ModeRegistry,
         contents: &ContentStore,
         content: ContentId,
-        command: &crate::app::command::ModeCommand,
+        command: &crate::command::ModeCommand,
         drafts: &mut ModeDraftJournal,
     ) -> Result<ModeResult, ModeError> {
         let (mode, action) = registry.resolve_command_checked(&command.mode, &command.action)?;
@@ -1629,15 +1624,15 @@ impl ModeViewInstance {
         }
     }
 
-    pub(crate) fn name(&self) -> &ModeName {
+    pub fn name(&self) -> &ModeName {
         self.registered.mode().name()
     }
 
-    pub(crate) fn register_faces(&self, faces: &mut FaceRegistry) {
+    pub fn register_faces(&self, faces: &mut FaceRegistry) {
         faces.register_defaults(self.registered.mode());
     }
 
-    pub(crate) fn execute_with_context(
+    pub fn execute_with_context(
         &self,
         content_state: &mut dyn ModeState,
         view_state: &mut dyn ModeState,
@@ -1702,14 +1697,14 @@ impl ModeViewInstance {
 }
 
 #[derive(Default)]
-pub(crate) struct ModeViewStore {
+pub struct ModeViewStore {
     chains: HashMap<ViewId, Vec<ModeId>>,
     instances: HashMap<(ModeId, ViewId), ModeViewInstance>,
 }
 
 impl ModeViewStore {
-    #[cfg(test)]
-    pub(crate) fn faults_for_test(&self) -> Vec<(String, ViewId)> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn faults_for_test(&self) -> Vec<(String, ViewId)> {
         self.instances
             .iter()
             .filter(|(_, instance)| instance.faulted)
@@ -1717,8 +1712,8 @@ impl ModeViewStore {
             .collect()
     }
 
-    #[cfg(test)]
-    pub(crate) fn state_for_test<T: 'static>(&self, mode: ModeId, view: ViewId) -> Option<&T> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn state_for_test<T: 'static>(&self, mode: ModeId, view: ViewId) -> Option<&T> {
         self.instances
             .get(&(mode, view))?
             .state
@@ -1726,17 +1721,17 @@ impl ModeViewStore {
             .downcast_ref()
     }
 
-    pub(crate) fn is_active(&self, view: ViewId) -> bool {
+    pub fn is_active(&self, view: ViewId) -> bool {
         self.chains
             .get(&view)
             .is_some_and(|chain| !chain.is_empty())
     }
 
-    pub(crate) fn revision(&self, mode: ModeId, view: ViewId) -> Option<Revision> {
+    pub fn revision(&self, mode: ModeId, view: ViewId) -> Option<Revision> {
         Some(self.instances.get(&(mode, view))?.revision)
     }
 
-    pub(crate) fn insert(&mut self, view: ViewId, mode: ModeViewInstance) {
+    pub fn insert(&mut self, view: ViewId, mode: ModeViewInstance) {
         let id = mode.registered.id;
         let chain = self.chains.entry(view).or_default();
         assert!(
@@ -1747,7 +1742,7 @@ impl ModeViewStore {
         assert!(self.instances.insert((id, view), mode).is_none());
     }
 
-    pub(crate) fn remove(&mut self, view: ViewId) -> Vec<ModeId> {
+    pub fn remove(&mut self, view: ViewId) -> Vec<ModeId> {
         let modes = self.chains.remove(&view).unwrap_or_default();
         for mode in &modes {
             self.instances.remove(&(*mode, view));
@@ -1755,12 +1750,12 @@ impl ModeViewStore {
         modes
     }
 
-    pub(crate) fn mode_ids(&self, view: ViewId) -> &[ModeId] {
+    pub fn mode_ids(&self, view: ViewId) -> &[ModeId] {
         self.chains.get(&view).map_or(&[], Vec::as_slice)
     }
 
-    #[cfg(test)]
-    pub(crate) fn mode_names(&self, view: ViewId) -> Vec<ModeName> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn mode_names(&self, view: ViewId) -> Vec<ModeName> {
         self.mode_ids(view)
             .iter()
             .filter_map(|mode| self.instances.get(&(*mode, view)))
@@ -1768,7 +1763,7 @@ impl ModeViewStore {
             .collect()
     }
 
-    pub(crate) fn notify_changed<'a>(
+    pub fn notify_changed<'a>(
         &self,
         views: impl IntoIterator<Item = (ViewId, ContentId, &'a ContentViewState)>,
         content: ContentId,
@@ -1822,7 +1817,7 @@ impl ModeViewStore {
         }
     }
 
-    pub(crate) fn presentation_layer(
+    pub fn presentation_layer(
         &self,
         mode: ModeId,
         view: ViewId,
@@ -1856,7 +1851,7 @@ impl ModeViewStore {
         })
     }
 
-    pub(crate) fn contains(&self, view: ViewId, name: &ModeName) -> bool {
+    pub fn contains(&self, view: ViewId, name: &ModeName) -> bool {
         self.mode_ids(view)
             .iter()
             .filter_map(|mode| self.instances.get(&(*mode, view)))
@@ -1868,7 +1863,7 @@ impl ModeViewStore {
         self.instances.get(&(mode, view))
     }
 
-    pub(crate) fn keymap_at<'a>(
+    pub fn keymap_at<'a>(
         &'a self,
         view: ViewId,
         index: usize,
@@ -1889,7 +1884,7 @@ impl ModeViewStore {
         })
     }
 
-    pub(crate) fn fallback_at(
+    pub fn fallback_at(
         &self,
         view: ViewId,
         index: usize,
@@ -1912,7 +1907,7 @@ impl ModeViewStore {
             .input_typing(content_state, view_state, context, key)
     }
 
-    pub(crate) fn status_at(
+    pub fn status_at(
         &self,
         view: ViewId,
         index: usize,
@@ -1940,7 +1935,7 @@ impl ModeViewStore {
             .mode_input_status(content_state, view_state, context)
     }
 
-    pub(crate) fn capture_at(
+    pub fn capture_at(
         &self,
         view: ViewId,
         index: usize,
@@ -1971,7 +1966,7 @@ impl ModeViewStore {
         )
     }
 
-    pub(crate) fn timeout_at(
+    pub fn timeout_at(
         &self,
         view: ViewId,
         index: usize,
@@ -1999,7 +1994,7 @@ impl ModeViewStore {
         )
     }
 
-    pub(crate) fn fallback_in_chain(
+    pub fn fallback_in_chain(
         &self,
         view: ViewId,
         start_mode: usize,
@@ -2028,7 +2023,7 @@ impl ModeViewStore {
             })
     }
 
-    pub(crate) fn cancel_chain(
+    pub fn cancel_chain(
         &mut self,
         view: ViewId,
         context: &ModeViewContext<'_>,
@@ -2062,7 +2057,7 @@ impl ModeViewStore {
         drafts.commit_views(self);
     }
 
-    pub(crate) fn view_policy_in_draft(
+    pub fn view_policy_in_draft(
         &self,
         view: ViewId,
         context: &ModeViewContext<'_>,
@@ -2092,11 +2087,11 @@ impl ModeViewStore {
         policy
     }
 
-    pub(crate) fn execute_with_context(
+    pub fn execute_with_context(
         &mut self,
         view: ViewId,
         registry: &ModeRegistry,
-        command: &crate::app::command::ModeCommand,
+        command: &crate::command::ModeCommand,
         context: &ModeViewContext<'_>,
         mode_contents: &mut ModeContentStore,
         drafts: &mut ModeDraftJournal,
@@ -2127,11 +2122,11 @@ impl ModeViewStore {
         result
     }
 
-    pub(crate) fn execute_input_with_context(
+    pub fn execute_input_with_context(
         &mut self,
         view: ViewId,
         registry: &ModeRegistry,
-        input: &crate::app::command::ModeInputCommand,
+        input: &crate::command::ModeInputCommand,
         context: &ModeViewContext<'_>,
         mode_contents: &mut ModeContentStore,
         drafts: &mut ModeDraftJournal,
@@ -2188,7 +2183,7 @@ mod tests {
         contents
             .insert(
                 content,
-                crate::core::content::Content::Buffer(crate::core::buffer::Buffer::new()),
+                modeleaf_core::content::Content::Buffer(modeleaf_core::buffer::Buffer::new()),
             )
             .unwrap();
         contents
@@ -2359,7 +2354,7 @@ mod tests {
         let mut content_modes = ModeContentStore::default();
         content_modes.attach_view(content, &mode);
         let contents = contents_with_buffer(content);
-        let command = crate::app::command::ModeCommand::new(name, action);
+        let command = crate::command::ModeCommand::new(name, action);
         let mut drafts = ModeDraftJournal::default();
 
         content_modes
@@ -2411,9 +2406,9 @@ mod tests {
         content_modes.attach_view(content, &mode);
         let contents = contents_with_buffer(content);
         let change = ContentChange::Text(
-            crate::core::transaction::TextChangeSet::from_edits(
+            modeleaf_core::transaction::TextChangeSet::from_edits(
                 0,
-                vec![crate::core::transaction::TextEdit::new(0..0, "x")],
+                vec![modeleaf_core::transaction::TextEdit::new(0..0, "x")],
             )
             .unwrap(),
         );

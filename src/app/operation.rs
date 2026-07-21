@@ -1,18 +1,13 @@
 use std::collections::VecDeque;
 use std::fmt;
 
-use crate::app::action::{TransactionIntent, ViewAction};
-use crate::app::command::{
-    AppCommand, ContentCommand, ModeCommand, ModeInputCommand, TransactionCommand,
-};
+use crate::app::action::TransactionIntent;
+use crate::app::command::{ContentCommand, ModeInputCommand, TransactionCommand};
 use crate::app::dispatcher::DispatchCommand;
 use crate::app::mode::ModeId;
-use crate::core::action::ContentAction;
-use crate::core::command::EditCommand;
 use crate::protocol::ids::{ContentId, ViewId};
-use crate::protocol::revision::Revision;
-use crate::protocol::selection::Selections;
-use crate::protocol::viewport::ViewportCommand;
+
+pub(crate) use modeleaf_mode::operation::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperationOriginScope {
@@ -27,105 +22,6 @@ pub struct OperationOrigin {
     pub view: Option<ViewId>,
     pub content: Option<ContentId>,
     pub mode: Option<ModeId>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ContentTarget {
-    Current,
-    #[allow(dead_code, reason = "explicit cross-content requests are reserved")]
-    Id(ContentId),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ViewTarget {
-    Current,
-    #[allow(dead_code, reason = "explicit cross-view requests are reserved")]
-    Id(ViewId),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ModeTarget {
-    #[allow(
-        dead_code,
-        reason = "content-scoped nested modes are an extension contract"
-    )]
-    CurrentContent,
-    CurrentView,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum OperationRequest {
-    Content {
-        target: ContentTarget,
-        operation: ContentOperation,
-    },
-    View {
-        target: ViewTarget,
-        operation: ViewOperation,
-    },
-    History {
-        target: ContentTarget,
-        operation: TransactionIntent,
-    },
-    Mode {
-        target: ModeTarget,
-        invocation: ModeInvocation,
-    },
-    ModeInput {
-        target: ViewTarget,
-        input: ModeInputCommand,
-    },
-    App(AppOperation),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ContentOperation {
-    #[allow(dead_code, reason = "content-scoped modes emit typed content actions")]
-    Apply(ContentAction),
-    Save,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ViewOperation {
-    Edit(EditCommand),
-    #[allow(dead_code, reason = "preplanned edits are an extension contract")]
-    ApplyPlan(ViewEditPlan),
-    ApplyContent(ContentAction),
-    #[allow(dead_code, reason = "modes can emit selection-only view actions")]
-    Apply(ViewAction),
-    Viewport(ViewportCommand),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ModeInvocation {
-    pub command: ModeCommand,
-    pub nested: bool,
-    pub flow: ModeFlowPropagation,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ModeFlowPropagation {
-    Propagate,
-    Isolate,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AppOperation {
-    Command(AppCommand),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ViewEditPlan {
-    pub expected: ViewPrecondition,
-    pub content: Option<ContentAction>,
-    pub view: Option<ViewAction>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ViewPrecondition {
-    Selections(Selections),
-    #[allow(dead_code, reason = "revision preconditions are reserved for plugins")]
-    Revision(Revision),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -357,6 +253,7 @@ fn transaction_intent(command: TransactionCommand) -> TransactionIntent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::command::EditCommand;
 
     #[test]
     fn sequence_adapter_preserves_order_and_one_origin() {

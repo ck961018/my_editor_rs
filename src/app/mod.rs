@@ -4,22 +4,17 @@
 //! 分别维护后端任务/保存状态与客户端 Scene/View 状态；`layout` 和 `query` 提供布局入口
 //! 与前端查询适配。
 
-mod action;
 mod application;
 #[cfg(test)]
 mod behavior;
 mod bootstrap;
-pub(crate) mod command;
 mod command_resolver;
 mod dispatcher;
 mod execution;
 mod kernel;
 mod layout;
 mod message;
-pub(crate) mod mode;
-pub(crate) mod mode_name;
 mod operation;
-mod presentation;
 mod query;
 mod remote;
 mod runtime;
@@ -30,6 +25,9 @@ mod session;
 mod tasks;
 mod transaction;
 mod view;
+
+pub(crate) use modeleaf_mode as mode;
+pub(crate) use modeleaf_mode::{action, command, mode_name, presentation};
 
 pub use application::App;
 
