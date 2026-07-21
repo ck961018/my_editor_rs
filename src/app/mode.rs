@@ -861,6 +861,18 @@ pub trait Mode {
     ) -> Option<Command> {
         None
     }
+    fn execute_input(
+        &self,
+        _content_state: &mut dyn ModeState,
+        _view_state: &mut dyn ModeState,
+        _context: &ModeViewContext<'_>,
+        _key: KeyEvent,
+    ) -> Result<ModeResult, ModeError> {
+        Err(ModeError::UnknownAction {
+            mode: self.name().clone(),
+            action: ModeActionName::new("<input>"),
+        })
+    }
     fn mode_input_status(
         &self,
         _content_state: &dyn ModeState,
@@ -1606,6 +1618,24 @@ impl ModeViewInstance {
             arguments,
         )
     }
+
+    fn execute_input_with_context(
+        &self,
+        content_state: &mut dyn ModeState,
+        view_state: &mut dyn ModeState,
+        faulted: bool,
+        context: &ModeViewContext<'_>,
+        key: KeyEvent,
+    ) -> Result<ModeResult, ModeError> {
+        if faulted {
+            return Err(ModeError::InactiveMode {
+                requested: self.name().clone(),
+                active: None,
+            });
+        }
+        self.adapter()
+            .execute_input(content_state, view_state, context, key)
+    }
 }
 
 impl ModeViewInstance {
@@ -2044,6 +2074,44 @@ impl ModeViewStore {
             action,
             &command.arguments,
             context,
+        );
+        if result.is_ok() {
+            content_draft.background_job_dirty = true;
+        }
+        result
+    }
+
+    pub(crate) fn execute_input_with_context(
+        &mut self,
+        view: ViewId,
+        registry: &ModeRegistry,
+        input: &crate::app::command::ModeInputCommand,
+        context: &ModeViewContext<'_>,
+        mode_contents: &mut ModeContentStore,
+        drafts: &mut ModeDraftJournal,
+    ) -> Result<ModeResult, ModeError> {
+        let mode = registry
+            .resolve_mode(input.mode())
+            .ok_or_else(|| ModeError::UnknownMode {
+                mode: input.mode().clone(),
+            })?;
+        let Some(instance) = self.instances.get(&(mode, view)) else {
+            return Err(ModeError::InactiveMode {
+                requested: input.mode().clone(),
+                active: self.first(view).map(|instance| instance.name().clone()),
+            });
+        };
+        let content_state = mode_contents
+            .instance(mode, context.content_id())
+            .expect("attached mode has content state");
+        let (content_draft, view_draft) =
+            drafts.content_and_view_mut(mode, context.content_id(), view, content_state, instance);
+        let result = instance.execute_input_with_context(
+            content_draft.state.as_mut(),
+            view_draft.state.as_mut(),
+            view_draft.faulted || content_draft.faulted,
+            context,
+            input.key(),
         );
         if result.is_ok() {
             content_draft.background_job_dirty = true;

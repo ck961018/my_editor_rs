@@ -17,6 +17,12 @@ editor.modes.define({
         },
       },
       keys: { '"': "quote" },
+      input(ctx) {
+        void ctx.arguments.code;
+        // @ts-expect-error Raw input uses the closed EditorKeyEvent shape.
+        void ctx.arguments.missing;
+        return ctx.pass();
+      },
     },
     statusBar: {
       state: () => ({ updates: 0 }),

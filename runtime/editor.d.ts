@@ -220,7 +220,11 @@ interface StatusBarCommandContext<
   pass(): Pass;
 }
 
-interface BufferAdapterDefinition<ContentState, ViewState> {
+interface BufferAdapterDefinition<
+  ContentState,
+  ViewState,
+  WorkerResponse = ScriptData,
+> {
   state?(context: BufferContentContext): ContentState;
   viewState?(state: Readonly<ContentState>): ViewState & {
     viewPolicy?: ViewPolicy;
@@ -232,13 +236,30 @@ interface BufferAdapterDefinition<ContentState, ViewState> {
     ) => void | Pass
   >;
   keys?: Record<string, string>;
-  input?: string;
+  input?(
+    context: BufferCommandContext<
+      ContentState,
+      ViewState,
+      EditorKeyEvent
+    >,
+  ): void | Pass;
   changed?(
     context: BufferContentContext & {
       readonly change: ContentChange[];
       state: ContentState;
     },
   ): void;
+  worker?: string;
+  job?(
+    context: BufferContentContext & { state: ContentState },
+  ): ContentJob | void;
+  applyJob?(
+    context: BufferContentContext & {
+      readonly jobVersion: number;
+      readonly arguments: WorkerResponse;
+      state: ContentState;
+    },
+  ): Pick<ModeActionResult, "contentDecorations"> | void;
 }
 
 interface StatusBarAdapterDefinition<ContentState, ViewState> {
@@ -251,12 +272,19 @@ interface StatusBarAdapterDefinition<ContentState, ViewState> {
     ) => void | Pass
   >;
   keys?: Record<string, string>;
-  input?: string;
+  input?(
+    context: StatusBarCommandContext<
+      ContentState,
+      ViewState,
+      EditorKeyEvent
+    >,
+  ): void | Pass;
 }
 
 interface ModeDefinitionV2<
   BufferState = ScriptData,
   BufferViewState = ScriptData,
+  BufferWorkerResponse = ScriptData,
   StatusBarState = ScriptData,
   StatusBarViewState = ScriptData,
 > {
@@ -264,7 +292,11 @@ interface ModeDefinitionV2<
   before?: string;
   faces?: Record<string, EditorFace>;
   on: {
-    buffer?: BufferAdapterDefinition<BufferState, BufferViewState>;
+    buffer?: BufferAdapterDefinition<
+      BufferState,
+      BufferViewState,
+      BufferWorkerResponse
+    >;
     statusBar?: StatusBarAdapterDefinition<
       StatusBarState,
       StatusBarViewState
@@ -352,12 +384,14 @@ declare const editor: {
     define<
       BufferState = ScriptData,
       BufferViewState = ScriptData,
+      BufferWorkerResponse = ScriptData,
       StatusBarState = ScriptData,
       StatusBarViewState = ScriptData,
     >(
       definition: ModeDefinitionV2<
         BufferState,
         BufferViewState,
+        BufferWorkerResponse,
         StatusBarState,
         StatusBarViewState
       >,

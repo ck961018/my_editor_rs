@@ -22,7 +22,6 @@ function languageFor(fileName?: string): HighlightState["language"] {
 
 editor.modes.define<HighlightState, null, HighlightResult>({
   name: "syntax-highlighting",
-  worker: "worker.ts",
   faces: {
     "syntax.attribute": { foreground: 173 },
     "syntax.comment": { foreground: 244, italic: true },
@@ -46,55 +45,57 @@ editor.modes.define<HighlightState, null, HighlightResult>({
     "syntax.type": { foreground: 109 },
     "syntax.variable": { foreground: 252 },
   },
-  content: {
-    create(context) {
-      return {
-        language: languageFor(context.document?.fileName),
-        generation: 0,
-        scheduledGeneration: null,
-      };
-    },
-    changed(context) {
-      context.contentState.generation += 1;
-    },
-    job(context) {
-      const state = context.contentState;
-      if (
-        state.language === null ||
-        state.scheduledGeneration === state.generation ||
-        context.revision === undefined
-      ) {
-        return;
-      }
-      state.scheduledGeneration = state.generation;
-      return {
-        slot: "parse",
-        version: state.generation,
-        includeText: true,
-        message: {
-          contentId: context.contentId,
-          generation: state.generation,
-          language: state.language,
-          revision: context.revision,
-        },
-      };
-    },
-    applyJob(context) {
-      const result = context.arguments;
-      if (
-        context.jobVersion !== context.contentState.generation ||
-        result.generation !== context.contentState.generation ||
-        result.revision !== context.revision
-      ) {
-        return;
-      }
-      return {
-        contentDecorations: {
-          revision: result.revision,
-          spans: result.spans,
-        },
-      };
+  on: {
+    buffer: {
+      worker: "worker.ts",
+      state(context) {
+        return {
+          language: languageFor(context.document?.fileName),
+          generation: 0,
+          scheduledGeneration: null,
+        };
+      },
+      changed(context) {
+        context.state.generation += 1;
+      },
+      job(context) {
+        const state = context.state;
+        if (
+          state.language === null ||
+          state.scheduledGeneration === state.generation ||
+          context.revision === undefined
+        ) {
+          return;
+        }
+        state.scheduledGeneration = state.generation;
+        return {
+          slot: "parse",
+          version: state.generation,
+          includeText: true,
+          message: {
+            contentId: context.contentId,
+            generation: state.generation,
+            language: state.language,
+            revision: context.revision,
+          },
+        };
+      },
+      applyJob(context) {
+        const result = context.arguments;
+        if (
+          context.jobVersion !== context.state.generation ||
+          result.generation !== context.state.generation ||
+          result.revision !== context.revision
+        ) {
+          return;
+        }
+        return {
+          contentDecorations: {
+            revision: result.revision,
+            spans: result.spans,
+          },
+        };
+      },
     },
   },
-  actions: {},
 });

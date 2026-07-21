@@ -33,6 +33,9 @@ use primitives::PrimitiveRuntime;
 use worker::ScriptWorker;
 
 static V8_INIT: Once = Once::new();
+const V1_DEPRECATION: &str =
+    "TypeScript Mode v1 is deprecated; migrate to the on.buffer adapter schema";
+const V2_INPUT_ACTION: &str = "$input";
 
 include!(concat!(env!("OUT_DIR"), "/plugin_assets.rs"));
 
@@ -64,6 +67,7 @@ pub(crate) struct ScriptHost {
     context: v8::Global<v8::Context>,
     modules: Rc<RefCell<ModuleMap>>,
     definitions: Rc<RefCell<Vec<ScriptModeDefinition>>>,
+    diagnostics: Rc<RefCell<ScriptDiagnostics>>,
     plugin_root: Rc<RefCell<Option<String>>>,
     primitives: Rc<RefCell<PrimitiveRuntime>>,
 }
@@ -78,10 +82,12 @@ impl ScriptHost {
         isolate.set_capture_stack_trace_for_uncaught_exceptions(true, 10);
         let modules = Rc::new(RefCell::new(ModuleMap::default()));
         let definitions = Rc::new(RefCell::new(Vec::new()));
+        let diagnostics = Rc::new(RefCell::new(ScriptDiagnostics::default()));
         let plugin_root = Rc::new(RefCell::new(None));
         let primitives = PrimitiveRuntime::new();
         isolate.set_slot(modules.clone());
         isolate.set_slot(definitions.clone());
+        isolate.set_slot(diagnostics.clone());
         isolate.set_slot(plugin_root.clone());
         isolate.set_slot(primitives.clone());
 
@@ -100,6 +106,7 @@ impl ScriptHost {
             context,
             modules,
             definitions,
+            diagnostics,
             plugin_root,
             primitives,
         }
@@ -183,6 +190,10 @@ impl ScriptHost {
             .into_iter()
             .map(|definition| ScriptMode::new(host.clone(), definition))
             .collect()
+    }
+
+    pub(crate) fn take_diagnostics(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.diagnostics.borrow_mut().messages)
     }
 
     fn execute_action(
@@ -362,6 +373,7 @@ impl ScriptHost {
     fn take_content_job(
         &mut self,
         callback: &v8::Global<v8::Function>,
+        api_version: ScriptApiVersion,
         context: &ModeContentContext<'_>,
         state: &mut ScriptModeState,
     ) -> Result<Option<ScriptJob>, ScriptError> {
@@ -370,17 +382,20 @@ impl ScriptHost {
         v8::tc_scope!(let scope, scope);
         let argument = content_context_object(scope, context, false)?;
         let content_state = json_to_v8(scope, &state.data)?;
-        set_value(scope, argument, "contentState", content_state);
+        let content_state_name = api_version.content_state_name();
+        set_value(scope, argument, content_state_name, content_state);
         let callback = v8::Local::new(scope, callback);
         let receiver = v8::undefined(scope).into();
         let value = callback
             .call(scope, receiver, &[argument.into()])
             .ok_or_else(|| current_exception(scope, "script content job", "execute"))?;
-        let next = property(scope, argument, "contentState")
-            .ok_or_else(|| ScriptError::new("script removed context.contentState"))?;
-        state.data = v8_to_json(scope, next, "contentState")?;
+        let next = property(scope, argument, content_state_name).ok_or_else(|| {
+            ScriptError::new(format!("script removed context.{content_state_name}"))
+        })?;
+        let next = v8_to_json(scope, next, content_state_name)?;
         scope.perform_microtask_checkpoint();
         if value.is_null_or_undefined() {
+            state.data = next;
             return Ok(None);
         }
         let value = v8_to_json(scope, value, "content job")?;
@@ -393,12 +408,14 @@ impl ScriptHost {
                     .ok_or_else(|| ScriptError::new("content job text requires text content"))?,
             );
         }
+        state.data = next;
         Ok(Some(job))
     }
 
     fn apply_content_job(
         &mut self,
         callback: &v8::Global<v8::Function>,
+        api_version: ScriptApiVersion,
         context: &ModeContentContext<'_>,
         state: &mut ScriptModeState,
         version: u64,
@@ -409,7 +426,8 @@ impl ScriptHost {
         v8::tc_scope!(let scope, scope);
         let argument = content_context_object(scope, context, false)?;
         let content_state = json_to_v8(scope, &state.data)?;
-        set_value(scope, argument, "contentState", content_state);
+        let content_state_name = api_version.content_state_name();
+        set_value(scope, argument, content_state_name, content_state);
         set_number(scope, argument, "jobVersion", version as f64);
         let result_value = json_to_v8(scope, result)?;
         set_value(scope, argument, "arguments", result_value);
@@ -425,9 +443,10 @@ impl ScriptHost {
             context.buffer().and_then(|context| context.text_snapshot()),
             context.content_revision(),
         )?;
-        let next = property(scope, argument, "contentState")
-            .ok_or_else(|| ScriptError::new("script removed context.contentState"))?;
-        let next = v8_to_json(scope, next, "contentState")?;
+        let next = property(scope, argument, content_state_name).ok_or_else(|| {
+            ScriptError::new(format!("script removed context.{content_state_name}"))
+        })?;
+        let next = v8_to_json(scope, next, content_state_name)?;
         let changed = next != state.data || decorations.is_some();
         state.data = next;
         if let Some(decorations) = decorations {
@@ -475,6 +494,12 @@ enum ScriptApiVersion {
     V2,
 }
 
+#[derive(Default)]
+struct ScriptDiagnostics {
+    messages: Vec<String>,
+    v1_deprecation_reported: bool,
+}
+
 impl ScriptApiVersion {
     fn content_state_name(self) -> &'static str {
         match self {
@@ -490,6 +515,7 @@ struct ScriptAdapterDefinition {
     actions: Vec<ScriptActionDefinition>,
     bindings: Vec<(KeyEvent, usize)>,
     input_action: Option<usize>,
+    input: Option<v8::Global<v8::Function>>,
     create_content: Option<v8::Global<v8::Function>>,
     content_changed: Option<v8::Global<v8::Function>>,
     content_job: Option<v8::Global<v8::Function>>,
@@ -507,6 +533,7 @@ struct ScriptAdapterDefinitions {
 #[derive(Clone)]
 struct ScriptModeDefinition {
     name: ModeName,
+    version: ScriptApiVersion,
     faces: Vec<(FaceName, Face)>,
     before: Option<ModeName>,
     adapters: ScriptAdapterDefinitions,
@@ -651,6 +678,7 @@ struct ScriptAdapter {
     actions: Vec<ScriptActionDefinition>,
     keymap: Keymap<Command>,
     input_action: Option<ModeActionName>,
+    input: Option<v8::Global<v8::Function>>,
     create_content: Option<v8::Global<v8::Function>>,
     content_changed: Option<v8::Global<v8::Function>>,
     content_job: Option<v8::Global<v8::Function>>,
@@ -689,6 +717,7 @@ impl ScriptAdapter {
             actions: definition.actions,
             keymap,
             input_action,
+            input: definition.input,
             create_content: definition.create_content,
             content_changed: definition.content_changed,
             content_job: definition.content_job,
@@ -824,10 +853,49 @@ impl Mode for ScriptMode {
         context: &ModeViewContext<'_>,
         key: KeyEvent,
     ) -> Option<Command> {
-        let action = self.adapter(context.content_kind()).input_action.clone()?;
+        let adapter = self.adapter(context.content_kind());
+        if adapter.input.is_some() {
+            return Some(Command::ModeInput(
+                crate::app::command::ModeInputCommand::new(self.name.clone(), key),
+            ));
+        }
+        let action = adapter.input_action.clone()?;
         Some(Command::Mode(
             ModeCommand::new(self.name.clone(), action).with_arguments(key_event_arguments(key)),
         ))
+    }
+
+    fn execute_input(
+        &self,
+        content_state: &mut dyn ModeState,
+        view_state: &mut dyn ModeState,
+        context: &ModeViewContext<'_>,
+        key: KeyEvent,
+    ) -> Result<ModeResult, ModeError> {
+        let adapter = self.adapter(context.content_kind());
+        let callback = adapter
+            .input
+            .as_ref()
+            .ok_or_else(|| ModeError::UnknownAction {
+                mode: self.name.clone(),
+                action: ModeActionName::new("<input>"),
+            })?;
+        let content_state = script_state_mut(content_state, &self.name)?;
+        let view_state = script_state_mut(view_state, &self.name)?;
+        self.host
+            .borrow_mut()
+            .execute_action(
+                callback,
+                adapter.version,
+                context,
+                &key_event_arguments(key),
+                content_state,
+                view_state,
+            )
+            .map_err(|error| ModeError::CallbackFailed {
+                mode: self.name.clone(),
+                message: error.to_string(),
+            })
     }
 
     fn view_policy(
@@ -900,15 +968,16 @@ impl Mode for ScriptMode {
                 return Some(failed_script_job(error.to_string()));
             }
         };
-        let job = match self
-            .host
-            .borrow_mut()
-            .take_content_job(callback, context, state)
-        {
-            Ok(Some(job)) => job,
-            Ok(None) => return None,
-            Err(error) => return Some(failed_script_job(error.to_string())),
-        };
+        let job =
+            match self
+                .host
+                .borrow_mut()
+                .take_content_job(callback, adapter.version, context, state)
+            {
+                Ok(Some(job)) => job,
+                Ok(None) => return None,
+                Err(error) => return Some(failed_script_job(error.to_string())),
+            };
         let worker = worker.clone();
         let ScriptJob {
             slot,
@@ -966,7 +1035,7 @@ impl Mode for ScriptMode {
         let state = script_state_mut(state, &self.name)?;
         self.host
             .borrow_mut()
-            .apply_content_job(callback, context, state, version, &result)
+            .apply_content_job(callback, adapter.version, context, state, version, &result)
             .map_err(|error| ModeError::CallbackFailed {
                 mode: self.name.clone(),
                 message: error.to_string(),
@@ -1142,6 +1211,9 @@ pub(crate) fn load_user_config() -> Result<Rc<RefCell<ScriptHost>>, ScriptError>
     }
 
     host.borrow_mut().execute_module(&path)?;
+    for diagnostic in host.borrow_mut().take_diagnostics() {
+        eprintln!("warning: {diagnostic}");
+    }
     Ok(host)
 }
 
@@ -1204,6 +1276,18 @@ fn define_mode(
                 );
                 return;
             }
+            if definition.version == ScriptApiVersion::V1 {
+                let Some(diagnostics) = scope.get_slot::<Rc<RefCell<ScriptDiagnostics>>>().cloned()
+                else {
+                    throw_script_error(scope, "script diagnostic registry is unavailable");
+                    return;
+                };
+                let mut diagnostics = diagnostics.borrow_mut();
+                if !diagnostics.v1_deprecation_reported {
+                    diagnostics.v1_deprecation_reported = true;
+                    diagnostics.messages.push(V1_DEPRECATION.to_owned());
+                }
+            }
             definitions.borrow_mut().push(definition);
             return_value.set_undefined();
         }
@@ -1220,15 +1304,22 @@ fn parse_mode_definition(
     let name = required_string(scope, object, "name")?;
     let before = optional_string(scope, object, "before")?.map(ModeName::new);
     let faces = parse_faces(scope, object)?;
-    let adapters = match property(scope, object, "on") {
-        Some(value) if !value.is_null_or_undefined() => parse_v2_adapters(scope, object, value)?,
-        _ => ScriptAdapterDefinitions {
-            buffer: Some(parse_v1_adapter(scope, object)?),
-            status_bar: None,
-        },
+    let (version, adapters) = match property(scope, object, "on") {
+        Some(value) if !value.is_null_or_undefined() => (
+            ScriptApiVersion::V2,
+            parse_v2_adapters(scope, object, value)?,
+        ),
+        _ => (
+            ScriptApiVersion::V1,
+            ScriptAdapterDefinitions {
+                buffer: Some(parse_v1_adapter(scope, object)?),
+                status_bar: None,
+            },
+        ),
     };
     Ok(ScriptModeDefinition {
         name: ModeName::new(name),
+        version,
         faces,
         before,
         adapters,
@@ -1247,19 +1338,7 @@ fn parse_v1_adapter(
     let content_job = optional_section_callback(scope, object, "content", "job")?;
     let content_apply_job = optional_section_callback(scope, object, "content", "applyJob")?;
     let create_view = optional_factory(scope, object, "view")?;
-    let worker = optional_string(scope, object, "worker")?
-        .map(|entry| {
-            let root = scope
-                .get_slot::<Rc<RefCell<Option<String>>>>()
-                .and_then(|root| root.borrow().clone())
-                .ok_or_else(|| {
-                    ScriptError::new(
-                        "mode workers currently require an embedded plugin resource root",
-                    )
-                })?;
-            ScriptWorker::start(root, entry)
-        })
-        .transpose()?;
+    let worker = parse_worker(scope, object)?;
     if content_job.is_some() != worker.is_some() || content_apply_job.is_some() != worker.is_some()
     {
         return Err(ScriptError::new(
@@ -1271,6 +1350,7 @@ fn parse_v1_adapter(
         actions,
         bindings,
         input_action,
+        input: None,
         create_content,
         content_changed,
         content_job,
@@ -1333,28 +1413,78 @@ fn parse_v2_adapter(
     kind: ContentKind,
 ) -> Result<ScriptAdapterDefinition, ScriptError> {
     let actions = parse_actions(scope, object, "commands", false)?;
-    let content_changed = match kind {
-        ContentKind::Buffer => optional_function(scope, object, "changed")?,
-        ContentKind::StatusBar => {
-            if property(scope, object, "changed").is_some_and(|value| !value.is_null_or_undefined())
+    if actions
+        .iter()
+        .any(|action| action.name.as_str() == V2_INPUT_ACTION)
+    {
+        return Err(ScriptError::new(format!(
+            "mode command '{V2_INPUT_ACTION}' is reserved for raw input"
+        )));
+    }
+    let input = optional_function(scope, object, "input")?;
+    let (content_changed, content_job, content_apply_job, worker) = match kind {
+        ContentKind::Buffer => {
+            let content_job = optional_function(scope, object, "job")?;
+            let content_apply_job = optional_function(scope, object, "applyJob")?;
+            let worker = parse_worker(scope, object)?;
+            if content_job.is_some() != worker.is_some()
+                || content_apply_job.is_some() != worker.is_some()
             {
-                return Err(ScriptError::new("mode statusBar.changed is not supported"));
+                return Err(ScriptError::new(
+                    "mode buffer worker, job, and applyJob must be defined together",
+                ));
             }
-            None
+            (
+                optional_function(scope, object, "changed")?,
+                content_job,
+                content_apply_job,
+                worker,
+            )
+        }
+        ContentKind::StatusBar => {
+            for field in ["changed", "worker", "job", "applyJob"] {
+                if property(scope, object, field).is_some_and(|value| !value.is_null_or_undefined())
+                {
+                    return Err(ScriptError::new(format!(
+                        "mode statusBar.{field} is not supported"
+                    )));
+                }
+            }
+            (None, None, None, None)
         }
     };
     Ok(ScriptAdapterDefinition {
         version: ScriptApiVersion::V2,
         bindings: parse_bindings(scope, object, &actions)?,
-        input_action: parse_input_action(scope, object, &actions)?,
+        input_action: None,
+        input,
         actions,
         create_content: optional_function(scope, object, "state")?,
         content_changed,
-        content_job: None,
-        content_apply_job: None,
+        content_job,
+        content_apply_job,
         create_view: optional_function(scope, object, "viewState")?,
-        worker: None,
+        worker,
     })
+}
+
+fn parse_worker(
+    scope: &mut v8::PinScope,
+    object: v8::Local<v8::Object>,
+) -> Result<Option<ScriptWorker>, ScriptError> {
+    optional_string(scope, object, "worker")?
+        .map(|entry| {
+            let root = scope
+                .get_slot::<Rc<RefCell<Option<String>>>>()
+                .and_then(|root| root.borrow().clone())
+                .ok_or_else(|| {
+                    ScriptError::new(
+                        "mode workers currently require an embedded plugin resource root",
+                    )
+                })?;
+            ScriptWorker::start(root, entry)
+        })
+        .transpose()
 }
 
 fn parse_actions(
@@ -2751,6 +2881,31 @@ editor.modes.define({
                 r#"on: { statusBar: { changed() {} } }"#,
                 "mode statusBar.changed is not supported",
             ),
+            (
+                "status-worker",
+                r#"on: { statusBar: { worker: "worker.ts" } }"#,
+                "mode statusBar.worker is not supported",
+            ),
+            (
+                "incomplete-worker",
+                r#"on: { buffer: { job() {} } }"#,
+                "mode buffer worker, job, and applyJob must be defined together",
+            ),
+            (
+                "invalid-input",
+                r#"on: { buffer: { input: 42 } }"#,
+                "mode input must be a function",
+            ),
+            (
+                "reserved-input",
+                r#"on: { buffer: { commands: { "$input"() {} }, input() {} } }"#,
+                "mode command '$input' is reserved for raw input",
+            ),
+            (
+                "bound-internal-input",
+                r#"on: { buffer: { input() {}, keys: { "x": "$input" } } }"#,
+                "unknown command '$input' in key bindings",
+            ),
         ] {
             let mut host = ScriptHost::new();
             let source = format!("editor.modes.define({{ name: {name:?}, {body} }});");
@@ -2882,6 +3037,129 @@ editor.modes.define({
                 .collect::<Vec<_>>(),
             vec!["vim", "syntax-highlighting"]
         );
+        assert!(
+            definitions
+                .iter()
+                .all(|definition| definition.version == ScriptApiVersion::V2)
+        );
+        let vim = definitions
+            .iter()
+            .find(|definition| definition.name.as_str() == "vim")
+            .unwrap();
+        let vim_adapter = vim.adapters.buffer.as_ref().unwrap();
+        assert!(vim_adapter.input.is_some());
+        assert!(
+            vim_adapter
+                .actions
+                .iter()
+                .all(|action| action.name.as_str() != V2_INPUT_ACTION)
+        );
+        let highlighting = definitions
+            .iter()
+            .find(|definition| definition.name.as_str() == "syntax-highlighting")
+            .unwrap();
+        let adapter = highlighting.adapters.buffer.as_ref().unwrap();
+        assert!(adapter.worker.is_some());
+        assert!(adapter.content_job.is_some());
+        assert!(adapter.content_apply_job.is_some());
+        assert!(host.diagnostics.borrow().messages.is_empty());
+    }
+
+    #[test]
+    fn v2_raw_input_is_not_a_registered_mode_command() {
+        let host = load_default_plugins().unwrap();
+        let vim = ScriptHost::script_modes(&host)
+            .into_iter()
+            .find(|mode| mode.name().as_str() == "vim")
+            .unwrap();
+        let mut registry = ModeRegistry::new();
+        registry.register(vim).unwrap();
+
+        let error = registry
+            .resolve_command_checked(&ModeName::new("vim"), &ModeActionName::new(V2_INPUT_ACTION))
+            .unwrap_err();
+
+        assert!(matches!(error, ModeError::UnknownAction { .. }));
+    }
+
+    #[test]
+    fn v1_schema_reports_one_deprecation_diagnostic_per_host() {
+        let mut host = ScriptHost::new();
+        host.execute_typescript(
+            "file:///legacy.ts",
+            r#"
+editor.modes.define({ name: "legacy-one", actions: {} });
+editor.modes.define({ name: "legacy-two", actions: {} });
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(host.take_diagnostics(), vec![V1_DEPRECATION]);
+        assert!(host.take_diagnostics().is_empty());
+
+        host.execute_typescript(
+            "file:///legacy-again.ts",
+            r#"editor.modes.define({ name: "legacy-three", actions: {} });"#,
+        )
+        .unwrap();
+        assert!(host.take_diagnostics().is_empty());
+
+        host.execute_typescript(
+            "file:///modern.ts",
+            r#"editor.modes.define({ name: "modern", on: { buffer: {} } });"#,
+        )
+        .unwrap();
+        assert!(host.take_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn invalid_v2_background_job_does_not_publish_mutated_state() {
+        let mut host = ScriptHost::new();
+        host.execute_embedded_plugin(
+            "tree-sitter/invalid-job.ts",
+            r#"
+editor.modes.define({
+  name: "invalid-job",
+  on: {
+    buffer: {
+      worker: "worker.ts",
+      state: () => ({ calls: 0 }),
+      job(ctx) {
+        ctx.state.calls++;
+        return { slot: "", version: 0, message: {} };
+      },
+      applyJob() {},
+    },
+  },
+});
+"#,
+        )
+        .unwrap();
+        let callback = host.definitions.borrow()[0]
+            .adapters
+            .buffer
+            .as_ref()
+            .unwrap()
+            .content_job
+            .as_ref()
+            .unwrap()
+            .clone();
+        let content = ContentId(0);
+        let mut contents = ContentStore::default();
+        contents
+            .insert(content, Content::Buffer(Buffer::new()))
+            .unwrap();
+        let context = ModeContentContext::new(content, &contents);
+        let mut state = ScriptModeState::new(serde_json::json!({ "calls": 0 }));
+
+        let error =
+            match host.take_content_job(&callback, ScriptApiVersion::V2, &context, &mut state) {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("invalid job unexpectedly passed validation"),
+            };
+
+        assert!(error.contains("slot must be a non-empty string"), "{error}");
+        assert_eq!(state.data, serde_json::json!({ "calls": 0 }));
     }
 
     #[test]

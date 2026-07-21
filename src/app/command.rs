@@ -14,6 +14,7 @@ pub enum Command {
     App(AppCommand),
     Content(ContentCommand),
     Mode(ModeCommand),
+    ModeInput(ModeInputCommand),
     Viewport(ViewportCommand),
     Noop,
 }
@@ -23,6 +24,26 @@ pub struct ModeCommand {
     pub mode: ModeName,
     pub action: ModeActionName,
     pub arguments: ModeValue,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModeInputCommand {
+    mode: ModeName,
+    key: crate::protocol::key_event::KeyEvent,
+}
+
+impl ModeInputCommand {
+    pub(crate) fn new(mode: ModeName, key: crate::protocol::key_event::KeyEvent) -> Self {
+        Self { mode, key }
+    }
+
+    pub(crate) fn mode(&self) -> &ModeName {
+        &self.mode
+    }
+
+    pub(crate) fn key(&self) -> crate::protocol::key_event::KeyEvent {
+        self.key
+    }
 }
 
 #[allow(

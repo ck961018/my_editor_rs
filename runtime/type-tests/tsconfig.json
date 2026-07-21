@@ -5,5 +5,9 @@
     "strict": true,
     "target": "ES2022"
   },
-  "files": ["v2-mode.ts"]
+  "files": [
+    "../plugins/tree-sitter/plugin.ts",
+    "../plugins/vim/plugin.ts",
+    "v2-mode.ts"
+  ]
 }

@@ -18,11 +18,10 @@ async fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let path = args.get(1).map(|s| s.as_str());
 
-    let _guard = TerminalGuard::enter()?;
-
     let (width, height) = term_size().unwrap_or((80, 24));
     let frontend = TuiFrontend::new(Output::new(io::BufWriter::new(io::stdout())));
     let mut app = App::new_configured(path, width as usize, height as usize, frontend)?;
+    let _guard = TerminalGuard::enter()?;
     app.run().await?;
     Ok(())
 }

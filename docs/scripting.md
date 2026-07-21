@@ -20,17 +20,21 @@ The runtime transpiles TypeScript but does not type-check it.
 ```ts
 editor.modes.define({
   name: "pairs",
-  content: { create: () => ({ inserted: 0 }) },
-  view: { create: () => ({ enabled: true }) },
-  actions: {
-    quote(context) {
-      if (!context.viewState.enabled) return context.forward();
-      context.contentState.inserted++;
-      context.text.insert('""');
-      return context.handled();
+  on: {
+    buffer: {
+      state: () => ({ inserted: 0 }),
+      viewState: () => ({ enabled: true }),
+      commands: {
+        quote(context) {
+          if (!context.viewState.enabled) return context.pass();
+          context.state.inserted++;
+          context.edit.insert('""');
+          context.cursor.moveLeft();
+        },
+      },
+      keys: { '"': "quote" },
     },
   },
-  keys: { '"': "quote" },
 });
 ```
 
@@ -38,15 +42,21 @@ Content state exists once per `(Mode, Content)`. View state exists once per
 `(Mode, View)`. Both contain only JSON-compatible structured data. The host
 copies validated values back after a callback returns.
 
-Modes receive input in attachment order. `context.forward()` passes the same
-input to the next mode after the current operations execute.
-`context.handled()` stops dispatch, which is also the default. `input` names
-an action that receives every raw, unmapped key in `context.arguments`.
+Modes receive input in attachment order. A command that returns normally has
+handled the input. Only `return context.pass()` continues to the next Mode
+after the current operations execute. The optional `input(context)` callback
+receives every raw, unmapped key as a typed `EditorKeyEvent` in
+`context.arguments`; simple keymap Modes do not need that callback.
+
+Commands have stable qualified names such as `pairs.quote`. Another command
+can stage one with `context.commands.invoke("pairs.quote")`. The nested command
+shares the current transaction, but its return value does not replace the
+calling command's `void | Pass` decision.
 
 ## Native primitives
 
-Rust exposes typed functions under `context.cursor`, `context.text`,
-`context.history`, `context.viewport`, `context.mode`, and `context.app`.
+Rust exposes typed functions under `context.cursor`, `context.edit`,
+`context.history`, `context.viewport`, `context.commands`, and `context.app`.
 Scripts call these functions directly; operation names are not serialized as
 strings. Dynamic mode and action names remain strings because plugins define
 that namespace.
@@ -65,19 +75,18 @@ For example:
 ```ts
 context.history.begin();
 context.cursor.moveWordForward(2);
-context.text.deleteToLineEnd();
+context.edit.deleteToLineEnd();
 context.history.commit();
-return context.handled();
 ```
 
 ## Editing Content
 
-`context.text.insert()` and the cursor-relative text functions use the
+`context.edit.insert()` and the cursor-relative text functions use the
 existing deferred edit path. An absolute edit batch uses zero-based UTF-16
 positions:
 
 ```ts
-context.text.applyEdits([{
+context.edit.applyEdits([{
   range: {
     start: { line: 0, character: 1 },
     end: { line: 0, character: 3 },
@@ -119,17 +128,36 @@ Worker resources are read-only and restricted to the plugin directory.
 Absolute paths, parent traversal, network access, timers, and Node APIs are
 not provided.
 
-The mode's `content.job` callback returns a JSON message, slot, and version.
-Set `includeText: true` to add the current document text to the worker message
-off the UI thread. The message must then be an object without a `text` field.
-The existing Mode job scheduler runs the worker off the UI thread. One job per
+An advanced Buffer adapter may temporarily use `worker`, `job`, and
+`applyJob`. The `job` callback returns a JSON message, slot, and version. Set
+`includeText: true` to add the current document text to the worker message off
+the UI thread. The message must then be an object without a `text` field. The
+existing Mode job scheduler runs the worker off the UI thread. One job per
 `(Mode, Content, slot)` runs at a time, and only the latest queued request is
-kept. `content.applyJob` validates the generation and Content revision before
+kept. `applyJob` validates the generation and Content revision before
 publishing state or decorations.
 
 Workers may return a Promise. The worker isolate pumps V8 microtasks, observes
 editor cancellation, and rejects a request that exceeds its execution budget.
 The main ScriptHost remains synchronous for input and command callbacks.
+
+## Migrating a v1 mode
+
+The v1 `content/view/actions/keys` schema remains accepted for user
+configuration during the migration window. A configured host emits one
+deprecation warning even when several v1 Modes are defined. The parser adapts
+them to the same registered Mode and execution frame used by v2.
+
+Migration is mechanical for ordinary Buffer Modes:
+
+- move `content.create` to `on.buffer.state`;
+- move `view.create` to `on.buffer.viewState`;
+- rename `actions` to `on.buffer.commands` and move `keys` beside it;
+- rename `contentState` to `state` and `text` primitives to `edit`;
+- replace `forward()` with `pass()` and remove `handled()` returns.
+
+The bundled Vim and Tree-sitter plugins use v2 and therefore do not exercise
+the compatibility parser. v1 removal is a separate release decision.
 
 ## Modules and trust boundary
 

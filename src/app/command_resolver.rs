@@ -41,6 +41,14 @@ pub(super) fn resolve_command(
                 content: views.get(&view)?.content(),
             })
         }
+        Command::ModeInput(input) => {
+            let view = source.view_or(focused_view);
+            Some(DispatchCommand::ModeInput {
+                input,
+                view,
+                content: views.get(&view)?.content(),
+            })
+        }
         Command::Viewport(command) => {
             let view = source.view_or(focused_view);
             Some(DispatchCommand::Viewport {

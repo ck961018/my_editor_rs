@@ -1,17 +1,6 @@
 type VimEditorState = "normal" | "insert" | "visual" | "visual-line";
 
-interface KeyInput {
-  code: "character" | "arrow" | "backspace" | "enter" | "escape" |
-    "function" | "unknown";
-  character?: string;
-  direction?: "up" | "down" | "left" | "right";
-  number?: number;
-  modifiers: {
-    alt: boolean;
-    ctrl: boolean;
-    shift: boolean;
-  };
-}
+type KeyInput = EditorKeyEvent;
 
 type VimPending =
   | { kind: "count"; count: number }
@@ -35,7 +24,7 @@ interface VimViewState {
   };
 }
 
-type VimContext = ModeContext<null, VimViewState, KeyInput>;
+type VimContext = BufferCommandContext<null, VimViewState, KeyInput>;
 type Effect = (context: VimContext) => void;
 
 function isVisual(state: VimViewState): boolean {
@@ -169,7 +158,7 @@ function handlePending(state: VimViewState, key: KeyInput): Effect[] | null {
           state,
           pending.operator,
           (context) =>
-            context.text.deleteToLineStartMotion(pending.operatorCount),
+            context.edit.deleteToLineStartMotion(pending.operatorCount),
         );
       }
       pending.motionCount = (pending.motionCount ?? 0) * 10 +
@@ -182,8 +171,8 @@ function handlePending(state: VimViewState, key: KeyInput): Effect[] | null {
         state,
         pending.operator,
         (context) => pending.operator === "change"
-          ? context.text.changeLines(count)
-          : context.text.deleteLines(count),
+          ? context.edit.changeLines(count)
+          : context.edit.deleteLines(count),
       );
     }
     if (key.character === "w") {
@@ -191,22 +180,22 @@ function handlePending(state: VimViewState, key: KeyInput): Effect[] | null {
         state,
         pending.operator,
         (context) => pending.operator === "change"
-          ? context.text.changeWordMotion(count)
-          : context.text.deleteWordMotion(count),
+          ? context.edit.changeWordMotion(count)
+          : context.edit.deleteWordMotion(count),
       );
     }
     if (key.character === "e") {
       return completeOperator(
         state,
         pending.operator,
-        (context) => context.text.deleteWordEndMotion(count),
+        (context) => context.edit.deleteWordEndMotion(count),
       );
     }
     if (key.character === "$") {
       return completeOperator(
         state,
         pending.operator,
-        (context) => context.text.deleteToLineEndMotion(count),
+        (context) => context.edit.deleteToLineEndMotion(count),
       );
     }
     state.pending = null;
@@ -240,17 +229,17 @@ function handleInsert(state: VimViewState, key: KeyInput): Effect[] | null {
     ];
   }
   if (key.code === "character" && isPlain(key) && key.character !== undefined) {
-    return [(context) => context.text.insert(key.character!)];
+    return [(context) => context.edit.insert(key.character!)];
   }
   if (key.code === "enter" && isPlain(key) || isCtrl(key, "j") || isCtrl(key, "m")) {
-    return [(context) => context.text.insert("\n")];
+    return [(context) => context.edit.insert("\n")];
   }
   if (key.code === "backspace" && isPlain(key) || isCtrl(key, "h")) {
-    return [(context) => context.text.deleteBackward()];
+    return [(context) => context.edit.deleteBackward()];
   }
-  if (isCtrl(key, "w")) return [(context) => context.text.deleteWordBackward()];
-  if (isCtrl(key, "u")) return [(context) => context.text.deleteToLineStart()];
-  if (isCtrl(key, "k")) return [(context) => context.text.deleteToLineEnd()];
+  if (isCtrl(key, "w")) return [(context) => context.edit.deleteWordBackward()];
+  if (isCtrl(key, "u")) return [(context) => context.edit.deleteToLineStart()];
+  if (isCtrl(key, "k")) return [(context) => context.edit.deleteToLineEnd()];
   if (isCtrl(key, "b")) return [(context) => context.cursor.moveLeft()];
   if (isCtrl(key, "f")) return [(context) => context.cursor.moveRight()];
   if (key.code === "arrow" && key.direction !== undefined) {
@@ -392,8 +381,8 @@ function handleVisual(state: VimViewState, key: KeyInput): Effect[] | null {
     const linewise = state.state === "visual-line";
     setEditorState(state, "normal");
     return [(context) => linewise
-      ? context.text.deleteSelectedLines()
-      : context.text.deleteSelectionInclusive()];
+      ? context.edit.deleteSelectedLines()
+      : context.edit.deleteSelectionInclusive()];
   }
   if (key.character === "c" || key.character === "s") {
     const linewise = state.state === "visual-line";
@@ -401,8 +390,8 @@ function handleVisual(state: VimViewState, key: KeyInput): Effect[] | null {
     return [
       (context) => context.history.begin(),
       (context) => linewise
-        ? context.text.deleteSelectedLines()
-        : context.text.deleteSelectionInclusive(),
+        ? context.edit.deleteSelectedLines()
+        : context.edit.deleteSelectionInclusive(),
     ];
   }
   if (key.character >= "1" && key.character <= "9") {
@@ -428,11 +417,11 @@ function handleNormal(state: VimViewState, key: KeyInput): Effect[] | null {
     return [];
   }
   if (key.character === "u") return [(context) => context.history.undo()];
-  if (key.character === "x") return [(context) => context.text.deleteForward()];
-  if (key.character === "X") return [(context) => context.text.deleteBackward()];
-  if (key.character === "J") return [(context) => context.text.joinLines()];
-  if (key.character === "D") return [(context) => context.text.deleteToLineEnd()];
-  if (key.character === "~") return [(context) => context.text.toggleCase()];
+  if (key.character === "x") return [(context) => context.edit.deleteForward()];
+  if (key.character === "X") return [(context) => context.edit.deleteBackward()];
+  if (key.character === "J") return [(context) => context.edit.joinLines()];
+  if (key.character === "D") return [(context) => context.edit.deleteToLineEnd()];
+  if (key.character === "~") return [(context) => context.edit.toggleCase()];
   if (key.character === "i") {
     setEditorState(state, "insert");
     return [(context) => context.history.begin()];
@@ -450,8 +439,8 @@ function handleNormal(state: VimViewState, key: KeyInput): Effect[] | null {
     return [
       (context) => context.history.begin(),
       (context) => below
-        ? context.text.insertLineBelow()
-        : context.text.insertLineAbove(),
+        ? context.edit.insertLineBelow()
+        : context.edit.insertLineAbove(),
     ];
   }
   if (key.character === "I") {
@@ -472,21 +461,21 @@ function handleNormal(state: VimViewState, key: KeyInput): Effect[] | null {
     setEditorState(state, "insert");
     return [
       (context) => context.history.begin(),
-      (context) => context.text.deleteForward(),
+      (context) => context.edit.deleteForward(),
     ];
   }
   if (key.character === "C") {
     setEditorState(state, "insert");
     return [
       (context) => context.history.begin(),
-      (context) => context.text.deleteToLineEnd(),
+      (context) => context.edit.deleteToLineEnd(),
     ];
   }
   if (key.character === "S") {
     setEditorState(state, "insert");
     return [
       (context) => context.history.begin(),
-      (context) => context.text.deleteLineContent(),
+      (context) => context.edit.deleteLineContent(),
     ];
   }
   if (key.character === "v") return enterVisual(state, "visual");
@@ -521,8 +510,10 @@ function handleNormal(state: VimViewState, key: KeyInput): Effect[] | null {
 
 editor.modes.define({
   name: "vim",
-  view: {
-    create: (): VimViewState => ({
+  on: {
+    buffer: {
+      state: () => null,
+      viewState: (): VimViewState => ({
       state: "normal",
       pending: null,
       viewPolicy: {
@@ -530,22 +521,19 @@ editor.modes.define({
         cursorDomain: "character",
         selectionShape: "character",
       },
-    }),
-  },
-  input: "input",
-  actions: {
-    input(context) {
-      const state = context.viewState as VimViewState;
-      const key = context.arguments as KeyInput;
-      const pending = handlePending(state, key);
-      const effects = pending ?? (state.state === "insert"
-        ? handleInsert(state, key)
-        : isVisual(state)
-        ? handleVisual(state, key)
-        : handleNormal(state, key));
-      if (effects === null) return context.forward();
-      for (const effect of effects) effect(context as VimContext);
-      return context.handled();
+      }),
+      input(context) {
+        const state = context.viewState;
+        const key = context.arguments;
+        const pending = handlePending(state, key);
+        const effects = pending ?? (state.state === "insert"
+          ? handleInsert(state, key)
+          : isVisual(state)
+          ? handleVisual(state, key)
+          : handleNormal(state, key));
+        if (effects === null) return context.pass();
+        for (const effect of effects) effect(context);
+      },
     },
   },
 });

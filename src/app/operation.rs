@@ -2,7 +2,9 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use crate::app::action::{TransactionIntent, ViewAction};
-use crate::app::command::{AppCommand, ContentCommand, ModeCommand, TransactionCommand};
+use crate::app::command::{
+    AppCommand, ContentCommand, ModeCommand, ModeInputCommand, TransactionCommand,
+};
 use crate::app::dispatcher::DispatchCommand;
 use crate::app::mode::ModeId;
 use crate::core::action::ContentAction;
@@ -68,6 +70,10 @@ pub enum OperationRequest {
     Mode {
         target: ModeTarget,
         invocation: ModeInvocation,
+    },
+    ModeInput {
+        target: ViewTarget,
+        input: ModeInputCommand,
     },
     App(AppOperation),
 }
@@ -142,6 +148,12 @@ pub enum ResolvedOperation {
         mode: ModeId,
         scope: ResolvedModeScope,
         invocation: ModeInvocation,
+    },
+    ModeInput {
+        mode: ModeId,
+        view: ViewId,
+        content: ContentId,
+        input: ModeInputCommand,
     },
     App(AppOperation),
 }
@@ -245,6 +257,17 @@ pub fn adapt_dispatch_command(
                     nested: false,
                     flow: ModeFlowPropagation::Propagate,
                 },
+            }],
+        ),
+        DispatchCommand::ModeInput {
+            input,
+            view,
+            content,
+        } => (
+            OperationOrigin::view(view, content),
+            vec![OperationRequest::ModeInput {
+                target: ViewTarget::Current,
+                input,
             }],
         ),
         DispatchCommand::Viewport {

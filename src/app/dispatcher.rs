@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use crate::app::command::{AppCommand, Command, ContentCommand, ModeCommand};
+use crate::app::command::{AppCommand, Command, ContentCommand, ModeCommand, ModeInputCommand};
 use crate::app::command_resolver::{focused_view_id, resolve_command};
 use crate::app::mode::{ModeContentStore, ModeDraftJournal, ModeViewContext, ModeViewStore};
 use crate::app::view::View;
@@ -48,6 +48,11 @@ pub(crate) enum DispatchCommand {
         view: ViewId,
         content: ContentId,
     },
+    ModeInput {
+        input: ModeInputCommand,
+        view: ViewId,
+        content: ContentId,
+    },
     Viewport {
         command: ViewportCommand,
         view: ViewId,
@@ -78,6 +83,7 @@ impl DispatchCommand {
             Self::Content { content, .. }
             | Self::ContentWithView { content, .. }
             | Self::Mode { content, .. }
+            | Self::ModeInput { content, .. }
             | Self::Viewport { content, .. }
             | Self::ModeContentOperations { content, .. }
             | Self::ModeOperations { content, .. } => Some(*content),
@@ -89,6 +95,7 @@ impl DispatchCommand {
         match self {
             Self::ContentWithView { view, .. }
             | Self::Mode { view, .. }
+            | Self::ModeInput { view, .. }
             | Self::Viewport { view, .. }
             | Self::ModeOperations { view, .. } => Some(*view),
             Self::App(_)

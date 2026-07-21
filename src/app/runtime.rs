@@ -675,6 +675,42 @@ impl<F: Frontend> App<F> {
                         }
                     }
                 }
+                ResolvedOperation::ModeInput {
+                    mode,
+                    view,
+                    content,
+                    input,
+                } => {
+                    let revision_before = self
+                        .session
+                        .view(view)
+                        .expect("target view exists")
+                        .revision();
+                    let (contents, modes, mode_contents) = self.kernel.mode_attachment_parts();
+                    let result = self
+                        .session
+                        .execute_mode_input(
+                            view,
+                            modes,
+                            contents,
+                            &input,
+                            mode_contents,
+                            frame.mode_drafts_mut(),
+                        )
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                    let (flow, operations) = result.into_parts();
+                    input_flow = flow;
+                    frame.record_view_touch(view, revision_before);
+                    let mut effect_origin = OperationOrigin::view(view, content);
+                    effect_origin.mode = Some(mode);
+                    prepend_mode_operations(
+                        &mut queue,
+                        effect_origin,
+                        operations,
+                        ModeFlowPropagation::Propagate,
+                    );
+                    Ok(())
+                }
             };
             result?;
         }
@@ -780,6 +816,35 @@ impl<F: Frontend> App<F> {
                     mode,
                     scope,
                     invocation,
+                })
+            }
+            OperationRequest::ModeInput { target, input } => {
+                if origin.scope != OperationOriginScope::View {
+                    return Err(invalid_operation(
+                        "mode input requires a view-scoped origin",
+                    ));
+                }
+                let (view, content) = self.resolve_view_target(target, origin)?;
+                let content_kind = self
+                    .kernel
+                    .contents()
+                    .kind(content)
+                    .ok_or_else(|| invalid_operation("mode input targets missing content"))?;
+                let mode = self
+                    .kernel
+                    .modes()
+                    .resolve_mode(input.mode())
+                    .ok_or_else(|| invalid_operation("mode input targets unknown mode"))?;
+                if self.kernel.modes().adapter(mode, content_kind).is_none() {
+                    return Err(invalid_operation(
+                        "mode input targets an unsupported content kind",
+                    ));
+                }
+                Ok(ResolvedOperation::ModeInput {
+                    mode,
+                    view,
+                    content,
+                    input,
                 })
             }
         }

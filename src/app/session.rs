@@ -409,6 +409,28 @@ impl ClientSession {
         )
     }
 
+    pub(super) fn execute_mode_input(
+        &mut self,
+        view: ViewId,
+        registry: &ModeRegistry,
+        contents: &ContentStore,
+        input: &crate::app::command::ModeInputCommand,
+        mode_contents: &mut ModeContentStore,
+        drafts: &mut ModeDraftJournal,
+    ) -> Result<ModeResult, ModeError> {
+        let view_data = self.views.get(&view).expect("target view exists");
+        let context = crate::app::mode::ModeViewContext::new(view, view_data, contents)
+            .map_err(ModeError::InvalidViewContext)?;
+        self.view_modes.execute_input_with_context(
+            view,
+            registry,
+            input,
+            &context,
+            mode_contents,
+            drafts,
+        )
+    }
+
     pub(super) fn view_for_space(&self, space: SpaceId) -> Option<ViewId> {
         view_for_space(&self.scene, space)
     }
