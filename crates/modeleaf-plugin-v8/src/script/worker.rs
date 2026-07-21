@@ -463,7 +463,7 @@ mod tests {
                     CancellationToken::new(),
                 )
                 .unwrap();
-            let snapshot = crate::core::text_snapshot::TextSnapshot::from_text(text);
+            let snapshot = modeleaf_core::text_snapshot::TextSnapshot::from_text(text);
             for span in result["spans"].as_array().unwrap() {
                 let start = &span["range"]["start"];
                 let end = &span["range"]["end"];

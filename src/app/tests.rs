@@ -13,7 +13,6 @@ use super::dispatcher::{DispatchCommand, Dispatcher};
 use super::layout::{LayoutError, NewView, resolve_focus, view_for_space};
 use super::message::AppMessage;
 use super::query::AppQuery;
-use super::script::ScriptHost;
 use super::view::View;
 use crate::app::action::{TransactionIntent, ViewAction};
 use crate::app::command::{
@@ -53,6 +52,7 @@ use crate::protocol::viewport::{
     ResolvedViewportCommand, ViewportCommand, ViewportCursorBehavior, ViewportMoveAmount,
     ViewportMoveDirection,
 };
+use modeleaf_plugin_v8::ScriptHost;
 use std::collections::VecDeque;
 
 mod baseline;
@@ -1272,7 +1272,14 @@ impl Frontend for ScriptedFrontend {
 }
 
 fn make_app(events: Vec<FrontendEvent>, path: Option<&str>) -> App<ScriptedFrontend> {
-    App::new(path, 40, 5, ScriptedFrontend::new(events)).unwrap()
+    App::with_modes(
+        path,
+        40,
+        5,
+        ScriptedFrontend::new(events),
+        modeleaf_plugin_v8::load_default_modes().unwrap(),
+    )
+    .unwrap()
 }
 
 fn make_script_app(source: &str) -> App<ScriptedFrontend> {
@@ -1280,8 +1287,7 @@ fn make_script_app(source: &str) -> App<ScriptedFrontend> {
     host.execute_typescript("file:///test-config.ts", source)
         .unwrap();
     let host = Rc::new(RefCell::new(host));
-    let bootstrap =
-        bootstrap_editor(Buffer::new(), 40, 5, ScriptHost::script_modes(&host)).unwrap();
+    let bootstrap = bootstrap_editor(Buffer::new(), 40, 5, ScriptHost::modes(&host)).unwrap();
     App {
         kernel: bootstrap.kernel,
         session: bootstrap.session,
@@ -1294,8 +1300,7 @@ fn make_embedded_script_app(path: &str, source: &str) -> App<ScriptedFrontend> {
     let mut host = ScriptHost::new();
     host.execute_embedded_plugin(path, source).unwrap();
     let host = Rc::new(RefCell::new(host));
-    let bootstrap =
-        bootstrap_editor(Buffer::new(), 40, 5, ScriptHost::script_modes(&host)).unwrap();
+    let bootstrap = bootstrap_editor(Buffer::new(), 40, 5, ScriptHost::modes(&host)).unwrap();
     App {
         kernel: bootstrap.kernel,
         session: bootstrap.session,
@@ -1333,7 +1338,7 @@ editor.modes.define({
     )
     .unwrap();
     let host = Rc::new(RefCell::new(host));
-    let bootstrap = bootstrap_editor(buffer, 40, 5, ScriptHost::script_modes(&host)).unwrap();
+    let bootstrap = bootstrap_editor(buffer, 40, 5, ScriptHost::modes(&host)).unwrap();
     let mut app = App {
         kernel: bootstrap.kernel,
         session: bootstrap.session,

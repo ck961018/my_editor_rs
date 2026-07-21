@@ -1,13 +1,13 @@
-use crate::app::command::ModeValue;
-use crate::app::mode::{CursorDomain, ModeContentContext, ModeViewPolicy};
-use crate::protocol::content_query::{CursorStyle, FaceName, SelectionShape};
+use modeleaf_mode::command::ModeValue;
+use modeleaf_mode::{CursorDomain, ModeContentContext, ModeViewPolicy};
+use modeleaf_protocol::content_query::{CursorStyle, FaceName, SelectionShape};
 
 use super::{MAX_SCRIPT_INPUT_BYTES, MAX_SCRIPT_JSON_BYTES, ScriptError, ensure_size};
 
 pub(super) fn parse_position(
     scope: &mut v8::PinScope,
     value: v8::Local<v8::Object>,
-    snapshot: &crate::core::text_snapshot::TextSnapshot,
+    snapshot: &modeleaf_core::text_snapshot::TextSnapshot,
 ) -> Result<usize, ScriptError> {
     let line = required_usize(scope, value, "line")?;
     let character = required_usize(scope, value, "character")?;
@@ -234,7 +234,7 @@ pub(super) fn set_document_context(
     scope: &mut v8::PinScope,
     argument: v8::Local<v8::Object>,
     name: &str,
-    status: crate::protocol::content_query::DocumentStatus,
+    status: modeleaf_protocol::content_query::DocumentStatus,
 ) {
     let document = v8::Object::new(scope);
     if let Some(file_name) = status.file_name {
@@ -248,9 +248,9 @@ pub(super) fn set_document_context(
 
 pub(super) fn content_change_to_v8<'scope>(
     scope: &mut v8::PinScope<'scope, '_>,
-    change: &crate::core::content::ContentChange,
+    change: &modeleaf_core::content::ContentChange,
 ) -> Result<v8::Local<'scope, v8::Value>, ScriptError> {
-    let crate::core::content::ContentChange::Text(change) = change;
+    let modeleaf_core::content::ContentChange::Text(change) = change;
     let edits = change
         .to_edits()
         .map_err(|error| ScriptError::new(format!("invalid content change: {error:?}")))?;

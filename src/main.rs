@@ -2,6 +2,7 @@ mod app;
 
 use modeleaf_core as core;
 use modeleaf_frontend as frontend;
+use modeleaf_plugin_v8::load_user_modes;
 use modeleaf_protocol as protocol;
 use modeleaf_tui::TuiFrontend;
 use modeleaf_tui::terminal::lifecycle::TerminalGuard;
@@ -18,7 +19,8 @@ async fn main() -> io::Result<()> {
 
     let (width, height) = term_size().unwrap_or((80, 24));
     let frontend = TuiFrontend::new(Output::new(io::BufWriter::new(io::stdout())));
-    let mut app = App::new_configured(path, width as usize, height as usize, frontend)?;
+    let modes = load_user_modes().map_err(io::Error::other)?;
+    let mut app = App::with_modes(path, width as usize, height as usize, frontend, modes)?;
     let _guard = TerminalGuard::enter()?;
     app.run().await?;
     Ok(())

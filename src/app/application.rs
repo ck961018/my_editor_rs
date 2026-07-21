@@ -5,9 +5,8 @@ use std::time::Instant;
 use crate::app::behavior::BehaviorRecorder;
 use crate::app::bootstrap::bootstrap_editor;
 use crate::app::kernel::Kernel;
-use crate::app::mode::ModeAttachmentError;
+use crate::app::mode::{Mode, ModeAttachmentError};
 use crate::app::mode_name::ModeName;
-use crate::app::script::{ScriptHost, ScriptMode, load_default_plugins, load_user_config};
 use crate::app::session::ClientSession;
 use crate::core::buffer::Buffer;
 use crate::frontend::Frontend;
@@ -22,25 +21,19 @@ pub struct App<F: Frontend> {
 }
 
 impl<F: Frontend> App<F> {
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "test-only unconfigured constructor")
-    )]
+    #[allow(dead_code, reason = "unconfigured application constructor")]
     pub fn new(path: Option<&str>, width: usize, height: usize, frontend: F) -> io::Result<Self> {
-        let script_host = load_default_plugins().map_err(io::Error::other)?;
-        let script_modes = ScriptHost::script_modes(&script_host);
-        Self::build(path, width, height, frontend, script_modes)
+        Self::build(path, width, height, frontend, Vec::new())
     }
 
-    pub fn new_configured(
+    pub fn with_modes(
         path: Option<&str>,
         width: usize,
         height: usize,
         frontend: F,
+        modes: Vec<Box<dyn Mode>>,
     ) -> io::Result<Self> {
-        let script_host = load_user_config().map_err(io::Error::other)?;
-        let script_modes = ScriptHost::script_modes(&script_host);
-        Self::build(path, width, height, frontend, script_modes)
+        Self::build(path, width, height, frontend, modes)
     }
 
     fn build(
@@ -48,13 +41,13 @@ impl<F: Frontend> App<F> {
         width: usize,
         height: usize,
         frontend: F,
-        script_modes: Vec<ScriptMode>,
+        modes: Vec<Box<dyn Mode>>,
     ) -> io::Result<Self> {
         let mut buffer = Buffer::new();
         if let Some(p) = path {
             buffer.open_path(p)?;
         }
-        let bootstrap = bootstrap_editor(buffer, width, height, script_modes)?;
+        let bootstrap = bootstrap_editor(buffer, width, height, modes)?;
         Ok(Self {
             kernel: bootstrap.kernel,
             session: bootstrap.session,

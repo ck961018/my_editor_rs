@@ -2,7 +2,7 @@ use super::*;
 
 /// The single long-lived V8 isolate used by script modes.
 #[allow(dead_code)]
-pub(crate) struct ScriptHost {
+pub struct ScriptHost {
     isolate: v8::OwnedIsolate,
     heap_limit: Box<HeapLimitState>,
     heap_limit_bytes: usize,
@@ -15,9 +15,15 @@ pub(crate) struct ScriptHost {
     primitives: Rc<RefCell<PrimitiveRuntime>>,
 }
 
+impl Default for ScriptHost {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[allow(dead_code)]
 impl ScriptHost {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::with_budget_and_heap(ScriptExecutionBudget::default(), SCRIPT_HEAP_LIMIT_BYTES)
     }
 
@@ -67,11 +73,8 @@ impl ScriptHost {
         }
     }
 
-    #[cfg(test)]
-    pub(in crate::app) fn with_timeouts(
-        callback_timeout: Duration,
-        startup_timeout: Duration,
-    ) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_timeouts(callback_timeout: Duration, startup_timeout: Duration) -> Self {
         Self::with_budget_and_heap(
             ScriptExecutionBudget {
                 callback_timeout,
@@ -103,11 +106,7 @@ impl ScriptHost {
         result
     }
 
-    pub(crate) fn execute_typescript(
-        &mut self,
-        specifier: &str,
-        source: &str,
-    ) -> Result<(), ScriptError> {
+    pub fn execute_typescript(&mut self, specifier: &str, source: &str) -> Result<(), ScriptError> {
         let definition_count = self.definitions.borrow().len();
         let diagnostics = self.diagnostics.borrow().clone();
         let result = self.evaluate_typescript(specifier, source).map(|_| ());
@@ -118,11 +117,7 @@ impl ScriptHost {
         result
     }
 
-    pub(in crate::app) fn execute_embedded_plugin(
-        &mut self,
-        path: &str,
-        source: &str,
-    ) -> Result<(), ScriptError> {
+    pub fn execute_embedded_plugin(&mut self, path: &str, source: &str) -> Result<(), ScriptError> {
         let root = path
             .rsplit_once('/')
             .map(|(root, _)| format!("{root}/"))
@@ -196,11 +191,19 @@ impl ScriptHost {
         result
     }
 
-    pub(crate) fn script_modes(host: &Rc<RefCell<Self>>) -> Vec<ScriptMode> {
+    pub(super) fn script_modes(host: &Rc<RefCell<Self>>) -> Vec<ScriptMode> {
         let definitions = host.borrow().definitions.borrow().clone();
         definitions
             .into_iter()
             .map(|definition| ScriptMode::new(host.clone(), definition))
+            .collect()
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn modes(host: &Rc<RefCell<Self>>) -> Vec<Box<dyn Mode>> {
+        Self::script_modes(host)
+            .into_iter()
+            .map(|mode| Box::new(mode) as Box<dyn Mode>)
             .collect()
     }
 
@@ -388,7 +391,7 @@ impl ScriptHost {
         version: ScriptApiVersion,
         context: &ModeContentContext<'_>,
         state: &mut ScriptModeState,
-        change: &crate::core::content::ContentChange,
+        change: &modeleaf_core::content::ContentChange,
     ) -> Result<(), ScriptError> {
         let v8_context = self.context.clone();
         let content_state_name = version.content_state_name();

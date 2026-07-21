@@ -799,6 +799,9 @@ pub trait Mode {
     fn name(&self) -> &ModeName;
     fn actions(&self) -> &[ModeActionName];
     fn adapters(&self) -> ModeAdapters;
+    fn before(&self) -> Option<&ModeName> {
+        None
+    }
     fn faces(&self) -> Vec<(FaceName, Face)> {
         Vec::new()
     }
@@ -1079,9 +1082,13 @@ impl ModeRegistry {
     }
 
     pub fn register(&mut self, mode: impl Mode + 'static) -> Result<ModeId, ModeRegistrationError> {
+        self.register_boxed(Box::new(mode))
+    }
+
+    pub fn register_boxed(&mut self, mode: Box<dyn Mode>) -> Result<ModeId, ModeRegistrationError> {
         let name = mode.name().clone();
         let actions = mode.actions().to_vec();
-        self.register_definition(name, actions, Box::new(mode))
+        self.register_definition(name, actions, mode)
     }
 
     fn register_definition(

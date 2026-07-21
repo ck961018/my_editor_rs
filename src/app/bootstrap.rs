@@ -4,7 +4,6 @@ use crate::app::kernel::Kernel;
 use crate::app::mode::{Mode, ModeRegistry};
 #[cfg(test)]
 use crate::app::mode_name::ModeName;
-use crate::app::script::ScriptMode;
 use crate::app::session::{ClientSession, EditorSessionInit, InitialView};
 use crate::core::buffer::Buffer;
 use crate::core::content::Content;
@@ -47,7 +46,7 @@ pub(super) fn bootstrap_editor(
     buffer: Buffer,
     width: usize,
     height: usize,
-    script_modes: Vec<ScriptMode>,
+    configured_modes: Vec<Box<dyn Mode>>,
 ) -> io::Result<EditorBootstrap> {
     let mut ids = BootstrapIds::default();
     let editor_content = ids.content();
@@ -68,7 +67,7 @@ pub(super) fn bootstrap_editor(
         )
         .expect("bootstrap allocates unique content ids");
     let mut modes = ModeRegistry::new();
-    for mode in script_modes {
+    for mode in configured_modes {
         let name = mode.name().clone();
         if modes.resolve_mode(&name).is_some() {
             return Err(io::Error::new(
@@ -85,7 +84,7 @@ pub(super) fn bootstrap_editor(
                 format!("mode '{}' cannot attach before unknown mode", name.as_str()),
             ));
         }
-        let id = modes.register(mode).map_err(io::Error::other)?;
+        let id = modes.register_boxed(mode).map_err(io::Error::other)?;
         for (kind, chain) in [
             (crate::core::content::ContentKind::Buffer, &mut editor_modes),
             (

@@ -9,16 +9,16 @@ use std::rc::Rc;
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
-use crate::app::command::{Command, ModeCommand, ModeValue};
-use crate::app::mode::{
+use modeleaf_core::content::ContentKind;
+use modeleaf_core::keymap::Keymap;
+use modeleaf_mode::command::{Command, ModeCommand, ModeValue};
+use modeleaf_mode::mode_name::{ModeActionName, ModeName};
+use modeleaf_mode::{
     Mode, ModeAdapters, ModeContentContext, ModeError, ModeJobRequest, ModeJobResult, ModeResult,
     ModeState, ModeViewContext, ModeViewPolicy,
 };
-use crate::app::mode_name::{ModeActionName, ModeName};
-use crate::core::content::ContentKind;
-use crate::core::keymap::Keymap;
-use crate::protocol::content_query::{Color, Face, FaceName, NamedTextDecoration, RowRange};
-use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
+use modeleaf_protocol::content_query::{Color, Face, FaceName, NamedTextDecoration, RowRange};
+use modeleaf_protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
 
 mod bridge;
 mod host;
@@ -34,7 +34,7 @@ use bridge::{
     set_document_context, set_number, set_object, set_value, throw_script_error, v8_to_json,
     view_policy_from_json,
 };
-pub(crate) use host::ScriptHost;
+pub use host::ScriptHost;
 use invocation::{
     HeapLimitState, InvocationWatchdog, ScriptExecutionBudget, ScriptInvocationKind,
     call_script_callback, install_heap_limit, perform_microtask_checkpoint, recover_heap_limit,
@@ -65,7 +65,7 @@ const SCRIPT_HEAP_RECOVERY_BYTES: usize = 16 * 1024 * 1024;
 include!(concat!(env!("OUT_DIR"), "/plugin_assets.rs"));
 
 #[derive(Debug)]
-pub(crate) struct ScriptError {
+pub struct ScriptError {
     message: String,
 }
 
@@ -230,7 +230,7 @@ impl DecorationSet {
 
     fn visible(
         &self,
-        snapshot: &crate::core::text_snapshot::TextSnapshot,
+        snapshot: &modeleaf_core::text_snapshot::TextSnapshot,
         rows: RowRange,
     ) -> Vec<NamedTextDecoration> {
         let range = snapshot.char_range_for_rows(rows.start, rows.end);
@@ -251,7 +251,7 @@ impl DecorationSet {
 
 fn map_decoration_set(
     decorations: &DecorationSet,
-    change: &crate::core::transaction::TextChangeSet,
+    change: &modeleaf_core::transaction::TextChangeSet,
 ) -> DecorationSet {
     DecorationSet::new(
         decorations
@@ -259,15 +259,15 @@ fn map_decoration_set(
             .filter_map(|decoration| {
                 let start = change.map_position(
                     decoration.start.char_index,
-                    crate::core::transaction::Affinity::After,
+                    modeleaf_core::transaction::Affinity::After,
                 );
                 let end = change.map_position(
                     decoration.end.char_index,
-                    crate::core::transaction::Affinity::Before,
+                    modeleaf_core::transaction::Affinity::Before,
                 );
                 (start < end).then(|| NamedTextDecoration {
-                    start: crate::protocol::selection::TextOffset { char_index: start },
-                    end: crate::protocol::selection::TextOffset { char_index: end },
+                    start: modeleaf_protocol::selection::TextOffset { char_index: start },
+                    end: modeleaf_protocol::selection::TextOffset { char_index: end },
                     face: decoration.face.clone(),
                 })
             })
@@ -280,12 +280,12 @@ struct ScriptJob {
     version: u64,
     message: serde_json::Value,
     include_text: bool,
-    text_snapshot: Option<crate::core::text_snapshot::TextSnapshot>,
+    text_snapshot: Option<modeleaf_core::text_snapshot::TextSnapshot>,
 }
 
 struct PreparedAnalysisJob {
     message: Option<serde_json::Value>,
-    text_snapshot: Option<crate::core::text_snapshot::TextSnapshot>,
+    text_snapshot: Option<modeleaf_core::text_snapshot::TextSnapshot>,
 }
 
 enum ScriptJobOutput {
@@ -437,7 +437,7 @@ impl ScriptModeState {
     }
 }
 
-pub(crate) struct ScriptMode {
+struct ScriptMode {
     host: Rc<RefCell<ScriptHost>>,
     name: ModeName,
     actions: Vec<ModeActionName>,
@@ -544,10 +544,6 @@ impl ScriptMode {
             .get(kind)
             .expect("registered ScriptMode keeps its declared adapter")
     }
-
-    pub(crate) fn before(&self) -> Option<&ModeName> {
-        self.before.as_ref()
-    }
 }
 
 impl Mode for ScriptMode {
@@ -569,6 +565,10 @@ impl Mode for ScriptMode {
             (false, true) => ModeAdapters::status_bar(),
             (false, false) => unreachable!("script parser requires at least one adapter"),
         }
+    }
+
+    fn before(&self) -> Option<&ModeName> {
+        self.before.as_ref()
     }
 
     fn faces(&self) -> Vec<(FaceName, Face)> {
@@ -631,7 +631,7 @@ impl Mode for ScriptMode {
         let adapter = self.adapter(context.content_kind());
         if adapter.input.is_some() {
             return Some(Command::ModeInput(
-                crate::app::command::ModeInputCommand::new(self.name.clone(), key),
+                modeleaf_mode::command::ModeInputCommand::new(self.name.clone(), key),
             ));
         }
         let action = adapter.input_action.clone()?;
@@ -689,11 +689,11 @@ impl Mode for ScriptMode {
         &self,
         state: &mut dyn ModeState,
         context: &ModeContentContext<'_>,
-        change: &crate::core::content::ContentChange,
+        change: &modeleaf_core::content::ContentChange,
     ) -> Result<(), ModeError> {
         let state = script_state_mut(state, &self.name)?;
         let adapter = self.adapter(context.content_kind());
-        let crate::core::content::ContentChange::Text(text_change) = change;
+        let modeleaf_core::content::ContentChange::Text(text_change) = change;
         state.decorations = map_decoration_set(&state.decorations, text_change);
         for decorations in state.analysis_decorations.values_mut() {
             *decorations = map_decoration_set(decorations, text_change);
@@ -1014,7 +1014,7 @@ fn script_state_mut<'state>(
         })
 }
 
-pub(crate) fn load_default_plugins() -> Result<Rc<RefCell<ScriptHost>>, ScriptError> {
+fn load_default_plugins() -> Result<Rc<RefCell<ScriptHost>>, ScriptError> {
     let mut host = ScriptHost::new();
     let mut plugins = default_plugin_entries()?;
     plugins.sort_by_key(|plugin| plugin.0);
@@ -1074,7 +1074,7 @@ fn default_plugin_entries() -> Result<Vec<(i64, &'static str, &'static str)>, Sc
         .collect()
 }
 
-pub(crate) fn load_user_config() -> Result<Rc<RefCell<ScriptHost>>, ScriptError> {
+fn load_user_config() -> Result<Rc<RefCell<ScriptHost>>, ScriptError> {
     let host = load_default_plugins()?;
     let Some((path, legacy)) = resolve_config_path(
         std::env::var_os("MODELEAF_CONFIG").map(PathBuf::from),
@@ -1096,6 +1096,22 @@ pub(crate) fn load_user_config() -> Result<Rc<RefCell<ScriptHost>>, ScriptError>
         eprintln!("warning: {diagnostic}");
     }
     Ok(host)
+}
+
+pub fn load_default_modes() -> Result<Vec<Box<dyn Mode>>, ScriptError> {
+    let host = load_default_plugins()?;
+    Ok(ScriptHost::script_modes(&host)
+        .into_iter()
+        .map(|mode| Box::new(mode) as Box<dyn Mode>)
+        .collect())
+}
+
+pub fn load_user_modes() -> Result<Vec<Box<dyn Mode>>, ScriptError> {
+    let host = load_user_config()?;
+    Ok(ScriptHost::script_modes(&host)
+        .into_iter()
+        .map(|mode| Box::new(mode) as Box<dyn Mode>)
+        .collect())
 }
 
 fn resolve_config_path(
@@ -1214,7 +1230,7 @@ fn mode_value_to_json(value: &ModeValue) -> serde_json::Value {
 fn parse_action_result(
     scope: &mut v8::PinScope,
     value: v8::Local<v8::Value>,
-    operations: Vec<crate::app::operation::OperationRequest>,
+    operations: Vec<modeleaf_mode::operation::OperationRequest>,
 ) -> Result<ModeResult, ScriptError> {
     if value.is_null_or_undefined() {
         return Ok(ModeResult::operations(operations));
@@ -1249,7 +1265,7 @@ fn parse_v2_action_result(
     scope: &mut v8::PinScope,
     value: v8::Local<v8::Value>,
     pass: &v8::Global<v8::Object>,
-    operations: Vec<crate::app::operation::OperationRequest>,
+    operations: Vec<modeleaf_mode::operation::OperationRequest>,
 ) -> Result<ModeResult, ScriptError> {
     if value.is_undefined() {
         return Ok(ModeResult::operations(operations));
@@ -1267,8 +1283,8 @@ fn parse_decorations_property(
     scope: &mut v8::PinScope,
     value: v8::Local<v8::Value>,
     name: &str,
-    snapshot: Option<crate::core::text_snapshot::TextSnapshot>,
-    current_revision: Option<crate::protocol::revision::Revision>,
+    snapshot: Option<modeleaf_core::text_snapshot::TextSnapshot>,
+    current_revision: Option<modeleaf_protocol::revision::Revision>,
 ) -> Result<Option<Vec<NamedTextDecoration>>, ScriptError> {
     if value.is_null_or_undefined() || value.is_boolean() {
         return Ok(None);
@@ -1319,8 +1335,8 @@ fn parse_decorations_property(
             )));
         }
         decorations.push(NamedTextDecoration {
-            start: crate::protocol::selection::TextOffset { char_index: start },
-            end: crate::protocol::selection::TextOffset { char_index: end },
+            start: modeleaf_protocol::selection::TextOffset { char_index: start },
+            end: modeleaf_protocol::selection::TextOffset { char_index: end },
             face: FaceName::new(required_string(scope, span, "face")?),
         });
     }
@@ -1331,34 +1347,33 @@ fn parse_decorations_property(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::mode::{InputFlow, ModeRegistry};
-    use crate::app::view::View;
-    use crate::core::action::ContentAction;
-    use crate::core::buffer::Buffer;
-    use crate::core::command::EditCommand;
-    use crate::core::content::{Content, ContentKind};
-    use crate::core::content_store::ContentStore;
-    use crate::core::status_bar::StatusBar;
-    use crate::protocol::ids::{ContentId, ViewId};
+    use modeleaf_core::action::ContentAction;
+    use modeleaf_core::buffer::Buffer;
+    use modeleaf_core::command::EditCommand;
+    use modeleaf_core::content::{Content, ContentKind};
+    use modeleaf_core::content_store::ContentStore;
+    use modeleaf_core::status_bar::StatusBar;
+    use modeleaf_mode::{InputFlow, ModeRegistry};
+    use modeleaf_protocol::ids::{ContentId, ViewId};
 
     #[test]
     fn decoration_set_returns_only_spans_intersecting_visible_rows() {
-        let snapshot = crate::core::text_snapshot::TextSnapshot::from_text(&"a\n".repeat(100));
+        let snapshot = modeleaf_core::text_snapshot::TextSnapshot::from_text(&"a\n".repeat(100));
         let face = FaceName::new("syntax.test");
         let decorations = DecorationSet::new(vec![
             NamedTextDecoration {
-                start: crate::protocol::selection::TextOffset { char_index: 0 },
-                end: crate::protocol::selection::TextOffset { char_index: 150 },
+                start: modeleaf_protocol::selection::TextOffset { char_index: 0 },
+                end: modeleaf_protocol::selection::TextOffset { char_index: 150 },
                 face: face.clone(),
             },
             NamedTextDecoration {
-                start: crate::protocol::selection::TextOffset { char_index: 10 },
-                end: crate::protocol::selection::TextOffset { char_index: 20 },
+                start: modeleaf_protocol::selection::TextOffset { char_index: 10 },
+                end: modeleaf_protocol::selection::TextOffset { char_index: 20 },
                 face: face.clone(),
             },
             NamedTextDecoration {
-                start: crate::protocol::selection::TextOffset { char_index: 100 },
-                end: crate::protocol::selection::TextOffset { char_index: 101 },
+                start: modeleaf_protocol::selection::TextOffset { char_index: 100 },
+                end: modeleaf_protocol::selection::TextOffset { char_index: 101 },
                 face,
             },
         ]);
@@ -1682,9 +1697,8 @@ editor.modes.define({
         contents
             .insert(content_id, Content::Buffer(Buffer::new()))
             .unwrap();
-        let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context =
-            ModeViewContext::new(ViewId(0), view.content(), view.state(), &contents).unwrap();
+        let view_state = contents.create_view_state(content_id).unwrap();
+        let context = ModeViewContext::new(ViewId(0), content_id, &view_state, &contents).unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode
@@ -1720,8 +1734,8 @@ editor.modes.define({
         );
         assert!(matches!(
             operations.as_slice(),
-            [crate::app::operation::OperationRequest::View {
-                operation: crate::app::operation::ViewOperation::Edit(
+            [modeleaf_mode::operation::OperationRequest::View {
+                operation: modeleaf_mode::operation::ViewOperation::Edit(
                     EditCommand::InsertText(text)
                 ),
                 ..
@@ -1774,9 +1788,8 @@ editor.modes.define({
         contents
             .insert(content_id, Content::Buffer(Buffer::new()))
             .unwrap();
-        let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context =
-            ModeViewContext::new(ViewId(0), view.content(), view.state(), &contents).unwrap();
+        let view_state = contents.create_view_state(content_id).unwrap();
+        let context = ModeViewContext::new(ViewId(0), content_id, &view_state, &contents).unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode
@@ -1818,7 +1831,7 @@ editor.modes.define({
         let (_, operations) = delegate.into_parts();
         assert!(matches!(
             operations.as_slice(),
-            [crate::app::operation::OperationRequest::Mode { invocation, .. }]
+            [modeleaf_mode::operation::OperationRequest::Mode { invocation, .. }]
                 if invocation.command.mode.as_str() == "pairs"
                     && invocation.command.action.as_str() == "quote"
         ));
@@ -1871,9 +1884,8 @@ editor.modes.define({
         contents
             .insert(content_id, Content::Buffer(Buffer::new()))
             .unwrap();
-        let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context =
-            ModeViewContext::new(ViewId(0), view.content(), view.state(), &contents).unwrap();
+        let view_state = contents.create_view_state(content_id).unwrap();
+        let context = ModeViewContext::new(ViewId(0), content_id, &view_state, &contents).unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode
@@ -1965,9 +1977,8 @@ editor.modes.define({
         contents
             .insert(status, Content::StatusBar(StatusBar::new(buffer)))
             .unwrap();
-        let view = View::new(status, contents.create_view_state(status).unwrap());
-        let context =
-            ModeViewContext::new(ViewId(1), view.content(), view.state(), &contents).unwrap();
+        let view_state = contents.create_view_state(status).unwrap();
+        let context = ModeViewContext::new(ViewId(1), status, &view_state, &contents).unwrap();
         let content_context = ModeContentContext::new(status, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode
@@ -2129,9 +2140,8 @@ editor.modes.define({
         contents
             .insert(content_id, Content::Buffer(Buffer::new()))
             .unwrap();
-        let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context =
-            ModeViewContext::new(ViewId(0), view.content(), view.state(), &contents).unwrap();
+        let view_state = contents.create_view_state(content_id).unwrap();
+        let context = ModeViewContext::new(ViewId(0), content_id, &view_state, &contents).unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode
@@ -2233,9 +2243,8 @@ editor.modes.define({
         contents
             .insert(content_id, Content::Buffer(Buffer::new()))
             .unwrap();
-        let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context =
-            ModeViewContext::new(ViewId(0), view.content(), view.state(), &contents).unwrap();
+        let view_state = contents.create_view_state(content_id).unwrap();
+        let context = ModeViewContext::new(ViewId(0), content_id, &view_state, &contents).unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode
@@ -2343,9 +2352,8 @@ editor.modes.define({{
         contents
             .insert(content_id, Content::Buffer(Buffer::new()))
             .unwrap();
-        let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context =
-            ModeViewContext::new(ViewId(0), view.content(), view.state(), &contents).unwrap();
+        let view_state = contents.create_view_state(content_id).unwrap();
+        let context = ModeViewContext::new(ViewId(0), content_id, &view_state, &contents).unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode
@@ -2947,9 +2955,8 @@ editor.modes.define({
         contents
             .insert(content_id, Content::Buffer(buffer))
             .unwrap();
-        let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context =
-            ModeViewContext::new(ViewId(0), view.content(), view.state(), &contents).unwrap();
+        let view_state = contents.create_view_state(content_id).unwrap();
+        let context = ModeViewContext::new(ViewId(0), content_id, &view_state, &contents).unwrap();
         let before = context.buffer().unwrap().text_snapshot().unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
@@ -2966,9 +2973,9 @@ editor.modes.define({
             )
             .unwrap()
             .into_parts();
-        let crate::app::operation::OperationRequest::View {
+        let modeleaf_mode::operation::OperationRequest::View {
             operation:
-                crate::app::operation::ViewOperation::ApplyContent(ContentAction::Text(change)),
+                modeleaf_mode::operation::ViewOperation::ApplyContent(ContentAction::Text(change)),
             ..
         } = &operations[0]
         else {
@@ -3012,9 +3019,8 @@ editor.modes.define({
         contents
             .insert(content_id, Content::Buffer(Buffer::new()))
             .unwrap();
-        let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context =
-            ModeViewContext::new(ViewId(0), view.content(), view.state(), &contents).unwrap();
+        let view_state = contents.create_view_state(content_id).unwrap();
+        let context = ModeViewContext::new(ViewId(0), content_id, &view_state, &contents).unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode

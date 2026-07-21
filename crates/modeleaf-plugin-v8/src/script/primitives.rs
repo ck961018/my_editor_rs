@@ -1,20 +1,20 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::app::command::{AppCommand, ModeCommand, ModeValue};
-use crate::app::mode::ModeViewContext;
-use crate::app::mode_name::{ModeActionName, ModeName};
-use crate::app::operation::{
+use modeleaf_core::action::ContentAction;
+use modeleaf_core::command::{CharSearchDirection, EditCommand};
+use modeleaf_core::content::ContentKind;
+use modeleaf_core::motion::{OperatorCommand, TextMotion, TextOperator, TextTarget};
+use modeleaf_core::text_snapshot::TextSnapshot;
+use modeleaf_core::transaction::{TextChangeSet, TextEdit};
+use modeleaf_mode::ModeViewContext;
+use modeleaf_mode::command::{AppCommand, ModeCommand, ModeValue};
+use modeleaf_mode::mode_name::{ModeActionName, ModeName};
+use modeleaf_mode::operation::{
     AppOperation, ContentOperation, ContentTarget, ModeFlowPropagation, ModeInvocation, ModeTarget,
     OperationRequest, ViewOperation, ViewTarget,
 };
-use crate::core::action::ContentAction;
-use crate::core::command::{CharSearchDirection, EditCommand};
-use crate::core::content::ContentKind;
-use crate::core::motion::{OperatorCommand, TextMotion, TextOperator, TextTarget};
-use crate::core::text_snapshot::TextSnapshot;
-use crate::core::transaction::{TextChangeSet, TextEdit};
-use crate::protocol::viewport::{
+use modeleaf_protocol::viewport::{
     ViewportAlignment, ViewportCommand, ViewportCursorBehavior, ViewportMoveAmount,
     ViewportMoveDirection,
 };
@@ -546,11 +546,11 @@ fn primitive_effects(
             target: ViewTarget::Current,
             operation: ViewOperation::ApplyContent(apply_edits(scope, arguments, runtime)?),
         }],
-        Begin => vec![history(crate::app::action::TransactionIntent::Begin)],
-        Commit => vec![history(crate::app::action::TransactionIntent::Commit)],
-        Rollback => vec![history(crate::app::action::TransactionIntent::Rollback)],
-        Undo => vec![history(crate::app::action::TransactionIntent::Undo)],
-        Redo => vec![history(crate::app::action::TransactionIntent::Redo)],
+        Begin => vec![history(modeleaf_mode::action::TransactionIntent::Begin)],
+        Commit => vec![history(modeleaf_mode::action::TransactionIntent::Commit)],
+        Rollback => vec![history(modeleaf_mode::action::TransactionIntent::Rollback)],
+        Undo => vec![history(modeleaf_mode::action::TransactionIntent::Undo)],
+        Redo => vec![history(modeleaf_mode::action::TransactionIntent::Redo)],
         HalfPageUp => viewport(
             ViewportMoveDirection::Up,
             ViewportMoveAmount::HalfPage,
@@ -628,7 +628,7 @@ fn primitive_effects(
     })
 }
 
-fn history(operation: crate::app::action::TransactionIntent) -> OperationRequest {
+fn history(operation: modeleaf_mode::action::TransactionIntent) -> OperationRequest {
     OperationRequest::History {
         target: ContentTarget::Current,
         operation,

@@ -20,7 +20,6 @@ mod remote;
 mod runtime;
 mod save;
 mod scene_model;
-mod script;
 mod session;
 mod tasks;
 mod transaction;

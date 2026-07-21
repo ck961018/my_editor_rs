@@ -4,6 +4,7 @@ members = [
     "crates/modeleaf-core",
     "crates/modeleaf-frontend",
     "crates/modeleaf-mode",
+    "crates/modeleaf-plugin-v8",
     "crates/modeleaf-protocol",
     "crates/modeleaf-tui",
 ]
@@ -19,17 +20,13 @@ rust-version = "1.88"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["full"] }
 tempfile = "3"
-serde_json = "1"
 modeleaf-protocol = { path = "crates/modeleaf-protocol" }
 modeleaf-core = { path = "crates/modeleaf-core" }
 modeleaf-frontend = { path = "crates/modeleaf-frontend" }
 modeleaf-mode = { path = "crates/modeleaf-mode" }
+modeleaf-plugin-v8 = { path = "crates/modeleaf-plugin-v8" }
 modeleaf-tui = { path = "crates/modeleaf-tui" }
-deno_ast = { version = "0.50.3", features = ["transpiling"] }
-v8 = { version = "=149.3.0", default-features = false, features = [
-    "simdutf",
-    "use_custom_libcxx",
-] }
 
 [dev-dependencies]
 modeleaf-mode = { path = "crates/modeleaf-mode", features = ["test-support"] }
+modeleaf-plugin-v8 = { path = "crates/modeleaf-plugin-v8", features = ["test-support"] }
