@@ -61,29 +61,29 @@ jobs:
       - name: Test V8-independent crates
         run: >-
           cargo test --locked
-          -p modeleaf-protocol
-          -p modeleaf-core
-          -p modeleaf-frontend
-          -p modeleaf-mode
-          -p modeleaf-tui
+          -p vell-protocol
+          -p vell-core
+          -p vell-frontend
+          -p vell-mode
+          -p vell-tui
       - name: Check the application boundary without dev dependencies
-        run: cargo check --locked -p modeleaf-app --lib
+        run: cargo check --locked -p vell-app --lib
       - name: Verify application dependencies exclude V8 on Unix
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          tree="$(cargo tree -p modeleaf-app --edges normal)"
+          tree="$(cargo tree -p vell-app --edges normal)"
           if grep -E '(^|[[:space:]])v8 v' <<<"$tree"; then
-            echo 'modeleaf-app must not depend on V8' >&2
+            echo 'vell-app must not depend on V8' >&2
             exit 1
           fi
       - name: Verify application dependencies exclude V8 on Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $tree = cargo tree -p modeleaf-app --edges normal
+          $tree = cargo tree -p vell-app --edges normal
           if ($tree -match '(^|\s)v8 v') {
-            throw 'modeleaf-app must not depend on V8'
+            throw 'vell-app must not depend on V8'
           }
 
   full-host:

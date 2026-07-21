@@ -1,24 +1,24 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/modeleaf-app",
-    "crates/modeleaf-core",
-    "crates/modeleaf-frontend",
-    "crates/modeleaf-mode",
-    "crates/modeleaf-plugin-v8",
-    "crates/modeleaf-protocol",
-    "crates/modeleaf-tui",
+    "crates/vell-app",
+    "crates/vell-core",
+    "crates/vell-frontend",
+    "crates/vell-mode",
+    "crates/vell-plugin-v8",
+    "crates/vell-protocol",
+    "crates/vell-tui",
 ]
 default-members = ["."]
 
 [package]
-name = "modeleaf"
+name = "vell"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-modeleaf-app = { path = "crates/modeleaf-app" }
-modeleaf-plugin-v8 = { path = "crates/modeleaf-plugin-v8" }
-modeleaf-tui = { path = "crates/modeleaf-tui" }
+vell-app = { path = "crates/vell-app" }
+vell-plugin-v8 = { path = "crates/vell-plugin-v8" }
+vell-tui = { path = "crates/vell-tui" }

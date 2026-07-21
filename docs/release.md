@@ -12,19 +12,19 @@ The CI workflow runs these paths:
   and macOS;
 - the complete V8 host workspace tests on all three platforms;
 - locked dependency resolution in every Cargo command;
-- a dependency-tree assertion that `modeleaf-app` does not depend on V8.
+- a dependency-tree assertion that `vell-app` does not depend on V8.
 
 The manual M0 performance test remains ignored in the ordinary suite. Run it
 when a change affects input dispatch, Mode state, script invocation, or large
 document presentation:
 
 ```text
-cargo test -p modeleaf-app m0_performance_baseline -- --ignored --nocapture
+cargo test -p vell-app m0_performance_baseline -- --ignored --nocapture
 ```
 
 ## Plugin compatibility
 
-| Mode schema | Modeleaf 0.1.x | Modeleaf 0.2.x | Modeleaf 0.3.0 |
+| Mode schema | Vell 0.1.x | Vell 0.2.x | Vell 0.3.0 |
 | --- | --- | --- | --- |
 | v2 `on` adapters | supported | supported | supported |
 | v1 legacy fields | deprecated | deprecated | removed |
@@ -34,14 +34,11 @@ v1 produces one structured warning per host. The
 TypeScript and the Rust host. `PLUGIN_API_VERSION` is `2`, and
 `V1_REMOVAL_VERSION` is `0.3.0`.
 
-Legacy `MY_EDITOR_CONFIG` and `my_editor_rs` configuration paths are available
-only in 0.1.x and are removed in 0.2.0.
-
 ## Manual publication gates
 
 Before publishing a release, a maintainer must:
 
-1. reserve or confirm ownership of the Modeleaf names on the chosen registries;
+1. reserve or confirm ownership of the Vell names on the chosen registries;
 2. choose and add the project license and package metadata;
 3. confirm the repository hosting rename and release artifact names;
 4. run the ignored performance baseline and compare it with M0 and M5;

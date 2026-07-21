@@ -1,9 +1,9 @@
-use modeleaf_app::App;
-use modeleaf_plugin_v8::load_user_modes;
-use modeleaf_tui::TuiFrontend;
-use modeleaf_tui::terminal::lifecycle::TerminalGuard;
-use modeleaf_tui::terminal::output::Output;
-use modeleaf_tui::terminal::size as term_size;
+use vell_app::App;
+use vell_plugin_v8::load_user_modes;
+use vell_tui::TuiFrontend;
+use vell_tui::terminal::lifecycle::TerminalGuard;
+use vell_tui::terminal::output::Output;
+use vell_tui::terminal::size as term_size;
 
 use std::io;
 

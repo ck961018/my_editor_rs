@@ -1,0 +1,16 @@
+[package]
+name = "vell-tui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[dependencies]
+crossterm = { version = "0.29", features = ["event-stream"] }
+futures = "0.3"
+vell-frontend = { path = "../vell-frontend" }
+vell-protocol = { path = "../vell-protocol" }
+taffy = "0.11"
+unicode-width = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

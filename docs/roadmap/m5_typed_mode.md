@@ -6,7 +6,7 @@
 
 ## 1. 结果
 
-`modeleaf-mode` 新增 `TypedMode` 和唯一的 `ErasedMode<M>` 适配器。原生 Mode
+`vell-mode` 新增 `TypedMode` 和唯一的 `ErasedMode<M>` 适配器。原生 Mode
 使用关联类型声明 content state、view state 和 job output；注册时才转换到
 现有 object-safe `Mode`。Mode 身份、注册中心、状态表和事务生命周期没有产生
 第二套实现。
@@ -76,7 +76,7 @@ cargo test --workspace --all-features --quiet
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 $env:RUSTDOCFLAGS = "-D warnings"
 cargo doc --workspace --all-features --no-deps
-cargo check -p modeleaf-mode --no-default-features
+cargo check -p vell-mode --no-default-features
 cargo fmt --check
 pnpm typecheck
 git diff --check

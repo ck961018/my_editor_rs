@@ -1103,86 +1103,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "modeleaf"
-version = "0.1.0"
-dependencies = [
- "modeleaf-app",
- "modeleaf-plugin-v8",
- "modeleaf-tui",
- "tokio",
-]
-
-[[package]]
-name = "modeleaf-app"
-version = "0.1.0"
-dependencies = [
- "modeleaf-core",
- "modeleaf-frontend",
- "modeleaf-mode",
- "modeleaf-plugin-v8",
- "modeleaf-protocol",
- "tempfile",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "modeleaf-core"
-version = "0.1.0"
-dependencies = [
- "modeleaf-protocol",
- "ropey",
- "tempfile",
-]
-
-[[package]]
-name = "modeleaf-frontend"
-version = "0.1.0"
-dependencies = [
- "modeleaf-protocol",
-]
-
-[[package]]
-name = "modeleaf-mode"
-version = "0.1.0"
-dependencies = [
- "modeleaf-core",
- "modeleaf-protocol",
- "tokio-util",
-]
-
-[[package]]
-name = "modeleaf-plugin-v8"
-version = "0.1.0"
-dependencies = [
- "deno_ast",
- "modeleaf-core",
- "modeleaf-mode",
- "modeleaf-protocol",
- "serde_json",
- "tempfile",
- "tokio-util",
- "v8",
-]
-
-[[package]]
-name = "modeleaf-protocol"
-version = "0.1.0"
-
-[[package]]
-name = "modeleaf-tui"
-version = "0.1.0"
-dependencies = [
- "crossterm",
- "futures",
- "modeleaf-frontend",
- "modeleaf-protocol",
- "taffy",
- "tokio",
- "unicode-width 0.2.2",
-]
-
-[[package]]
 name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2466,6 +2386,86 @@ dependencies = [
  "paste",
  "temporal_capi",
  "which",
+]
+
+[[package]]
+name = "vell"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "vell-app",
+ "vell-plugin-v8",
+ "vell-tui",
+]
+
+[[package]]
+name = "vell-app"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "vell-core",
+ "vell-frontend",
+ "vell-mode",
+ "vell-plugin-v8",
+ "vell-protocol",
+]
+
+[[package]]
+name = "vell-core"
+version = "0.1.0"
+dependencies = [
+ "ropey",
+ "tempfile",
+ "vell-protocol",
+]
+
+[[package]]
+name = "vell-frontend"
+version = "0.1.0"
+dependencies = [
+ "vell-protocol",
+]
+
+[[package]]
+name = "vell-mode"
+version = "0.1.0"
+dependencies = [
+ "tokio-util",
+ "vell-core",
+ "vell-protocol",
+]
+
+[[package]]
+name = "vell-plugin-v8"
+version = "0.1.0"
+dependencies = [
+ "deno_ast",
+ "serde_json",
+ "tempfile",
+ "tokio-util",
+ "v8",
+ "vell-core",
+ "vell-mode",
+ "vell-protocol",
+]
+
+[[package]]
+name = "vell-protocol"
+version = "0.1.0"
+
+[[package]]
+name = "vell-tui"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "futures",
+ "taffy",
+ "tokio",
+ "unicode-width 0.2.2",
+ "vell-frontend",
+ "vell-protocol",
 ]
 
 [[package]]

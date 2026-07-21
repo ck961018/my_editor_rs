@@ -1,0 +1,12 @@
+[package]
+name = "vell-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[dependencies]
+vell-protocol = { path = "../vell-protocol" }
+ropey = "1"
+
+[dev-dependencies]
+tempfile = "3"

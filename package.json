@@ -1,5 +1,5 @@
 {
-  "name": "modeleaf-development",
+  "name": "vell-development",
   "private": true,
   "scripts": {
     "typecheck": "tsc --noEmit -p runtime/type-tests/tsconfig.json"

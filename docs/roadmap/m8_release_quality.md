@@ -11,7 +11,7 @@
 - Linux quality job 运行格式检查、严格 Clippy、Rustdoc 和 TypeScript
   契约检查。
 - 所有 Cargo CI 命令使用 `--locked`，避免流水线隐式更新依赖。
-- CI 检查 `modeleaf-app` 的普通依赖树，禁止 V8 越过宿主边界。
+- CI 检查 `vell-app` 的普通依赖树，禁止 V8 越过宿主边界。
 - 增加 bare import 和配置目录逃逸的模块加载回归测试。
 - 新增 [`docs/release.md`](../release.md)，记录自动门槛、插件兼容矩阵、
   性能基准命令和人工发布条件。
@@ -46,9 +46,9 @@ workflow 的精确例外。
 cargo test --locked --workspace --all-features
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo doc --locked --workspace --all-features --no-deps
-cargo test --locked -p modeleaf-protocol -p modeleaf-core
-  -p modeleaf-frontend -p modeleaf-mode -p modeleaf-tui
-cargo check --locked -p modeleaf-app --lib
+cargo test --locked -p vell-protocol -p vell-core
+  -p vell-frontend -p vell-mode -p vell-tui
+cargo check --locked -p vell-app --lib
 pnpm typecheck
 cargo fmt --all -- --check
 git diff --check

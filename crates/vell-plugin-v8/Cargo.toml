@@ -1,0 +1,23 @@
+[package]
+name = "vell-plugin-v8"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[features]
+test-support = []
+
+[dependencies]
+deno_ast = { version = "0.50.3", features = ["transpiling"] }
+vell-core = { path = "../vell-core" }
+vell-mode = { path = "../vell-mode" }
+vell-protocol = { path = "../vell-protocol" }
+serde_json = "1"
+tokio-util = { version = "0.7", features = ["rt"] }
+v8 = { version = "=149.3.0", default-features = false, features = [
+    "simdutf",
+    "use_custom_libcxx",
+] }
+
+[dev-dependencies]
+tempfile = "3"

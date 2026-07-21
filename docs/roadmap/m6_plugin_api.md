@@ -20,8 +20,8 @@
 - `runtime/examples/v1-migration.ts` 同时由 TypeScript 编译器检查和 Rust
   宿主执行，覆盖 v1 与 v2 的机械迁移路径。
 
-没有建立独立 `modeleaf-plugin-api` crate。当前公开契约只有 V8 宿主这一
-个消费者，留在 `modeleaf-plugin-v8` 更小且不会制造空边界。
+没有建立独立 `vell-plugin-api` crate。当前公开契约只有 V8 宿主这一
+个消费者，留在 `vell-plugin-v8` 更小且不会制造空边界。
 
 ## 迭代复审
 
