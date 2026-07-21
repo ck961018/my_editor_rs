@@ -6,13 +6,15 @@
 
 ## 1. 结果
 
-原 `src/app/script.rs` 已转换为目录模块，当前结构为：
+原 `src/app/script.rs` 已转换为目录模块，workspace 提取后
+当前位于：
 
 ```text
-src/app/script/
+crates/vell-plugin-v8/src/script/
 ├── mod.rs
 ├── host.rs
 ├── invocation.rs
+├── mode_adapter.rs
 ├── module.rs
 ├── bridge.rs
 ├── schema.rs
@@ -28,14 +30,16 @@ src/app/script/
 - `module.rs` 负责 TypeScript 转译、本地 module graph 和异常格式化；
 - `bridge.rs` 负责 Rust、JSON 与 V8 值的窄转换；
 - `schema.rs` 只解析插件 Mode definition；
+- `mode_adapter.rs` 负责 ScriptMode 的 Mode contract 和 job 编排；
 - `primitives.rs` 和 `worker.rs` 保持原有独立职责；
-- `mod.rs` 保留 façade、共享私有类型和 ScriptMode adapter。
+- `mod.rs` 保留 façade、共享私有类型和转换函数。
 
-## 2. 有意延后
+## 2. M5 后续
 
-本阶段没有预建 `mode_adapter.rs`。adapter、状态和 presentation 仍共享大量
-私有类型，M5 会修改这组类型边界；现在强拆会制造一轮临时可见性和紧随其后的
-重写。`mode.rs` 与 `kernel.rs` 也没有因文件长度而拆分。
+M2 最初有意延后 `mode_adapter.rs`，避免在 M5 强类型 Mode
+边界完成前制造临时可见性。M5 完成后，ScriptMode contract
+和 job 编排已迁入该模块；共享状态类型仍由 façade 持有。
+`mode.rs` 与 `kernel.rs` 仍不因文件长度而拆分。
 
 本阶段没有新增 trait、生命周期或动态分派，也没有改变公开 API、插件 schema
 或执行顺序。

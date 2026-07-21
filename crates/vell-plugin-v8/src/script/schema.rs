@@ -112,7 +112,6 @@ fn parse_v1_adapter(
         ));
     }
     Ok(ScriptAdapterDefinition {
-        version: ScriptApiVersion::V1,
         actions,
         bindings,
         input_action,
@@ -217,7 +216,6 @@ fn parse_v2_adapter(
         }
     };
     Ok(ScriptAdapterDefinition {
-        version: ScriptApiVersion::V2,
         bindings: parse_bindings(scope, object, &actions)?,
         input_action: None,
         input,
