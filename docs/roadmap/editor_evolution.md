@@ -1,6 +1,6 @@
 # 编辑器演进 Roadmap
 
-**状态：** 执行中（M0 至 M4 已完成）
+**状态：** 执行中（M0 至 M5 已完成）
 
 **更新日期：** 2026-07-21
 
@@ -309,6 +309,10 @@ adapter 时再拆。`modeleaf-plugin-api` 也暂缓，直到 schema 需要被非
 **优先级：** P2
 
 **依赖：** M0 指标；可以在 M4 前后独立实施
+
+**状态：** 已完成（2026-07-21）
+
+**记录：** [`m5_typed_mode.md`](m5_typed_mode.md)
 
 先为 native Mode 提供带关联类型的构造接口，再在 registry 边界适配到
 object-safe `Mode`。业务实现应直接使用自己的 content state、view state
