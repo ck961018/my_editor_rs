@@ -442,8 +442,9 @@ V8 允许恢复执行时才继续使用，否则禁用脚本层并保留 native 
 - isolate heap 为 128 MiB，并保留 16 MiB 终止恢复余量；
 - 单文件 TypeScript/module 为 4 MiB，module graph 为 16 MiB；
 - 结构化输入为 32 MiB，state 和 callback result 为 4 MiB；
-- 单次调用最多暂存 255 个 operation 和 100,000 个 decoration；callback
-  上限由 app execution frame 的 256 operation 上限扣除调用自身后得到，二者
+- 单次调用最多暂存 255 个 operation 和 100,000 个
+  decoration；callback 上限由 app execution frame 的 256
+  operation 上限扣除调用自身后得到，二者
   共用 `vell-mode` 中的同一契约常量。
 
 超时、heap 超限、转换失败和输出超限均在 Rust 侧发布 state、operation 与
