@@ -171,6 +171,12 @@ Mode definition 的 adapter。第一版的各 slot 共用同一个 definition，
 通过强类型 context 区分行为；runtime callback 只从已注册 adapter
 进入。
 
+初始 profile 按 ContentKind 分别对 `before` 约束做稳定拓扑排序。
+前向引用有效；无约束且同时可用的 Mode 保持配置
+顺序。目标不存在或同一 ContentKind 的约束成环时，启动返回
+结构化错误。目标不支持当前
+ContentKind 时，该约束不影响这条 ModeChain。
+
 `ModeContentContext` 和 `ModeViewContext` 都是按 `ContentKind` 封闭的
 enum。Buffer variant 仅提供强类型文本查询、snapshot 和 selections；
 StatusBar variant 只提供状态栏数据。一个多 adapter native Mode 可以按
