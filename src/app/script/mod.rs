@@ -1683,7 +1683,8 @@ editor.modes.define({
             .insert(content_id, Content::Buffer(Buffer::new()))
             .unwrap();
         let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context = ModeViewContext::new(ViewId(0), &view, &contents).unwrap();
+        let context =
+            ModeViewContext::new(ViewId(0), view.content(), view.state(), &contents).unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode
@@ -1774,7 +1775,8 @@ editor.modes.define({
             .insert(content_id, Content::Buffer(Buffer::new()))
             .unwrap();
         let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context = ModeViewContext::new(ViewId(0), &view, &contents).unwrap();
+        let context =
+            ModeViewContext::new(ViewId(0), view.content(), view.state(), &contents).unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode
@@ -1870,7 +1872,8 @@ editor.modes.define({
             .insert(content_id, Content::Buffer(Buffer::new()))
             .unwrap();
         let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context = ModeViewContext::new(ViewId(0), &view, &contents).unwrap();
+        let context =
+            ModeViewContext::new(ViewId(0), view.content(), view.state(), &contents).unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode
@@ -1963,7 +1966,8 @@ editor.modes.define({
             .insert(status, Content::StatusBar(StatusBar::new(buffer)))
             .unwrap();
         let view = View::new(status, contents.create_view_state(status).unwrap());
-        let context = ModeViewContext::new(ViewId(1), &view, &contents).unwrap();
+        let context =
+            ModeViewContext::new(ViewId(1), view.content(), view.state(), &contents).unwrap();
         let content_context = ModeContentContext::new(status, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode
@@ -2126,7 +2130,8 @@ editor.modes.define({
             .insert(content_id, Content::Buffer(Buffer::new()))
             .unwrap();
         let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context = ModeViewContext::new(ViewId(0), &view, &contents).unwrap();
+        let context =
+            ModeViewContext::new(ViewId(0), view.content(), view.state(), &contents).unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode
@@ -2229,7 +2234,8 @@ editor.modes.define({
             .insert(content_id, Content::Buffer(Buffer::new()))
             .unwrap();
         let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context = ModeViewContext::new(ViewId(0), &view, &contents).unwrap();
+        let context =
+            ModeViewContext::new(ViewId(0), view.content(), view.state(), &contents).unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode
@@ -2338,7 +2344,8 @@ editor.modes.define({{
             .insert(content_id, Content::Buffer(Buffer::new()))
             .unwrap();
         let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context = ModeViewContext::new(ViewId(0), &view, &contents).unwrap();
+        let context =
+            ModeViewContext::new(ViewId(0), view.content(), view.state(), &contents).unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode
@@ -2941,7 +2948,8 @@ editor.modes.define({
             .insert(content_id, Content::Buffer(buffer))
             .unwrap();
         let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context = ModeViewContext::new(ViewId(0), &view, &contents).unwrap();
+        let context =
+            ModeViewContext::new(ViewId(0), view.content(), view.state(), &contents).unwrap();
         let before = context.buffer().unwrap().text_snapshot().unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
@@ -3005,7 +3013,8 @@ editor.modes.define({
             .insert(content_id, Content::Buffer(Buffer::new()))
             .unwrap();
         let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context = ModeViewContext::new(ViewId(0), &view, &contents).unwrap();
+        let context =
+            ModeViewContext::new(ViewId(0), view.content(), view.state(), &contents).unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode

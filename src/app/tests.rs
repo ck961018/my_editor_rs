@@ -1744,8 +1744,9 @@ fn replace_view_mode_for_test(
             mode_contents.detach_view(content, mode_id);
         }
         let content_context = ModeContentContext::new(content, contents);
+        let view_data = &app.session.views()[&view];
         let view_context =
-            ModeViewContext::new(view, &app.session.views()[&view], contents).unwrap();
+            ModeViewContext::new(view, view_data.content(), view_data.state(), contents).unwrap();
         mode_contents.attach_view_with_context(content, &mut mode, &content_context, &view_context);
     }
     app.session.view_modes_mut_for_test().insert(view, mode);

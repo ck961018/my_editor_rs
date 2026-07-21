@@ -14,7 +14,6 @@ use crate::app::command::{Command, ModeValue};
 use crate::app::mode_name::{ModeActionName, ModeName};
 use crate::app::operation::OperationRequest;
 use crate::app::presentation::{ContentPresentationLayer, ViewPresentationLayer};
-use crate::app::view::View;
 use crate::core::content::{ContentChange, ContentKind};
 use crate::core::content_store::ContentStore;
 use crate::core::content_view_state::{BufferViewState, ContentViewState};
@@ -523,17 +522,17 @@ pub struct StatusBarModeViewContext<'a> {
 impl<'a> ModeViewContext<'a> {
     pub(crate) fn new(
         view_id: ViewId,
-        view: &'a View,
+        content_id: ContentId,
+        state: &'a ContentViewState,
         contents: &'a ContentStore,
     ) -> Result<Self, ModeContextError> {
-        let content_id = view.content();
         let content_kind = contents
             .kind(content_id)
             .ok_or(ModeContextError::MissingContent {
                 view: view_id,
                 content: content_id,
             })?;
-        match (content_kind, view.state()) {
+        match (content_kind, state) {
             (ContentKind::Buffer, ContentViewState::Buffer(state)) => {
                 Ok(Self::Buffer(BufferModeViewContext {
                     view_id,
@@ -1769,21 +1768,20 @@ impl ModeViewStore {
             .collect()
     }
 
-    pub(crate) fn notify_changed(
+    pub(crate) fn notify_changed<'a>(
         &self,
-        views: &HashMap<ViewId, View>,
+        views: impl IntoIterator<Item = (ViewId, ContentId, &'a ContentViewState)>,
         content: ContentId,
         mode_contents: &ModeContentStore,
         contents: &ContentStore,
         change: &ContentChange,
         drafts: &mut ModeDraftJournal,
     ) {
-        let targets: Vec<_> = views
-            .iter()
-            .filter_map(|(view, data)| (data.content() == content).then_some(*view))
-            .collect();
-        for view in targets {
-            let Ok(context) = ModeViewContext::new(view, &views[&view], contents) else {
+        for (view, view_content, state) in views {
+            if view_content != content {
+                continue;
+            }
+            let Ok(context) = ModeViewContext::new(view, view_content, state, contents) else {
                 continue;
             };
             let modes = self.mode_ids(view).to_vec();

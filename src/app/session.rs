@@ -77,9 +77,14 @@ impl ClientSession {
         views.insert(init.editor.view, editor.view);
         for name in editor.mode_names {
             let content_context = ModeContentContext::new(editor_content, contents);
-            let view_context =
-                ModeViewContext::new(init.editor.view, &views[&init.editor.view], contents)
-                    .expect("editor view state matches editor content");
+            let view_data = &views[&init.editor.view];
+            let view_context = ModeViewContext::new(
+                init.editor.view,
+                view_data.content(),
+                view_data.state(),
+                contents,
+            )
+            .expect("editor view state matches editor content");
             let mode = modes
                 .instantiate_with_context(
                     &name,
@@ -99,9 +104,14 @@ impl ClientSession {
         views.insert(init.status.view, status.view);
         for name in status.mode_names {
             let content_context = ModeContentContext::new(status_content, contents);
-            let view_context =
-                ModeViewContext::new(init.status.view, &views[&init.status.view], contents)
-                    .expect("status view state matches status content");
+            let view_data = &views[&init.status.view];
+            let view_context = ModeViewContext::new(
+                init.status.view,
+                view_data.content(),
+                view_data.state(),
+                contents,
+            )
+            .expect("status view state matches status content");
             let mode = modes
                 .instantiate_with_context(
                     &name,
@@ -242,7 +252,9 @@ impl ClientSession {
                         active_content.insert(content_key);
                     }
                 }
-                let Ok(context) = ModeViewContext::new(view, view_data, contents) else {
+                let Ok(context) =
+                    ModeViewContext::new(view, view_data.content(), view_data.state(), contents)
+                else {
                     continue;
                 };
                 let view_key = (mode, view);
@@ -325,7 +337,12 @@ impl ClientSession {
         drafts: &ModeDraftJournal,
     ) -> CursorDomain {
         let view_data = self.views.get(&view).expect("target view exists");
-        let Ok(context) = crate::app::mode::ModeViewContext::new(view, view_data, contents) else {
+        let Ok(context) = crate::app::mode::ModeViewContext::new(
+            view,
+            view_data.content(),
+            view_data.state(),
+            contents,
+        ) else {
             return CursorDomain::InsertionPoint;
         };
         self.view_modes
@@ -397,8 +414,13 @@ impl ClientSession {
         drafts: &mut ModeDraftJournal,
     ) -> Result<ModeResult, ModeError> {
         let view_data = self.views.get(&view).expect("target view exists");
-        let context = crate::app::mode::ModeViewContext::new(view, view_data, contents)
-            .map_err(ModeError::InvalidViewContext)?;
+        let context = crate::app::mode::ModeViewContext::new(
+            view,
+            view_data.content(),
+            view_data.state(),
+            contents,
+        )
+        .map_err(ModeError::InvalidViewContext)?;
         self.view_modes.execute_with_context(
             view,
             registry,
@@ -419,8 +441,13 @@ impl ClientSession {
         drafts: &mut ModeDraftJournal,
     ) -> Result<ModeResult, ModeError> {
         let view_data = self.views.get(&view).expect("target view exists");
-        let context = crate::app::mode::ModeViewContext::new(view, view_data, contents)
-            .map_err(ModeError::InvalidViewContext)?;
+        let context = crate::app::mode::ModeViewContext::new(
+            view,
+            view_data.content(),
+            view_data.state(),
+            contents,
+        )
+        .map_err(ModeError::InvalidViewContext)?;
         self.view_modes.execute_input_with_context(
             view,
             registry,
@@ -502,8 +529,9 @@ impl ClientSession {
         let Some(view_id) = self.view_for_space(self.focused) else {
             return;
         };
+        let view = &self.views[&view_id];
         let Ok(context) =
-            crate::app::mode::ModeViewContext::new(view_id, &self.views[&view_id], contents)
+            crate::app::mode::ModeViewContext::new(view_id, view.content(), view.state(), contents)
         else {
             return;
         };
@@ -556,7 +584,9 @@ impl ClientSession {
         drafts: &mut ModeDraftJournal,
     ) {
         self.view_modes.notify_changed(
-            &self.views,
+            self.views
+                .iter()
+                .map(|(&view, data)| (view, data.content(), data.state())),
             content,
             mode_contents,
             contents,
@@ -586,7 +616,8 @@ impl ClientSession {
             .filter_map(|(view, data)| (data.content() == content).then_some(*view))
             .collect();
         for view in &views {
-            ModeViewContext::new(*view, &self.views[view], contents)?;
+            let view_data = &self.views[view];
+            ModeViewContext::new(*view, view_data.content(), view_data.state(), contents)?;
         }
         let profile = self.mode_profiles.entry(content).or_default();
         if !profile.contains(name) {
@@ -597,8 +628,10 @@ impl ClientSession {
                 continue;
             }
             let content_context = ModeContentContext::new(content, contents);
-            let view_context = ModeViewContext::new(view, &self.views[&view], contents)
-                .expect("attachment prevalidated view context");
+            let view_data = &self.views[&view];
+            let view_context =
+                ModeViewContext::new(view, view_data.content(), view_data.state(), contents)
+                    .expect("attachment prevalidated view context");
             let mode = registry.instantiate_with_context(
                 name,
                 content,
@@ -802,8 +835,10 @@ impl ClientSession {
         );
         for name in view.mode_names {
             let content_context = ModeContentContext::new(content, contents);
-            let view_context = ModeViewContext::new(id, &self.views[&id], contents)
-                .expect("new view state matches content kind");
+            let view_data = &self.views[&id];
+            let view_context =
+                ModeViewContext::new(id, view_data.content(), view_data.state(), contents)
+                    .expect("new view state matches content kind");
             let mode = registry
                 .instantiate_with_context(
                     &name,
