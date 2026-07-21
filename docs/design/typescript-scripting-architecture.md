@@ -138,10 +138,12 @@ App runtime
 同步 callback 期间 app 本来就必须等待 ModeResult，独立 VM 线程不会改善输入
 响应，反而要求额外的序列化和请求通道。因此第一版不建立 VM worker thread。
 
-超时 watchdog 在独立线程持有 `IsolateHandle`。callback 到期时终止 V8
-执行；callback 正常返回时取消 watchdog。终止异常传播出 V8 scope 后，宿主
-清理 terminate 状态并验证后续调用仍可执行。接近 heap 上限时采用同一终止
-路径，并在恢复后还原上限。
+超时 watchdog 在独立线程持有 `IsolateHandle`。callback 到期时
+终止 V8 执行；callback 正常返回时取消 watchdog。主 isolate
+和 worker 共用同一 RAII lifecycle：在发送停止信号前判定
+执行时间，回收时 join 线程，并在 unwind 时也保证清理。
+终止异常传播出 V8 scope 后，宿主清理 terminate 状态。
+接近 heap 上限时采用同一终止路径，并在恢复后还原上限。
 
 ## 6. 初始化顺序
 

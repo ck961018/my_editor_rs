@@ -1,19 +1,16 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::mpsc;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
 use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
 use super::{
     DEFAULT_PLUGIN_ASSETS, InvocationWatchdog, MAX_SCRIPT_SOURCE_BYTES, SCRIPT_HEAP_LIMIT_BYTES,
-    SCRIPT_STARTUP_TIMEOUT, ScriptError, ScriptInvocationKind, call_script_callback,
-    current_exception, ensure_size, initialize_v8, install_heap_limit, json_to_v8,
-    recover_heap_limit, set_object, throw_script_error, transpile_typescript, v8_to_json,
+    SCRIPT_STARTUP_TIMEOUT, ScriptError, ScriptInvocationKind, WatchdogOutcome,
+    call_script_callback, current_exception, ensure_size, initialize_v8, install_heap_limit,
+    json_to_v8, recover_heap_limit, set_object, throw_script_error, transpile_typescript,
+    v8_to_json,
 };
 
 const RESPONSE_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -169,45 +166,24 @@ fn execute_request_with_watchdog(
     heap_limit: &mut Box<super::HeapLimitState>,
 ) -> Result<serde_json::Value, String> {
     let handle = isolate.thread_safe_handle();
-    let finished = Arc::new(AtomicBool::new(false));
-    let interrupted = Arc::new(AtomicBool::new(false));
-    let watcher_finished = finished.clone();
-    let watcher_interrupted = interrupted.clone();
-    let watcher_cancellation = cancellation.clone();
-    let watcher_handle = handle.clone();
-    let watchdog = std::thread::Builder::new()
-        .name("script-worker-watchdog".to_owned())
-        .spawn(move || {
-            let deadline = Instant::now() + WORKER_TIMEOUT;
-            while !watcher_finished.load(Ordering::Acquire) {
-                if watcher_cancellation.is_cancelled() || Instant::now() >= deadline {
-                    watcher_interrupted.store(true, Ordering::Release);
-                    watcher_handle.terminate_execution();
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        })
-        .map_err(|error| format!("failed to start script worker watchdog: {error}"))?;
+    let mut watchdog = InvocationWatchdog::start_cancellable(
+        handle,
+        ScriptInvocationKind::ContentJob,
+        WORKER_TIMEOUT,
+        cancellation.clone(),
+    )
+    .map_err(|error| error.to_string())?;
     let result = execute_request(isolate, context, handler, message, cancellation)
         .map_err(|error| error.to_string());
-    finished.store(true, Ordering::Release);
-    let _ = watchdog.join();
-    if interrupted.load(Ordering::Acquire) {
-        handle.cancel_terminate_execution();
-        if recover_heap_limit(isolate, heap_limit, SCRIPT_HEAP_LIMIT_BYTES) {
-            return Err("script worker heap limit exceeded".to_owned());
-        }
-        return Err(if cancellation.is_cancelled() {
-            "script worker request cancelled".to_owned()
-        } else {
-            "script worker request timed out".to_owned()
-        });
-    }
+    let outcome = watchdog.stop();
     if recover_heap_limit(isolate, heap_limit, SCRIPT_HEAP_LIMIT_BYTES) {
         return Err("script worker heap limit exceeded".to_owned());
     }
-    result
+    match outcome {
+        WatchdogOutcome::Completed => result,
+        WatchdogOutcome::TimedOut => Err("script worker request timed out".to_owned()),
+        WatchdogOutcome::Cancelled => Err("script worker request cancelled".to_owned()),
+    }
 }
 
 fn install_worker_api(scope: &mut v8::PinScope<'_, '_>) {

@@ -25,8 +25,11 @@ staged operations       255
 decorations             100,000
 ```
 
-超时通过线程安全的 V8 handle 请求终止。终止异常传播出 V8 scope 后，宿主
-清理 terminate 状态；heap 接近上限时也使用该路径，并在恢复后还原上限。
+超时通过线程安全的 V8 handle 请求终止。watchdog guard
+在正常返回和 unwind 中都停止并 join 线程；只用 callback
+返回前的时间判定是否超时，不把线程回收时间计入预算。
+终止异常传播出 V8 scope 后，宿主清理 terminate 状态；
+heap 接近上限时也使用该路径，并在恢复后还原上限。
 启动失败会撤销本次新增的 Mode definition 和 diagnostic。
 
 worker isolate 已经运行在独立线程，因此关闭 V8 的异步 WASM 编译，使编译和

@@ -1,9 +1,11 @@
 use std::ffi::c_void;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+use tokio_util::sync::CancellationToken;
 
 use super::{
     SCRIPT_CALLBACK_TIMEOUT, SCRIPT_HEAP_RECOVERY_BYTES, SCRIPT_STARTUP_TIMEOUT, ScriptError,
@@ -73,10 +75,30 @@ pub(super) struct InvocationWatchdog {
     kind: ScriptInvocationKind,
     timeout: Duration,
     started: Instant,
+    cancellation: Option<CancellationToken>,
     handle: v8::IsolateHandle,
-    interrupted: Arc<AtomicBool>,
-    stop: mpsc::Sender<()>,
+    outcome: Arc<AtomicU8>,
+    completed: Option<WatchdogOutcome>,
+    stop: Option<mpsc::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(super) enum WatchdogOutcome {
+    Completed,
+    TimedOut,
+    Cancelled,
+}
+
+impl WatchdogOutcome {
+    fn load(outcome: &AtomicU8) -> Self {
+        match outcome.load(Ordering::Acquire) {
+            value if value == Self::TimedOut as u8 => Self::TimedOut,
+            value if value == Self::Cancelled as u8 => Self::Cancelled,
+            _ => Self::Completed,
+        }
+    }
 }
 
 pub(super) struct HeapLimitState {
@@ -133,48 +155,101 @@ impl InvocationWatchdog {
         kind: ScriptInvocationKind,
         timeout: Duration,
     ) -> Result<Self, ScriptError> {
+        Self::start_inner(
+            handle,
+            kind,
+            timeout,
+            None,
+            "script-watchdog",
+            "script watchdog",
+        )
+    }
+
+    pub(super) fn start_cancellable(
+        handle: v8::IsolateHandle,
+        kind: ScriptInvocationKind,
+        timeout: Duration,
+        cancellation: CancellationToken,
+    ) -> Result<Self, ScriptError> {
+        Self::start_inner(
+            handle,
+            kind,
+            timeout,
+            Some(cancellation),
+            "script-worker-watchdog",
+            "script worker watchdog",
+        )
+    }
+
+    fn start_inner(
+        handle: v8::IsolateHandle,
+        kind: ScriptInvocationKind,
+        timeout: Duration,
+        cancellation: Option<CancellationToken>,
+        thread_name: &str,
+        watchdog_name: &str,
+    ) -> Result<Self, ScriptError> {
         let (stop, receiver) = mpsc::channel();
-        let interrupted = Arc::new(AtomicBool::new(false));
-        let watcher_interrupted = interrupted.clone();
+        let (arm, armed) = mpsc::sync_channel(1);
+        let outcome = Arc::new(AtomicU8::new(WatchdogOutcome::Completed as u8));
+        let watcher_outcome = outcome.clone();
         let watcher_handle = handle.clone();
+        let watcher_cancellation = cancellation.clone();
         let thread = thread::Builder::new()
-            .name("script-watchdog".to_owned())
+            .name(thread_name.to_owned())
             .spawn(move || {
-                if matches!(
-                    receiver.recv_timeout(timeout),
-                    Err(mpsc::RecvTimeoutError::Timeout)
-                ) {
-                    watcher_interrupted.store(true, Ordering::Release);
+                let Ok(started) = armed.recv() else {
+                    return;
+                };
+                let outcome = wait_for_watchdog(
+                    &receiver,
+                    started,
+                    timeout,
+                    watcher_cancellation.as_ref(),
+                );
+                if outcome != WatchdogOutcome::Completed {
+                    watcher_outcome.store(outcome as u8, Ordering::Release);
                     watcher_handle.terminate_execution();
                 }
             })
             .map_err(|error| {
-                ScriptError::new(format!("failed to start script watchdog: {error}"))
+                ScriptError::new(format!("failed to start {watchdog_name}: {error}"))
             })?;
+        let started = Instant::now();
+        if arm.send(started).is_err() {
+            let _ = thread.join();
+            return Err(ScriptError::new(format!(
+                "failed to arm {watchdog_name}"
+            )));
+        }
         Ok(Self {
             kind,
             timeout,
-            started: Instant::now(),
+            started,
+            cancellation,
             handle,
-            interrupted,
-            stop,
+            outcome,
+            completed: None,
+            stop: Some(stop),
             thread: Some(thread),
         })
     }
 
     pub(super) fn finish<T>(mut self, result: Result<T, ScriptError>) -> Result<T, ScriptError> {
-        let _ = self.stop.send(());
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-        let timed_out =
-            self.interrupted.load(Ordering::Acquire) || self.started.elapsed() >= self.timeout;
-        if timed_out {
-            self.handle.cancel_terminate_execution();
-            return Err(ScriptError::new(format!(
-                "script timeout during {}",
-                self.kind.label()
-            )));
+        match self.stop() {
+            WatchdogOutcome::Completed => {}
+            WatchdogOutcome::TimedOut => {
+                return Err(ScriptError::new(format!(
+                    "script timeout during {}",
+                    self.kind.label()
+                )));
+            }
+            WatchdogOutcome::Cancelled => {
+                return Err(ScriptError::new(format!(
+                    "script cancelled during {}",
+                    self.kind.label()
+                )));
+            }
         }
         result.map_err(|error| {
             ScriptError::new(format!(
@@ -182,5 +257,134 @@ impl InvocationWatchdog {
                 self.kind.label()
             ))
         })
+    }
+
+    pub(super) fn stop(&mut self) -> WatchdogOutcome {
+        if let Some(outcome) = self.completed {
+            return outcome;
+        }
+        let cancelled = self
+            .cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled);
+        let timed_out = self.started.elapsed() >= self.timeout;
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        let watcher_outcome = WatchdogOutcome::load(&self.outcome);
+        if watcher_outcome != WatchdogOutcome::Completed {
+            self.handle.cancel_terminate_execution();
+        }
+        let outcome = resolve_watchdog_outcome(watcher_outcome, cancelled, timed_out);
+        self.completed = Some(outcome);
+        outcome
+    }
+}
+
+fn resolve_watchdog_outcome(
+    watcher_outcome: WatchdogOutcome,
+    cancelled: bool,
+    timed_out: bool,
+) -> WatchdogOutcome {
+    if cancelled {
+        WatchdogOutcome::Cancelled
+    } else if watcher_outcome != WatchdogOutcome::Completed {
+        watcher_outcome
+    } else if timed_out {
+        WatchdogOutcome::TimedOut
+    } else {
+        WatchdogOutcome::Completed
+    }
+}
+
+impl Drop for InvocationWatchdog {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn wait_for_watchdog(
+    stop: &mpsc::Receiver<()>,
+    started: Instant,
+    timeout: Duration,
+    cancellation: Option<&CancellationToken>,
+) -> WatchdogOutcome {
+    loop {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return WatchdogOutcome::Cancelled;
+        }
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return WatchdogOutcome::TimedOut;
+        }
+        let wait = if cancellation.is_some() {
+            remaining.min(Duration::from_millis(1))
+        } else {
+            remaining
+        };
+        match stop.recv_timeout(wait) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return WatchdogOutcome::Completed;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watchdog_wait_distinguishes_stop_timeout_and_cancellation() {
+        let (stop, receiver) = mpsc::channel();
+        stop.send(()).unwrap();
+        assert_eq!(
+            wait_for_watchdog(
+                &receiver,
+                Instant::now(),
+                Duration::from_secs(1),
+                None,
+            ),
+            WatchdogOutcome::Completed
+        );
+
+        let (_stop, receiver) = mpsc::channel();
+        assert_eq!(
+            wait_for_watchdog(&receiver, Instant::now(), Duration::ZERO, None),
+            WatchdogOutcome::TimedOut
+        );
+
+        let (_stop, receiver) = mpsc::channel();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        assert_eq!(
+            wait_for_watchdog(
+                &receiver,
+                Instant::now(),
+                Duration::from_secs(1),
+                Some(&cancellation),
+            ),
+            WatchdogOutcome::Cancelled
+        );
+    }
+
+    #[test]
+    fn completion_snapshot_classifies_deadline_and_prioritizes_cancellation() {
+        assert_eq!(
+            resolve_watchdog_outcome(WatchdogOutcome::Completed, false, false),
+            WatchdogOutcome::Completed
+        );
+        assert_eq!(
+            resolve_watchdog_outcome(WatchdogOutcome::Completed, false, true),
+            WatchdogOutcome::TimedOut
+        );
+        assert_eq!(
+            resolve_watchdog_outcome(WatchdogOutcome::TimedOut, true, true),
+            WatchdogOutcome::Cancelled
+        );
     }
 }
