@@ -59,6 +59,17 @@ pub enum ModeError {
         kind: ContentKind,
     },
     InvalidViewContext(ModeContextError),
+    StateTypeMismatch {
+        mode: ModeName,
+        state: ModeStateKind,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModeStateKind {
+    Content,
+    View,
+    JobOutput,
 }
 
 impl fmt::Display for ModeError {
@@ -97,6 +108,11 @@ impl fmt::Display for ModeError {
                 mode.as_str()
             ),
             Self::InvalidViewContext(error) => error.fmt(formatter),
+            Self::StateTypeMismatch { mode, state } => write!(
+                formatter,
+                "mode '{}' received an invalid {state:?} state type",
+                mode.as_str()
+            ),
         }
     }
 }
@@ -145,7 +161,9 @@ pub trait ModeState: Any {
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn clone_box(&self) -> Box<dyn ModeState>;
-    fn eq_box(&self, other: &dyn ModeState) -> bool;
+    fn eq_box(&self, _other: &dyn ModeState) -> Option<bool> {
+        None
+    }
 }
 
 #[cfg(feature = "test-support")]
@@ -176,6 +194,15 @@ pub fn mode_state_clone_metrics() -> ModeStateCloneMetrics {
         nanos: MODE_STATE_CLONE_NANOS.load(Ordering::Relaxed),
         inline_bytes: MODE_STATE_CLONE_INLINE_BYTES.load(Ordering::Relaxed),
     }
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) fn record_mode_state_clone<T: ?Sized>(started: Instant, state: &T) {
+    let nanos = started.elapsed().as_nanos().min(u64::MAX.into()) as u64;
+    let bytes = u64::try_from(std::mem::size_of_val(state)).unwrap_or(u64::MAX);
+    MODE_STATE_CLONE_COUNT.fetch_add(1, Ordering::Relaxed);
+    MODE_STATE_CLONE_NANOS.fetch_add(nanos, Ordering::Relaxed);
+    MODE_STATE_CLONE_INLINE_BYTES.fetch_add(bytes, Ordering::Relaxed);
 }
 
 pub type ModeJobResult = Result<Box<dyn Any + Send>, String>;
@@ -237,7 +264,7 @@ impl ModeJobRequest {
     }
 }
 
-impl<T: Any + Clone + PartialEq> ModeState for T {
+impl<T: Any + Clone> ModeState for T {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -251,18 +278,8 @@ impl<T: Any + Clone + PartialEq> ModeState for T {
         let started = Instant::now();
         let cloned: Box<dyn ModeState> = Box::new(self.clone());
         #[cfg(feature = "test-support")]
-        {
-            let nanos = started.elapsed().as_nanos().min(u64::MAX.into()) as u64;
-            let bytes = u64::try_from(std::mem::size_of_val(self)).unwrap_or(u64::MAX);
-            MODE_STATE_CLONE_COUNT.fetch_add(1, Ordering::Relaxed);
-            MODE_STATE_CLONE_NANOS.fetch_add(nanos, Ordering::Relaxed);
-            MODE_STATE_CLONE_INLINE_BYTES.fetch_add(bytes, Ordering::Relaxed);
-        }
+        record_mode_state_clone(started, self);
         cloned
-    }
-
-    fn eq_box(&self, other: &dyn ModeState) -> bool {
-        other.as_any().downcast_ref::<T>() == Some(self)
     }
 }
 
@@ -357,7 +374,7 @@ impl ModeDraftJournal {
                 .instances
                 .get_mut(&key)
                 .expect("drafted mode content still exists");
-            if draft.state.eq_box(instance.state.as_ref())
+            if draft.state.eq_box(instance.state.as_ref()) == Some(true)
                 && draft.faulted == instance.faulted
                 && draft.background_job_dirty == instance.background_job_dirty
             {
@@ -376,7 +393,9 @@ impl ModeDraftJournal {
                 .instances
                 .get_mut(&key)
                 .expect("drafted mode view still exists");
-            if draft.state.eq_box(instance.state.as_ref()) && draft.faulted == instance.faulted {
+            if draft.state.eq_box(instance.state.as_ref()) == Some(true)
+                && draft.faulted == instance.faulted
+            {
                 continue;
             }
             instance.state = draft.state;
@@ -2212,6 +2231,7 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+    use crate::TypedMode;
 
     struct CountingJobMode {
         name: ModeName,
@@ -2251,7 +2271,11 @@ mod tests {
         }
     }
 
-    impl Mode for DraftStateMode {
+    impl TypedMode for DraftStateMode {
+        type ContentState = u8;
+        type ViewState = ();
+        type JobOutput = ();
+
         fn name(&self) -> &ModeName {
             &self.name
         }
@@ -2271,28 +2295,36 @@ mod tests {
         fn create_content_state(
             &self,
             _context: &ModeContentContext<'_>,
-        ) -> Result<Box<dyn ModeState>, ModeError> {
-            Ok(Box::new(0_u8))
+        ) -> Result<Self::ContentState, ModeError> {
+            Ok(0)
+        }
+
+        fn create_view_state(
+            &self,
+            _content_state: &Self::ContentState,
+            _context: &ModeViewContext<'_>,
+        ) -> Result<Self::ViewState, ModeError> {
+            Ok(())
         }
 
         fn execute_content_with_arguments(
             &self,
-            state: &mut dyn ModeState,
+            state: &mut Self::ContentState,
             _context: &ModeContentContext<'_>,
             _action: &ModeActionName,
             _arguments: &ModeValue,
         ) -> Result<ModeResult, ModeError> {
-            *state.as_any_mut().downcast_mut::<u8>().unwrap() += 1;
+            *state += 1;
             Ok(ModeResult::none())
         }
 
         fn on_content_changed(
             &self,
-            state: &mut dyn ModeState,
+            state: &mut Self::ContentState,
             _context: &ModeContentContext<'_>,
             _change: &ContentChange,
         ) -> Result<(), ModeError> {
-            *state.as_any_mut().downcast_mut::<u8>().unwrap() += 1;
+            *state += 1;
             if self.fail_observer {
                 Err(ModeError::CallbackFailed {
                     mode: self.name.clone(),
@@ -2388,7 +2420,7 @@ mod tests {
         let action = ModeActionName::new("advance");
         let mut registry = ModeRegistry::new();
         registry
-            .register(DraftStateMode {
+            .register_typed(DraftStateMode {
                 name: name.clone(),
                 actions: vec![action.clone()],
                 fail_observer: false,
@@ -2439,9 +2471,10 @@ mod tests {
         let name = ModeName::new("unchanged-draft");
         let mut registry = ModeRegistry::new();
         registry
-            .register(CountingJobMode {
+            .register_typed(DraftStateMode {
                 name: name.clone(),
-                calls: Rc::new(Cell::new(0)),
+                actions: vec![ModeActionName::new("advance")],
+                fail_observer: false,
             })
             .unwrap();
         let mode = registry.instantiate(&name).unwrap();
@@ -2464,7 +2497,7 @@ mod tests {
         let name = ModeName::new("faulting-observer-draft");
         let mut registry = ModeRegistry::new();
         registry
-            .register(DraftStateMode {
+            .register_typed(DraftStateMode {
                 name: name.clone(),
                 actions: vec![ModeActionName::new("advance")],
                 fail_observer: true,
@@ -2513,7 +2546,7 @@ mod tests {
     fn registration_rejects_duplicate_mode_and_action_names() {
         let mut registry = ModeRegistry::new();
         registry
-            .register(DraftStateMode {
+            .register_typed(DraftStateMode {
                 name: ModeName::new("duplicate"),
                 actions: vec![ModeActionName::new("run")],
                 fail_observer: false,
@@ -2521,7 +2554,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            registry.register(DraftStateMode {
+            registry.register_typed(DraftStateMode {
                 name: ModeName::new("duplicate"),
                 actions: vec![ModeActionName::new("other")],
                 fail_observer: false,
@@ -2529,7 +2562,7 @@ mod tests {
             Err(ModeRegistrationError::DuplicateMode(_))
         ));
         assert!(matches!(
-            registry.register(DraftStateMode {
+            registry.register_typed(DraftStateMode {
                 name: ModeName::new("duplicate-action"),
                 actions: vec![ModeActionName::new("run"), ModeActionName::new("run")],
                 fail_observer: false,

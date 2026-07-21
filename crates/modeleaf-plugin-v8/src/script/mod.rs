@@ -184,7 +184,7 @@ struct ScriptModeDefinition {
     adapters: ScriptAdapterDefinitions,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 struct ScriptModeState {
     data: serde_json::Value,
     decorations: DecorationSet,
@@ -194,7 +194,7 @@ struct ScriptModeState {
     analysis_input_epoch: u64,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 struct ScriptAnalysisSchedule {
     version: u64,
     content_revision: u64,
@@ -202,7 +202,7 @@ struct ScriptAnalysisSchedule {
     message: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Default)]
 struct DecorationSet {
     values: Arc<Vec<NamedTextDecoration>>,
     prefix_max_end: Arc<Vec<usize>>,
