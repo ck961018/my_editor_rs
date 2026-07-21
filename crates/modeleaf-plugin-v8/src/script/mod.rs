@@ -1665,6 +1665,41 @@ editor.modes.define({{
     }
 
     #[test]
+    fn module_graph_rejects_imports_outside_the_config_directory() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("config");
+        fs::create_dir(&root).unwrap();
+        fs::write(parent.path().join("outside.ts"), "export const value = 1;").unwrap();
+        let config = root.join("config.ts");
+        fs::write(
+            &config,
+            "import { value } from '../outside.ts'; void value;",
+        )
+        .unwrap();
+
+        let error = ScriptHost::new()
+            .execute_module(&config)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("escapes the config directory"), "{error}");
+    }
+
+    #[test]
+    fn module_graph_rejects_bare_imports() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.ts");
+        fs::write(&config, "import 'untrusted-package';").unwrap();
+
+        let error = ScriptHost::new()
+            .execute_module(&config)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("bare and URL imports"), "{error}");
+    }
+
+    #[test]
     fn registers_script_mode_that_calls_a_native_primitive() {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.ts");

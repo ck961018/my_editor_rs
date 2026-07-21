@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  quality:
+    name: Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust 1.88
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal \
+            --component clippy,rustfmt
+          rustup default 1.88.0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install TypeScript dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        run: >-
+          cargo clippy --locked --workspace --all-targets --all-features --
+          -D warnings
+      - name: Build documentation
+        run: cargo doc --locked --workspace --all-features --no-deps
+      - name: Check TypeScript contracts
+        run: pnpm typecheck
+
+  core:
+    name: Core without V8 (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust 1.88
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+      - name: Test V8-independent crates
+        run: >-
+          cargo test --locked
+          -p modeleaf-protocol
+          -p modeleaf-core
+          -p modeleaf-frontend
+          -p modeleaf-mode
+          -p modeleaf-tui
+      - name: Check the application boundary without dev dependencies
+        run: cargo check --locked -p modeleaf-app --lib
+      - name: Verify application dependencies exclude V8 on Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          tree="$(cargo tree -p modeleaf-app --edges normal)"
+          if grep -E '(^|[[:space:]])v8 v' <<<"$tree"; then
+            echo 'modeleaf-app must not depend on V8' >&2
+            exit 1
+          fi
+      - name: Verify application dependencies exclude V8 on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tree = cargo tree -p modeleaf-app --edges normal
+          if ($tree -match '(^|\s)v8 v') {
+            throw 'modeleaf-app must not depend on V8'
+          }
+
+  full-host:
+    name: Full V8 host (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust 1.88
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+      - name: Test the complete workspace
+        run: cargo test --locked --workspace --all-features

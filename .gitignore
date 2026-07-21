@@ -1,6 +1,9 @@
 /.*/
 !/.cargo/
 !/.cargo/config.toml
+!/.github/
+!/.github/workflows/
+!/.github/workflows/ci.yml
 /target
 /node_modules/
 /.worktrees/
