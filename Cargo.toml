@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["crates/modeleaf-core", "crates/modeleaf-protocol"]
+members = [
+    "crates/modeleaf-core",
+    "crates/modeleaf-frontend",
+    "crates/modeleaf-protocol",
+]
 default-members = ["."]
 
 [package]
@@ -20,6 +24,7 @@ unicode-width = "0.2"
 serde_json = "1"
 modeleaf-protocol = { path = "crates/modeleaf-protocol" }
 modeleaf-core = { path = "crates/modeleaf-core" }
+modeleaf-frontend = { path = "crates/modeleaf-frontend" }
 deno_ast = { version = "0.50.3", features = ["transpiling"] }
 v8 = { version = "=149.3.0", default-features = false, features = [
     "simdutf",

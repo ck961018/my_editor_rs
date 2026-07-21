@@ -1110,6 +1110,7 @@ dependencies = [
  "deno_ast",
  "futures",
  "modeleaf-core",
+ "modeleaf-frontend",
  "modeleaf-protocol",
  "serde_json",
  "taffy",
@@ -1127,6 +1128,13 @@ dependencies = [
  "modeleaf-protocol",
  "ropey",
  "tempfile",
+]
+
+[[package]]
+name = "modeleaf-frontend"
+version = "0.1.0"
+dependencies = [
+ "modeleaf-protocol",
 ]
 
 [[package]]

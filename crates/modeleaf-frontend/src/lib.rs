@@ -1,13 +1,18 @@
 //! 前端抽象层。App 和具体前端实现都依赖这里，避免 app <-> tui 互相依赖。
 
+#![allow(
+    async_fn_in_trait,
+    reason = "workspace-only static dispatch does not require a Send future contract"
+)]
+
 use std::io;
 
-use crate::protocol::content_query::RenderQuery;
-use crate::protocol::frontend_event::FrontendEvent;
-use crate::protocol::ids::{SpaceId, ViewId};
-use crate::protocol::revision::Revision;
-use crate::protocol::scene::Scene;
-use crate::protocol::viewport::{ResolvedViewportCommand, ViewportCommand};
+use modeleaf_protocol::content_query::RenderQuery;
+use modeleaf_protocol::frontend_event::FrontendEvent;
+use modeleaf_protocol::ids::{SpaceId, ViewId};
+use modeleaf_protocol::revision::Revision;
+use modeleaf_protocol::scene::Scene;
+use modeleaf_protocol::viewport::{ResolvedViewportCommand, ViewportCommand};
 
 pub trait Frontend {
     async fn next_event(&mut self) -> io::Result<Option<FrontendEvent>>;
