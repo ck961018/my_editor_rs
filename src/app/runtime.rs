@@ -12,10 +12,10 @@ use crate::app::dispatcher::{DispatchCommand, DispatchInput, DispatchOutcome};
 use crate::app::execution::{ExecutionFrame, InputCheckpoint, PreparedEffect, StateRollback};
 use crate::app::mode::{CursorDomain, InputFlow};
 use crate::app::operation::{
-    AppOperation, ContentOperation, ContentTarget, ModeTarget, OperationError, OperationOrigin,
-    OperationOriginScope, OperationRequest, QueuedOperation, ResolvedModeScope, ResolvedOperation,
-    ViewEditPlan, ViewOperation, ViewPrecondition, ViewTarget, adapt_dispatch_command,
-    prepend_operations,
+    AppOperation, ContentOperation, ContentTarget, ModeFlowPropagation, ModeTarget, OperationError,
+    OperationOrigin, OperationOriginScope, OperationRequest, QueuedOperation, ResolvedModeScope,
+    ResolvedOperation, ViewEditPlan, ViewOperation, ViewPrecondition, ViewTarget,
+    adapt_dispatch_command, prepend_operations,
 };
 use crate::app::query::AppQuery;
 use crate::app::transaction::{TransactionData, TransactionRecord, ViewTransactionData};
@@ -624,10 +624,17 @@ impl<F: Frontend> App<F> {
                                     io::Error::new(io::ErrorKind::InvalidData, error)
                                 })?;
                             let (flow, operations) = result.into_parts();
-                            input_flow = flow;
+                            if invocation.flow == ModeFlowPropagation::Propagate {
+                                input_flow = flow;
+                            }
                             let mut effect_origin = OperationOrigin::content(content, source_view);
                             effect_origin.mode = Some(mode);
-                            prepend_operations(&mut queue, effect_origin, operations);
+                            prepend_mode_operations(
+                                &mut queue,
+                                effect_origin,
+                                operations,
+                                invocation.flow,
+                            );
                             Ok(())
                         }
                         ResolvedModeScope::View { view, content } => {
@@ -652,11 +659,18 @@ impl<F: Frontend> App<F> {
                                     io::Error::new(io::ErrorKind::InvalidData, error)
                                 })?;
                             let (flow, operations) = result.into_parts();
-                            input_flow = flow;
+                            if invocation.flow == ModeFlowPropagation::Propagate {
+                                input_flow = flow;
+                            }
                             frame.record_view_touch(view, revision_before);
                             let mut effect_origin = OperationOrigin::view(view, content);
                             effect_origin.mode = Some(mode);
-                            prepend_operations(&mut queue, effect_origin, operations);
+                            prepend_mode_operations(
+                                &mut queue,
+                                effect_origin,
+                                operations,
+                                invocation.flow,
+                            );
                             Ok(())
                         }
                     }
@@ -1201,4 +1215,20 @@ fn viewport_cursor_edit(
             EditCommand::ExtendDownBy(lines)
         }
     })
+}
+
+fn prepend_mode_operations(
+    queue: &mut VecDeque<QueuedOperation>,
+    origin: OperationOrigin,
+    mut operations: Vec<OperationRequest>,
+    parent_flow: ModeFlowPropagation,
+) {
+    if parent_flow == ModeFlowPropagation::Isolate {
+        for operation in &mut operations {
+            if let OperationRequest::Mode { invocation, .. } = operation {
+                invocation.flow = ModeFlowPropagation::Isolate;
+            }
+        }
+    }
+    prepend_operations(queue, origin, operations);
 }

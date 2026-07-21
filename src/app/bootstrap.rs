@@ -55,6 +55,7 @@ pub(super) fn bootstrap_editor(
     let editor_view = ids.view();
     let status_view = ids.view();
     let mut editor_modes = Vec::new();
+    let mut status_modes = Vec::new();
 
     let mut contents = ContentStore::default();
     contents
@@ -75,21 +76,35 @@ pub(super) fn bootstrap_editor(
                 format!("mode '{}' is already registered", name.as_str()),
             ));
         }
-        if let Some(before) = mode.before() {
-            let index = editor_modes
-                .iter()
-                .position(|candidate| candidate == before)
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("mode '{}' cannot attach before unknown mode", name.as_str()),
-                    )
-                })?;
-            editor_modes.insert(index, name);
-        } else {
-            editor_modes.push(name);
+        let before = mode.before().cloned();
+        if let Some(before) = &before
+            && modes.resolve_mode(before).is_none()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("mode '{}' cannot attach before unknown mode", name.as_str()),
+            ));
         }
-        modes.register(mode).map_err(io::Error::other)?;
+        let id = modes.register(mode).map_err(io::Error::other)?;
+        for (kind, chain) in [
+            (crate::core::content::ContentKind::Buffer, &mut editor_modes),
+            (
+                crate::core::content::ContentKind::StatusBar,
+                &mut status_modes,
+            ),
+        ] {
+            if modes.adapter(id, kind).is_none() {
+                continue;
+            }
+            if let Some(index) = before
+                .as_ref()
+                .and_then(|before| chain.iter().position(|candidate| candidate == before))
+            {
+                chain.insert(index, name.clone());
+            } else {
+                chain.push(name.clone());
+            }
+        }
     }
     let mut kernel = Kernel::new(contents, modes);
     let (contents, modes, mode_contents) = kernel.mode_attachment_parts();
@@ -108,7 +123,7 @@ pub(super) fn bootstrap_editor(
             status: InitialView {
                 view: status_view,
                 content: status_content,
-                modes: Vec::new(),
+                modes: status_modes,
             },
             next_view_id: ids.next_view,
         },

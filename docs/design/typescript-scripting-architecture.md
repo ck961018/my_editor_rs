@@ -2,7 +2,7 @@
 
 **状态：** 当前脚本子系统设计；总架构见
 [`editor-kernel-architecture.md`](editor-kernel-architecture.md)
-**日期：** 2026-07-19
+**日期：** 2026-07-21
 
 ## 0. 实现补充
 
@@ -29,6 +29,18 @@
 - callback 结束后旧 context 的原语函数失效，不能持有宿主引用；
 - callback 或返回值验证失败时丢弃本次暂存操作，不进入 app executor；
 - `ModeName`、action 名和 Face 名仍是字符串，因为它们属于插件扩展命名空间。
+- v2 定义通过 `on.buffer` 和 `on.statusBar` 生成 canonical
+  Mode-Content adapter，不支持的 adapter 不会挂载到对应 Content；
+- v2 以 `state`、`viewState`、`commands` 和 `keys` 为基础组织，
+  `void` 表示处理，`ctx.pass()` 表示继续 Mode chain；
+- Buffer 和 StatusBar 拥有独立的 TypeScript context 类型与运行时原语
+  集，StatusBar 不安装 `edit`、`cursor` 或文本原语；
+- v1 `content/view/actions/keys` schema 暂时作为兼容入口，但与 v2
+  共用 `ScriptMode`、Mode state、typed operation 和 execution frame。
+- v2 的静态 context 收窄由 `runtime/type-tests/tsconfig.json` 固化；使用
+  `tsc.cmd --noEmit -p runtime/type-tests/tsconfig.json` 验证负向类型用例。
+- `changed` 当前只属于 Buffer adapter；StatusBar 是派生 Content，没有独立的
+  `ContentChange` 通知源，因此 schema 和类型定义均不暴露该 hook。
 
 主 ScriptHost 仍在 UI 线程同步执行输入和 action callback。只有显式声明的
 后台 worker 用于解析等 CPU 密集工作，因此没有引入通用 Web、Node 或 Deno
@@ -146,16 +158,16 @@ App runtime
 
 ## 7. Script Mode 定义
 
-脚本定义与 native Mode 共享一个后端契约：
+脚本定义与 native Mode 共享一个后端契约。v2 以 Content adapter
+为行为边界：
 
 ```text
 name
-content state factory
-view state factory
-content actions
-view actions
-input handler
-keymap
+adapter state factory
+adapter view-state factory
+mode-local commands
+adapter input handler
+adapter keymap
 content change callbacks
 faces
 decorations
@@ -163,27 +175,27 @@ view policy
 attachment policy
 ```
 
-TypeScript API 的具体命名在实现时保持小而一致。语义示例：
+TypeScript API 保持 command-first：
 
 ```ts
 editor.modes.define({
   name: "pairs",
-  content: {
-    create: () => ({ enabled: true }),
-  },
-  view: {
-    create: () => ({ inserted: 0 }),
-  },
-  actions: {
-    quote(ctx) {
-      ctx.viewState.inserted++;
-      ctx.text.insert('\"\"');
-      ctx.cursor.moveLeft();
-      return ctx.handled();
+  on: {
+    buffer: {
+      state: () => ({ enabled: true }),
+      viewState: () => ({ inserted: 0 }),
+      commands: {
+        quote(ctx) {
+          if (!ctx.state.enabled) return ctx.pass();
+          ctx.viewState.inserted++;
+          ctx.edit.insert('\"\"');
+          ctx.cursor.moveLeft();
+        },
+      },
+      keys: {
+        '\"': "quote",
+      },
     },
-  },
-  keys: {
-    '\"': "quote",
   },
 });
 ```
@@ -196,8 +208,8 @@ callback identity 和静态 keymap/presentation metadata，不保存宿主可变
 正式 Script Mode 状态只有：
 
 ```text
-contentState: 每 (ModeId, ContentId) 一份
-viewState:    每 (ModeId, ViewId) 一份
+state:     每 (ModeId, ContentId) 一份
+viewState: 每 (ModeId, ViewId) 一份
 ```
 
 它们必须是可结构化复制的数据：
@@ -237,8 +249,9 @@ Rust Mode state checkpoint
 -> app 按顺序执行 OperationRequest
 ```
 
-V8 callback 内不得重新进入 app command executor。`context.mode.invoke()` 只暂存
-类型化 `ModeCommand`，等 callback scope 退出后再由 app 深度优先执行。
+V8 callback 内不得重新进入 app command executor。
+`context.commands.invoke("mode.command")` 只暂存类型化
+`ModeCommand`，等 callback scope 退出后再由 app 深度优先执行。
 
 `onContentChanged` 等被动 callback 只能更新所属 Mode state，不能返回编辑或
 其他宿主 operation。需要修改文本的行为必须由 input 或显式 action 触发，避免隐式
@@ -246,10 +259,14 @@ V8 callback 内不得重新进入 app command executor。`context.mode.invoke()`
 
 ## 10. Callback 结果和原语
 
-callback 通过 `context.handled()` 或 `context.forward()` 返回输入流向，也可以返回
-包含 presentation snapshot 的对象。编辑操作不放在返回值中，而是调用
-`context.cursor`、`text`、`history`、`viewport`、`mode` 和 `app` 下的 Rust
-native functions。
+v2 command 正常返回 `void` 表示已处理；只有 `return ctx.pass()`
+会继续后续 Mode。boolean 和旧 `ModeActionResult.continue` 不是 v2 流向
+语义。编辑操作不放在返回值中，而是调用 Buffer context 的
+`cursor`、`edit`、`history`、`viewport`、`commands` 和 `app`
+原语。StatusBar context 只安装其合法能力。
+
+v1 callback 暂时仍使用 `handled()`、`forward()` 和原有的结果对象，
+兼容语义由脚本 parser 边界吸收，不进入 Rust Mode contract。
 
 每个 native function 立即校验参数，并把 `OperationRequest` 追加到本次 callback
 的 Rust 暂存区。adapter 必须在执行任何宿主操作前完整验证返回值和 state。

@@ -71,6 +71,12 @@ interface ModeActionResult {
   viewDecorations?: TextDecorationSnapshot;
 }
 
+declare const editorPass: unique symbol;
+
+interface Pass {
+  readonly [editorPass]: true;
+}
+
 interface CursorPrimitives {
   moveLeft(count?: number): void;
   moveRight(count?: number): void;
@@ -160,6 +166,10 @@ interface ModePrimitives {
   invoke(mode: string, action: string, arguments?: ScriptData): void;
 }
 
+interface CommandPrimitives {
+  invoke(command: `${string}.${string}`, arguments?: ScriptData): void;
+}
+
 interface AppPrimitives {
   save(): void;
   quit(): void;
@@ -168,6 +178,98 @@ interface AppPrimitives {
 interface DocumentContext {
   readonly fileName?: string;
   readonly modified: boolean;
+}
+
+interface BufferContentContext {
+  readonly contentId: number;
+  readonly revision?: number;
+  readonly document?: DocumentContext;
+}
+
+interface StatusBarContentContext {
+  readonly contentId: number;
+  readonly revision?: number;
+  readonly status?: DocumentContext;
+}
+
+interface BufferCommandContext<ContentState, ViewState, Arguments = ScriptData>
+  extends BufferContentContext {
+  readonly viewId: number;
+  readonly arguments: Arguments;
+  readonly cursor: CursorPrimitives;
+  readonly edit: TextPrimitives;
+  readonly history: HistoryPrimitives;
+  readonly viewport: ViewportPrimitives;
+  readonly commands: CommandPrimitives;
+  readonly app: AppPrimitives;
+  state: ContentState;
+  viewState: ViewState;
+  pass(): Pass;
+}
+
+interface StatusBarCommandContext<
+  ContentState,
+  ViewState,
+  Arguments = ScriptData,
+> extends StatusBarContentContext {
+  readonly viewId: number;
+  readonly arguments: Arguments;
+  readonly commands: CommandPrimitives;
+  state: ContentState;
+  viewState: ViewState;
+  pass(): Pass;
+}
+
+interface BufferAdapterDefinition<ContentState, ViewState> {
+  state?(context: BufferContentContext): ContentState;
+  viewState?(state: Readonly<ContentState>): ViewState & {
+    viewPolicy?: ViewPolicy;
+  };
+  commands?: Record<
+    string,
+    (
+      context: BufferCommandContext<ContentState, ViewState>,
+    ) => void | Pass
+  >;
+  keys?: Record<string, string>;
+  input?: string;
+  changed?(
+    context: BufferContentContext & {
+      readonly change: ContentChange[];
+      state: ContentState;
+    },
+  ): void;
+}
+
+interface StatusBarAdapterDefinition<ContentState, ViewState> {
+  state?(context: StatusBarContentContext): ContentState;
+  viewState?(state: Readonly<ContentState>): ViewState;
+  commands?: Record<
+    string,
+    (
+      context: StatusBarCommandContext<ContentState, ViewState>,
+    ) => void | Pass
+  >;
+  keys?: Record<string, string>;
+  input?: string;
+}
+
+interface ModeDefinitionV2<
+  BufferState = ScriptData,
+  BufferViewState = ScriptData,
+  StatusBarState = ScriptData,
+  StatusBarViewState = ScriptData,
+> {
+  name: string;
+  before?: string;
+  faces?: Record<string, EditorFace>;
+  on: {
+    buffer?: BufferAdapterDefinition<BufferState, BufferViewState>;
+    statusBar?: StatusBarAdapterDefinition<
+      StatusBarState,
+      StatusBarViewState
+    >;
+  };
 }
 
 interface ContentChange {
@@ -247,6 +349,19 @@ interface ModeDefinition<
 
 declare const editor: {
   readonly modes: {
+    define<
+      BufferState = ScriptData,
+      BufferViewState = ScriptData,
+      StatusBarState = ScriptData,
+      StatusBarViewState = ScriptData,
+    >(
+      definition: ModeDefinitionV2<
+        BufferState,
+        BufferViewState,
+        StatusBarState,
+        StatusBarViewState
+      >,
+    ): void;
     define<ContentState, ViewState, WorkerResponse = ScriptData>(
       definition: ModeDefinition<ContentState, ViewState, WorkerResponse>,
     ): void;

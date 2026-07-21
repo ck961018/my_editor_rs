@@ -94,6 +94,13 @@ pub enum ViewOperation {
 pub struct ModeInvocation {
     pub command: ModeCommand,
     pub nested: bool,
+    pub flow: ModeFlowPropagation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModeFlowPropagation {
+    Propagate,
+    Isolate,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -236,6 +243,7 @@ pub fn adapt_dispatch_command(
                 invocation: ModeInvocation {
                     command,
                     nested: false,
+                    flow: ModeFlowPropagation::Propagate,
                 },
             }],
         ),

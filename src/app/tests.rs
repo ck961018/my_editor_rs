@@ -1,18 +1,19 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::io;
 use std::rc::Rc;
 
 use super::App;
 use super::behavior::{
-    BehaviorSnapshot, EffectBehavior, ExecutionOutcome, ModeFaultBehavior, ModeFaultScope,
-    ModeProbeBehavior,
+    BehaviorRecorder, BehaviorSnapshot, EffectBehavior, ExecutionOutcome, ModeFaultBehavior,
+    ModeFaultScope, ModeProbeBehavior,
 };
-use super::bootstrap::create_editor_session;
+use super::bootstrap::{bootstrap_editor, create_editor_session};
 use super::command_resolver::default_global_keymap;
 use super::dispatcher::{DispatchCommand, Dispatcher};
 use super::layout::{LayoutError, NewView, resolve_focus, view_for_space};
 use super::message::AppMessage;
 use super::query::AppQuery;
+use super::script::ScriptHost;
 use super::view::View;
 use crate::app::action::{TransactionIntent, ViewAction};
 use crate::app::command::{
@@ -24,8 +25,8 @@ use crate::app::mode::{
 };
 use crate::app::mode_name::{ModeActionName, ModeName};
 use crate::app::operation::{
-    AppOperation, ContentOperation, ContentTarget, ModeInvocation, ModeTarget, OperationRequest,
-    ViewEditPlan, ViewOperation, ViewPrecondition, ViewTarget,
+    AppOperation, ContentOperation, ContentTarget, ModeFlowPropagation, ModeInvocation, ModeTarget,
+    OperationRequest, ViewEditPlan, ViewOperation, ViewPrecondition, ViewTarget,
 };
 use crate::core::action::ContentAction;
 use crate::core::buffer::Buffer;
@@ -161,6 +162,7 @@ fn nested_mode(command: ModeCommand) -> OperationRequest {
         invocation: ModeInvocation {
             command,
             nested: true,
+            flow: ModeFlowPropagation::Propagate,
         },
     }
 }
@@ -1269,6 +1271,21 @@ impl Frontend for ScriptedFrontend {
 
 fn make_app(events: Vec<FrontendEvent>, path: Option<&str>) -> App<ScriptedFrontend> {
     App::new(path, 40, 5, ScriptedFrontend::new(events)).unwrap()
+}
+
+fn make_script_app(source: &str) -> App<ScriptedFrontend> {
+    let mut host = ScriptHost::new();
+    host.execute_typescript("file:///test-config.ts", source)
+        .unwrap();
+    let host = Rc::new(RefCell::new(host));
+    let bootstrap =
+        bootstrap_editor(Buffer::new(), 40, 5, ScriptHost::script_modes(&host)).unwrap();
+    App {
+        kernel: bootstrap.kernel,
+        session: bootstrap.session,
+        frontend: ScriptedFrontend::new(Vec::new()),
+        behavior: BehaviorRecorder::default(),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2687,6 +2704,212 @@ async fn mode_can_handle_input_then_continue_to_the_next_mode() {
         .unwrap();
 
     assert_eq!(text_rows(&app, editor_cid()), vec!["ab"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn v2_script_pass_continues_through_modes_in_attachment_order() {
+    let mut app = make_script_app(
+        r#"
+editor.modes.define({
+  name: "first-v2",
+  on: {
+    buffer: {
+      commands: {
+        type(ctx) {
+          ctx.edit.insert("a");
+          return ctx.pass();
+        },
+      },
+      keys: { "q": "type" },
+    },
+  },
+});
+editor.modes.define({
+  name: "second-v2",
+  on: {
+    buffer: {
+      commands: {
+        type(ctx) {
+          ctx.edit.insert("b");
+        },
+      },
+      keys: { "q": "type" },
+    },
+  },
+});
+"#,
+    );
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('q')))
+        .await
+        .unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["ab"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn v2_nested_command_flow_does_not_override_the_caller_flow() {
+    let mut stopped = make_script_app(
+        r#"
+editor.modes.define({
+  name: "stopping-caller",
+  on: {
+    buffer: {
+      commands: { run(ctx) { ctx.commands.invoke("callee.pass"); } },
+      keys: { "q": "run" },
+    },
+  },
+});
+editor.modes.define({
+  name: "callee",
+  on: {
+    buffer: {
+      commands: {
+        pass(ctx) { return ctx.pass(); },
+        stop() {},
+      },
+    },
+  },
+});
+editor.modes.define({
+  name: "fallback",
+  on: {
+    buffer: {
+      commands: { run(ctx) { ctx.edit.insert("f"); } },
+      keys: { "q": "run" },
+    },
+  },
+});
+"#,
+    );
+
+    stopped
+        .handle_event(FrontendEvent::Key(KeyEvent::char('q')))
+        .await
+        .unwrap();
+    assert_eq!(text_rows(&stopped, editor_cid()), vec![""]);
+
+    let mut passed = make_script_app(
+        r#"
+editor.modes.define({
+  name: "passing-caller",
+  on: {
+    buffer: {
+      commands: {
+        run(ctx) {
+          ctx.commands.invoke("callee.stop");
+          return ctx.pass();
+        },
+      },
+      keys: { "q": "run" },
+    },
+  },
+});
+editor.modes.define({
+  name: "callee",
+  on: { buffer: { commands: { stop() {} } } },
+});
+editor.modes.define({
+  name: "fallback",
+  on: {
+    buffer: {
+      commands: { run(ctx) { ctx.edit.insert("f"); } },
+      keys: { "q": "run" },
+    },
+  },
+});
+"#,
+    );
+
+    passed
+        .handle_event(FrontendEvent::Key(KeyEvent::char('q')))
+        .await
+        .unwrap();
+    assert_eq!(text_rows(&passed, editor_cid()), vec!["f"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn v2_nested_command_isolates_flow_from_the_entire_invocation_subtree() {
+    let mut app = make_script_app(
+        r#"
+editor.modes.define({
+  name: "outer-v2",
+  on: {
+    buffer: {
+      commands: { run(ctx) { ctx.commands.invoke("legacy.delegate"); } },
+      keys: { "q": "run" },
+    },
+  },
+});
+editor.modes.define({
+  name: "legacy",
+  content: { create: () => null },
+  view: { create: () => null },
+  actions: {
+    delegate(ctx) {
+      ctx.mode.invoke("passer", "pass");
+      return ctx.handled();
+    },
+  },
+});
+editor.modes.define({
+  name: "passer",
+  content: { create: () => null },
+  view: { create: () => null },
+  actions: { pass(ctx) { return ctx.forward(); } },
+});
+editor.modes.define({
+  name: "fallback",
+  on: {
+    buffer: {
+      commands: { run(ctx) { ctx.edit.insert("f"); } },
+      keys: { "q": "run" },
+    },
+  },
+});
+"#,
+    );
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('q')))
+        .await
+        .unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec![""]);
+}
+
+#[test]
+fn v2_script_adapters_attach_only_to_matching_standard_content() {
+    let app = make_script_app(
+        r#"
+editor.modes.define({
+  name: "status-v2",
+  on: {
+    statusBar: {
+      state: () => ({ ready: true }),
+      commands: {},
+    },
+  },
+});
+"#,
+    );
+    let editor_view = app
+        .session
+        .views()
+        .iter()
+        .find_map(|(id, view)| (view.content() == editor_cid()).then_some(*id))
+        .unwrap();
+    let status_view = app
+        .session
+        .views()
+        .iter()
+        .find_map(|(id, view)| (view.content() == ContentId(1)).then_some(*id))
+        .unwrap();
+
+    assert!(app.session.view_modes().mode_names(editor_view).is_empty());
+    assert_eq!(
+        app.session.view_modes().mode_names(status_view),
+        vec![ModeName::new("status-v2")]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

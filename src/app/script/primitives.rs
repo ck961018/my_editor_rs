@@ -5,11 +5,12 @@ use crate::app::command::{AppCommand, ModeCommand, ModeValue};
 use crate::app::mode::ModeViewContext;
 use crate::app::mode_name::{ModeActionName, ModeName};
 use crate::app::operation::{
-    AppOperation, ContentOperation, ContentTarget, ModeInvocation, ModeTarget, OperationRequest,
-    ViewOperation, ViewTarget,
+    AppOperation, ContentOperation, ContentTarget, ModeFlowPropagation, ModeInvocation, ModeTarget,
+    OperationRequest, ViewOperation, ViewTarget,
 };
 use crate::core::action::ContentAction;
 use crate::core::command::{CharSearchDirection, EditCommand};
+use crate::core::content::ContentKind;
 use crate::core::motion::{OperatorCommand, TextMotion, TextOperator, TextTarget};
 use crate::core::text_snapshot::TextSnapshot;
 use crate::core::transaction::{TextChangeSet, TextEdit};
@@ -19,8 +20,8 @@ use crate::protocol::viewport::{
 };
 
 use super::{
-    ScriptError, json_to_mode_value, parse_position, required_object, required_string, set_object,
-    throw_script_error, v8_to_json,
+    ScriptError, json_to_mode_value, parse_position, property, required_object, required_string,
+    set_number, set_object, throw_script_error, v8_to_json,
 };
 
 const OPCODE_BITS: u32 = 8;
@@ -125,6 +126,7 @@ primitives! {
     AlignCenter => ("viewport", "alignCenter"),
     AlignBottom => ("viewport", "alignBottom"),
     InvokeMode => ("mode", "invoke"),
+    InvokeCommand => ("commands", "invoke"),
     Save => ("app", "save"),
     Quit => ("app", "quit"),
 }
@@ -176,7 +178,7 @@ impl PrimitiveRuntime {
     }
 }
 
-pub(super) fn install(
+pub(super) fn install_v1(
     scope: &mut v8::PinScope<'_, '_>,
     context: v8::Local<v8::Object>,
     invocation_id: u64,
@@ -200,6 +202,54 @@ pub(super) fn install(
 
     set_flow_function(scope, context, "handled", invocation_id, false);
     set_flow_function(scope, context, "forward", invocation_id, true);
+}
+
+pub(super) fn install_v2(
+    scope: &mut v8::PinScope<'_, '_>,
+    context: v8::Local<v8::Object>,
+    invocation_id: u64,
+    kind: ContentKind,
+) -> v8::Global<v8::Object> {
+    let namespaces: &[(&str, &str)] = match kind {
+        ContentKind::Buffer => &[
+            ("cursor", "cursor"),
+            ("text", "edit"),
+            ("history", "history"),
+            ("viewport", "viewport"),
+            ("commands", "commands"),
+            ("app", "app"),
+        ],
+        ContentKind::StatusBar => &[("commands", "commands")],
+    };
+    for &(primitive_namespace, context_namespace) in namespaces {
+        let object = v8::Object::new(scope);
+        for &(primitive, candidate, name) in PRIMITIVES {
+            if candidate == primitive_namespace {
+                let encoded = encode(invocation_id, primitive as u8);
+                let data = v8::Number::new(scope, encoded as f64);
+                let function = v8::Function::builder(call_primitive)
+                    .data(data.into())
+                    .build(scope)
+                    .expect("primitive function");
+                let name = v8::String::new(scope, name).expect("primitive name");
+                object.set(scope, name.into(), function.into());
+            }
+        }
+        set_object(scope, context, context_namespace, object);
+    }
+
+    let sentinel = v8::Object::new(scope);
+    let data = v8::Object::new(scope);
+    set_number(scope, data, "invocationId", invocation_id as f64);
+    let sentinel_name = v8::String::new(scope, "sentinel").unwrap();
+    data.set(scope, sentinel_name.into(), sentinel.into());
+    let pass = v8::Function::builder(action_pass)
+        .data(data.into())
+        .build(scope)
+        .expect("pass function");
+    let pass_name = v8::String::new(scope, "pass").unwrap();
+    context.set(scope, pass_name.into(), pass.into());
+    v8::Global::new(scope, sentinel)
 }
 
 fn set_flow_function(
@@ -258,6 +308,33 @@ fn action_flow(
         return;
     }
     return_value.set(v8::Boolean::new(scope, encoded % 2 == 1).into());
+}
+
+fn action_pass(
+    scope: &mut v8::PinScope,
+    arguments: v8::FunctionCallbackArguments,
+    mut return_value: v8::ReturnValue,
+) {
+    let Ok(data) = v8::Local::<v8::Object>::try_from(arguments.data()) else {
+        throw_script_error(scope, "invalid script pass binding");
+        return;
+    };
+    let Some(invocation_id) = property(scope, data, "invocationId")
+        .and_then(|value| value.integer_value(scope))
+        .and_then(|value| u64::try_from(value).ok())
+    else {
+        throw_script_error(scope, "invalid script pass invocation");
+        return;
+    };
+    if let Err(error) = active_runtime(scope, invocation_id) {
+        throw_script_error(scope, &error.to_string());
+        return;
+    }
+    let Some(sentinel) = property(scope, data, "sentinel") else {
+        throw_script_error(scope, "script pass sentinel is unavailable");
+        return;
+    };
+    return_value.set(sentinel);
 }
 
 fn call_primitive(
@@ -507,6 +584,33 @@ fn primitive_effects(
                 invocation: ModeInvocation {
                     command: ModeCommand::new(mode, action).with_arguments(arguments),
                     nested: true,
+                    flow: ModeFlowPropagation::Propagate,
+                },
+            })
+        }
+        InvokeCommand => {
+            let qualified = string(scope, arguments.get(0), "command")?;
+            let (mode, action) = qualified.rsplit_once('.').ok_or_else(|| {
+                ScriptError::new("command must use the qualified name 'mode.command'")
+            })?;
+            if mode.is_empty() || action.is_empty() {
+                return Err(ScriptError::new(
+                    "command must use the qualified name 'mode.command'",
+                ));
+            }
+            let value = arguments.get(1);
+            let arguments = if value.is_null_or_undefined() {
+                ModeValue::Null
+            } else {
+                json_to_mode_value(&v8_to_json(scope, value, "command arguments")?)?
+            };
+            nested(OperationRequest::Mode {
+                target: ModeTarget::CurrentView,
+                invocation: ModeInvocation {
+                    command: ModeCommand::new(ModeName::new(mode), ModeActionName::new(action))
+                        .with_arguments(arguments),
+                    nested: true,
+                    flow: ModeFlowPropagation::Isolate,
                 },
             })
         }

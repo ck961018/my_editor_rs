@@ -1,18 +1,18 @@
 # 架构收敛与扩展系统 Roadmap
 
-**状态：** 进行中（R1 至 R7 已完成，R8 至 R10 待实施）
+**状态：** 进行中（R1 至 R8 已完成，R9 至 R10 待实施）
 
 **更新日期：** 2026-07-21
 
-**已完成基线验证：** `cargo fmt -- --check`、452 项测试、全目标 Clippy、
-`git diff --check` 和 Markdown 行宽检查均通过。
+**已完成基线验证：** `cargo fmt -- --check`、460 项测试、全目标 Clippy、
+严格 TypeScript 类型检查、`git diff --check` 和 Markdown 行宽检查均通过。
 
 ## 1. 文档定位
 
 此前的执行事务、typed operation、Mode state draft 和 presentation cache
 改造已经完成。当前架构以
 [`editor-kernel-architecture.md`][1] 和源码为准；R1 至 R7 保留已完成的
-收敛结论，R8 至 R10 记录剩余扩展系统演进，不把未来设计写回当前实现
+收敛结论，R9 至 R10 记录剩余扩展系统演进，不把未来设计写回当前实现
 文档。
 
 R1 至 R5 消除了以下重复真相来源：
@@ -348,7 +348,7 @@ Buffer adapter。实现经过两轮审查，最后一轮未发现明确问题。
 
 ## 11. R8：TypeScript command-first adapter DSL
 
-**状态：** 待实施
+**状态：** 已完成（2026-07-21）
 
 **依赖：** R7
 
@@ -409,6 +409,14 @@ editor.modes.define({
 - 命令可以脱离默认键位调用和重新绑定；
 - `void`、`ctx.pass()`、异常回滚和多个 Mode 的执行顺序有回归测试；
 - Vim 的 raw input 能力不迫使普通 keymap Mode 使用同样复杂的入口。
+
+完成结果：v2 schema 以 `on.buffer` / `on.statusBar` 生成 canonical
+adapter，并按 Content 安装强类型运行时 context。命令以稳定限定名通过
+`ctx.commands.invoke()` 调用，`void | ctx.pass()` 是唯一 v2 输入流语义；
+嵌套限定命令共享 operation、事务帧和递归预算，但其整个调用子树不会覆盖
+调用者的 flow。`statusBar.changed` 因没有独立 `ContentChange` 源而未暴露。
+严格 `.d.ts` 负向用例由 `runtime/type-tests/tsconfig.json` 固化。实现经过
+三轮审查，最后一轮未发现明确问题。
 
 ## 12. R9：v1 兼容迁移与内建插件验证
 

@@ -19,6 +19,7 @@ use crate::app::mode::{
     ModeResult, ModeState, ModeViewContext, ModeViewPolicy,
 };
 use crate::app::mode_name::{ModeActionName, ModeName};
+use crate::core::content::ContentKind;
 use crate::core::keymap::Keymap;
 use crate::protocol::content_query::{
     Color, CursorStyle, Face, FaceName, NamedTextDecoration, RowRange, SelectionShape,
@@ -180,27 +181,20 @@ impl ScriptHost {
         let definitions = host.borrow().definitions.borrow().clone();
         definitions
             .into_iter()
-            .enumerate()
-            .map(|(index, definition)| ScriptMode::new(host.clone(), index, definition))
+            .map(|definition| ScriptMode::new(host.clone(), definition))
             .collect()
     }
 
     fn execute_action(
         &mut self,
-        mode_index: usize,
-        action_index: usize,
+        callback: &v8::Global<v8::Function>,
+        version: ScriptApiVersion,
         context: &ModeViewContext<'_>,
         arguments: &ModeValue,
         content_state: &mut ScriptModeState,
         view_state: &mut ScriptModeState,
     ) -> Result<ModeResult, ScriptError> {
-        let callback = self
-            .definitions
-            .borrow()
-            .get(mode_index)
-            .and_then(|mode| mode.actions.get(action_index))
-            .map(|action| action.callback.clone())
-            .ok_or_else(|| ScriptError::new("script action is no longer registered"))?;
+        let callback = callback.clone();
         let v8_context = self.context.clone();
         v8::scope_with_context!(scope, &mut self.isolate, v8_context);
         v8::tc_scope!(let scope, scope);
@@ -211,14 +205,39 @@ impl ScriptHost {
         if let Some(revision) = context.content_revision() {
             set_number(scope, argument, "revision", revision.0 as f64);
         }
+        if version == ScriptApiVersion::V2 {
+            if let Some(status) = context
+                .buffer()
+                .and_then(|context| context.document_status())
+            {
+                set_document_context(scope, argument, "document", status);
+            } else if let Some(status) = context
+                .status_bar()
+                .and_then(|context| context.status_bar_data())
+            {
+                set_document_context(scope, argument, "status", status);
+            }
+        }
         let arguments = json_to_v8(scope, &mode_value_to_json(arguments))?;
         set_value(scope, argument, "arguments", arguments);
         let content_value = json_to_v8(scope, &content_state.data)?;
         let view_value = json_to_v8(scope, &view_state.data)?;
-        set_value(scope, argument, "contentState", content_value);
+        let content_state_name = version.content_state_name();
+        set_value(scope, argument, content_state_name, content_value);
         set_value(scope, argument, "viewState", view_value);
         let primitive_id = self.primitives.borrow_mut().begin(context)?;
-        primitives::install(scope, argument, primitive_id);
+        let pass = match version {
+            ScriptApiVersion::V1 => {
+                primitives::install_v1(scope, argument, primitive_id);
+                None
+            }
+            ScriptApiVersion::V2 => Some(primitives::install_v2(
+                scope,
+                argument,
+                primitive_id,
+                context.content_kind(),
+            )),
+        };
         let callback = v8::Local::new(scope, callback);
         let receiver = v8::undefined(scope).into();
         let callback_result = callback.call(scope, receiver, &[argument.into()]);
@@ -239,12 +258,18 @@ impl ScriptHost {
             context.buffer().and_then(|context| context.text_snapshot()),
             context.content_revision(),
         )?;
-        let result = parse_action_result(scope, result, operations)?;
-        let next_content = property(scope, argument, "contentState")
-            .ok_or_else(|| ScriptError::new("script removed context.contentState"))?;
+        let result = match version {
+            ScriptApiVersion::V1 => parse_action_result(scope, result, operations)?,
+            ScriptApiVersion::V2 => {
+                parse_v2_action_result(scope, result, pass.as_ref().unwrap(), operations)?
+            }
+        };
+        let next_content = property(scope, argument, content_state_name).ok_or_else(|| {
+            ScriptError::new(format!("script removed context.{content_state_name}"))
+        })?;
         let next_view = property(scope, argument, "viewState")
             .ok_or_else(|| ScriptError::new("script removed context.viewState"))?;
-        let next_content = v8_to_json(scope, next_content, "contentState")?;
+        let next_content = v8_to_json(scope, next_content, content_state_name)?;
         let next_view = v8_to_json(scope, next_view, "viewState")?;
         view_policy_from_json(&next_view)?;
         scope.perform_microtask_checkpoint();
@@ -286,6 +311,7 @@ impl ScriptHost {
     fn create_content_state(
         &mut self,
         callback: Option<&v8::Global<v8::Function>>,
+        version: ScriptApiVersion,
         context: &ModeContentContext<'_>,
     ) -> Result<serde_json::Value, ScriptError> {
         let Some(callback) = callback.cloned() else {
@@ -294,7 +320,7 @@ impl ScriptHost {
         let v8_context = self.context.clone();
         v8::scope_with_context!(scope, &mut self.isolate, v8_context);
         v8::tc_scope!(let scope, scope);
-        let argument = content_context_object(scope, context, true)?;
+        let argument = content_context_object(scope, context, version == ScriptApiVersion::V1)?;
         let callback = v8::Local::new(scope, callback);
         let receiver = v8::undefined(scope).into();
         let value = callback
@@ -306,6 +332,7 @@ impl ScriptHost {
     fn content_changed(
         &mut self,
         callback: &v8::Global<v8::Function>,
+        version: ScriptApiVersion,
         context: &ModeContentContext<'_>,
         state: &mut ScriptModeState,
         change: &crate::core::content::ContentChange,
@@ -314,8 +341,9 @@ impl ScriptHost {
         v8::scope_with_context!(scope, &mut self.isolate, v8_context);
         v8::tc_scope!(let scope, scope);
         let argument = content_context_object(scope, context, false)?;
+        let content_state_name = version.content_state_name();
         let content_state = json_to_v8(scope, &state.data)?;
-        set_value(scope, argument, "contentState", content_state);
+        set_value(scope, argument, content_state_name, content_state);
         let change_value = content_change_to_v8(scope, change)?;
         set_value(scope, argument, "change", change_value);
         let callback = v8::Local::new(scope, callback.clone());
@@ -323,9 +351,10 @@ impl ScriptHost {
         callback
             .call(scope, receiver, &[argument.into()])
             .ok_or_else(|| current_exception(scope, "script content changed", "execute"))?;
-        let next = property(scope, argument, "contentState")
-            .ok_or_else(|| ScriptError::new("script removed context.contentState"))?;
-        state.data = v8_to_json(scope, next, "contentState")?;
+        let next = property(scope, argument, content_state_name).ok_or_else(|| {
+            ScriptError::new(format!("script removed context.{content_state_name}"))
+        })?;
+        state.data = v8_to_json(scope, next, content_state_name)?;
         scope.perform_microtask_checkpoint();
         Ok(())
     }
@@ -440,20 +469,47 @@ struct ScriptActionDefinition {
     callback: v8::Global<v8::Function>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScriptApiVersion {
+    V1,
+    V2,
+}
+
+impl ScriptApiVersion {
+    fn content_state_name(self) -> &'static str {
+        match self {
+            Self::V1 => "contentState",
+            Self::V2 => "state",
+        }
+    }
+}
+
 #[derive(Clone)]
-struct ScriptModeDefinition {
-    name: ModeName,
+struct ScriptAdapterDefinition {
+    version: ScriptApiVersion,
     actions: Vec<ScriptActionDefinition>,
     bindings: Vec<(KeyEvent, usize)>,
     input_action: Option<usize>,
-    faces: Vec<(FaceName, Face)>,
-    before: Option<ModeName>,
     create_content: Option<v8::Global<v8::Function>>,
     content_changed: Option<v8::Global<v8::Function>>,
     content_job: Option<v8::Global<v8::Function>>,
     content_apply_job: Option<v8::Global<v8::Function>>,
     create_view: Option<v8::Global<v8::Function>>,
     worker: Option<ScriptWorker>,
+}
+
+#[derive(Clone, Default)]
+struct ScriptAdapterDefinitions {
+    buffer: Option<ScriptAdapterDefinition>,
+    status_bar: Option<ScriptAdapterDefinition>,
+}
+
+#[derive(Clone)]
+struct ScriptModeDefinition {
+    name: ModeName,
+    faces: Vec<(FaceName, Face)>,
+    before: Option<ModeName>,
+    adapters: ScriptAdapterDefinitions,
 }
 
 #[derive(Clone)]
@@ -583,13 +639,18 @@ impl ScriptModeState {
 
 pub(crate) struct ScriptMode {
     host: Rc<RefCell<ScriptHost>>,
-    mode_index: usize,
     name: ModeName,
     actions: Vec<ModeActionName>,
-    keymap: Keymap<Command>,
-    input_action: Option<ModeActionName>,
+    adapters: ScriptAdapters,
     faces: Vec<(FaceName, Face)>,
     before: Option<ModeName>,
+}
+
+struct ScriptAdapter {
+    version: ScriptApiVersion,
+    actions: Vec<ScriptActionDefinition>,
+    keymap: Keymap<Command>,
+    input_action: Option<ModeActionName>,
     create_content: Option<v8::Global<v8::Function>>,
     content_changed: Option<v8::Global<v8::Function>>,
     content_job: Option<v8::Global<v8::Function>>,
@@ -598,35 +659,36 @@ pub(crate) struct ScriptMode {
     worker: Option<ScriptWorker>,
 }
 
-impl ScriptMode {
-    fn new(
-        host: Rc<RefCell<ScriptHost>>,
-        mode_index: usize,
-        definition: ScriptModeDefinition,
-    ) -> Self {
+#[derive(Default)]
+struct ScriptAdapters {
+    buffer: Option<ScriptAdapter>,
+    status_bar: Option<ScriptAdapter>,
+}
+
+impl ScriptAdapters {
+    fn get(&self, kind: ContentKind) -> Option<&ScriptAdapter> {
+        match kind {
+            ContentKind::Buffer => self.buffer.as_ref(),
+            ContentKind::StatusBar => self.status_bar.as_ref(),
+        }
+    }
+}
+
+impl ScriptAdapter {
+    fn new(mode: &ModeName, definition: ScriptAdapterDefinition) -> Self {
         let mut keymap = Keymap::new();
         for (key, action_index) in &definition.bindings {
             let action = definition.actions[*action_index].name.clone();
-            keymap.bind(
-                *key,
-                Command::Mode(ModeCommand::new(definition.name.clone(), action)),
-            );
+            keymap.bind(*key, Command::Mode(ModeCommand::new(mode.clone(), action)));
         }
-        let actions: Vec<_> = definition
-            .actions
-            .iter()
-            .map(|action| action.name.clone())
-            .collect();
-        let input_action = definition.input_action.map(|index| actions[index].clone());
+        let input_action = definition
+            .input_action
+            .map(|index| definition.actions[index].name.clone());
         Self {
-            host,
-            mode_index,
-            name: definition.name,
-            actions,
+            version: definition.version,
+            actions: definition.actions,
             keymap,
             input_action,
-            faces: definition.faces,
-            before: definition.before,
             create_content: definition.create_content,
             content_changed: definition.content_changed,
             content_job: definition.content_job,
@@ -634,6 +696,49 @@ impl ScriptMode {
             create_view: definition.create_view,
             worker: definition.worker,
         }
+    }
+}
+
+impl ScriptMode {
+    fn new(host: Rc<RefCell<ScriptHost>>, definition: ScriptModeDefinition) -> Self {
+        let mut actions = Vec::new();
+        for adapter in [
+            definition.adapters.buffer.as_ref(),
+            definition.adapters.status_bar.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for action in &adapter.actions {
+                if !actions.contains(&action.name) {
+                    actions.push(action.name.clone());
+                }
+            }
+        }
+        let adapters = ScriptAdapters {
+            buffer: definition
+                .adapters
+                .buffer
+                .map(|adapter| ScriptAdapter::new(&definition.name, adapter)),
+            status_bar: definition
+                .adapters
+                .status_bar
+                .map(|adapter| ScriptAdapter::new(&definition.name, adapter)),
+        };
+        Self {
+            host,
+            name: definition.name,
+            actions,
+            adapters,
+            faces: definition.faces,
+            before: definition.before,
+        }
+    }
+
+    fn adapter(&self, kind: ContentKind) -> &ScriptAdapter {
+        self.adapters
+            .get(kind)
+            .expect("registered ScriptMode keeps its declared adapter")
     }
 
     pub(crate) fn before(&self) -> Option<&ModeName> {
@@ -651,7 +756,15 @@ impl Mode for ScriptMode {
     }
 
     fn adapters(&self) -> ModeAdapters {
-        ModeAdapters::buffer()
+        match (
+            self.adapters.buffer.is_some(),
+            self.adapters.status_bar.is_some(),
+        ) {
+            (true, true) => ModeAdapters::buffer_and_status_bar(),
+            (true, false) => ModeAdapters::buffer(),
+            (false, true) => ModeAdapters::status_bar(),
+            (false, false) => unreachable!("script parser requires at least one adapter"),
+        }
     }
 
     fn faces(&self) -> Vec<(FaceName, Face)> {
@@ -662,9 +775,10 @@ impl Mode for ScriptMode {
         &self,
         context: &ModeContentContext<'_>,
     ) -> Result<Box<dyn ModeState>, ModeError> {
+        let adapter = self.adapter(context.content_kind());
         self.host
             .borrow_mut()
-            .create_content_state(self.create_content.as_ref(), context)
+            .create_content_state(adapter.create_content.as_ref(), adapter.version, context)
             .map(|state| Box::new(ScriptModeState::new(state)) as Box<dyn ModeState>)
             .map_err(|error| ModeError::CallbackFailed {
                 mode: self.name.clone(),
@@ -675,13 +789,14 @@ impl Mode for ScriptMode {
     fn create_view_state(
         &self,
         content_state: &dyn ModeState,
-        _context: &ModeViewContext<'_>,
+        context: &ModeViewContext<'_>,
     ) -> Result<Box<dyn ModeState>, ModeError> {
+        let adapter = self.adapter(context.content_kind());
         let content_state = &script_state(content_state, &self.name)?.data;
         let state = self
             .host
             .borrow_mut()
-            .create_state(self.create_view.as_ref(), Some(content_state))
+            .create_state(adapter.create_view.as_ref(), Some(content_state))
             .map_err(|error| ModeError::CallbackFailed {
                 mode: self.name.clone(),
                 message: error.to_string(),
@@ -697,19 +812,19 @@ impl Mode for ScriptMode {
         &'a self,
         _content_state: &dyn ModeState,
         _view_state: &dyn ModeState,
-        _context: &ModeViewContext<'_>,
+        context: &ModeViewContext<'_>,
     ) -> &'a Keymap<Command> {
-        &self.keymap
+        &self.adapter(context.content_kind()).keymap
     }
 
     fn input_typing(
         &self,
         _content_state: &dyn ModeState,
         _view_state: &dyn ModeState,
-        _context: &ModeViewContext<'_>,
+        context: &ModeViewContext<'_>,
         key: KeyEvent,
     ) -> Option<Command> {
-        let action = self.input_action.clone()?;
+        let action = self.adapter(context.content_kind()).input_action.clone()?;
         Some(Command::Mode(
             ModeCommand::new(self.name.clone(), action).with_arguments(key_event_arguments(key)),
         ))
@@ -734,6 +849,7 @@ impl Mode for ScriptMode {
         change: &crate::core::content::ContentChange,
     ) -> Result<(), ModeError> {
         let state = script_state_mut(state, &self.name)?;
+        let adapter = self.adapter(context.content_kind());
         let crate::core::content::ContentChange::Text(text_change) = change;
         let mapped = state
             .decorations
@@ -755,10 +871,10 @@ impl Mode for ScriptMode {
             })
             .collect();
         state.decorations = DecorationSet::new(mapped);
-        if let Some(callback) = self.content_changed.as_ref() {
+        if let Some(callback) = adapter.content_changed.as_ref() {
             self.host
                 .borrow_mut()
-                .content_changed(callback, context, state, change)
+                .content_changed(callback, adapter.version, context, state, change)
                 .map_err(|error| ModeError::CallbackFailed {
                     mode: self.name.clone(),
                     message: error.to_string(),
@@ -772,7 +888,9 @@ impl Mode for ScriptMode {
         state: &mut dyn ModeState,
         context: &ModeContentContext<'_>,
     ) -> Option<ModeJobRequest> {
-        let (Some(callback), Some(worker)) = (self.content_job.as_ref(), self.worker.as_ref())
+        let adapter = self.adapter(context.content_kind());
+        let (Some(callback), Some(worker)) =
+            (adapter.content_job.as_ref(), adapter.worker.as_ref())
         else {
             return None;
         };
@@ -822,7 +940,8 @@ impl Mode for ScriptMode {
         version: u64,
         result: ModeJobResult,
     ) -> Result<bool, ModeError> {
-        let Some(callback) = self.content_apply_job.as_ref() else {
+        let adapter = self.adapter(context.content_kind());
+        let Some(callback) = adapter.content_apply_job.as_ref() else {
             return Ok(false);
         };
         let Ok(result) = result else {
@@ -891,10 +1010,11 @@ impl Mode for ScriptMode {
         action: &ModeActionName,
         arguments: &ModeValue,
     ) -> Result<ModeResult, ModeError> {
-        let action_index = self
+        let adapter = self.adapter(context.content_kind());
+        let callback = adapter
             .actions
             .iter()
-            .position(|candidate| candidate == action)
+            .find(|candidate| &candidate.name == action)
             .ok_or_else(|| ModeError::UnknownAction {
                 mode: self.name.clone(),
                 action: action.clone(),
@@ -904,8 +1024,8 @@ impl Mode for ScriptMode {
         self.host
             .borrow_mut()
             .execute_action(
-                self.mode_index,
-                action_index,
+                &callback.callback,
+                adapter.version,
                 context,
                 arguments,
                 content_state,
@@ -1098,66 +1218,30 @@ fn parse_mode_definition(
     let object = v8::Local::<v8::Object>::try_from(value)
         .map_err(|_| ScriptError::new("editor.modes.define expects an object"))?;
     let name = required_string(scope, object, "name")?;
-    let actions_object = required_object(scope, object, "actions")?;
-    let action_keys = actions_object
-        .get_own_property_names(scope, Default::default())
-        .ok_or_else(|| ScriptError::new("failed to enumerate mode actions"))?;
-    let mut actions = Vec::new();
-    for index in 0..action_keys.length() {
-        let key = action_keys
-            .get_index(scope, index)
-            .ok_or_else(|| ScriptError::new("failed to read action name"))?;
-        let action_name = key.to_rust_string_lossy(scope);
-        let callback = actions_object
-            .get(scope, key)
-            .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
-            .ok_or_else(|| {
-                ScriptError::new(format!("mode action '{action_name}' must be a function"))
-            })?;
-        actions.push(ScriptActionDefinition {
-            name: ModeActionName::new(action_name),
-            callback: v8::Global::new(scope, callback),
-        });
-    }
-    let mut bindings = Vec::new();
-    if let Some(keys_value) =
-        property(scope, object, "keys").filter(|value| !value.is_null_or_undefined())
-    {
-        let keys = v8::Local::<v8::Object>::try_from(keys_value)
-            .map_err(|_| ScriptError::new("mode keys must be an object"))?;
-        let binding_keys = keys
-            .get_own_property_names(scope, Default::default())
-            .ok_or_else(|| ScriptError::new("failed to enumerate mode keys"))?;
-        for index in 0..binding_keys.length() {
-            let key_value = binding_keys
-                .get_index(scope, index)
-                .ok_or_else(|| ScriptError::new("failed to read key binding"))?;
-            let key_name = key_value.to_rust_string_lossy(scope);
-            let action_name = keys
-                .get(scope, key_value)
-                .filter(|value| value.is_string())
-                .map(|value| value.to_rust_string_lossy(scope))
-                .ok_or_else(|| ScriptError::new("key binding action must be a string"))?;
-            let action_index = actions
-                .iter()
-                .position(|action| action.name.as_str() == action_name)
-                .ok_or_else(|| {
-                    ScriptError::new(format!("unknown action '{action_name}' in key bindings"))
-                })?;
-            bindings.push((parse_key(&key_name)?, action_index));
-        }
-    }
-
     let before = optional_string(scope, object, "before")?.map(ModeName::new);
-    let input_action = optional_string(scope, object, "input")?
-        .map(|name| {
-            actions
-                .iter()
-                .position(|action| action.name.as_str() == name)
-                .ok_or_else(|| ScriptError::new(format!("unknown input action '{name}'")))
-        })
-        .transpose()?;
     let faces = parse_faces(scope, object)?;
+    let adapters = match property(scope, object, "on") {
+        Some(value) if !value.is_null_or_undefined() => parse_v2_adapters(scope, object, value)?,
+        _ => ScriptAdapterDefinitions {
+            buffer: Some(parse_v1_adapter(scope, object)?),
+            status_bar: None,
+        },
+    };
+    Ok(ScriptModeDefinition {
+        name: ModeName::new(name),
+        faces,
+        before,
+        adapters,
+    })
+}
+
+fn parse_v1_adapter(
+    scope: &mut v8::PinScope,
+    object: v8::Local<v8::Object>,
+) -> Result<ScriptAdapterDefinition, ScriptError> {
+    let actions = parse_actions(scope, object, "actions", true)?;
+    let bindings = parse_bindings(scope, object, &actions)?;
+    let input_action = parse_input_action(scope, object, &actions)?;
     let create_content = optional_factory(scope, object, "content")?;
     let content_changed = optional_section_callback(scope, object, "content", "changed")?;
     let content_job = optional_section_callback(scope, object, "content", "job")?;
@@ -1182,13 +1266,11 @@ fn parse_mode_definition(
             "mode worker, content.job, and content.applyJob must be defined together",
         ));
     }
-    Ok(ScriptModeDefinition {
-        name: ModeName::new(name),
+    Ok(ScriptAdapterDefinition {
+        version: ScriptApiVersion::V1,
         actions,
         bindings,
         input_action,
-        faces,
-        before,
         create_content,
         content_changed,
         content_job,
@@ -1196,6 +1278,189 @@ fn parse_mode_definition(
         create_view,
         worker,
     })
+}
+
+fn parse_v2_adapters(
+    scope: &mut v8::PinScope,
+    definition: v8::Local<v8::Object>,
+    value: v8::Local<v8::Value>,
+) -> Result<ScriptAdapterDefinitions, ScriptError> {
+    for legacy in ["content", "view", "actions", "keys", "input", "worker"] {
+        if property(scope, definition, legacy).is_some_and(|value| !value.is_null_or_undefined()) {
+            return Err(ScriptError::new(format!(
+                "v2 mode definition cannot combine 'on' with legacy '{legacy}'"
+            )));
+        }
+    }
+    let object = v8::Local::<v8::Object>::try_from(value)
+        .map_err(|_| ScriptError::new("mode on must be an object"))?;
+    let keys = object
+        .get_own_property_names(scope, Default::default())
+        .ok_or_else(|| ScriptError::new("failed to enumerate mode adapters"))?;
+    let mut adapters = ScriptAdapterDefinitions::default();
+    for index in 0..keys.length() {
+        let key = keys
+            .get_index(scope, index)
+            .ok_or_else(|| ScriptError::new("failed to read adapter name"))?;
+        let name = key.to_rust_string_lossy(scope);
+        let value = object
+            .get(scope, key)
+            .ok_or_else(|| ScriptError::new(format!("mode adapter '{name}' is missing")))?;
+        let adapter = v8::Local::<v8::Object>::try_from(value)
+            .map_err(|_| ScriptError::new(format!("mode adapter '{name}' must be an object")))?;
+        match name.as_str() {
+            "buffer" => {
+                adapters.buffer = Some(parse_v2_adapter(scope, adapter, ContentKind::Buffer)?)
+            }
+            "statusBar" => {
+                adapters.status_bar =
+                    Some(parse_v2_adapter(scope, adapter, ContentKind::StatusBar)?)
+            }
+            _ => return Err(ScriptError::new(format!("unknown mode adapter '{name}'"))),
+        }
+    }
+    if adapters.buffer.is_none() && adapters.status_bar.is_none() {
+        return Err(ScriptError::new(
+            "v2 mode definition must provide on.buffer or on.statusBar",
+        ));
+    }
+    Ok(adapters)
+}
+
+fn parse_v2_adapter(
+    scope: &mut v8::PinScope,
+    object: v8::Local<v8::Object>,
+    kind: ContentKind,
+) -> Result<ScriptAdapterDefinition, ScriptError> {
+    let actions = parse_actions(scope, object, "commands", false)?;
+    let content_changed = match kind {
+        ContentKind::Buffer => optional_function(scope, object, "changed")?,
+        ContentKind::StatusBar => {
+            if property(scope, object, "changed").is_some_and(|value| !value.is_null_or_undefined())
+            {
+                return Err(ScriptError::new("mode statusBar.changed is not supported"));
+            }
+            None
+        }
+    };
+    Ok(ScriptAdapterDefinition {
+        version: ScriptApiVersion::V2,
+        bindings: parse_bindings(scope, object, &actions)?,
+        input_action: parse_input_action(scope, object, &actions)?,
+        actions,
+        create_content: optional_function(scope, object, "state")?,
+        content_changed,
+        content_job: None,
+        content_apply_job: None,
+        create_view: optional_function(scope, object, "viewState")?,
+        worker: None,
+    })
+}
+
+fn parse_actions(
+    scope: &mut v8::PinScope,
+    object: v8::Local<v8::Object>,
+    property_name: &str,
+    required: bool,
+) -> Result<Vec<ScriptActionDefinition>, ScriptError> {
+    let actions_object = match property(scope, object, property_name) {
+        Some(value) if !value.is_null_or_undefined() => v8::Local::<v8::Object>::try_from(value)
+            .map_err(|_| ScriptError::new(format!("mode {property_name} must be an object")))?,
+        _ if required => {
+            return Err(ScriptError::new(format!(
+                "mode {property_name} must be an object"
+            )));
+        }
+        _ => return Ok(Vec::new()),
+    };
+    let action_keys = actions_object
+        .get_own_property_names(scope, Default::default())
+        .ok_or_else(|| ScriptError::new(format!("failed to enumerate mode {property_name}")))?;
+    let mut actions = Vec::new();
+    for index in 0..action_keys.length() {
+        let key = action_keys
+            .get_index(scope, index)
+            .ok_or_else(|| ScriptError::new("failed to read action name"))?;
+        let action_name = key.to_rust_string_lossy(scope);
+        let callback = actions_object
+            .get(scope, key)
+            .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
+            .ok_or_else(|| {
+                ScriptError::new(format!("mode command '{action_name}' must be a function"))
+            })?;
+        actions.push(ScriptActionDefinition {
+            name: ModeActionName::new(action_name),
+            callback: v8::Global::new(scope, callback),
+        });
+    }
+    Ok(actions)
+}
+
+fn parse_bindings(
+    scope: &mut v8::PinScope,
+    object: v8::Local<v8::Object>,
+    actions: &[ScriptActionDefinition],
+) -> Result<Vec<(KeyEvent, usize)>, ScriptError> {
+    let mut bindings = Vec::new();
+    if let Some(keys_value) =
+        property(scope, object, "keys").filter(|value| !value.is_null_or_undefined())
+    {
+        let keys = v8::Local::<v8::Object>::try_from(keys_value)
+            .map_err(|_| ScriptError::new("mode keys must be an object"))?;
+        let binding_keys = keys
+            .get_own_property_names(scope, Default::default())
+            .ok_or_else(|| ScriptError::new("failed to enumerate mode keys"))?;
+        for index in 0..binding_keys.length() {
+            let key_value = binding_keys
+                .get_index(scope, index)
+                .ok_or_else(|| ScriptError::new("failed to read key binding"))?;
+            let key_name = key_value.to_rust_string_lossy(scope);
+            let action_name = keys
+                .get(scope, key_value)
+                .filter(|value| value.is_string())
+                .map(|value| value.to_rust_string_lossy(scope))
+                .ok_or_else(|| ScriptError::new("key binding action must be a string"))?;
+            let action_index = actions
+                .iter()
+                .position(|action| action.name.as_str() == action_name)
+                .ok_or_else(|| {
+                    ScriptError::new(format!("unknown command '{action_name}' in key bindings"))
+                })?;
+            bindings.push((parse_key(&key_name)?, action_index));
+        }
+    }
+    Ok(bindings)
+}
+
+fn parse_input_action(
+    scope: &mut v8::PinScope,
+    object: v8::Local<v8::Object>,
+    actions: &[ScriptActionDefinition],
+) -> Result<Option<usize>, ScriptError> {
+    optional_string(scope, object, "input")?
+        .map(|name| {
+            actions
+                .iter()
+                .position(|action| action.name.as_str() == name)
+                .ok_or_else(|| ScriptError::new(format!("unknown input command '{name}'")))
+        })
+        .transpose()
+}
+
+fn optional_function(
+    scope: &mut v8::PinScope,
+    object: v8::Local<v8::Object>,
+    name: &str,
+) -> Result<Option<v8::Global<v8::Function>>, ScriptError> {
+    let Some(value) = property(scope, object, name) else {
+        return Ok(None);
+    };
+    if value.is_null_or_undefined() {
+        return Ok(None);
+    }
+    let callback = v8::Local::<v8::Function>::try_from(value)
+        .map_err(|_| ScriptError::new(format!("mode {name} must be a function")))?;
+    Ok(Some(v8::Global::new(scope, callback)))
 }
 
 fn optional_factory(
@@ -1458,6 +1723,24 @@ fn parse_action_result(
     })
 }
 
+fn parse_v2_action_result(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+    pass: &v8::Global<v8::Object>,
+    operations: Vec<crate::app::operation::OperationRequest>,
+) -> Result<ModeResult, ScriptError> {
+    if value.is_undefined() {
+        return Ok(ModeResult::operations(operations));
+    }
+    let pass = v8::Local::new(scope, pass);
+    if value.strict_equals(pass.into()) {
+        return Ok(ModeResult::continue_with(operations));
+    }
+    Err(ScriptError::new(
+        "v2 command must return undefined or ctx.pass()",
+    ))
+}
+
 fn parse_decorations_property(
     scope: &mut v8::PinScope,
     value: v8::Local<v8::Value>,
@@ -1714,23 +1997,36 @@ fn content_context_object<'scope>(
     if let Some(revision) = context.content_revision() {
         set_number(scope, argument, "revision", revision.0 as f64);
     }
-    let buffer = context
-        .buffer()
-        .ok_or_else(|| ScriptError::new("v1 script mode requires a Buffer adapter"))?;
-    if include_text && let Some(snapshot) = buffer.text_snapshot() {
-        set_string(scope, argument, "text", &snapshot.to_owned_string());
-    }
-    if let Some(status) = buffer.document_status() {
-        let document = v8::Object::new(scope);
-        if let Some(file_name) = status.file_name {
-            set_string(scope, document, "fileName", &file_name);
+    if let Some(buffer) = context.buffer() {
+        if include_text && let Some(snapshot) = buffer.text_snapshot() {
+            set_string(scope, argument, "text", &snapshot.to_owned_string());
         }
-        let key = v8::String::new(scope, "modified").unwrap();
-        let modified = v8::Boolean::new(scope, status.modified);
-        document.set(scope, key.into(), modified.into());
-        set_object(scope, argument, "document", document);
+        if let Some(status) = buffer.document_status() {
+            set_document_context(scope, argument, "document", status);
+        }
+    } else if let Some(status) = context
+        .status_bar()
+        .and_then(|context| context.status_bar_data())
+    {
+        set_document_context(scope, argument, "status", status);
     }
     Ok(argument)
+}
+
+fn set_document_context(
+    scope: &mut v8::PinScope,
+    argument: v8::Local<v8::Object>,
+    name: &str,
+    status: crate::protocol::content_query::DocumentStatus,
+) {
+    let document = v8::Object::new(scope);
+    if let Some(file_name) = status.file_name {
+        set_string(scope, document, "fileName", &file_name);
+    }
+    let key = v8::String::new(scope, "modified").unwrap();
+    let modified = v8::Boolean::new(scope, status.modified);
+    document.set(scope, key.into(), modified.into());
+    set_object(scope, argument, name, document);
 }
 
 fn content_change_to_v8<'scope>(
@@ -1999,6 +2295,7 @@ mod tests {
     use crate::core::command::EditCommand;
     use crate::core::content::{Content, ContentKind};
     use crate::core::content_store::ContentStore;
+    use crate::core::status_bar::StatusBar;
     use crate::protocol::ids::{ContentId, ViewId};
 
     #[test]
@@ -2164,6 +2461,307 @@ editor.modes.define({
                 ..
             }] if text == "\"\""
         ));
+    }
+
+    #[test]
+    fn registers_v2_buffer_commands_with_void_and_qualified_invocation() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.ts");
+        fs::write(
+            &config,
+            r#"
+editor.modes.define({
+  name: "pairs",
+  on: {
+    buffer: {
+      state: () => ({ enabled: true, calls: 0 }),
+      viewState: () => ({ insertedPairs: 0 }),
+      commands: {
+        quote(ctx) {
+          if (!ctx.state.enabled) return ctx.pass();
+          ctx.edit.insert("\"\"");
+          ctx.cursor.moveLeft();
+          ctx.state.calls++;
+          ctx.viewState.insertedPairs++;
+        },
+        delegate(ctx) {
+          ctx.commands.invoke("pairs.quote");
+        },
+      },
+      keys: { "\"": "quote" },
+    },
+  },
+});
+"#,
+        )
+        .unwrap();
+
+        let mut host = ScriptHost::new();
+        host.execute_module(&config).unwrap();
+        let host = Rc::new(RefCell::new(host));
+        let mode = ScriptHost::script_modes(&host).pop().unwrap();
+        assert!(mode.adapters().contains(ContentKind::Buffer));
+        assert!(!mode.adapters().contains(ContentKind::StatusBar));
+
+        let content_id = ContentId(0);
+        let mut contents = ContentStore::default();
+        contents
+            .insert(content_id, Content::Buffer(Buffer::new()))
+            .unwrap();
+        let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
+        let context = ModeViewContext::new(ViewId(0), &view, &contents).unwrap();
+        let content_context = ModeContentContext::new(content_id, &contents);
+        let mut content_state = mode.create_content_state(&content_context).unwrap();
+        let mut view_state = mode
+            .create_view_state(content_state.as_ref(), &context)
+            .unwrap();
+
+        let quote = mode
+            .execute_view_with_arguments(
+                content_state.as_mut(),
+                view_state.as_mut(),
+                &context,
+                &ModeActionName::new("quote"),
+                &ModeValue::Null,
+            )
+            .unwrap();
+        let (flow, operations) = quote.into_parts();
+        assert_eq!(flow, InputFlow::Stop);
+        assert_eq!(operations.len(), 2);
+        assert_eq!(
+            script_state(content_state.as_ref(), mode.name())
+                .unwrap()
+                .data,
+            serde_json::json!({ "enabled": true, "calls": 1 })
+        );
+        assert_eq!(
+            script_state(view_state.as_ref(), mode.name()).unwrap().data,
+            serde_json::json!({ "insertedPairs": 1 })
+        );
+
+        let delegate = mode
+            .execute_view_with_arguments(
+                content_state.as_mut(),
+                view_state.as_mut(),
+                &context,
+                &ModeActionName::new("delegate"),
+                &ModeValue::Null,
+            )
+            .unwrap();
+        let (_, operations) = delegate.into_parts();
+        assert!(matches!(
+            operations.as_slice(),
+            [crate::app::operation::OperationRequest::Mode { invocation, .. }]
+                if invocation.command.mode.as_str() == "pairs"
+                    && invocation.command.action.as_str() == "quote"
+        ));
+    }
+
+    #[test]
+    fn v2_pass_is_distinct_from_legacy_booleans_and_errors_do_not_publish_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.ts");
+        fs::write(
+            &config,
+            r#"
+editor.modes.define({
+  name: "flow-v2",
+  on: {
+    buffer: {
+      state: () => ({ calls: 0 }),
+      commands: {
+        pass(ctx) {
+          ctx.state.calls++;
+          return ctx.pass();
+        },
+        legacyBoolean(ctx) {
+          ctx.state.calls++;
+          ctx.edit.insert("x");
+          return true;
+        },
+        returnsNull() {
+          return null;
+        },
+        throws(ctx) {
+          ctx.state.calls++;
+          ctx.edit.insert("y");
+          throw new Error("boom");
+        },
+      },
+    },
+  },
+});
+"#,
+        )
+        .unwrap();
+
+        let mut host = ScriptHost::new();
+        host.execute_module(&config).unwrap();
+        let host = Rc::new(RefCell::new(host));
+        let mode = ScriptHost::script_modes(&host).pop().unwrap();
+        let content_id = ContentId(0);
+        let mut contents = ContentStore::default();
+        contents
+            .insert(content_id, Content::Buffer(Buffer::new()))
+            .unwrap();
+        let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
+        let context = ModeViewContext::new(ViewId(0), &view, &contents).unwrap();
+        let content_context = ModeContentContext::new(content_id, &contents);
+        let mut content_state = mode.create_content_state(&content_context).unwrap();
+        let mut view_state = mode
+            .create_view_state(content_state.as_ref(), &context)
+            .unwrap();
+
+        let pass = mode
+            .execute_view_with_arguments(
+                content_state.as_mut(),
+                view_state.as_mut(),
+                &context,
+                &ModeActionName::new("pass"),
+                &ModeValue::Null,
+            )
+            .unwrap();
+        assert_eq!(pass.into_parts(), (InputFlow::Continue, Vec::new()));
+        assert_eq!(
+            script_state(content_state.as_ref(), mode.name())
+                .unwrap()
+                .data,
+            serde_json::json!({ "calls": 1 })
+        );
+
+        for (action, message) in [
+            ("legacyBoolean", "undefined or ctx.pass()"),
+            ("returnsNull", "undefined or ctx.pass()"),
+            ("throws", "boom"),
+        ] {
+            let error = mode
+                .execute_view_with_arguments(
+                    content_state.as_mut(),
+                    view_state.as_mut(),
+                    &context,
+                    &ModeActionName::new(action),
+                    &ModeValue::Null,
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains(message));
+            assert_eq!(
+                script_state(content_state.as_ref(), mode.name())
+                    .unwrap()
+                    .data,
+                serde_json::json!({ "calls": 1 })
+            );
+        }
+    }
+
+    #[test]
+    fn v2_status_bar_adapter_has_no_buffer_primitives() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.ts");
+        fs::write(
+            &config,
+            r#"
+editor.modes.define({
+  name: "status-probe",
+  on: {
+    statusBar: {
+      state: (ctx) => ({ modified: ctx.status?.modified ?? false, calls: 0 }),
+      viewState: () => ({ ready: true }),
+      commands: {
+        touch(ctx) {
+          if ("edit" in ctx || "cursor" in ctx) {
+            throw new Error("buffer capability leaked");
+          }
+          ctx.state.calls++;
+        },
+      },
+    },
+  },
+});
+"#,
+        )
+        .unwrap();
+
+        let mut host = ScriptHost::new();
+        host.execute_module(&config).unwrap();
+        let host = Rc::new(RefCell::new(host));
+        let mode = ScriptHost::script_modes(&host).pop().unwrap();
+        assert!(!mode.adapters().contains(ContentKind::Buffer));
+        assert!(mode.adapters().contains(ContentKind::StatusBar));
+
+        let buffer = ContentId(0);
+        let status = ContentId(1);
+        let mut contents = ContentStore::default();
+        contents
+            .insert(buffer, Content::Buffer(Buffer::new()))
+            .unwrap();
+        contents
+            .insert(status, Content::StatusBar(StatusBar::new(buffer)))
+            .unwrap();
+        let view = View::new(status, contents.create_view_state(status).unwrap());
+        let context = ModeViewContext::new(ViewId(1), &view, &contents).unwrap();
+        let content_context = ModeContentContext::new(status, &contents);
+        let mut content_state = mode.create_content_state(&content_context).unwrap();
+        let mut view_state = mode
+            .create_view_state(content_state.as_ref(), &context)
+            .unwrap();
+        let result = mode
+            .execute_view_with_arguments(
+                content_state.as_mut(),
+                view_state.as_mut(),
+                &context,
+                &ModeActionName::new("touch"),
+                &ModeValue::Null,
+            )
+            .unwrap();
+
+        assert_eq!(result.into_parts(), (InputFlow::Stop, Vec::new()));
+        assert_eq!(
+            script_state(content_state.as_ref(), mode.name())
+                .unwrap()
+                .data,
+            serde_json::json!({ "modified": false, "calls": 1 })
+        );
+    }
+
+    #[test]
+    fn v2_schema_rejects_unknown_adapters_legacy_fields_and_invalid_keys() {
+        for (name, body, expected) in [
+            (
+                "unknown-adapter",
+                r#"on: { terminal: { commands: {} } }"#,
+                "unknown mode adapter 'terminal'",
+            ),
+            (
+                "mixed-schema",
+                r#"on: { buffer: { commands: {} } }, actions: {}"#,
+                "cannot combine 'on' with legacy 'actions'",
+            ),
+            (
+                "unknown-command",
+                r#"on: { buffer: { commands: {}, keys: { "x": "missing" } } }"#,
+                "unknown command 'missing' in key bindings",
+            ),
+            (
+                "invalid-key",
+                r#"on: { buffer: { commands: { run() {} }, keys: { "Ctrl+X": "run" } } }"#,
+                "unsupported key binding: Ctrl+X",
+            ),
+            (
+                "status-changed",
+                r#"on: { statusBar: { changed() {} } }"#,
+                "mode statusBar.changed is not supported",
+            ),
+        ] {
+            let mut host = ScriptHost::new();
+            let source = format!("editor.modes.define({{ name: {name:?}, {body} }});");
+
+            let error = host
+                .execute_typescript("file:///v2-invalid.ts", &source)
+                .unwrap_err()
+                .to_string();
+
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     #[test]
