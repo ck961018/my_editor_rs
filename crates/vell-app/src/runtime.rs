@@ -1,4 +1,6 @@
 use std::collections::VecDeque;
+use std::error::Error;
+use std::fmt;
 use std::future;
 use std::io;
 use std::time::Instant;
@@ -9,6 +11,7 @@ use crate::application::App;
 use crate::behavior::EffectBehavior;
 use crate::command::AppCommand;
 use crate::dispatcher::{DispatchCommand, DispatchInput, DispatchOutcome};
+use crate::diagnostics::RuntimeDiagnostic;
 use crate::execution::{ExecutionFrame, InputCheckpoint, PreparedEffect, StateRollback};
 use crate::mode::{CursorDomain, InputFlow};
 use crate::operation::{
@@ -29,6 +32,8 @@ use vell_protocol::ids::{ContentId, ViewId};
 use vell_protocol::viewport::{
     ResolvedViewportCommand, ViewportCommand, ViewportCursorBehavior, ViewportMoveDirection,
 };
+
+const MAX_RUNTIME_DIAGNOSTICS: usize = 128;
 
 #[cfg(test)]
 impl PreparedEffect {
@@ -64,14 +69,58 @@ fn prepend_inputs(queue: &mut VecDeque<DispatchInput>, inputs: Vec<DispatchInput
 }
 
 fn operation_error(error: OperationError) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, error)
+    recoverable_execution_error(io::ErrorKind::InvalidData, error)
 }
 
 fn invalid_operation(message: &'static str) -> io::Error {
     operation_error(OperationError::new(message))
 }
 
+#[derive(Debug)]
+struct RecoverableExecutionError {
+    source: Box<dyn Error + Send + Sync>,
+}
+
+impl fmt::Display for RecoverableExecutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.source.as_ref(), formatter)
+    }
+}
+
+impl Error for RecoverableExecutionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+fn recoverable_execution_error(
+    kind: io::ErrorKind,
+    error: impl Error + Send + Sync + 'static,
+) -> io::Error {
+    io::Error::new(
+        kind,
+        RecoverableExecutionError {
+            source: Box::new(error),
+        },
+    )
+}
+
+fn recoverable_message(kind: io::ErrorKind, message: impl Into<String>) -> io::Error {
+    recoverable_execution_error(kind, OperationError::new(message))
+}
+
 impl<F: Frontend> App<F> {
+    fn record_recoverable_error(&mut self, error: io::Error) {
+        if self.runtime_diagnostics.len() >= MAX_RUNTIME_DIAGNOSTICS {
+            self.runtime_diagnostics.remove(0);
+        }
+        self.runtime_diagnostics.push(RuntimeDiagnostic {
+            message: error.to_string(),
+        });
+        self.session
+            .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
+    }
+
     fn prepare_effect(&mut self, frame: &mut ExecutionFrame, effect: PreparedEffect) {
         #[cfg(test)]
         self.behavior.record_prepared(effect.behavior());
@@ -98,8 +147,14 @@ impl<F: Frontend> App<F> {
                 biased;
                 _ = cancellation.cancelled() => break,
                 _ = wait_for_input_deadline(input_deadline) => {
-                    self.handle_input_timeout()?;
-                    true
+                    match self.handle_input_timeout() {
+                        Ok(()) => true,
+                        Err(error) if is_recoverable_execution_error(&error) => {
+                            self.record_recoverable_error(error);
+                            true
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
                 message = self.kernel.receive_message() => {
                     if let Some(message) = message {
@@ -111,7 +166,14 @@ impl<F: Frontend> App<F> {
                 }
                 ev = self.frontend.next_event() => {
                     match ev? {
-                        Some(event) => self.handle_event(event).await?,
+                        Some(event) => match self.handle_event(event).await {
+                            Ok(render) => render,
+                            Err(error) if is_recoverable_execution_error(&error) => {
+                                self.record_recoverable_error(error);
+                                true
+                            }
+                            Err(error) => return Err(error),
+                        },
                         None => {
                             self.kernel.cancel();
                             false
@@ -229,6 +291,11 @@ impl<F: Frontend> App<F> {
             self.kernel.commit_mode_drafts(&mut mode_drafts);
             self.session.commit_mode_drafts(&mut mode_drafts);
             self.session.commit_view_touches(view_touches);
+        } else {
+            mode_drafts.commit_faults(
+                self.kernel.content_modes_mut(),
+                self.session.view_modes_mut(),
+            );
         }
         self.kernel.finish_command_transaction(success);
         if success {
@@ -270,7 +337,7 @@ impl<F: Frontend> App<F> {
                 DispatchOutcome::Waiting | DispatchOutcome::Consumed => {}
                 DispatchOutcome::Replay(replay) => {
                     if let Err(error) = frame.consume_replayed_inputs(replay.len()) {
-                        result = Err(error);
+                        result = Err(operation_error(error));
                     } else {
                         prepend_inputs(&mut queue, replay);
                     }
@@ -288,7 +355,7 @@ impl<F: Frontend> App<F> {
                             frame.mode_drafts_mut(),
                         );
                         if let Err(error) = frame.consume_replayed_inputs(replay.len()) {
-                            result = Err(error);
+                            result = Err(operation_error(error));
                         } else {
                             prepend_inputs(&mut queue, replay);
                             if flow == InputFlow::Continue
@@ -360,7 +427,9 @@ impl<F: Frontend> App<F> {
         match outcome {
             DispatchOutcome::Waiting | DispatchOutcome::Consumed => {}
             DispatchOutcome::Replay(replay) => {
-                frame.consume_replayed_inputs(replay.len())?;
+                frame
+                    .consume_replayed_inputs(replay.len())
+                    .map_err(operation_error)?;
                 prepend_inputs(queue, replay);
             }
             DispatchOutcome::Emit {
@@ -375,7 +444,9 @@ impl<F: Frontend> App<F> {
                     self.kernel.contents(),
                     frame.mode_drafts_mut(),
                 );
-                frame.consume_replayed_inputs(replay.len())?;
+                frame
+                    .consume_replayed_inputs(replay.len())
+                    .map_err(operation_error)?;
                 prepend_inputs(queue, replay);
                 if flow == InputFlow::Continue
                     && let Some(continuation) = continuation
@@ -477,7 +548,7 @@ impl<F: Frontend> App<F> {
         let mut input_flow = InputFlow::Stop;
 
         while let Some(queued) = queue.pop_front() {
-            frame.consume_operation()?;
+            frame.consume_operation().map_err(operation_error)?;
             let origin = queued.origin;
             let operation = self.resolve_operation(queued)?;
             let result = match operation {
@@ -536,7 +607,7 @@ impl<F: Frontend> App<F> {
                                 .and_then(|view| view.selections())
                                 .map(|selections| selections.primary().head())
                                 .ok_or_else(|| {
-                                    io::Error::new(
+                                    recoverable_message(
                                         io::ErrorKind::InvalidInput,
                                         "viewport alignment requires a text cursor",
                                     )
@@ -546,7 +617,7 @@ impl<F: Frontend> App<F> {
                                 .contents()
                                 .query(content, ContentQuery::TextPoints(vec![cursor]))
                             else {
-                                return Err(io::Error::new(
+                                return Err(recoverable_message(
                                     io::ErrorKind::InvalidInput,
                                     "viewport alignment requires text content",
                                 ));
@@ -555,7 +626,7 @@ impl<F: Frontend> App<F> {
                                 .into_iter()
                                 .next()
                                 .ok_or_else(|| {
-                                    io::Error::new(
+                                    recoverable_message(
                                         io::ErrorKind::InvalidData,
                                         "text query omitted the viewport cursor point",
                                     )
@@ -606,7 +677,9 @@ impl<F: Frontend> App<F> {
                     invocation,
                 } => {
                     if invocation.nested {
-                        frame.consume_nested_mode_call()?;
+                        frame
+                            .consume_nested_mode_call()
+                            .map_err(operation_error)?;
                     }
                     match scope {
                         ResolvedModeScope::Content {
@@ -621,7 +694,7 @@ impl<F: Frontend> App<F> {
                                     frame.mode_drafts_mut(),
                                 )
                                 .map_err(|error| {
-                                    io::Error::new(io::ErrorKind::InvalidData, error)
+                                    recoverable_execution_error(io::ErrorKind::InvalidData, error)
                                 })?;
                             let (flow, operations) = result.into_parts();
                             if invocation.flow == ModeFlowPropagation::Propagate {
@@ -656,7 +729,7 @@ impl<F: Frontend> App<F> {
                                     frame.mode_drafts_mut(),
                                 )
                                 .map_err(|error| {
-                                    io::Error::new(io::ErrorKind::InvalidData, error)
+                                    recoverable_execution_error(io::ErrorKind::InvalidData, error)
                                 })?;
                             let (flow, operations) = result.into_parts();
                             if invocation.flow == ModeFlowPropagation::Propagate {
@@ -697,7 +770,9 @@ impl<F: Frontend> App<F> {
                             mode_contents,
                             frame.mode_drafts_mut(),
                         )
-                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                        .map_err(|error| {
+                            recoverable_execution_error(io::ErrorKind::InvalidData, error)
+                        })?;
                     let (flow, operations) = result.into_parts();
                     input_flow = flow;
                     frame.record_view_touch(view, revision_before);
@@ -787,7 +862,9 @@ impl<F: Frontend> App<F> {
                         &invocation.command.action,
                         content_kind,
                     )
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                    .map_err(|error| {
+                        recoverable_execution_error(io::ErrorKind::InvalidData, error)
+                    })?;
                 let mode = self
                     .kernel
                     .modes()
@@ -959,7 +1036,7 @@ impl<F: Frontend> App<F> {
             ViewPrecondition::Revision(expected) => target_view.revision() != *expected,
         };
         if stale {
-            return Err(io::Error::new(
+            return Err(recoverable_message(
                 io::ErrorKind::InvalidData,
                 "stale resolved view edit",
             ));
@@ -986,7 +1063,7 @@ impl<F: Frontend> App<F> {
             transaction,
         } = result
         else {
-            return Err(io::Error::new(
+            return Err(recoverable_message(
                 io::ErrorKind::InvalidData,
                 "content rejected a planned edit",
             ));
@@ -1040,7 +1117,7 @@ impl<F: Frontend> App<F> {
                 TransactionDirection::Forward,
             ));
             self.kernel.record_transaction(record).map_err(|error| {
-                io::Error::new(
+                recoverable_message(
                     io::ErrorKind::InvalidData,
                     format!("invalid outer transaction: {error:?}"),
                 )
@@ -1069,7 +1146,7 @@ impl<F: Frontend> App<F> {
             transaction,
         } = self.kernel.apply_content_action(content, action)
         else {
-            return Err(io::Error::new(
+            return Err(recoverable_message(
                 io::ErrorKind::InvalidData,
                 "content rejected its mode action",
             ));
@@ -1093,7 +1170,7 @@ impl<F: Frontend> App<F> {
                 TransactionDirection::Forward,
             ));
             self.kernel.record_transaction(record).map_err(|error| {
-                io::Error::new(
+                recoverable_message(
                     io::ErrorKind::InvalidData,
                     format!("invalid outer transaction: {error:?}"),
                 )
@@ -1170,7 +1247,7 @@ impl<F: Frontend> App<F> {
             .kernel
             .apply_transaction_record(record, direction)
             .map_err(|error| {
-                io::Error::new(
+                recoverable_message(
                     io::ErrorKind::InvalidData,
                     format!("invalid history traversal: {error:?}"),
                 )
@@ -1230,7 +1307,9 @@ impl<F: Frontend> App<F> {
         self.session
             .apply_view_action(view, action, self.kernel.contents())
             .map(|_| ())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid view action"))
+            .ok_or_else(|| {
+                recoverable_message(io::ErrorKind::InvalidData, "invalid view action")
+            })
     }
 
     pub(super) fn render(&mut self) -> io::Result<()> {
@@ -1249,10 +1328,16 @@ impl<F: Frontend> App<F> {
     }
 }
 
+fn is_recoverable_execution_error(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|source| source.downcast_ref::<RecoverableExecutionError>().is_some())
+}
+
 fn invalid_content_view_state(
     error: vell_core::content_view_state::ContentViewStateError,
 ) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, error)
+    recoverable_execution_error(io::ErrorKind::InvalidData, error)
 }
 
 fn viewport_cursor_edit(

@@ -1083,11 +1083,25 @@ fn load_user_config() -> Result<Rc<RefCell<ScriptHost>>, ScriptError> {
         return Ok(host);
     };
 
-    host.borrow_mut().execute_module(&path)?;
+    let _ = load_optional_user_config(&host, &path);
+    Ok(host)
+}
+
+fn load_optional_user_config(
+    host: &Rc<RefCell<ScriptHost>>,
+    path: &Path,
+) -> Result<(), ScriptError> {
+    let result = host.borrow_mut().execute_module(path);
+    if let Err(error) = &result {
+        eprintln!(
+            "warning: failed to load Vell config '{}': {error}",
+            path.display()
+        );
+    }
     for diagnostic in host.borrow_mut().take_diagnostics() {
         eprintln!("warning: {}", diagnostic.message);
     }
-    Ok(host)
+    result
 }
 
 pub fn load_default_modes() -> Result<Vec<Box<dyn Mode>>, ScriptError> {
@@ -1398,6 +1412,36 @@ mod tests {
         assert_eq!(
             resolve_config_path(None, Some(root.to_owned())),
             Some(default)
+        );
+    }
+
+    #[test]
+    fn invalid_optional_config_keeps_existing_modes_and_host_usable() {
+        let mut host = ScriptHost::new();
+        host.execute_typescript(
+            "file:///default.ts",
+            r#"
+editor.modes.define({
+  name: "default-mode",
+  on: { buffer: {} },
+});
+"#,
+        )
+        .unwrap();
+        let host = Rc::new(RefCell::new(host));
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.ts");
+        fs::write(&config, "throw new Error('invalid user config');").unwrap();
+
+        let error = load_optional_user_config(&host, &config).unwrap_err();
+
+        assert!(error.to_string().contains("invalid user config"));
+        assert_eq!(ScriptHost::script_modes(&host).len(), 1);
+        assert_eq!(
+            host.borrow_mut()
+                .evaluate_typescript("file:///probe.ts", "40 + 2")
+                .unwrap(),
+            "42"
         );
     }
 

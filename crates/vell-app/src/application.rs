@@ -4,6 +4,7 @@ use std::time::Instant;
 #[cfg(test)]
 use crate::behavior::BehaviorRecorder;
 use crate::bootstrap::bootstrap_editor;
+use crate::diagnostics::RuntimeDiagnostic;
 use crate::kernel::Kernel;
 use crate::mode::{Mode, ModeAttachmentError};
 use crate::mode_name::ModeName;
@@ -16,6 +17,7 @@ pub struct App<F: Frontend> {
     pub(super) kernel: Kernel,
     pub(super) session: ClientSession,
     pub(super) frontend: F,
+    pub(super) runtime_diagnostics: Vec<RuntimeDiagnostic>,
     #[cfg(test)]
     pub(super) behavior: BehaviorRecorder,
 }
@@ -52,6 +54,7 @@ impl<F: Frontend> App<F> {
             kernel: bootstrap.kernel,
             session: bootstrap.session,
             frontend,
+            runtime_diagnostics: Vec::new(),
             #[cfg(test)]
             behavior: BehaviorRecorder::default(),
         })

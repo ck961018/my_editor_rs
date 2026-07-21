@@ -30,7 +30,9 @@ pub(crate) use vell_mode as mode;
 pub(crate) use vell_mode::{action, command, mode_name, presentation};
 
 pub use application::App;
-pub use diagnostics::{ModeDecorationDiagnostics, NamedPolicySources, ViewModeDiagnostics};
+pub use diagnostics::{
+    ModeDecorationDiagnostics, NamedPolicySources, RuntimeDiagnostic, ViewModeDiagnostics,
+};
 
 #[cfg(test)]
 mod tests;

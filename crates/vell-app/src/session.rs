@@ -173,6 +173,10 @@ impl ClientSession {
         &self.view_modes
     }
 
+    pub(super) fn view_modes_mut(&mut self) -> &mut ModeViewStore {
+        &mut self.view_modes
+    }
+
     pub(super) fn mode_chain_for_new_view(
         &self,
         content: ContentId,

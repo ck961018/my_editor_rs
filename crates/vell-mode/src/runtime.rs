@@ -66,6 +66,32 @@ pub enum ModeError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModeFaultPhase {
+    ContentState,
+    ViewState,
+    Input,
+    Action,
+    ContentChanged,
+    BackgroundJob,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModeFaultCategory {
+    Callback,
+    State,
+    Contract,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModeFault {
+    pub mode: ModeName,
+    pub phase: ModeFaultPhase,
+    pub category: ModeFaultCategory,
+    pub callback: String,
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModeStateKind {
     Content,
     View,
@@ -118,6 +144,49 @@ impl fmt::Display for ModeError {
 }
 
 impl std::error::Error for ModeError {}
+
+impl ModeError {
+    fn faults_instance(&self) -> bool {
+        matches!(
+            self,
+            Self::CallbackFailed { .. } | Self::StateTypeMismatch { .. }
+        )
+    }
+}
+
+impl ModeFault {
+    fn from_error(
+        mode: &ModeName,
+        phase: ModeFaultPhase,
+        callback: impl Into<String>,
+        error: &ModeError,
+    ) -> Self {
+        let category = match error {
+            ModeError::CallbackFailed { .. } => ModeFaultCategory::Callback,
+            ModeError::StateTypeMismatch { .. } => ModeFaultCategory::State,
+            _ => ModeFaultCategory::Contract,
+        };
+        Self {
+            mode: mode.clone(),
+            phase,
+            category,
+            callback: callback.into(),
+            message: error.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for ModeFault {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "mode '{}' faulted during {}: {}",
+            self.mode.as_str(),
+            self.callback,
+            self.message
+        )
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModeContextError {
@@ -291,13 +360,13 @@ pub struct ModeDraftJournal {
 
 struct ModeContentDraft {
     state: Box<dyn ModeState>,
-    faulted: bool,
+    fault: Option<ModeFault>,
     background_job_dirty: bool,
 }
 
 struct ModeViewDraft {
     state: Box<dyn ModeState>,
-    faulted: bool,
+    fault: Option<ModeFault>,
 }
 
 impl ModeDraftJournal {
@@ -309,8 +378,8 @@ impl ModeDraftJournal {
     ) -> (&'a dyn ModeState, bool) {
         self.content
             .get(&(mode, content))
-            .map_or((persistent.state.as_ref(), persistent.faulted), |draft| {
-                (draft.state.as_ref(), draft.faulted)
+            .map_or((persistent.state.as_ref(), persistent.fault.is_some()), |draft| {
+                (draft.state.as_ref(), draft.fault.is_some())
             })
     }
 
@@ -324,7 +393,7 @@ impl ModeDraftJournal {
             .entry((mode, content))
             .or_insert_with(|| ModeContentDraft {
                 state: persistent.state.clone_box(),
-                faulted: persistent.faulted,
+                fault: persistent.fault.clone(),
                 background_job_dirty: persistent.background_job_dirty,
             })
     }
@@ -337,8 +406,8 @@ impl ModeDraftJournal {
     ) -> (&'a dyn ModeState, bool) {
         self.views
             .get(&(mode, view))
-            .map_or((persistent.state.as_ref(), persistent.faulted), |draft| {
-                (draft.state.as_ref(), draft.faulted)
+            .map_or((persistent.state.as_ref(), persistent.fault.is_some()), |draft| {
+                (draft.state.as_ref(), draft.fault.is_some())
             })
     }
 
@@ -355,7 +424,7 @@ impl ModeDraftJournal {
                 .entry((mode, content))
                 .or_insert_with(|| ModeContentDraft {
                     state: persistent_content.state.clone_box(),
-                    faulted: persistent_content.faulted,
+                    fault: persistent_content.fault.clone(),
                     background_job_dirty: persistent_content.background_job_dirty,
                 });
         let view_draft = self
@@ -363,7 +432,7 @@ impl ModeDraftJournal {
             .entry((mode, view))
             .or_insert_with(|| ModeViewDraft {
                 state: persistent_view.state.clone_box(),
-                faulted: persistent_view.faulted,
+                fault: persistent_view.fault.clone(),
             });
         (content_draft, view_draft)
     }
@@ -375,13 +444,13 @@ impl ModeDraftJournal {
                 .get_mut(&key)
                 .expect("drafted mode content still exists");
             if draft.state.eq_box(instance.state.as_ref()) == Some(true)
-                && draft.faulted == instance.faulted
+                && draft.fault == instance.fault
                 && draft.background_job_dirty == instance.background_job_dirty
             {
                 continue;
             }
             instance.state = draft.state;
-            instance.faulted = draft.faulted;
+            instance.fault = draft.fault;
             instance.background_job_dirty = draft.background_job_dirty;
             instance.revision.next();
         }
@@ -394,12 +463,48 @@ impl ModeDraftJournal {
                 .get_mut(&key)
                 .expect("drafted mode view still exists");
             if draft.state.eq_box(instance.state.as_ref()) == Some(true)
-                && draft.faulted == instance.faulted
+                && draft.fault == instance.fault
             {
                 continue;
             }
             instance.state = draft.state;
-            instance.faulted = draft.faulted;
+            instance.fault = draft.fault;
+            instance.revision.next();
+        }
+    }
+
+    pub fn commit_faults(
+        &mut self,
+        content_store: &mut ModeContentStore,
+        view_store: &mut ModeViewStore,
+    ) {
+        for (key, draft) in self.content.drain() {
+            let Some(fault) = draft.fault else {
+                continue;
+            };
+            let instance = content_store
+                .instances
+                .get_mut(&key)
+                .expect("drafted mode content still exists");
+            if instance.fault.as_ref() == Some(&fault) {
+                continue;
+            }
+            instance.fault = Some(fault);
+            instance.background_job_dirty = false;
+            instance.revision.next();
+        }
+        for (key, draft) in self.views.drain() {
+            let Some(fault) = draft.fault else {
+                continue;
+            };
+            let instance = view_store
+                .instances
+                .get_mut(&key)
+                .expect("drafted mode view still exists");
+            if instance.fault.as_ref() == Some(&fault) {
+                continue;
+            }
+            instance.fault = Some(fault);
             instance.revision.next();
         }
     }
@@ -1182,7 +1287,7 @@ pub struct ModeViewInstance {
     registered: Rc<ModeRegistration>,
     adapter_kind: ContentKind,
     state: Box<dyn ModeState>,
-    faulted: bool,
+    fault: Option<ModeFault>,
     revision: Revision,
 }
 
@@ -1327,7 +1432,7 @@ impl ModeRegistry {
             state: Box::new(()),
             registered,
             adapter_kind: ContentKind::Buffer,
-            faulted: false,
+            fault: None,
             revision: Revision::default(),
         })
     }
@@ -1360,7 +1465,7 @@ impl ModeRegistry {
             state: Box::new(()),
             registered,
             adapter_kind: kind,
-            faulted: false,
+            fault: None,
             revision: Revision::default(),
         };
         mode_contents.attach_view_with_context(content, &mut mode, content_context, view_context);
@@ -1397,7 +1502,7 @@ pub struct ModeContentInstance {
     adapter_kind: ContentKind,
     state: Box<dyn ModeState>,
     attachments: usize,
-    faulted: bool,
+    fault: Option<ModeFault>,
     background_job_dirty: bool,
     revision: Revision,
 }
@@ -1446,13 +1551,17 @@ impl ModeContentStore {
     pub fn is_faulted(&self, mode: ModeId, content: ContentId) -> bool {
         self.instances
             .get(&(mode, content))
-            .is_some_and(|instance| instance.faulted)
+            .is_some_and(|instance| instance.fault.is_some())
+    }
+
+    pub fn fault(&self, mode: ModeId, content: ContentId) -> Option<&ModeFault> {
+        self.instances.get(&(mode, content))?.fault.as_ref()
     }
     #[cfg(any(test, feature = "test-support"))]
     pub fn faults_for_test(&self) -> Vec<(String, ContentId)> {
         self.instances
             .values()
-            .filter(|instance| instance.faulted)
+            .filter(|instance| instance.fault.is_some())
             .map(|instance| {
                 (
                     instance.registered.mode().name().as_str().to_owned(),
@@ -1483,7 +1592,7 @@ impl ModeContentStore {
                 .instances
                 .get(&(mode, content))
                 .expect("collected mode content exists");
-            if instance.faulted || !instance.background_job_dirty {
+            if instance.fault.is_some() || !instance.background_job_dirty {
                 continue;
             }
             let draft = drafts.content_mut(mode, content, instance);
@@ -1514,7 +1623,7 @@ impl ModeContentStore {
         };
         let mut drafts = ModeDraftJournal::default();
         let draft = drafts.content_mut(mode, content, instance);
-        if draft.faulted {
+        if draft.fault.is_some() {
             return false;
         }
         let checkpoint = draft.state.clone_box();
@@ -1530,10 +1639,15 @@ impl ModeContentStore {
                 draft.background_job_dirty |= changed;
                 changed
             }
-            Err(_) => {
+            Err(error) => {
                 draft.state = checkpoint;
-                draft.faulted = true;
-                false
+                draft.fault = Some(ModeFault::from_error(
+                    instance.registered.mode().name(),
+                    ModeFaultPhase::BackgroundJob,
+                    slot.as_str(),
+                    &error,
+                ));
+                true
             }
         };
         drafts.commit_content(self);
@@ -1548,7 +1662,7 @@ impl ModeContentStore {
         visible_rows: RowRange,
     ) -> Option<ContentPresentationLayer> {
         let instance = self.instance(mode, content)?;
-        if instance.faulted {
+        if instance.fault.is_some() {
             return None;
         }
         let context = ModeContentContext::new(content, contents);
@@ -1590,7 +1704,7 @@ impl ModeContentStore {
                 adapter_kind: mode.adapter_kind,
                 state,
                 attachments: 1,
-                faulted: false,
+                fault: None,
                 background_job_dirty: true,
                 revision: Revision::default(),
             },
@@ -1608,9 +1722,17 @@ impl ModeContentStore {
         if let Some(existing) = self.instances.get_mut(&(id, content)) {
             existing.attachments += 1;
         } else {
-            let (state, faulted) = match mode.adapter().create_content_state(content_context) {
-                Ok(state) => (state, false),
-                Err(_) => (Box::new(()) as Box<dyn ModeState>, true),
+            let (state, fault) = match mode.adapter().create_content_state(content_context) {
+                Ok(state) => (state, None),
+                Err(error) => (
+                    Box::new(()) as Box<dyn ModeState>,
+                    Some(ModeFault::from_error(
+                        mode.name(),
+                        ModeFaultPhase::ContentState,
+                        "<content-state>",
+                        &error,
+                    )),
+                ),
             };
             self.instances.insert(
                 (id, content),
@@ -1620,8 +1742,8 @@ impl ModeContentStore {
                     adapter_kind: mode.adapter_kind,
                     state,
                     attachments: 1,
-                    faulted,
-                    background_job_dirty: !faulted,
+                    background_job_dirty: fault.is_none(),
+                    fault,
                     revision: Revision::default(),
                 },
             );
@@ -1632,7 +1754,7 @@ impl ModeContentStore {
             .expect("attached mode has content state");
         mode.initialize(
             content_state.state.as_ref(),
-            content_state.faulted,
+            content_state.fault.is_some(),
             view_context,
         );
     }
@@ -1666,18 +1788,22 @@ impl ModeContentStore {
                 .get(&(mode, content))
                 .expect("collected mode exists");
             let draft = drafts.content_mut(mode, content, instance);
-            if draft.faulted {
+            if draft.fault.is_some() {
                 continue;
             }
             let checkpoint = draft.state.clone_box();
             let context = ModeContentContext::new(content, contents);
-            if instance
+            if let Err(error) = instance
                 .adapter()
                 .on_content_changed(draft.state.as_mut(), &context, change)
-                .is_err()
             {
                 draft.state = checkpoint;
-                draft.faulted = true;
+                draft.fault = Some(ModeFault::from_error(
+                    instance.registered.mode().name(),
+                    ModeFaultPhase::ContentChanged,
+                    "<content-changed>",
+                    &error,
+                ));
             } else {
                 draft.background_job_dirty = true;
             }
@@ -1718,7 +1844,7 @@ impl ModeContentStore {
         let draft = drafts.content_mut(mode, content, instance);
         let result = instance.execute(
             draft.state.as_mut(),
-            draft.faulted,
+            draft.fault.is_some(),
             mode,
             action,
             &command.arguments,
@@ -1726,6 +1852,15 @@ impl ModeContentStore {
         );
         if result.is_ok() {
             draft.background_job_dirty = true;
+        } else if let Err(error) = &result
+            && error.faults_instance()
+        {
+            draft.fault = Some(ModeFault::from_error(
+                instance.registered.mode().name(),
+                ModeFaultPhase::Action,
+                command.action.as_str(),
+                error,
+            ));
         }
         result
     }
@@ -1748,9 +1883,17 @@ impl ModeViewInstance {
         if content_faulted {
             return;
         }
-        match self.adapter().create_view_state(content_state, context) {
+        let state = self.adapter().create_view_state(content_state, context);
+        match state {
             Ok(state) => self.state = state,
-            Err(_) => self.faulted = true,
+            Err(error) => {
+                self.fault = Some(ModeFault::from_error(
+                    self.name(),
+                    ModeFaultPhase::ViewState,
+                    "<view-state>",
+                    &error,
+                ));
+            }
         }
     }
 
@@ -1836,13 +1979,17 @@ impl ModeViewStore {
     pub fn is_faulted(&self, mode: ModeId, view: ViewId) -> bool {
         self.instances
             .get(&(mode, view))
-            .is_some_and(|instance| instance.faulted)
+            .is_some_and(|instance| instance.fault.is_some())
+    }
+
+    pub fn fault(&self, mode: ModeId, view: ViewId) -> Option<&ModeFault> {
+        self.instances.get(&(mode, view))?.fault.as_ref()
     }
     #[cfg(any(test, feature = "test-support"))]
     pub fn faults_for_test(&self) -> Vec<(String, ViewId)> {
         self.instances
             .iter()
-            .filter(|(_, instance)| instance.faulted)
+            .filter(|(_, instance)| instance.fault.is_some())
             .map(|((_, view), instance)| (instance.name().as_str().to_owned(), *view))
             .collect()
     }
@@ -1929,12 +2076,12 @@ impl ModeViewStore {
                     content_instance,
                     view_instance,
                 );
-                if content_draft.faulted || view_draft.faulted {
+                if content_draft.fault.is_some() || view_draft.fault.is_some() {
                     continue;
                 }
                 let content_checkpoint = content_draft.state.clone_box();
                 let view_checkpoint = view_draft.state.clone_box();
-                if view_instance
+                if let Err(error) = view_instance
                     .adapter()
                     .on_view_content_changed(
                         content_draft.state.as_mut(),
@@ -1942,11 +2089,15 @@ impl ModeViewStore {
                         &context,
                         change,
                     )
-                    .is_err()
                 {
                     content_draft.state = content_checkpoint;
                     view_draft.state = view_checkpoint;
-                    view_draft.faulted = true;
+                    view_draft.fault = Some(ModeFault::from_error(
+                        view_instance.name(),
+                        ModeFaultPhase::ContentChanged,
+                        "<view-content-changed>",
+                        &error,
+                    ));
                 }
             }
         }
@@ -1963,7 +2114,7 @@ impl ModeViewStore {
     ) -> Option<ViewPresentationLayer> {
         let content_instance = mode_contents.instance(mode, context.content_id())?;
         let view_instance = self.instances.get(&(mode, view))?;
-        if content_instance.faulted || view_instance.faulted {
+        if content_instance.fault.is_some() || view_instance.fault.is_some() {
             return None;
         }
         let definition = view_instance.adapter();
@@ -2090,7 +2241,7 @@ impl ModeViewStore {
         };
         let (content_draft, view_draft) =
             drafts.content_and_view_mut(mode, context.content_id(), view, content_state, instance);
-        if content_draft.faulted || view_draft.faulted {
+        if content_draft.fault.is_some() || view_draft.fault.is_some() {
             return InputDecision::Pass;
         }
         instance.adapter().input_capture(
@@ -2114,7 +2265,7 @@ impl ModeViewStore {
         let instance = self.instances.get(&(mode, view))?;
         let (content_draft, view_draft) =
             drafts.content_and_view_mut(mode, context.content_id(), view, content_state, instance);
-        if content_draft.faulted || view_draft.faulted {
+        if content_draft.fault.is_some() || view_draft.fault.is_some() {
             return None;
         }
         Some(
@@ -2184,7 +2335,7 @@ impl ModeViewStore {
             instance.input_cancel_with_content(
                 content_draft.state.as_mut(),
                 view_draft.state.as_mut(),
-                view_draft.faulted,
+                view_draft.fault.is_some(),
                 context,
             );
         }
@@ -2246,13 +2397,22 @@ impl ModeViewStore {
         let result = instance.execute_with_context(
             content_draft.state.as_mut(),
             view_draft.state.as_mut(),
-            view_draft.faulted || content_draft.faulted,
+            view_draft.fault.is_some() || content_draft.fault.is_some(),
             action,
             &command.arguments,
             context,
         );
         if result.is_ok() {
             content_draft.background_job_dirty = true;
+        } else if let Err(error) = &result
+            && error.faults_instance()
+        {
+            view_draft.fault = Some(ModeFault::from_error(
+                instance.name(),
+                ModeFaultPhase::Action,
+                command.action.as_str(),
+                error,
+            ));
         }
         result
     }
@@ -2285,12 +2445,21 @@ impl ModeViewStore {
         let result = instance.execute_input_with_context(
             content_draft.state.as_mut(),
             view_draft.state.as_mut(),
-            view_draft.faulted || content_draft.faulted,
+            view_draft.fault.is_some() || content_draft.fault.is_some(),
             context,
             input.key(),
         );
         if result.is_ok() {
             content_draft.background_job_dirty = true;
+        } else if let Err(error) = &result
+            && error.faults_instance()
+        {
+            view_draft.fault = Some(ModeFault::from_error(
+                instance.name(),
+                ModeFaultPhase::Input,
+                "<input>",
+                error,
+            ));
         }
         result
     }
@@ -2427,6 +2596,20 @@ mod tests {
             self.calls.set(self.calls.get() + 1);
             Vec::new()
         }
+
+        fn apply_background_job(
+            &self,
+            _state: &mut dyn ModeState,
+            _context: &ModeContentContext<'_>,
+            _slot: &ModeJobSlot,
+            _version: u64,
+            _result: ModeJobResult,
+        ) -> Result<bool, ModeError> {
+            Err(ModeError::CallbackFailed {
+                mode: self.name.clone(),
+                message: "job apply failed".to_owned(),
+            })
+        }
     }
 
     #[test]
@@ -2459,6 +2642,39 @@ mod tests {
         assert!(content_modes.take_background_jobs(&contents).is_empty());
         assert!(content_modes.take_background_jobs(&contents).is_empty());
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn background_fault_invalidates_presentation_and_keeps_structured_error() {
+        let name = ModeName::new("failing-job");
+        let mut registry = ModeRegistry::new();
+        let mode_id = registry
+            .register(CountingJobMode {
+                name: name.clone(),
+                calls: Rc::new(Cell::new(0)),
+            })
+            .unwrap();
+        let mode = registry.instantiate(&name).unwrap();
+        let content = ContentId(1);
+        let contents = contents_with_buffer(content);
+        let mut content_modes = ModeContentStore::default();
+        content_modes.attach_view(content, &mode);
+
+        let changed = content_modes.apply_background_job(
+            mode_id,
+            content,
+            &contents,
+            &ModeJobSlot::from("parse"),
+            1,
+            Ok(Box::new(())),
+        );
+
+        assert!(changed);
+        let fault = content_modes.fault(mode_id, content).unwrap();
+        assert_eq!(fault.phase, ModeFaultPhase::BackgroundJob);
+        assert_eq!(fault.category, ModeFaultCategory::Callback);
+        assert_eq!(fault.callback, "parse");
+        assert_eq!(fault.message, "mode 'failing-job' callback failed: job apply failed");
     }
 
     #[test]
@@ -2606,6 +2822,11 @@ mod tests {
             content_modes.faults_for_test(),
             vec![(name.as_str().to_owned(), content)]
         );
+        let fault = content_modes.fault(mode_id, content).unwrap();
+        assert_eq!(fault.phase, ModeFaultPhase::ContentChanged);
+        assert_eq!(fault.category, ModeFaultCategory::Callback);
+        assert_eq!(fault.callback, "<content-changed>");
+        assert!(fault.message.contains("observer failed"));
         assert_eq!(
             content_modes.state_for_test::<u8>(mode_id, content),
             Some(&0)

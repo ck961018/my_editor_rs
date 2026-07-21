@@ -1,5 +1,5 @@
 use crate::application::App;
-use crate::mode::{FaceConflict, ModeViewPolicy};
+use crate::mode::{FaceConflict, ModeFault, ModeViewPolicy};
 use crate::mode_name::ModeName;
 use crate::presentation::PolicySources;
 use vell_frontend::Frontend;
@@ -20,6 +20,12 @@ pub struct ModeDecorationDiagnostics {
     pub content_count: usize,
     pub view_count: usize,
     pub faulted: bool,
+    pub faults: Vec<ModeFault>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeDiagnostic {
+    pub message: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,12 +66,22 @@ impl<F: Frontend> App<F> {
                 let decorations = raw
                     .decorations
                     .into_iter()
-                    .map(|layer| ModeDecorationDiagnostics {
-                        mode: mode_name(layer.mode),
-                        content_count: layer.content_count,
-                        view_count: layer.view_count,
-                        faulted: content_modes.is_faulted(layer.mode, content)
-                            || view_modes.is_faulted(layer.mode, view),
+                    .map(|layer| {
+                        let faults = [
+                            content_modes.fault(layer.mode, content),
+                            view_modes.fault(layer.mode, view),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .cloned()
+                        .collect::<Vec<_>>();
+                        ModeDecorationDiagnostics {
+                            mode: mode_name(layer.mode),
+                            content_count: layer.content_count,
+                            view_count: layer.view_count,
+                            faulted: !faults.is_empty(),
+                            faults,
+                        }
                     })
                     .collect();
                 Some(ViewModeDiagnostics {
@@ -88,6 +104,10 @@ impl<F: Frontend> App<F> {
 
     pub fn face_conflicts(&self) -> &[FaceConflict] {
         self.session.faces().conflicts()
+    }
+
+    pub fn runtime_diagnostics(&self) -> &[RuntimeDiagnostic] {
+        &self.runtime_diagnostics
     }
 }
 

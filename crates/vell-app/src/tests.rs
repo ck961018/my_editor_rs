@@ -20,7 +20,8 @@ use crate::command::{
 };
 use crate::mode::{
     Mode, ModeActionScope, ModeAdapters, ModeAttachmentError, ModeContentContext, ModeContextError,
-    ModeError, ModeResult, ModeState, ModeViewContext, ModeViewInstance, ModeViewPolicy,
+    ModeError, ModeFaultPhase, ModeResult, ModeState, ModeViewContext, ModeViewInstance,
+    ModeViewPolicy,
 };
 use crate::mode_name::{ModeActionName, ModeName};
 use crate::operation::{
@@ -63,6 +64,7 @@ struct ScriptedFrontend {
     scene_revisions: Vec<Revision>,
     fail_next_event: bool,
     fail_render: bool,
+    fail_viewport: bool,
     viewport_height: usize,
     viewport_commands: Vec<(ViewId, ResolvedViewportCommand)>,
 }
@@ -1211,6 +1213,7 @@ impl ScriptedFrontend {
             scene_revisions: Vec::new(),
             fail_next_event: false,
             fail_render: false,
+            fail_viewport: false,
             viewport_height: 4,
             viewport_commands: Vec::new(),
         }
@@ -1250,6 +1253,13 @@ impl Frontend for ScriptedFrontend {
         cursor_row: usize,
         command: ViewportCommand,
     ) -> io::Result<ResolvedViewportCommand> {
+        if self.fail_viewport {
+            self.fail_viewport = false;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "scripted viewport failure",
+            ));
+        }
         Ok(match command {
             ViewportCommand::Scroll {
                 direction, amount, ..
@@ -1292,6 +1302,7 @@ fn make_script_app(source: &str) -> App<ScriptedFrontend> {
         kernel: bootstrap.kernel,
         session: bootstrap.session,
         frontend: ScriptedFrontend::new(Vec::new()),
+        runtime_diagnostics: Vec::new(),
         behavior: BehaviorRecorder::default(),
     }
 }
@@ -1305,6 +1316,7 @@ fn make_embedded_script_app(path: &str, source: &str) -> App<ScriptedFrontend> {
         kernel: bootstrap.kernel,
         session: bootstrap.session,
         frontend: ScriptedFrontend::new(Vec::new()),
+        runtime_diagnostics: Vec::new(),
         behavior: BehaviorRecorder::default(),
     }
 }
@@ -1343,6 +1355,7 @@ editor.modes.define({
         kernel: bootstrap.kernel,
         session: bootstrap.session,
         frontend: ScriptedFrontend::new(Vec::new()),
+        runtime_diagnostics: Vec::new(),
         behavior: BehaviorRecorder::default(),
     };
     let view = view_id(&app, app.session.focused());
@@ -1376,6 +1389,75 @@ editor.modes.define({
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "native-before");
     app.execute_command(DispatchCommand::App(AppCommand::Quit))
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn active_script_failure_faults_only_its_view_and_run_loop_continues() {
+    let mut app = make_script_app(
+        r#"
+editor.modes.define({
+  name: "recoverable-script",
+  on: {
+    buffer: {
+      commands: {
+        fail(ctx) {
+          ctx.edit.insert("discarded");
+          throw new Error("recoverable failure");
+        },
+      },
+      keys: { x: "fail" },
+    },
+  },
+});
+"#,
+    );
+    app.frontend.events = VecDeque::from([
+        FrontendEvent::Key(KeyEvent::char('x')),
+        FrontendEvent::Key(KeyEvent::ctrl('q')),
+    ]);
+    let view = view_id(&app, app.session.focused());
+    let mode = app
+        .kernel
+        .modes()
+        .resolve_mode(&ModeName::new("recoverable-script"))
+        .unwrap();
+
+    app.run().await.unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec![""]);
+    assert!(app.kernel.is_cancelled());
+    assert!(
+        app.runtime_diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("recoverable failure"))
+    );
+    let fault = app.session.view_modes().fault(mode, view).unwrap().clone();
+    assert_eq!(fault.phase, ModeFaultPhase::Action);
+    assert_eq!(fault.callback, "fail");
+    assert!(fault.message.contains("recoverable failure"));
+    let diagnostic = app
+        .mode_diagnostics()
+        .into_iter()
+        .find(|diagnostic| diagnostic.view == view)
+        .unwrap()
+        .decorations
+        .into_iter()
+        .find(|diagnostic| diagnostic.mode == ModeName::new("recoverable-script"))
+        .unwrap();
+    assert!(diagnostic.faulted);
+    assert_eq!(diagnostic.faults, vec![fault]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn frontend_invalid_data_error_remains_fatal() {
+    let mut app = make_app(vec![FrontendEvent::Key(KeyEvent::ctrl('d'))], None);
+    app.frontend.fail_viewport = true;
+
+    let error = app.run().await.unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("scripted viewport failure"));
+    assert!(app.runtime_diagnostics().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

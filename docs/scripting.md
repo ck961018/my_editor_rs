@@ -12,6 +12,11 @@ One optional user `config.ts` is loaded after the bundled plugins. Set
 - Linux and macOS: `$XDG_CONFIG_HOME/vell/config.ts`
 - Home-directory fallback: `$HOME/.config/vell/config.ts`
 
+Bundled plugin failures stop startup because they indicate a broken editor
+installation. A failure in the optional user config is reported as a warning;
+its partial definitions are rolled back and the editor continues with the
+bundled modes.
+
 Use [editor.d.ts](../runtime/editor.d.ts) for editor and TypeScript tooling.
 It is the canonical public schema and is embedded in `vell-plugin-v8` as
 `TYPESCRIPT_DECLARATIONS`. CI type-checks the bundled plugins and migration

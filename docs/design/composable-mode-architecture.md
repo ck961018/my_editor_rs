@@ -447,10 +447,14 @@ adapter 负责转换为 parser 所需的 byte offset 和 point。
 错误分为主动执行错误和被动观察错误：
 
 - input handler 或显式 action 失败时，整个执行帧失败并恢复；
+- 主动失败只提交结构化 `ModeFault`，不提交 callback 已修改的
+  Mode state；
 - `on_content_changed` 等被动通知失败时，不撤销用户文本；
 - 被动通知失败只恢复该 callback 的 Mode state；
-- content callback 失败标记共享 entry faulted；
-- view callback 失败只标记对应 View entry faulted；
+- `ModeFault` 保留 mode、执行阶段、错误类别、callback 名和错误
+  消息；
+- content callback 失败标记共享 entry；
+- view callback 失败只标记对应 View entry；
 - faulted attachment 暂停输入和呈现查询；
 - 重新附加或 reload 会清除 fault。
 

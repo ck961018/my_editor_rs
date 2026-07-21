@@ -79,6 +79,10 @@ impl Kernel {
         &self.content_modes
     }
 
+    pub(super) fn content_modes_mut(&mut self) -> &mut ModeContentStore {
+        &mut self.content_modes
+    }
+
     pub(super) fn commit_mode_drafts(&mut self, drafts: &mut ModeDraftJournal) {
         drafts.commit_content(&mut self.content_modes);
     }

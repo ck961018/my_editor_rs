@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use std::io;
 
 use crate::dispatcher::DispatcherInputSnapshot;
 use crate::mode::ModeDraftJournal;
+use crate::operation::OperationError;
 use crate::transaction::TransactionRecord;
 use vell_core::content::SaveSnapshot;
 use vell_core::content_store::ContentSnapshot;
@@ -108,15 +108,15 @@ impl ExecutionFrame {
         self.checkpoints.selections = Some(selections);
     }
 
-    pub(super) fn consume_operation(&mut self) -> io::Result<()> {
+    pub(super) fn consume_operation(&mut self) -> Result<(), OperationError> {
         self.budget.consume_operation()
     }
 
-    pub(super) fn consume_nested_mode_call(&mut self) -> io::Result<()> {
+    pub(super) fn consume_nested_mode_call(&mut self) -> Result<(), OperationError> {
         self.budget.consume_nested_mode_call()
     }
 
-    pub(super) fn consume_replayed_inputs(&mut self, count: usize) -> io::Result<()> {
+    pub(super) fn consume_replayed_inputs(&mut self, count: usize) -> Result<(), OperationError> {
         self.budget.consume_replayed_inputs(count)
     }
 
@@ -174,24 +174,23 @@ impl Default for ExecutionBudget {
 }
 
 impl ExecutionBudget {
-    fn consume_operation(&mut self) -> io::Result<()> {
+    fn consume_operation(&mut self) -> Result<(), OperationError> {
         consume(
             &mut self.operations,
             || format!("command chain exceeded the limit of {MAX_OPERATIONS_PER_FRAME} commands"),
         )
     }
 
-    fn consume_nested_mode_call(&mut self) -> io::Result<()> {
+    fn consume_nested_mode_call(&mut self) -> Result<(), OperationError> {
         consume(
             &mut self.nested_mode_calls,
             || "nested mode calls exceeded the limit of 256 calls".to_owned(),
         )
     }
 
-    fn consume_replayed_inputs(&mut self, count: usize) -> io::Result<()> {
+    fn consume_replayed_inputs(&mut self, count: usize) -> Result<(), OperationError> {
         if count > self.replayed_inputs {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
+            return Err(OperationError::new(
                 "replayed inputs exceeded the limit of 256 inputs",
             ));
         }
@@ -200,9 +199,12 @@ impl ExecutionBudget {
     }
 }
 
-fn consume(remaining: &mut usize, message: impl FnOnce() -> String) -> io::Result<()> {
+fn consume(
+    remaining: &mut usize,
+    message: impl FnOnce() -> String,
+) -> Result<(), OperationError> {
     let Some(next) = remaining.checked_sub(1) else {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, message()));
+        return Err(OperationError::new(message()));
     };
     *remaining = next;
     Ok(())

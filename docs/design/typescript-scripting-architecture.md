@@ -424,8 +424,11 @@ Mode。
 -异常 message 和 stack；
 -超时、heap limit、转换或 operation 验证失败类别。
 
-主动 callback 错误映射为 `ModeError`，交给当前 `ExecutionFrame` 丢弃 Mode
-draft，并恢复本次输入的 Content、View、input 和 transaction checkpoint。
+主动 callback 错误映射为 `ModeError`，交给当前
+`ExecutionFrame` 丢弃 Mode draft，并恢复本次输入的 Content、View、
+input 和 transaction checkpoint。仅结构化 `ModeFault` 会跨失败边界
+提交。事件循环记录诊断后继续处理输入，但前端 I/O 和渲染
+错误仍然向上返回。
 被动 callback 错误使用 attachment fault isolation，不阻止基础文本编辑。
 
 V8 exception 不自动销毁整个 runtime。timeout 终止传播完成后，runtime 只有在

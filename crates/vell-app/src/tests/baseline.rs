@@ -62,6 +62,7 @@ fn make_native_app() -> App<ScriptedFrontend> {
         kernel: bootstrap.kernel,
         session: bootstrap.session,
         frontend: ScriptedFrontend::new(Vec::new()),
+        runtime_diagnostics: Vec::new(),
         behavior: BehaviorRecorder::default(),
     }
 }
