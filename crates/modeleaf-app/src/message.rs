@@ -1,8 +1,8 @@
 use std::io;
 
-use crate::app::mode::{ModeJobKey, ModeJobResult};
-use crate::core::transaction::TextStateId;
-use crate::protocol::ids::ContentId;
+use crate::mode::{ModeJobKey, ModeJobResult};
+use modeleaf_core::transaction::TextStateId;
+use modeleaf_protocol::ids::ContentId;
 
 pub(crate) enum AppMessage {
     SaveCompleted {

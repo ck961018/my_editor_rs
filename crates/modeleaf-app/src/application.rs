@@ -2,15 +2,15 @@ use std::io;
 use std::time::Instant;
 
 #[cfg(test)]
-use crate::app::behavior::BehaviorRecorder;
-use crate::app::bootstrap::bootstrap_editor;
-use crate::app::kernel::Kernel;
-use crate::app::mode::{Mode, ModeAttachmentError};
-use crate::app::mode_name::ModeName;
-use crate::app::session::ClientSession;
-use crate::core::buffer::Buffer;
-use crate::frontend::Frontend;
-use crate::protocol::ids::ContentId;
+use crate::behavior::BehaviorRecorder;
+use crate::bootstrap::bootstrap_editor;
+use crate::kernel::Kernel;
+use crate::mode::{Mode, ModeAttachmentError};
+use crate::mode_name::ModeName;
+use crate::session::ClientSession;
+use modeleaf_core::buffer::Buffer;
+use modeleaf_frontend::Frontend;
+use modeleaf_protocol::ids::ContentId;
 
 pub struct App<F: Frontend> {
     pub(super) kernel: Kernel,

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/modeleaf-app",
     "crates/modeleaf-core",
     "crates/modeleaf-frontend",
     "crates/modeleaf-mode",
@@ -18,15 +19,6 @@ rust-version = "1.88"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["full"] }
-tempfile = "3"
-modeleaf-protocol = { path = "crates/modeleaf-protocol" }
-modeleaf-core = { path = "crates/modeleaf-core" }
-modeleaf-frontend = { path = "crates/modeleaf-frontend" }
-modeleaf-mode = { path = "crates/modeleaf-mode" }
+modeleaf-app = { path = "crates/modeleaf-app" }
 modeleaf-plugin-v8 = { path = "crates/modeleaf-plugin-v8" }
 modeleaf-tui = { path = "crates/modeleaf-tui" }
-
-[dev-dependencies]
-modeleaf-mode = { path = "crates/modeleaf-mode", features = ["test-support"] }
-modeleaf-plugin-v8 = { path = "crates/modeleaf-plugin-v8", features = ["test-support"] }

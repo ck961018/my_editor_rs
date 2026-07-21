@@ -1,11 +1,11 @@
-use crate::app::application::App;
-use crate::core::transaction::TextStateId;
-use crate::frontend::Frontend;
-use crate::protocol::content_query::{ContentData, ContentQuery, DocumentStatus};
-use crate::protocol::ids::{ContentId, ViewId};
-use crate::protocol::revision::Revision;
-use crate::protocol::selection::Selections;
-use crate::protocol::viewport::ResolvedViewportCommand;
+use crate::application::App;
+use modeleaf_core::transaction::TextStateId;
+use modeleaf_frontend::Frontend;
+use modeleaf_protocol::content_query::{ContentData, ContentQuery, DocumentStatus};
+use modeleaf_protocol::ids::{ContentId, ViewId};
+use modeleaf_protocol::revision::Revision;
+use modeleaf_protocol::selection::Selections;
+use modeleaf_protocol::viewport::ResolvedViewportCommand;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct BehaviorSnapshot {

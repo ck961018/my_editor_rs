@@ -4,16 +4,16 @@ use super::{
     App, AppQuery, BehaviorRecorder, ChainProbeMode, ScriptedFrontend, editor_cid, make_app,
     make_script_app, view_edit, view_id,
 };
-use crate::app::bootstrap::bootstrap_editor;
-use crate::app::dispatcher::DispatchCommand;
-use crate::app::mode::{mode_state_clone_metrics, reset_mode_state_clone_metrics};
-use crate::app::mode_name::ModeName;
-use crate::core::buffer::Buffer;
-use crate::core::command::EditCommand;
-use crate::protocol::content_query::{FaceName, NamedTextDecoration, RenderQuery, RowRange};
-use crate::protocol::frontend_event::FrontendEvent;
-use crate::protocol::key_event::KeyEvent;
-use crate::protocol::selection::TextOffset;
+use crate::bootstrap::bootstrap_editor;
+use crate::dispatcher::DispatchCommand;
+use crate::mode::{mode_state_clone_metrics, reset_mode_state_clone_metrics};
+use crate::mode_name::ModeName;
+use modeleaf_core::buffer::Buffer;
+use modeleaf_core::command::EditCommand;
+use modeleaf_protocol::content_query::{FaceName, NamedTextDecoration, RenderQuery, RowRange};
+use modeleaf_protocol::frontend_event::FrontendEvent;
+use modeleaf_protocol::key_event::KeyEvent;
+use modeleaf_protocol::selection::TextOffset;
 
 const STARTUP_ITERATIONS: usize = 5;
 const INPUT_ITERATIONS: usize = 500;
@@ -23,23 +23,23 @@ struct LargePresentationMode {
     name: ModeName,
 }
 
-impl crate::app::mode::Mode for LargePresentationMode {
+impl crate::mode::Mode for LargePresentationMode {
     fn name(&self) -> &ModeName {
         &self.name
     }
 
-    fn actions(&self) -> &[crate::app::mode_name::ModeActionName] {
+    fn actions(&self) -> &[crate::mode_name::ModeActionName] {
         &[]
     }
 
-    fn adapters(&self) -> crate::app::mode::ModeAdapters {
-        crate::app::mode::ModeAdapters::buffer()
+    fn adapters(&self) -> crate::mode::ModeAdapters {
+        crate::mode::ModeAdapters::buffer()
     }
 
     fn content_decorations(
         &self,
-        _state: &dyn crate::app::mode::ModeState,
-        _context: &crate::app::mode::ModeContentContext<'_>,
+        _state: &dyn crate::mode::ModeState,
+        _context: &crate::mode::ModeContentContext<'_>,
         rows: RowRange,
     ) -> Vec<NamedTextDecoration> {
         (rows.start..rows.end)
@@ -155,7 +155,7 @@ editor.modes.define({
     let view = view_id(&presentation, presentation.session.focused());
     presentation
         .execute_command(DispatchCommand::ContentWithView {
-            command: crate::app::command::ContentCommand::Edit(EditCommand::InsertText(
+            command: crate::command::ContentCommand::Edit(EditCommand::InsertText(
                 "x\n".repeat(10_000),
             )),
             view,

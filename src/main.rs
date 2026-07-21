@@ -1,9 +1,5 @@
-mod app;
-
-use modeleaf_core as core;
-use modeleaf_frontend as frontend;
+use modeleaf_app::App;
 use modeleaf_plugin_v8::load_user_modes;
-use modeleaf_protocol as protocol;
 use modeleaf_tui::TuiFrontend;
 use modeleaf_tui::terminal::lifecycle::TerminalGuard;
 use modeleaf_tui::terminal::output::Output;
@@ -11,7 +7,6 @@ use modeleaf_tui::terminal::size as term_size;
 
 use std::io;
 
-use app::App;
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();

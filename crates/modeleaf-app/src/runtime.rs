@@ -3,30 +3,30 @@ use std::future;
 use std::io;
 use std::time::Instant;
 
-use crate::app::action::{TransactionIntent, ViewAction};
-use crate::app::application::App;
+use crate::action::{TransactionIntent, ViewAction};
+use crate::application::App;
 #[cfg(test)]
-use crate::app::behavior::EffectBehavior;
-use crate::app::command::AppCommand;
-use crate::app::dispatcher::{DispatchCommand, DispatchInput, DispatchOutcome};
-use crate::app::execution::{ExecutionFrame, InputCheckpoint, PreparedEffect, StateRollback};
-use crate::app::mode::{CursorDomain, InputFlow};
-use crate::app::operation::{
+use crate::behavior::EffectBehavior;
+use crate::command::AppCommand;
+use crate::dispatcher::{DispatchCommand, DispatchInput, DispatchOutcome};
+use crate::execution::{ExecutionFrame, InputCheckpoint, PreparedEffect, StateRollback};
+use crate::mode::{CursorDomain, InputFlow};
+use crate::operation::{
     AppOperation, ContentOperation, ContentTarget, ModeFlowPropagation, ModeTarget, OperationError,
     OperationOrigin, OperationOriginScope, OperationRequest, QueuedOperation, ResolvedModeScope,
     ResolvedOperation, ViewEditPlan, ViewOperation, ViewPrecondition, ViewTarget,
     adapt_dispatch_command, prepend_operations,
 };
-use crate::app::query::AppQuery;
-use crate::app::transaction::{TransactionData, TransactionRecord, ViewTransactionData};
-use crate::core::command::EditCommand;
-use crate::core::content::{ContentActionResult, ContentEffect, ContentInput, ContentResult};
-use crate::core::transaction::TransactionDirection;
-use crate::frontend::Frontend;
-use crate::protocol::content_query::{ContentData, ContentQuery, RenderQuery};
-use crate::protocol::frontend_event::FrontendEvent;
-use crate::protocol::ids::{ContentId, ViewId};
-use crate::protocol::viewport::{
+use crate::query::AppQuery;
+use crate::transaction::{TransactionData, TransactionRecord, ViewTransactionData};
+use modeleaf_core::command::EditCommand;
+use modeleaf_core::content::{ContentActionResult, ContentEffect, ContentInput, ContentResult};
+use modeleaf_core::transaction::TransactionDirection;
+use modeleaf_frontend::Frontend;
+use modeleaf_protocol::content_query::{ContentData, ContentQuery, RenderQuery};
+use modeleaf_protocol::frontend_event::FrontendEvent;
+use modeleaf_protocol::ids::{ContentId, ViewId};
+use modeleaf_protocol::viewport::{
     ResolvedViewportCommand, ViewportCommand, ViewportCursorBehavior, ViewportMoveDirection,
 };
 
@@ -794,7 +794,7 @@ impl<F: Frontend> App<F> {
                     .resolve_mode(&invocation.command.mode)
                     .expect("validated mode exists");
                 let scope = match command_scope {
-                    crate::app::mode::ModeActionScope::Content => {
+                    crate::mode::ModeActionScope::Content => {
                         let content =
                             self.resolve_content_target(ContentTarget::Current, origin)?;
                         let source_view = origin.view;
@@ -806,7 +806,7 @@ impl<F: Frontend> App<F> {
                             source_view,
                         }
                     }
-                    crate::app::mode::ModeActionScope::View => {
+                    crate::mode::ModeActionScope::View => {
                         let (view, content) =
                             self.resolve_view_target(ViewTarget::Current, origin)?;
                         ResolvedModeScope::View { view, content }
@@ -1055,7 +1055,7 @@ impl<F: Frontend> App<F> {
 
     fn execute_content_action(
         &mut self,
-        action: crate::core::action::ContentAction,
+        action: modeleaf_core::action::ContentAction,
         content: ContentId,
         frame: &mut ExecutionFrame,
     ) -> io::Result<()> {
@@ -1201,7 +1201,7 @@ impl<F: Frontend> App<F> {
     fn notify_mode_content_changed(
         &mut self,
         content: ContentId,
-        change: &crate::core::content::ContentChange,
+        change: &modeleaf_core::content::ContentChange,
         frame: &mut ExecutionFrame,
     ) {
         let (contents, mode_contents) = self.kernel.mode_runtime_parts();
@@ -1250,7 +1250,7 @@ impl<F: Frontend> App<F> {
 }
 
 fn invalid_content_view_state(
-    error: crate::core::content_view_state::ContentViewStateError,
+    error: modeleaf_core::content_view_state::ContentViewStateError,
 ) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }

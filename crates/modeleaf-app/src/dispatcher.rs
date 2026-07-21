@@ -1,21 +1,21 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use crate::app::command::{AppCommand, Command, ContentCommand, ModeCommand, ModeInputCommand};
-use crate::app::command_resolver::{focused_view_id, resolve_command};
-use crate::app::mode::{ModeContentStore, ModeDraftJournal, ModeViewContext, ModeViewStore};
-use crate::app::view::View;
-use crate::core::content_store::ContentStore;
-use crate::core::input::{
+use crate::command::{AppCommand, Command, ContentCommand, ModeCommand, ModeInputCommand};
+use crate::command_resolver::{focused_view_id, resolve_command};
+use crate::mode::{ModeContentStore, ModeDraftJournal, ModeViewContext, ModeViewStore};
+use crate::view::View;
+use modeleaf_core::content_store::ContentStore;
+use modeleaf_core::input::{
     AwaitingSource, InputCoordinator, InputDecision, InputStatus, KeySequenceConfig, KeymapLayer,
     PendingSequence, continuations, longest_complete, match_sequence,
 };
-use crate::core::keymap::Keymap;
-use crate::protocol::ids::{ContentId, SpaceId, ViewId};
-use crate::protocol::key_event::KeyEvent;
-use crate::protocol::revision::Revision;
-use crate::protocol::scene::Scene;
-use crate::protocol::viewport::ViewportCommand;
+use modeleaf_core::keymap::Keymap;
+use modeleaf_protocol::ids::{ContentId, SpaceId, ViewId};
+use modeleaf_protocol::key_event::KeyEvent;
+use modeleaf_protocol::revision::Revision;
+use modeleaf_protocol::scene::Scene;
+use modeleaf_protocol::viewport::ViewportCommand;
 
 const DEFAULT_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(1_000);
 
@@ -66,11 +66,11 @@ pub(crate) enum DispatchCommand {
         )
     )]
     ModeContentOperations {
-        operations: Vec<crate::app::operation::OperationRequest>,
+        operations: Vec<crate::operation::OperationRequest>,
         content: ContentId,
     },
     ModeOperations {
-        operations: Vec<crate::app::operation::OperationRequest>,
+        operations: Vec<crate::operation::OperationRequest>,
         view: ViewId,
         content: ContentId,
     },
@@ -355,7 +355,7 @@ impl Dispatcher {
         views: &HashMap<ViewId, View>,
         modes: &mut ModeViewStore,
         content_modes: &mut ModeContentStore,
-        contents: &crate::core::content_store::ContentStore,
+        contents: &modeleaf_core::content_store::ContentStore,
         drafts: &mut ModeDraftJournal,
     ) -> DispatchOutcome {
         self.view_mode_revisions.clear();
@@ -803,7 +803,7 @@ impl Dispatcher {
 }
 
 fn emit_resolved(
-    resolved: crate::core::input::ResolvedAction<Command, CommandSource>,
+    resolved: modeleaf_core::input::ResolvedAction<Command, CommandSource>,
     key: KeyEvent,
     focused_view: ViewId,
     views: &HashMap<ViewId, View>,
@@ -895,17 +895,17 @@ fn mode_continuation(source: CommandSource, key: KeyEvent) -> Option<DispatchInp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::command_resolver::default_global_keymap;
-    use crate::app::mode::{Mode, ModeContentStore, ModeRegistry, ModeViewStore};
-    use crate::app::mode_name::{ModeActionName, ModeName};
-    use crate::app::scene_model::{SceneBuilder, build_editor_scene};
-    use crate::core::buffer::Buffer;
-    use crate::core::command::EditCommand;
-    use crate::core::content::Content;
-    use crate::core::content_store::ContentStore;
-    use crate::core::status_bar::StatusBar;
-    use crate::protocol::ids::ContentId;
-    use crate::protocol::viewport::{
+    use crate::command_resolver::default_global_keymap;
+    use crate::mode::{Mode, ModeContentStore, ModeRegistry, ModeViewStore};
+    use crate::mode_name::{ModeActionName, ModeName};
+    use crate::scene_model::{SceneBuilder, build_editor_scene};
+    use modeleaf_core::buffer::Buffer;
+    use modeleaf_core::command::EditCommand;
+    use modeleaf_core::content::Content;
+    use modeleaf_core::content_store::ContentStore;
+    use modeleaf_core::status_bar::StatusBar;
+    use modeleaf_protocol::ids::ContentId;
+    use modeleaf_protocol::viewport::{
         ViewportCursorBehavior, ViewportMoveAmount, ViewportMoveDirection,
     };
 
@@ -945,14 +945,14 @@ mod tests {
             &self.actions
         }
 
-        fn adapters(&self) -> crate::app::mode::ModeAdapters {
-            crate::app::mode::ModeAdapters::buffer()
+        fn adapters(&self) -> crate::mode::ModeAdapters {
+            crate::mode::ModeAdapters::buffer()
         }
 
         fn input_keymap<'a>(
             &'a self,
-            _content_state: &dyn crate::app::mode::ModeState,
-            _view_state: &dyn crate::app::mode::ModeState,
+            _content_state: &dyn crate::mode::ModeState,
+            _view_state: &dyn crate::mode::ModeState,
             _context: &ModeViewContext<'_>,
         ) -> &'a Keymap<Command> {
             &self.keymap

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use crate::core::content::{ContentTransaction, ContentTransactionError};
-use crate::protocol::ids::{ContentId, ViewId};
-use crate::protocol::selection::Selections;
+use modeleaf_core::content::{ContentTransaction, ContentTransactionError};
+use modeleaf_protocol::ids::{ContentId, ViewId};
+use modeleaf_protocol::selection::Selections;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransactionRecord {
@@ -268,10 +268,10 @@ impl TransactionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::buffer::BufferTransactionData;
-    use crate::core::content::ContentTransaction;
-    use crate::core::transaction::{TextChangeSet, TextEdit, TextStateId, TextTransactionData};
-    use crate::protocol::selection::{Selection, TextOffset};
+    use modeleaf_core::buffer::BufferTransactionData;
+    use modeleaf_core::content::ContentTransaction;
+    use modeleaf_core::transaction::{TextChangeSet, TextEdit, TextStateId, TextTransactionData};
+    use modeleaf_protocol::selection::{Selection, TextOffset};
 
     fn selections(offset: usize) -> Selections {
         Selections::single(Selection::collapsed(TextOffset { char_index: offset }))

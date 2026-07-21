@@ -1,38 +1,36 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use crate::app::action::ViewAction;
-use crate::app::command::ModeCommand;
-use crate::app::command_resolver::default_global_keymap;
-use crate::app::dispatcher::{DispatchInput, DispatchOutcome, Dispatcher, DispatcherInputSnapshot};
-use crate::app::layout::{
+use crate::action::ViewAction;
+use crate::command::ModeCommand;
+use crate::command_resolver::default_global_keymap;
+use crate::dispatcher::{DispatchInput, DispatchOutcome, Dispatcher, DispatcherInputSnapshot};
+use crate::layout::{
     LayoutError, NewView, create_view, focusable_view_count, resolve_focus, scene_views,
     view_for_space, view_space_focusable,
 };
-use crate::app::mode::{
+use crate::mode::{
     CursorDomain, FaceRegistry, ModeAttachmentError, ModeContentContext, ModeContentStore,
     ModeDraftJournal, ModeError, ModeRegistry, ModeResult, ModeViewContext, ModeViewStore,
 };
-use crate::app::presentation::PresentationLayerStore;
-use crate::app::scene_model::{
-    CloseResult, SceneBuilder, SceneError, SplitResult, build_editor_scene,
-};
-use crate::app::view::View;
-use crate::core::content::ContentChange;
-use crate::core::content_store::ContentStore;
-use crate::core::content_view_state::ContentViewStateError;
-use crate::protocol::content_query::RowRange;
-use crate::protocol::ids::{ContentId, SpaceId, ViewId};
-use crate::protocol::revision::Revision;
-use crate::protocol::scene::Scene;
-use crate::protocol::space::{Sizing, SplitDirection};
+use crate::presentation::PresentationLayerStore;
+use crate::scene_model::{CloseResult, SceneBuilder, SceneError, SplitResult, build_editor_scene};
+use crate::view::View;
+use modeleaf_core::content::ContentChange;
+use modeleaf_core::content_store::ContentStore;
+use modeleaf_core::content_view_state::ContentViewStateError;
+use modeleaf_protocol::content_query::RowRange;
+use modeleaf_protocol::ids::{ContentId, SpaceId, ViewId};
+use modeleaf_protocol::revision::Revision;
+use modeleaf_protocol::scene::Scene;
+use modeleaf_protocol::space::{Sizing, SplitDirection};
 
 pub(super) struct ClientSession {
     scene: Scene,
     scene_builder: SceneBuilder,
     scene_revision: Revision,
     views: HashMap<ViewId, View>,
-    mode_profiles: HashMap<ContentId, Vec<crate::app::mode_name::ModeName>>,
+    mode_profiles: HashMap<ContentId, Vec<crate::mode_name::ModeName>>,
     view_modes: ModeViewStore,
     faces: FaceRegistry,
     presentation: PresentationLayerStore,
@@ -44,7 +42,7 @@ pub(super) struct ClientSession {
 pub(super) struct InitialView {
     pub view: ViewId,
     pub content: ContentId,
-    pub modes: Vec<crate::app::mode_name::ModeName>,
+    pub modes: Vec<crate::mode_name::ModeName>,
 }
 
 pub(super) struct EditorSessionInit {
@@ -179,7 +177,7 @@ impl ClientSession {
     pub(super) fn mode_chain_for_new_view(
         &self,
         content: ContentId,
-    ) -> Vec<crate::app::mode_name::ModeName> {
+    ) -> Vec<crate::mode_name::ModeName> {
         self.mode_profiles
             .get(&content)
             .cloned()
@@ -337,7 +335,7 @@ impl ClientSession {
         drafts: &ModeDraftJournal,
     ) -> CursorDomain {
         let view_data = self.views.get(&view).expect("target view exists");
-        let Ok(context) = crate::app::mode::ModeViewContext::new(
+        let Ok(context) = crate::mode::ModeViewContext::new(
             view,
             view_data.content(),
             view_data.state(),
@@ -372,8 +370,8 @@ impl ClientSession {
     ) -> HashMap<
         ViewId,
         (
-            crate::protocol::selection::Selections,
-            crate::protocol::revision::Revision,
+            modeleaf_protocol::selection::Selections,
+            modeleaf_protocol::revision::Revision,
         ),
     > {
         self.views
@@ -392,8 +390,8 @@ impl ClientSession {
         snapshot: HashMap<
             ViewId,
             (
-                crate::protocol::selection::Selections,
-                crate::protocol::revision::Revision,
+                modeleaf_protocol::selection::Selections,
+                modeleaf_protocol::revision::Revision,
             ),
         >,
     ) {
@@ -414,7 +412,7 @@ impl ClientSession {
         drafts: &mut ModeDraftJournal,
     ) -> Result<ModeResult, ModeError> {
         let view_data = self.views.get(&view).expect("target view exists");
-        let context = crate::app::mode::ModeViewContext::new(
+        let context = crate::mode::ModeViewContext::new(
             view,
             view_data.content(),
             view_data.state(),
@@ -436,12 +434,12 @@ impl ClientSession {
         view: ViewId,
         registry: &ModeRegistry,
         contents: &ContentStore,
-        input: &crate::app::command::ModeInputCommand,
+        input: &crate::command::ModeInputCommand,
         mode_contents: &mut ModeContentStore,
         drafts: &mut ModeDraftJournal,
     ) -> Result<ModeResult, ModeError> {
         let view_data = self.views.get(&view).expect("target view exists");
-        let context = crate::app::mode::ModeViewContext::new(
+        let context = crate::mode::ModeViewContext::new(
             view,
             view_data.content(),
             view_data.state(),
@@ -531,7 +529,7 @@ impl ClientSession {
         };
         let view = &self.views[&view_id];
         let Ok(context) =
-            crate::app::mode::ModeViewContext::new(view_id, view.content(), view.state(), contents)
+            crate::mode::ModeViewContext::new(view_id, view.content(), view.state(), contents)
         else {
             return;
         };
@@ -598,7 +596,7 @@ impl ClientSession {
     pub(super) fn attach_mode_to_content_views(
         &mut self,
         content: ContentId,
-        name: &crate::app::mode_name::ModeName,
+        name: &crate::mode_name::ModeName,
         registry: &ModeRegistry,
         mode_contents: &mut ModeContentStore,
         contents: &ContentStore,

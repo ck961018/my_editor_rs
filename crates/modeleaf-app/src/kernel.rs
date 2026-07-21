@@ -4,25 +4,25 @@ use std::path::Path;
 
 use tokio::sync::mpsc;
 
-use crate::app::command::ModeCommand;
-use crate::app::message::AppMessage;
-use crate::app::mode::{
+use crate::command::ModeCommand;
+use crate::message::AppMessage;
+use crate::mode::{
     ModeContentStore, ModeDraftJournal, ModeError, ModeId, ModeJobKey, ModeJobRequest,
     ModeJobResult, ModeJobRunner, ModeRegistry, ModeResult,
 };
-use crate::app::tasks::AppTasks;
-use crate::app::transaction::{
+use crate::tasks::AppTasks;
+use crate::transaction::{
     TransactionManager, TransactionManagerError, TransactionRecord, TransactionSnapshot,
 };
-use crate::core::action::{ContentAction, ContentEditPlan};
-use crate::core::content::{
+use modeleaf_core::action::{ContentAction, ContentEditPlan};
+use modeleaf_core::content::{
     ContentActionResult, ContentChange, ContentEvent, ContentInput, ContentResult,
     ContentTransactionError, SaveSnapshot,
 };
-use crate::core::content_store::{ContentSnapshot, ContentStore};
-use crate::core::transaction::{TextStateId, TransactionDirection};
-use crate::protocol::ids::{ContentId, ViewId};
-use crate::protocol::selection::Selections;
+use modeleaf_core::content_store::{ContentSnapshot, ContentStore};
+use modeleaf_core::transaction::{TextStateId, TransactionDirection};
+use modeleaf_protocol::ids::{ContentId, ViewId};
+use modeleaf_protocol::selection::Selections;
 
 pub(super) struct Kernel {
     contents: ContentStore,
@@ -129,7 +129,7 @@ impl Kernel {
     pub(super) fn plan_edit(
         &self,
         content: ContentId,
-        command: crate::core::command::EditCommand,
+        command: modeleaf_core::command::EditCommand,
         selections: &Selections,
     ) -> Option<ContentEditPlan> {
         self.contents.plan_edit(content, command, selections)
@@ -519,21 +519,21 @@ async fn atomic_write(snapshot: SaveSnapshot) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::mode_name::ModeName;
+    use crate::mode_name::ModeName;
 
     struct TestMode(ModeName);
 
-    impl crate::app::mode::Mode for TestMode {
+    impl crate::mode::Mode for TestMode {
         fn name(&self) -> &ModeName {
             &self.0
         }
 
-        fn actions(&self) -> &[crate::app::mode_name::ModeActionName] {
+        fn actions(&self) -> &[crate::mode_name::ModeActionName] {
             &[]
         }
 
-        fn adapters(&self) -> crate::app::mode::ModeAdapters {
-            crate::app::mode::ModeAdapters::buffer()
+        fn adapters(&self) -> crate::mode::ModeAdapters {
+            crate::mode::ModeAdapters::buffer()
         }
     }
 

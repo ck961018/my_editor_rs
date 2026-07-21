@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
-use crate::app::command::{AppCommand, Command, ContentCommandContext};
-use crate::app::dispatcher::{CommandSource, DispatchCommand};
-use crate::app::view::View;
-use crate::core::keymap::Keymap;
-use crate::protocol::ids::{SpaceId, ViewId};
-use crate::protocol::key_event::KeyEvent;
-use crate::protocol::scene::Scene;
-use crate::protocol::space::SpaceKind;
+use crate::command::{AppCommand, Command, ContentCommandContext};
+use crate::dispatcher::{CommandSource, DispatchCommand};
+use crate::view::View;
+use modeleaf_core::keymap::Keymap;
+use modeleaf_protocol::ids::{SpaceId, ViewId};
+use modeleaf_protocol::key_event::KeyEvent;
+use modeleaf_protocol::scene::Scene;
+use modeleaf_protocol::space::SpaceKind;
 
 pub(super) fn resolve_command(
     command: Command,
@@ -72,7 +72,7 @@ pub(super) fn default_global_keymap() -> Keymap<Command> {
     keymap.bind(KeyEvent::ctrl('q'), Command::App(AppCommand::Quit));
     keymap.bind(
         KeyEvent::ctrl('s'),
-        Command::Content(crate::app::command::ContentCommand::Save),
+        Command::Content(crate::command::ContentCommand::Save),
     );
     keymap
 }

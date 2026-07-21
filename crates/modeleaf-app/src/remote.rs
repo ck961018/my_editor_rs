@@ -1,7 +1,7 @@
 #![allow(dead_code)] // The local adapter is exercised by tests until a remote frontend is wired.
 
-use crate::protocol::content_query::{ContentData, RenderQuery};
-use crate::protocol::remote::{
+use modeleaf_protocol::content_query::{ContentData, RenderQuery};
+use modeleaf_protocol::remote::{
     ProtocolError, ProtocolErrorCode, Request, RequestData, Response, ResponseData,
 };
 
@@ -58,20 +58,20 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::app::view::View;
-    use crate::core::buffer::Buffer;
-    use crate::core::content::Content;
-    use crate::core::content_store::ContentStore;
-    use crate::protocol::content_query::{ContentQuery, RowRange, ViewPresentation};
-    use crate::protocol::ids::{ContentId, ViewId};
-    use crate::protocol::remote::RequestId;
-    use crate::protocol::revision::Revision;
+    use crate::view::View;
+    use modeleaf_core::buffer::Buffer;
+    use modeleaf_core::content::Content;
+    use modeleaf_core::content_store::ContentStore;
+    use modeleaf_protocol::content_query::{ContentQuery, RowRange, ViewPresentation};
+    use modeleaf_protocol::ids::{ContentId, ViewId};
+    use modeleaf_protocol::remote::RequestId;
+    use modeleaf_protocol::revision::Revision;
 
     struct Fixture {
         contents: ContentStore,
         views: HashMap<ViewId, View>,
-        presentation: crate::app::presentation::PresentationLayerStore,
-        faces: crate::app::mode::FaceRegistry,
+        presentation: crate::presentation::PresentationLayerStore,
+        faces: crate::mode::FaceRegistry,
     }
 
     impl Fixture {
@@ -85,8 +85,8 @@ mod tests {
             Self {
                 contents,
                 views: HashMap::from([(ViewId(0), view)]),
-                presentation: crate::app::presentation::PresentationLayerStore::default(),
-                faces: crate::app::mode::FaceRegistry::default(),
+                presentation: crate::presentation::PresentationLayerStore::default(),
+                faces: crate::mode::FaceRegistry::default(),
             }
         }
 
@@ -117,7 +117,7 @@ mod tests {
             Ok(ResponseData::View {
                 view: ViewId(0),
                 revision: Revision(0),
-                data: crate::protocol::content_query::ViewData {
+                data: modeleaf_protocol::content_query::ViewData {
                     presentation: ViewPresentation::Text(_),
                     ..
                 },

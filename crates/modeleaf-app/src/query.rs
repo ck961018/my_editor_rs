@@ -1,16 +1,16 @@
 use std::collections::HashMap;
 
-use crate::app::mode::FaceRegistry;
-use crate::app::presentation::PresentationLayerStore;
-use crate::app::view::View;
-use crate::core::content::ContentKind;
-use crate::core::content_store::ContentStore;
-use crate::core::content_view_state::ContentViewState;
-use crate::protocol::content_query::{
+use crate::mode::FaceRegistry;
+use crate::presentation::PresentationLayerStore;
+use crate::view::View;
+use modeleaf_core::content::ContentKind;
+use modeleaf_core::content_store::ContentStore;
+use modeleaf_core::content_view_state::ContentViewState;
+use modeleaf_protocol::content_query::{
     ContentData, ContentQuery, CursorStyle, RenderQuery, RenderQueryError, RowRange,
     SelectionShape, TextDecoration, TextPresentation, ViewData, ViewPresentation,
 };
-use crate::protocol::ids::{ContentId, ViewId};
+use modeleaf_protocol::ids::{ContentId, ViewId};
 
 pub(super) struct AppQuery<'a> {
     pub(super) contents: &'a ContentStore,

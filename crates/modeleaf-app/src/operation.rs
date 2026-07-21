@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
 use std::fmt;
 
-use crate::app::action::TransactionIntent;
-use crate::app::command::{ContentCommand, ModeInputCommand, TransactionCommand};
-use crate::app::dispatcher::DispatchCommand;
-use crate::app::mode::ModeId;
-use crate::protocol::ids::{ContentId, ViewId};
+use crate::action::TransactionIntent;
+use crate::command::{ContentCommand, ModeInputCommand, TransactionCommand};
+use crate::dispatcher::DispatchCommand;
+use crate::mode::ModeId;
+use modeleaf_protocol::ids::{ContentId, ViewId};
 
 pub(crate) use modeleaf_mode::operation::*;
 
@@ -253,7 +253,7 @@ fn transaction_intent(command: TransactionCommand) -> TransactionIntent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::command::EditCommand;
+    use modeleaf_core::command::EditCommand;
 
     #[test]
     fn sequence_adapter_preserves_order_and_one_origin() {

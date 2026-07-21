@@ -1,11 +1,11 @@
-use crate::app::application::App;
-use crate::app::scene_model::{CloseResult, SceneError, SplitResult};
-use crate::app::view::View;
-use crate::core::content_store::ContentStore;
-use crate::frontend::Frontend;
-use crate::protocol::ids::{ContentId, SpaceId, ViewId};
-use crate::protocol::scene::Scene;
-use crate::protocol::space::{Sizing, SpaceKind, SplitDirection};
+use crate::application::App;
+use crate::scene_model::{CloseResult, SceneError, SplitResult};
+use crate::view::View;
+use modeleaf_core::content_store::ContentStore;
+use modeleaf_frontend::Frontend;
+use modeleaf_protocol::ids::{ContentId, SpaceId, ViewId};
+use modeleaf_protocol::scene::Scene;
+use modeleaf_protocol::space::{Sizing, SpaceKind, SplitDirection};
 
 impl<F: Frontend> App<F> {
     #[cfg_attr(
@@ -140,7 +140,7 @@ impl From<SceneError> for LayoutError {
 pub(super) fn create_view(
     content: ContentId,
     contents: &ContentStore,
-    mode_names: &[crate::app::mode_name::ModeName],
+    mode_names: &[crate::mode_name::ModeName],
 ) -> Option<NewView> {
     if !contents.contains(content) {
         return None;
@@ -156,7 +156,7 @@ pub(super) fn create_view(
 
 pub(super) struct NewView {
     pub(super) view: View,
-    pub(super) mode_names: Vec<crate::app::mode_name::ModeName>,
+    pub(super) mode_names: Vec<crate::mode_name::ModeName>,
 }
 
 fn collect_view_spaces(scene: &Scene, sid: SpaceId, out: &mut Vec<(SpaceId, ViewId)>) {

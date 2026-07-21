@@ -1,15 +1,15 @@
 use std::io;
 
-use crate::app::kernel::Kernel;
-use crate::app::mode::{Mode, ModeRegistry};
+use crate::kernel::Kernel;
+use crate::mode::{Mode, ModeRegistry};
 #[cfg(test)]
-use crate::app::mode_name::ModeName;
-use crate::app::session::{ClientSession, EditorSessionInit, InitialView};
-use crate::core::buffer::Buffer;
-use crate::core::content::Content;
-use crate::core::content_store::ContentStore;
-use crate::core::status_bar::StatusBar;
-use crate::protocol::ids::{ContentId, ViewId};
+use crate::mode_name::ModeName;
+use crate::session::{ClientSession, EditorSessionInit, InitialView};
+use modeleaf_core::buffer::Buffer;
+use modeleaf_core::content::Content;
+use modeleaf_core::content_store::ContentStore;
+use modeleaf_core::status_bar::StatusBar;
+use modeleaf_protocol::ids::{ContentId, ViewId};
 
 pub(super) struct EditorBootstrap {
     pub kernel: Kernel,
@@ -86,9 +86,12 @@ pub(super) fn bootstrap_editor(
         }
         let id = modes.register_boxed(mode).map_err(io::Error::other)?;
         for (kind, chain) in [
-            (crate::core::content::ContentKind::Buffer, &mut editor_modes),
             (
-                crate::core::content::ContentKind::StatusBar,
+                modeleaf_core::content::ContentKind::Buffer,
+                &mut editor_modes,
+            ),
+            (
+                modeleaf_core::content::ContentKind::StatusBar,
                 &mut status_modes,
             ),
         ] {
@@ -138,7 +141,7 @@ pub(super) fn bootstrap_editor(
 pub(super) fn create_editor_session(
     contents: &ContentStore,
     modes: &ModeRegistry,
-    mode_contents: &mut crate::app::mode::ModeContentStore,
+    mode_contents: &mut crate::mode::ModeContentStore,
     width: usize,
     height: usize,
     editor_content: ContentId,
@@ -186,7 +189,7 @@ mod tests {
             .insert(status, Content::StatusBar(StatusBar::new(editor)))
             .unwrap();
         let modes = ModeRegistry::new();
-        let mut mode_contents = crate::app::mode::ModeContentStore::default();
+        let mut mode_contents = crate::mode::ModeContentStore::default();
 
         let session = create_editor_session(
             &contents,

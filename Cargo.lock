@@ -1106,12 +1106,21 @@ dependencies = [
 name = "modeleaf"
 version = "0.1.0"
 dependencies = [
+ "modeleaf-app",
+ "modeleaf-plugin-v8",
+ "modeleaf-tui",
+ "tokio",
+]
+
+[[package]]
+name = "modeleaf-app"
+version = "0.1.0"
+dependencies = [
  "modeleaf-core",
  "modeleaf-frontend",
  "modeleaf-mode",
  "modeleaf-plugin-v8",
  "modeleaf-protocol",
- "modeleaf-tui",
  "tempfile",
  "tokio",
  "tokio-util",

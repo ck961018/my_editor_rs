@@ -1,16 +1,16 @@
 use std::collections::HashMap;
 use std::io;
 
-use crate::app::dispatcher::DispatcherInputSnapshot;
-use crate::app::mode::ModeDraftJournal;
-use crate::app::transaction::TransactionRecord;
-use crate::core::content::SaveSnapshot;
-use crate::core::content_store::ContentSnapshot;
-use crate::core::transaction::TransactionDirection;
-use crate::protocol::ids::{ContentId, ViewId};
-use crate::protocol::revision::Revision;
-use crate::protocol::selection::Selections;
-use crate::protocol::viewport::ResolvedViewportCommand;
+use crate::dispatcher::DispatcherInputSnapshot;
+use crate::mode::ModeDraftJournal;
+use crate::transaction::TransactionRecord;
+use modeleaf_core::content::SaveSnapshot;
+use modeleaf_core::content_store::ContentSnapshot;
+use modeleaf_core::transaction::TransactionDirection;
+use modeleaf_protocol::ids::{ContentId, ViewId};
+use modeleaf_protocol::revision::Revision;
+use modeleaf_protocol::selection::Selections;
+use modeleaf_protocol::viewport::ResolvedViewportCommand;
 
 const DEFAULT_OPERATION_BUDGET: usize = 256;
 const DEFAULT_NESTED_MODE_BUDGET: usize = 256;

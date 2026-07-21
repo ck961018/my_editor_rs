@@ -14,45 +14,45 @@ use super::layout::{LayoutError, NewView, resolve_focus, view_for_space};
 use super::message::AppMessage;
 use super::query::AppQuery;
 use super::view::View;
-use crate::app::action::{TransactionIntent, ViewAction};
-use crate::app::command::{
+use crate::action::{TransactionIntent, ViewAction};
+use crate::command::{
     AppCommand, Command, ContentCommand, ModeCommand, ModeValue, TransactionCommand,
 };
-use crate::app::mode::{
+use crate::mode::{
     Mode, ModeActionScope, ModeAdapters, ModeAttachmentError, ModeContentContext, ModeContextError,
     ModeError, ModeResult, ModeState, ModeViewContext, ModeViewInstance, ModeViewPolicy,
 };
-use crate::app::mode_name::{ModeActionName, ModeName};
-use crate::app::operation::{
+use crate::mode_name::{ModeActionName, ModeName};
+use crate::operation::{
     AppOperation, ContentOperation, ContentTarget, ModeFlowPropagation, ModeInvocation, ModeTarget,
     OperationRequest, ViewEditPlan, ViewOperation, ViewPrecondition, ViewTarget,
 };
-use crate::core::action::ContentAction;
-use crate::core::buffer::Buffer;
-use crate::core::command::EditCommand;
-use crate::core::content::{Content, ContentChange, ContentKind};
-use crate::core::content_view_state::ContentViewState;
-use crate::core::keymap::Keymap;
-use crate::core::transaction::{TextChangeSet, TextEdit};
-use crate::frontend::Frontend;
-use crate::protocol::content_query::{
+use modeleaf_core::action::ContentAction;
+use modeleaf_core::buffer::Buffer;
+use modeleaf_core::command::EditCommand;
+use modeleaf_core::content::{Content, ContentChange, ContentKind};
+use modeleaf_core::content_view_state::ContentViewState;
+use modeleaf_core::keymap::Keymap;
+use modeleaf_core::transaction::{TextChangeSet, TextEdit};
+use modeleaf_frontend::Frontend;
+use modeleaf_plugin_v8::ScriptHost;
+use modeleaf_protocol::content_query::{
     Color, ContentData, ContentQuery, CursorStyle, DocumentStatus, Face, FaceName,
     NamedTextDecoration, RenderQuery, RenderQueryError, RowRange, TextPresentation, ViewData,
     ViewPresentation,
 };
-use crate::protocol::frontend_event::{FrontendEvent, ResizeEvent};
-use crate::protocol::ids::{ContentId, SpaceId, ViewId};
-use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
-use crate::protocol::revision::Revision;
-use crate::protocol::scene::Scene;
-use crate::protocol::selection::{Selection, Selections, TextOffset, TextPoint};
-use crate::protocol::space::{Sizing, SpaceKind, SplitDirection};
-use crate::protocol::status::StatusMessage;
-use crate::protocol::viewport::{
+use modeleaf_protocol::frontend_event::{FrontendEvent, ResizeEvent};
+use modeleaf_protocol::ids::{ContentId, SpaceId, ViewId};
+use modeleaf_protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
+use modeleaf_protocol::revision::Revision;
+use modeleaf_protocol::scene::Scene;
+use modeleaf_protocol::selection::{Selection, Selections, TextOffset, TextPoint};
+use modeleaf_protocol::space::{Sizing, SpaceKind, SplitDirection};
+use modeleaf_protocol::status::StatusMessage;
+use modeleaf_protocol::viewport::{
     ResolvedViewportCommand, ViewportCommand, ViewportCursorBehavior, ViewportMoveAmount,
     ViewportMoveDirection,
 };
-use modeleaf_plugin_v8::ScriptHost;
 use std::collections::VecDeque;
 
 mod baseline;
@@ -637,16 +637,16 @@ impl Mode for SharedContentMode {
         _content_state: &dyn ModeState,
         view_state: &dyn ModeState,
         _context: &ModeViewContext<'_>,
-    ) -> crate::core::input::InputStatus {
+    ) -> modeleaf_core::input::InputStatus {
         if view_state
             .as_any()
             .downcast_ref::<SharedViewState>()
             .expect("shared mode owns its view state")
             .awaiting
         {
-            crate::core::input::InputStatus::Awaiting(crate::core::input::TimeoutPolicy::Never)
+            modeleaf_core::input::InputStatus::Awaiting(modeleaf_core::input::TimeoutPolicy::Never)
         } else {
-            crate::core::input::InputStatus::Ready
+            modeleaf_core::input::InputStatus::Ready
         }
     }
 
@@ -656,16 +656,16 @@ impl Mode for SharedContentMode {
         view_state: &mut dyn ModeState,
         _context: &ModeViewContext<'_>,
         key: KeyEvent,
-    ) -> crate::core::input::InputDecision<Command> {
+    ) -> modeleaf_core::input::InputDecision<Command> {
         if key != KeyEvent::char('x') {
-            return crate::core::input::InputDecision::Pass;
+            return modeleaf_core::input::InputDecision::Pass;
         }
         view_state
             .as_any_mut()
             .downcast_mut::<SharedViewState>()
             .expect("shared mode owns its view state")
             .awaiting = true;
-        crate::core::input::InputDecision::Consumed
+        modeleaf_core::input::InputDecision::Consumed
     }
 
     fn input_cancel(
@@ -849,11 +849,11 @@ impl Mode for PresentationMutationMode {
         _content_state: &dyn ModeState,
         view_state: &dyn ModeState,
         _context: &ModeViewContext<'_>,
-    ) -> crate::core::input::InputStatus {
+    ) -> modeleaf_core::input::InputStatus {
         if *view_state.as_any().downcast_ref::<bool>().unwrap() {
-            crate::core::input::InputStatus::Ready
+            modeleaf_core::input::InputStatus::Ready
         } else {
-            crate::core::input::InputStatus::Awaiting(crate::core::input::TimeoutPolicy::After(
+            modeleaf_core::input::InputStatus::Awaiting(modeleaf_core::input::TimeoutPolicy::After(
                 std::time::Duration::ZERO,
             ))
         }
@@ -865,12 +865,12 @@ impl Mode for PresentationMutationMode {
         view_state: &mut dyn ModeState,
         _context: &ModeViewContext<'_>,
         key: KeyEvent,
-    ) -> crate::core::input::InputDecision<Command> {
+    ) -> modeleaf_core::input::InputDecision<Command> {
         if key != KeyEvent::char('x') {
-            return crate::core::input::InputDecision::Pass;
+            return modeleaf_core::input::InputDecision::Pass;
         }
         *view_state.as_any_mut().downcast_mut::<bool>().unwrap() = true;
-        crate::core::input::InputDecision::Consumed
+        modeleaf_core::input::InputDecision::Consumed
     }
 
     fn input_timeout(
@@ -1025,8 +1025,8 @@ impl Mode for CaptureFailureMode {
         _content_state: &dyn ModeState,
         _view_state: &dyn ModeState,
         _context: &ModeViewContext<'_>,
-    ) -> crate::core::input::InputStatus {
-        crate::core::input::InputStatus::Awaiting(crate::core::input::TimeoutPolicy::After(
+    ) -> modeleaf_core::input::InputStatus {
+        modeleaf_core::input::InputStatus::Awaiting(modeleaf_core::input::TimeoutPolicy::After(
             std::time::Duration::ZERO,
         ))
     }
@@ -1037,13 +1037,13 @@ impl Mode for CaptureFailureMode {
         view_state: &mut dyn ModeState,
         context: &ModeViewContext<'_>,
         _key: KeyEvent,
-    ) -> crate::core::input::InputDecision<Command> {
+    ) -> modeleaf_core::input::InputDecision<Command> {
         assert_eq!(context.view_id(), ViewId(0));
         *view_state
             .as_any_mut()
             .downcast_mut::<u8>()
             .expect("capture failure mode owns its state") = 1;
-        crate::core::input::InputDecision::Emit(Command::Mode(ModeCommand {
+        modeleaf_core::input::InputDecision::Emit(Command::Mode(ModeCommand {
             mode: ModeName::new("missing"),
             action: ModeActionName::new("missing"),
             arguments: Default::default(),
@@ -1826,8 +1826,8 @@ fn production_content_paths_use_closed_static_dispatch() {
         include_str!("save.rs"),
     ]
     .concat();
-    let content = include_str!("../../crates/modeleaf-core/src/content.rs");
-    let content_view_state = include_str!("../../crates/modeleaf-core/src/content_view_state.rs");
+    let content = include_str!("../../modeleaf-core/src/content.rs");
+    let content_view_state = include_str!("../../modeleaf-core/src/content_view_state.rs");
     let view = include_str!("view.rs");
     let transaction = include_str!("transaction.rs")
         .split("#[cfg(test)]")
@@ -1975,7 +1975,7 @@ fn text_point(
     app: &App<ScriptedFrontend>,
     content: ContentId,
     offset: TextOffset,
-) -> crate::protocol::selection::TextPoint {
+) -> modeleaf_protocol::selection::TextPoint {
     match app
         .kernel
         .contents()
@@ -2355,8 +2355,8 @@ fn failed_ordered_result_does_not_apply_an_earlier_viewport_move() {
     let mut app = make_app(vec![], None);
     let view = view_id(&app, app.session.focused());
     let command = ViewportCommand::new(
-        crate::protocol::viewport::ViewportMoveDirection::Down,
-        crate::protocol::viewport::ViewportMoveAmount::HalfPage,
+        modeleaf_protocol::viewport::ViewportMoveDirection::Down,
+        modeleaf_protocol::viewport::ViewportMoveAmount::HalfPage,
         ViewportCursorBehavior::Move,
     );
 
@@ -4609,14 +4609,14 @@ fn save_completed_ok_marks_buffer_saved() {
     app.kernel.track_pending_save_for_test(
         editor_cid(),
         1,
-        crate::core::transaction::TextStateId(1),
+        modeleaf_core::transaction::TextStateId(1),
         None,
     );
 
     app.handle_app_message(AppMessage::SaveCompleted {
         content: editor_cid(),
         revision: 1,
-        state: crate::core::transaction::TextStateId(1),
+        state: modeleaf_core::transaction::TextStateId(1),
         result: Ok(()),
     })
     .unwrap();
@@ -4633,14 +4633,14 @@ fn save_completed_err_marks_buffer_save_failed() {
     app.kernel.track_pending_save_for_test(
         editor_cid(),
         0,
-        crate::core::transaction::TextStateId(0),
+        modeleaf_core::transaction::TextStateId(0),
         None,
     );
 
     app.handle_app_message(AppMessage::SaveCompleted {
         content: editor_cid(),
         revision: 0,
-        state: crate::core::transaction::TextStateId(0),
+        state: modeleaf_core::transaction::TextStateId(0),
         result: Err(io::Error::other("boom")),
     })
     .unwrap();
@@ -6073,9 +6073,9 @@ fn status_bar_view_content_operation_returns_error_instead_of_panicking() {
 #[test]
 fn content_scoped_origin_cannot_smuggle_a_view_operation() {
     let mut app = make_app(vec![], None);
-    let request = crate::app::operation::OperationRequest::View {
-        target: crate::app::operation::ViewTarget::Current,
-        operation: crate::app::operation::ViewOperation::Apply(ViewAction::SetSelections(
+    let request = crate::operation::OperationRequest::View {
+        target: crate::operation::ViewTarget::Current,
+        operation: crate::operation::ViewOperation::Apply(ViewAction::SetSelections(
             Selections::single(Selection::collapsed(TextOffset::origin())),
         )),
     };

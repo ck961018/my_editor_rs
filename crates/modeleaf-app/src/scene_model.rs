@@ -2,10 +2,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::protocol::geometry::Size;
-use crate::protocol::ids::{SpaceId, ViewId};
-use crate::protocol::scene::{Scene, SpaceNode};
-use crate::protocol::space::{
+use modeleaf_protocol::geometry::Size;
+use modeleaf_protocol::ids::{SpaceId, ViewId};
+use modeleaf_protocol::scene::{Scene, SpaceNode};
+use modeleaf_protocol::space::{
     Align, Arrangement, Axis, Layer, Sizing, Space, SpaceKind, SplitDirection,
 };
 

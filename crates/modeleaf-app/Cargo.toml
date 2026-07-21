@@ -1,0 +1,18 @@
+[package]
+name = "modeleaf-app"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[dependencies]
+modeleaf-core = { path = "../modeleaf-core" }
+modeleaf-frontend = { path = "../modeleaf-frontend" }
+modeleaf-mode = { path = "../modeleaf-mode" }
+modeleaf-protocol = { path = "../modeleaf-protocol" }
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["full"] }
+
+[dev-dependencies]
+modeleaf-mode = { path = "../modeleaf-mode", features = ["test-support"] }
+modeleaf-plugin-v8 = { path = "../modeleaf-plugin-v8", features = ["test-support"] }

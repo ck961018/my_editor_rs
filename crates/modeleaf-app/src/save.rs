@@ -1,10 +1,10 @@
 use std::io;
 
-use crate::app::application::App;
-use crate::app::message::AppMessage;
-use crate::core::content::{ContentEffect, ContentResult};
-use crate::frontend::Frontend;
-use crate::protocol::ids::ContentId;
+use crate::application::App;
+use crate::message::AppMessage;
+use modeleaf_core::content::{ContentEffect, ContentResult};
+use modeleaf_frontend::Frontend;
+use modeleaf_protocol::ids::ContentId;
 
 impl<F: Frontend> App<F> {
     pub(super) fn handle_app_message(&mut self, message: AppMessage) -> io::Result<bool> {

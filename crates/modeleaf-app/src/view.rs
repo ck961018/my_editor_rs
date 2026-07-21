@@ -1,10 +1,10 @@
 //! 视图实例的交互会话：绑定一个 content，并持有独立 content view state。
 //! 按 ViewId 索引（App.views），同一 Content 可被多个独立 View 绑定。
 
-use crate::core::content_view_state::ContentViewState;
-use crate::protocol::ids::ContentId;
-use crate::protocol::revision::Revision;
-use crate::protocol::selection::Selections;
+use modeleaf_core::content_view_state::ContentViewState;
+use modeleaf_protocol::ids::ContentId;
+use modeleaf_protocol::revision::Revision;
+use modeleaf_protocol::selection::Selections;
 
 pub struct View {
     /// 绑定的 content；当前仅 View::new 写入，同一 content 可由多个 View 独立呈现。
@@ -61,7 +61,7 @@ impl View {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::content_view_state::ContentViewState;
+    use modeleaf_core::content_view_state::ContentViewState;
 
     #[test]
     fn status_bar_view_has_no_selections() {
