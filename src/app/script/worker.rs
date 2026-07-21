@@ -11,9 +11,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     DEFAULT_PLUGIN_ASSETS, InvocationWatchdog, MAX_SCRIPT_SOURCE_BYTES, SCRIPT_HEAP_LIMIT_BYTES,
-    SCRIPT_STARTUP_TIMEOUT, ScriptError, ScriptInvocationKind, current_exception, ensure_size,
-    initialize_v8, install_heap_limit, json_to_v8, recover_heap_limit, set_object,
-    throw_script_error, transpile_typescript, v8_to_json,
+    SCRIPT_STARTUP_TIMEOUT, ScriptError, ScriptInvocationKind, call_script_callback,
+    current_exception, ensure_size, initialize_v8, install_heap_limit, json_to_v8,
+    recover_heap_limit, set_object, throw_script_error, transpile_typescript, v8_to_json,
 };
 
 const RESPONSE_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -264,8 +264,7 @@ fn execute_request(
     let handler = v8::Local::new(scope, handler);
     let message = json_to_v8(scope, &message)?;
     let receiver = v8::undefined(scope).into();
-    let value = handler
-        .call(scope, receiver, &[message])
+    let value = call_script_callback(scope, handler, receiver, &[message])
         .ok_or_else(|| current_exception(scope, "script worker callback", "execute"))?;
     let value = await_value(scope, value, cancellation)?;
     v8_to_json(scope, value, "script worker response")
