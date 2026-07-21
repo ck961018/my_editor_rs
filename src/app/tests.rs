@@ -1305,6 +1305,75 @@ fn make_embedded_script_app(path: &str, source: &str) -> App<ScriptedFrontend> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn script_timeout_keeps_native_edit_save_and_quit_available() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("timeout-recovery.txt");
+    std::fs::write(&path, "before").unwrap();
+    let mut buffer = Buffer::new();
+    buffer.open_path(path.to_str().unwrap()).unwrap();
+    let mut host = ScriptHost::with_timeouts(
+        std::time::Duration::from_millis(50),
+        std::time::Duration::from_millis(100),
+    );
+    host.execute_typescript(
+        "file:///timeout-recovery.ts",
+        r#"
+editor.modes.define({
+  name: "timeout-recovery",
+  content: { create: () => ({ calls: 0 }) },
+  actions: {
+    hang(context) {
+      context.contentState.calls++;
+      context.text.insert("discarded");
+      while (true) {}
+    },
+  },
+});
+"#,
+    )
+    .unwrap();
+    let host = Rc::new(RefCell::new(host));
+    let bootstrap = bootstrap_editor(buffer, 40, 5, ScriptHost::script_modes(&host)).unwrap();
+    let mut app = App {
+        kernel: bootstrap.kernel,
+        session: bootstrap.session,
+        frontend: ScriptedFrontend::new(Vec::new()),
+        behavior: BehaviorRecorder::default(),
+    };
+    let view = view_id(&app, app.session.focused());
+
+    let error = app
+        .execute_command(DispatchCommand::Mode {
+            command: ModeCommand::new(
+                ModeName::new("timeout-recovery"),
+                ModeActionName::new("hang"),
+            ),
+            view,
+            content: editor_cid(),
+        })
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("timeout during action"), "{error}");
+    assert_eq!(text_rows(&app, editor_cid()), vec!["before"]);
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("native-".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    app.execute_command(DispatchCommand::Content {
+        command: ContentCommand::Save,
+        content: editor_cid(),
+    })
+    .unwrap();
+    app.shutdown_tasks().await.unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "native-before");
+    app.execute_command(DispatchCommand::App(AppCommand::Quit))
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn completing_one_named_analysis_schedules_the_next() {
     let mut app = make_embedded_script_app(
         "tree-sitter/multi-analysis.ts",

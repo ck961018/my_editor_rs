@@ -97,6 +97,10 @@ protocol -> std
 
 **依赖：** M0
 
+**状态：** 已完成（2026-07-21）
+
+**记录：** [`m1_script_safety.md`](m1_script_safety.md)
+
 这是当前最高优先级。目标不是把同步 callback 改成异步，而是保证用户脚本
 不能无限占用 UI 线程。
 

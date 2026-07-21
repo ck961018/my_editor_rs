@@ -2,11 +2,15 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::ffi::c_void;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, Once};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Once, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use deno_ast::{
     EmitOptions, MediaType, ModuleSpecifier, ParseParams, TranspileModuleOptions, TranspileOptions,
@@ -36,6 +40,179 @@ static V8_INIT: Once = Once::new();
 const V1_DEPRECATION: &str =
     "TypeScript Mode v1 is deprecated; migrate to the on.buffer adapter schema";
 const V2_INPUT_ACTION: &str = "$input";
+const SCRIPT_CALLBACK_TIMEOUT: Duration = Duration::from_secs(2);
+const SCRIPT_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_SCRIPT_SOURCE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_MODULE_GRAPH_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SCRIPT_JSON_BYTES: usize = 4 * 1024 * 1024;
+const MAX_SCRIPT_INPUT_BYTES: usize = 32 * 1024 * 1024;
+const MAX_SCRIPT_OPERATIONS: usize = 10_000;
+const MAX_SCRIPT_DECORATIONS: usize = 100_000;
+const SCRIPT_HEAP_LIMIT_BYTES: usize = 128 * 1024 * 1024;
+const SCRIPT_HEAP_RECOVERY_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct ScriptExecutionBudget {
+    callback_timeout: Duration,
+    startup_timeout: Duration,
+}
+
+impl Default for ScriptExecutionBudget {
+    fn default() -> Self {
+        Self {
+            callback_timeout: SCRIPT_CALLBACK_TIMEOUT,
+            startup_timeout: SCRIPT_STARTUP_TIMEOUT,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ScriptInvocationKind {
+    ModuleEvaluation,
+    StateFactory,
+    Action,
+    ContentChanged,
+    ContentJob,
+    AnalysisInput,
+    AnalysisApply,
+}
+
+impl ScriptInvocationKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ModuleEvaluation => "module evaluation",
+            Self::StateFactory => "state factory",
+            Self::Action => "action",
+            Self::ContentChanged => "content changed callback",
+            Self::ContentJob => "content job callback",
+            Self::AnalysisInput => "analysis input callback",
+            Self::AnalysisApply => "analysis apply callback",
+        }
+    }
+
+    fn timeout(self, budget: ScriptExecutionBudget) -> Duration {
+        match self {
+            Self::ModuleEvaluation => budget.startup_timeout,
+            _ => budget.callback_timeout,
+        }
+    }
+}
+
+struct InvocationWatchdog {
+    kind: ScriptInvocationKind,
+    timeout: Duration,
+    started: Instant,
+    handle: v8::IsolateHandle,
+    interrupted: Arc<AtomicBool>,
+    stop: mpsc::Sender<()>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+struct HeapLimitState {
+    shared: Arc<HeapLimitShared>,
+}
+
+struct HeapLimitShared {
+    exceeded: AtomicBool,
+    handle: v8::IsolateHandle,
+}
+
+unsafe extern "C" fn near_heap_limit(
+    data: *mut c_void,
+    current_heap_limit: usize,
+    _initial_heap_limit: usize,
+) -> usize {
+    // SAFETY: the isolate owns an Arc for this state in its slot storage, which
+    // remains alive until V8 has completed isolate teardown.
+    let state = unsafe { &*(data as *const HeapLimitShared) };
+    state.exceeded.store(true, Ordering::Release);
+    state.handle.terminate_execution();
+    current_heap_limit.saturating_add(SCRIPT_HEAP_RECOVERY_BYTES)
+}
+
+fn install_heap_limit(isolate: &mut v8::OwnedIsolate) -> Box<HeapLimitState> {
+    let shared = Arc::new(HeapLimitShared {
+        exceeded: AtomicBool::new(false),
+        handle: isolate.thread_safe_handle(),
+    });
+    let data = Arc::as_ptr(&shared) as *mut c_void;
+    isolate.set_slot(shared.clone());
+    isolate.add_near_heap_limit_callback(near_heap_limit, data);
+    Box::new(HeapLimitState { shared })
+}
+
+fn recover_heap_limit(
+    isolate: &mut v8::OwnedIsolate,
+    state: &mut Box<HeapLimitState>,
+    heap_limit_bytes: usize,
+) -> bool {
+    if !state.shared.exceeded.swap(false, Ordering::AcqRel) {
+        return false;
+    }
+    isolate.cancel_terminate_execution();
+    isolate.remove_near_heap_limit_callback(near_heap_limit, heap_limit_bytes);
+    let data = Arc::as_ptr(&state.shared) as *mut c_void;
+    isolate.add_near_heap_limit_callback(near_heap_limit, data);
+    true
+}
+
+impl InvocationWatchdog {
+    fn start(
+        handle: v8::IsolateHandle,
+        kind: ScriptInvocationKind,
+        timeout: Duration,
+    ) -> Result<Self, ScriptError> {
+        let (stop, receiver) = mpsc::channel();
+        let interrupted = Arc::new(AtomicBool::new(false));
+        let watcher_interrupted = interrupted.clone();
+        let watcher_handle = handle.clone();
+        let thread = thread::Builder::new()
+            .name("script-watchdog".to_owned())
+            .spawn(move || {
+                if matches!(
+                    receiver.recv_timeout(timeout),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    watcher_interrupted.store(true, Ordering::Release);
+                    watcher_handle.terminate_execution();
+                }
+            })
+            .map_err(|error| {
+                ScriptError::new(format!("failed to start script watchdog: {error}"))
+            })?;
+        Ok(Self {
+            kind,
+            timeout,
+            started: Instant::now(),
+            handle,
+            interrupted,
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    fn finish<T>(mut self, result: Result<T, ScriptError>) -> Result<T, ScriptError> {
+        let _ = self.stop.send(());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        let timed_out =
+            self.interrupted.load(Ordering::Acquire) || self.started.elapsed() >= self.timeout;
+        if timed_out {
+            self.handle.cancel_terminate_execution();
+            return Err(ScriptError::new(format!(
+                "script timeout during {}",
+                self.kind.label()
+            )));
+        }
+        result.map_err(|error| {
+            ScriptError::new(format!(
+                "script execution failed during {}: {error}",
+                self.kind.label()
+            ))
+        })
+    }
+}
 
 include!(concat!(env!("OUT_DIR"), "/plugin_assets.rs"));
 
@@ -60,10 +237,45 @@ impl fmt::Display for ScriptError {
 
 impl std::error::Error for ScriptError {}
 
+fn ensure_size(label: &str, actual: usize, limit: usize) -> Result<(), ScriptError> {
+    if actual > limit {
+        return Err(ScriptError::new(format!(
+            "script limit exceeded for {label}: {actual} bytes exceeds {limit}"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_count(label: &str, actual: usize, limit: usize) -> Result<(), ScriptError> {
+    if actual > limit {
+        return Err(ScriptError::new(format!(
+            "script limit exceeded for {label}: {actual} exceeds {limit}"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_file_size(path: &Path, label: &str, limit: usize) -> Result<(), ScriptError> {
+    let bytes = fs::metadata(path)
+        .map_err(|error| {
+            ScriptError::new(format!("failed to inspect {}: {error}", path.display()))
+        })?
+        .len();
+    if bytes > limit as u64 {
+        return Err(ScriptError::new(format!(
+            "script limit exceeded for {label}: {bytes} bytes exceeds {limit}"
+        )));
+    }
+    Ok(())
+}
+
 /// The single long-lived V8 isolate used by script modes.
 #[allow(dead_code)]
 pub(crate) struct ScriptHost {
     isolate: v8::OwnedIsolate,
+    heap_limit: Box<HeapLimitState>,
+    heap_limit_bytes: usize,
+    budget: ScriptExecutionBudget,
     context: v8::Global<v8::Context>,
     modules: Rc<RefCell<ModuleMap>>,
     definitions: Rc<RefCell<Vec<ScriptModeDefinition>>>,
@@ -75,9 +287,14 @@ pub(crate) struct ScriptHost {
 #[allow(dead_code)]
 impl ScriptHost {
     pub(crate) fn new() -> Self {
+        Self::with_budget_and_heap(ScriptExecutionBudget::default(), SCRIPT_HEAP_LIMIT_BYTES)
+    }
+
+    fn with_budget_and_heap(budget: ScriptExecutionBudget, heap_limit_bytes: usize) -> Self {
         initialize_v8();
 
-        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        let params = v8::CreateParams::default().heap_limits(0, heap_limit_bytes);
+        let mut isolate = v8::Isolate::new(params);
         isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
         isolate.set_capture_stack_trace_for_uncaught_exceptions(true, 10);
         let modules = Rc::new(RefCell::new(ModuleMap::default()));
@@ -100,9 +317,13 @@ impl ScriptHost {
             v8::scope_with_context!(scope, &mut isolate, context.clone());
             install_editor_api(scope);
         }
+        let heap_limit = install_heap_limit(&mut isolate);
 
         Self {
             isolate,
+            heap_limit,
+            heap_limit_bytes,
+            budget,
             context,
             modules,
             definitions,
@@ -112,12 +333,52 @@ impl ScriptHost {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn with_timeouts(callback_timeout: Duration, startup_timeout: Duration) -> Self {
+        Self::with_budget_and_heap(
+            ScriptExecutionBudget {
+                callback_timeout,
+                startup_timeout,
+            },
+            SCRIPT_HEAP_LIMIT_BYTES,
+        )
+    }
+
+    fn invoke<T>(
+        &mut self,
+        kind: ScriptInvocationKind,
+        callback: impl FnOnce(&mut v8::OwnedIsolate) -> Result<T, ScriptError>,
+    ) -> Result<T, ScriptError> {
+        let watchdog = InvocationWatchdog::start(
+            self.isolate.thread_safe_handle(),
+            kind,
+            kind.timeout(self.budget),
+        )?;
+        let result = callback(&mut self.isolate);
+        let result = watchdog.finish(result);
+        if recover_heap_limit(
+            &mut self.isolate,
+            &mut self.heap_limit,
+            self.heap_limit_bytes,
+        ) {
+            return Err(ScriptError::new("script heap limit exceeded"));
+        }
+        result
+    }
+
     pub(crate) fn execute_typescript(
         &mut self,
         specifier: &str,
         source: &str,
     ) -> Result<(), ScriptError> {
-        self.evaluate_typescript(specifier, source).map(|_| ())
+        let definition_count = self.definitions.borrow().len();
+        let diagnostics = self.diagnostics.borrow().clone();
+        let result = self.evaluate_typescript(specifier, source).map(|_| ());
+        if result.is_err() {
+            self.definitions.borrow_mut().truncate(definition_count);
+            self.diagnostics.replace(diagnostics);
+        }
+        result
     }
 
     pub(super) fn execute_embedded_plugin(
@@ -143,49 +404,59 @@ impl ScriptHost {
             .parent()
             .ok_or_else(|| ScriptError::new("script entry has no parent directory"))?
             .to_owned();
-        self.modules.borrow_mut().reset(root);
+        self.modules.borrow_mut().reset(root.clone());
+        let definition_count = self.definitions.borrow().len();
+        let diagnostics = self.diagnostics.borrow().clone();
 
         let modules = self.modules.clone();
         let context = self.context.clone();
-        v8::scope_with_context!(scope, &mut self.isolate, context);
-        v8::tc_scope!(let scope, scope);
+        let result = self.invoke(ScriptInvocationKind::ModuleEvaluation, |isolate| {
+            v8::scope_with_context!(scope, isolate, context);
+            v8::tc_scope!(let scope, scope);
 
-        let module = load_module_tree(scope, &entry, &modules)?;
-        match module.instantiate_module(scope, resolve_module) {
-            Some(true) => {}
-            _ => {
+            let module = load_module_tree(scope, &entry, &modules)?;
+            match module.instantiate_module(scope, resolve_module) {
+                Some(true) => {}
+                _ => {
+                    return Err(current_exception(
+                        scope,
+                        &entry.display().to_string(),
+                        "link",
+                    ));
+                }
+            }
+            if module.evaluate(scope).is_none() {
                 return Err(current_exception(
                     scope,
                     &entry.display().to_string(),
-                    "link",
+                    "execute",
                 ));
             }
-        }
-        if module.evaluate(scope).is_none() {
-            return Err(current_exception(
-                scope,
-                &entry.display().to_string(),
-                "execute",
-            ));
-        }
-        scope.perform_microtask_checkpoint();
-        match module.get_status() {
-            v8::ModuleStatus::Evaluated => {}
-            v8::ModuleStatus::Errored => {
-                let message = module.get_exception().to_rust_string_lossy(scope);
-                return Err(ScriptError::new(format!(
-                    "failed to execute {}: {message}",
-                    entry.display()
-                )));
+            scope.perform_microtask_checkpoint();
+            match module.get_status() {
+                v8::ModuleStatus::Evaluated => {}
+                v8::ModuleStatus::Errored => {
+                    let message = module.get_exception().to_rust_string_lossy(scope);
+                    return Err(ScriptError::new(format!(
+                        "failed to execute {}: {message}",
+                        entry.display()
+                    )));
+                }
+                _ => {
+                    return Err(ScriptError::new(format!(
+                        "script did not finish synchronously: {}",
+                        entry.display()
+                    )));
+                }
             }
-            _ => {
-                return Err(ScriptError::new(format!(
-                    "script did not finish synchronously: {}",
-                    entry.display()
-                )));
-            }
+            Ok(())
+        });
+        if result.is_err() {
+            self.definitions.borrow_mut().truncate(definition_count);
+            self.diagnostics.replace(diagnostics);
+            self.modules.borrow_mut().reset(root);
         }
-        Ok(())
+        result
     }
 
     pub(crate) fn script_modes(host: &Rc<RefCell<Self>>) -> Vec<ScriptMode> {
@@ -211,83 +482,104 @@ impl ScriptHost {
     ) -> Result<ModeResult, ScriptError> {
         let callback = callback.clone();
         let v8_context = self.context.clone();
-        v8::scope_with_context!(scope, &mut self.isolate, v8_context);
-        v8::tc_scope!(let scope, scope);
+        let primitives = self.primitives.clone();
+        let current_content = content_state.data.clone();
+        let current_view = view_state.data.clone();
+        let (result, next_content, next_view, content_decorations, view_decorations) = self
+            .invoke(ScriptInvocationKind::Action, |isolate| {
+                v8::scope_with_context!(scope, isolate, v8_context);
+                v8::tc_scope!(let scope, scope);
 
-        let argument = v8::Object::new(scope);
-        set_number(scope, argument, "contentId", context.content_id().0 as f64);
-        set_number(scope, argument, "viewId", context.view_id().0 as f64);
-        if let Some(revision) = context.content_revision() {
-            set_number(scope, argument, "revision", revision.0 as f64);
-        }
-        if version == ScriptApiVersion::V2 {
-            if let Some(status) = context
-                .buffer()
-                .and_then(|context| context.document_status())
-            {
-                set_document_context(scope, argument, "document", status);
-            } else if let Some(status) = context
-                .status_bar()
-                .and_then(|context| context.status_bar_data())
-            {
-                set_document_context(scope, argument, "status", status);
-            }
-        }
-        let arguments = json_to_v8(scope, &mode_value_to_json(arguments))?;
-        set_value(scope, argument, "arguments", arguments);
-        let content_value = json_to_v8(scope, &content_state.data)?;
-        let view_value = json_to_v8(scope, &view_state.data)?;
-        let content_state_name = version.content_state_name();
-        set_value(scope, argument, content_state_name, content_value);
-        set_value(scope, argument, "viewState", view_value);
-        let primitive_id = self.primitives.borrow_mut().begin(context)?;
-        let pass = match version {
-            ScriptApiVersion::V1 => {
-                primitives::install_v1(scope, argument, primitive_id);
-                None
-            }
-            ScriptApiVersion::V2 => Some(primitives::install_v2(
-                scope,
-                argument,
-                primitive_id,
-                context.content_kind(),
-            )),
-        };
-        let callback = v8::Local::new(scope, callback);
-        let receiver = v8::undefined(scope).into();
-        let callback_result = callback.call(scope, receiver, &[argument.into()]);
-        let operations = self.primitives.borrow_mut().finish(primitive_id)?;
-        let result = callback_result
-            .ok_or_else(|| current_exception(scope, "script mode action", "execute"))?;
-        let content_decorations = parse_decorations_property(
-            scope,
-            result,
-            "contentDecorations",
-            context.buffer().and_then(|context| context.text_snapshot()),
-            context.content_revision(),
-        )?;
-        let view_decorations = parse_decorations_property(
-            scope,
-            result,
-            "viewDecorations",
-            context.buffer().and_then(|context| context.text_snapshot()),
-            context.content_revision(),
-        )?;
-        let result = match version {
-            ScriptApiVersion::V1 => parse_action_result(scope, result, operations)?,
-            ScriptApiVersion::V2 => {
-                parse_v2_action_result(scope, result, pass.as_ref().unwrap(), operations)?
-            }
-        };
-        let next_content = property(scope, argument, content_state_name).ok_or_else(|| {
-            ScriptError::new(format!("script removed context.{content_state_name}"))
-        })?;
-        let next_view = property(scope, argument, "viewState")
-            .ok_or_else(|| ScriptError::new("script removed context.viewState"))?;
-        let next_content = v8_to_json(scope, next_content, content_state_name)?;
-        let next_view = v8_to_json(scope, next_view, "viewState")?;
-        view_policy_from_json(&next_view)?;
-        scope.perform_microtask_checkpoint();
+                let argument = v8::Object::new(scope);
+                set_number(scope, argument, "contentId", context.content_id().0 as f64);
+                set_number(scope, argument, "viewId", context.view_id().0 as f64);
+                if let Some(revision) = context.content_revision() {
+                    set_number(scope, argument, "revision", revision.0 as f64);
+                }
+                if version == ScriptApiVersion::V2 {
+                    if let Some(status) = context
+                        .buffer()
+                        .and_then(|context| context.document_status())
+                    {
+                        set_document_context(scope, argument, "document", status);
+                    } else if let Some(status) = context
+                        .status_bar()
+                        .and_then(|context| context.status_bar_data())
+                    {
+                        set_document_context(scope, argument, "status", status);
+                    }
+                }
+                let arguments = json_to_v8(scope, &mode_value_to_json(arguments))?;
+                set_value(scope, argument, "arguments", arguments);
+                let content_value = json_to_v8(scope, &current_content)?;
+                let view_value = json_to_v8(scope, &current_view)?;
+                let content_state_name = version.content_state_name();
+                set_value(scope, argument, content_state_name, content_value);
+                set_value(scope, argument, "viewState", view_value);
+                let primitive_id = primitives.borrow_mut().begin(context)?;
+                let pass = match version {
+                    ScriptApiVersion::V1 => {
+                        primitives::install_v1(scope, argument, primitive_id);
+                        None
+                    }
+                    ScriptApiVersion::V2 => Some(primitives::install_v2(
+                        scope,
+                        argument,
+                        primitive_id,
+                        context.content_kind(),
+                    )),
+                };
+                let callback = v8::Local::new(scope, callback);
+                let receiver = v8::undefined(scope).into();
+                let callback_result = callback.call(scope, receiver, &[argument.into()]);
+                let operations = primitives.borrow_mut().finish(primitive_id)?;
+                ensure_count("operations", operations.len(), MAX_SCRIPT_OPERATIONS)?;
+                let value = callback_result
+                    .ok_or_else(|| current_exception(scope, "script mode action", "execute"))?;
+                let content_decorations = parse_decorations_property(
+                    scope,
+                    value,
+                    "contentDecorations",
+                    context.buffer().and_then(|context| context.text_snapshot()),
+                    context.content_revision(),
+                )?;
+                let view_decorations = parse_decorations_property(
+                    scope,
+                    value,
+                    "viewDecorations",
+                    context.buffer().and_then(|context| context.text_snapshot()),
+                    context.content_revision(),
+                )?;
+                ensure_count(
+                    "decorations",
+                    content_decorations.as_ref().map_or(0, Vec::len)
+                        + view_decorations.as_ref().map_or(0, Vec::len),
+                    MAX_SCRIPT_DECORATIONS,
+                )?;
+                let result = match version {
+                    ScriptApiVersion::V1 => parse_action_result(scope, value, operations)?,
+                    ScriptApiVersion::V2 => {
+                        parse_v2_action_result(scope, value, pass.as_ref().unwrap(), operations)?
+                    }
+                };
+                let next_content =
+                    property(scope, argument, content_state_name).ok_or_else(|| {
+                        ScriptError::new(format!("script removed context.{content_state_name}"))
+                    })?;
+                let next_view = property(scope, argument, "viewState")
+                    .ok_or_else(|| ScriptError::new("script removed context.viewState"))?;
+                let next_content = v8_to_json(scope, next_content, content_state_name)?;
+                let next_view = v8_to_json(scope, next_view, "viewState")?;
+                view_policy_from_json(&next_view)?;
+                scope.perform_microtask_checkpoint();
+                Ok((
+                    result,
+                    next_content,
+                    next_view,
+                    content_decorations,
+                    view_decorations,
+                ))
+            })?;
         content_state.publish_external_data(next_content);
         view_state.data = next_view;
         if let Some(decorations) = content_decorations {
@@ -308,19 +600,23 @@ impl ScriptHost {
             return Ok(serde_json::Value::Null);
         };
         let context = self.context.clone();
-        v8::scope_with_context!(scope, &mut self.isolate, context);
-        v8::tc_scope!(let scope, scope);
-        let callback = v8::Local::new(scope, callback);
-        let receiver = v8::undefined(scope).into();
-        let arguments = parent
-            .map(|value| json_to_v8(scope, value))
-            .transpose()?
-            .into_iter()
-            .collect::<Vec<_>>();
-        let value = callback
-            .call(scope, receiver, &arguments)
-            .ok_or_else(|| current_exception(scope, "script mode state factory", "execute"))?;
-        v8_to_json(scope, value, "mode state")
+        self.invoke(ScriptInvocationKind::StateFactory, |isolate| {
+            v8::scope_with_context!(scope, isolate, context);
+            v8::tc_scope!(let scope, scope);
+            let callback = v8::Local::new(scope, callback);
+            let receiver = v8::undefined(scope).into();
+            let arguments = parent
+                .map(|value| json_to_v8(scope, value))
+                .transpose()?
+                .into_iter()
+                .collect::<Vec<_>>();
+            let value = callback
+                .call(scope, receiver, &arguments)
+                .ok_or_else(|| current_exception(scope, "script mode state factory", "execute"))?;
+            let result = v8_to_json(scope, value, "mode state")?;
+            scope.perform_microtask_checkpoint();
+            Ok(result)
+        })
     }
 
     fn create_content_state(
@@ -333,15 +629,21 @@ impl ScriptHost {
             return Ok(serde_json::Value::Null);
         };
         let v8_context = self.context.clone();
-        v8::scope_with_context!(scope, &mut self.isolate, v8_context);
-        v8::tc_scope!(let scope, scope);
-        let argument = content_context_object(scope, context, version == ScriptApiVersion::V1)?;
-        let callback = v8::Local::new(scope, callback);
-        let receiver = v8::undefined(scope).into();
-        let value = callback
-            .call(scope, receiver, &[argument.into()])
-            .ok_or_else(|| current_exception(scope, "script content state factory", "execute"))?;
-        v8_to_json(scope, value, "mode content state")
+        self.invoke(ScriptInvocationKind::StateFactory, |isolate| {
+            v8::scope_with_context!(scope, isolate, v8_context);
+            v8::tc_scope!(let scope, scope);
+            let argument = content_context_object(scope, context, version == ScriptApiVersion::V1)?;
+            let callback = v8::Local::new(scope, callback);
+            let receiver = v8::undefined(scope).into();
+            let value = callback
+                .call(scope, receiver, &[argument.into()])
+                .ok_or_else(|| {
+                    current_exception(scope, "script content state factory", "execute")
+                })?;
+            let result = v8_to_json(scope, value, "mode content state")?;
+            scope.perform_microtask_checkpoint();
+            Ok(result)
+        })
     }
 
     fn content_changed(
@@ -353,24 +655,30 @@ impl ScriptHost {
         change: &crate::core::content::ContentChange,
     ) -> Result<(), ScriptError> {
         let v8_context = self.context.clone();
-        v8::scope_with_context!(scope, &mut self.isolate, v8_context);
-        v8::tc_scope!(let scope, scope);
-        let argument = content_context_object(scope, context, false)?;
         let content_state_name = version.content_state_name();
-        let content_state = json_to_v8(scope, &state.data)?;
-        set_value(scope, argument, content_state_name, content_state);
-        let change_value = content_change_to_v8(scope, change)?;
-        set_value(scope, argument, "change", change_value);
-        let callback = v8::Local::new(scope, callback.clone());
-        let receiver = v8::undefined(scope).into();
-        callback
-            .call(scope, receiver, &[argument.into()])
-            .ok_or_else(|| current_exception(scope, "script content changed", "execute"))?;
-        let next = property(scope, argument, content_state_name).ok_or_else(|| {
-            ScriptError::new(format!("script removed context.{content_state_name}"))
+        let current = state.data.clone();
+        let callback = callback.clone();
+        let next = self.invoke(ScriptInvocationKind::ContentChanged, |isolate| {
+            v8::scope_with_context!(scope, isolate, v8_context);
+            v8::tc_scope!(let scope, scope);
+            let argument = content_context_object(scope, context, false)?;
+            let content_state = json_to_v8(scope, &current)?;
+            set_value(scope, argument, content_state_name, content_state);
+            let change_value = content_change_to_v8(scope, change)?;
+            set_value(scope, argument, "change", change_value);
+            let callback = v8::Local::new(scope, callback);
+            let receiver = v8::undefined(scope).into();
+            callback
+                .call(scope, receiver, &[argument.into()])
+                .ok_or_else(|| current_exception(scope, "script content changed", "execute"))?;
+            let next = property(scope, argument, content_state_name).ok_or_else(|| {
+                ScriptError::new(format!("script removed context.{content_state_name}"))
+            })?;
+            let next = v8_to_json(scope, next, content_state_name)?;
+            scope.perform_microtask_checkpoint();
+            Ok(next)
         })?;
-        state.publish_external_data(v8_to_json(scope, next, content_state_name)?);
-        scope.perform_microtask_checkpoint();
+        state.publish_external_data(next);
         Ok(())
     }
 
@@ -382,28 +690,37 @@ impl ScriptHost {
         state: &mut ScriptModeState,
     ) -> Result<Option<ScriptJob>, ScriptError> {
         let v8_context = self.context.clone();
-        v8::scope_with_context!(scope, &mut self.isolate, v8_context);
-        v8::tc_scope!(let scope, scope);
-        let argument = content_context_object(scope, context, false)?;
-        let content_state = json_to_v8(scope, &state.data)?;
         let content_state_name = api_version.content_state_name();
-        set_value(scope, argument, content_state_name, content_state);
-        let callback = v8::Local::new(scope, callback);
-        let receiver = v8::undefined(scope).into();
-        let value = callback
-            .call(scope, receiver, &[argument.into()])
-            .ok_or_else(|| current_exception(scope, "script content job", "execute"))?;
-        let next = property(scope, argument, content_state_name).ok_or_else(|| {
-            ScriptError::new(format!("script removed context.{content_state_name}"))
+        let current = state.data.clone();
+        let callback = callback.clone();
+        let (next, job) = self.invoke(ScriptInvocationKind::ContentJob, |isolate| {
+            v8::scope_with_context!(scope, isolate, v8_context);
+            v8::tc_scope!(let scope, scope);
+            let argument = content_context_object(scope, context, false)?;
+            let content_state = json_to_v8(scope, &current)?;
+            set_value(scope, argument, content_state_name, content_state);
+            let callback = v8::Local::new(scope, callback);
+            let receiver = v8::undefined(scope).into();
+            let value = callback
+                .call(scope, receiver, &[argument.into()])
+                .ok_or_else(|| current_exception(scope, "script content job", "execute"))?;
+            let next = property(scope, argument, content_state_name).ok_or_else(|| {
+                ScriptError::new(format!("script removed context.{content_state_name}"))
+            })?;
+            let next = v8_to_json(scope, next, content_state_name)?;
+            let job = if value.is_null_or_undefined() {
+                None
+            } else {
+                Some(v8_to_json(scope, value, "content job")?)
+            };
+            scope.perform_microtask_checkpoint();
+            Ok((next, job))
         })?;
-        let next = v8_to_json(scope, next, content_state_name)?;
-        scope.perform_microtask_checkpoint();
-        if value.is_null_or_undefined() {
+        let Some(job) = job else {
             state.data = next;
             return Ok(None);
-        }
-        let value = v8_to_json(scope, value, "content job")?;
-        let mut job = ScriptJob::from_json(value)?;
+        };
+        let mut job = ScriptJob::from_json(job)?;
         if job.include_text {
             job.text_snapshot = Some(
                 context
@@ -423,24 +740,33 @@ impl ScriptHost {
         state: &ScriptModeState,
     ) -> Result<PreparedAnalysisJob, ScriptError> {
         let v8_context = self.context.clone();
-        v8::scope_with_context!(scope, &mut self.isolate, v8_context);
-        v8::tc_scope!(let scope, scope);
-        let argument = content_context_object(scope, context, false)?;
-        let content_state = json_to_v8(scope, &state.data)?;
-        set_value(scope, argument, "state", content_state);
-        let callback = v8::Local::new(scope, &analysis.input);
-        let receiver = v8::undefined(scope).into();
-        let value = callback
-            .call(scope, receiver, &[argument.into()])
-            .ok_or_else(|| current_exception(scope, "script analysis input", "execute"))?;
-        scope.perform_microtask_checkpoint();
-        if value.is_null_or_undefined() {
+        let current = state.data.clone();
+        let callback = analysis.input.clone();
+        let message = self.invoke(ScriptInvocationKind::AnalysisInput, |isolate| {
+            v8::scope_with_context!(scope, isolate, v8_context);
+            v8::tc_scope!(let scope, scope);
+            let argument = content_context_object(scope, context, false)?;
+            let content_state = json_to_v8(scope, &current)?;
+            set_value(scope, argument, "state", content_state);
+            let callback = v8::Local::new(scope, callback);
+            let receiver = v8::undefined(scope).into();
+            let value = callback
+                .call(scope, receiver, &[argument.into()])
+                .ok_or_else(|| current_exception(scope, "script analysis input", "execute"))?;
+            let message = if value.is_null_or_undefined() {
+                None
+            } else {
+                Some(v8_to_json(scope, value, "analysis input")?)
+            };
+            scope.perform_microtask_checkpoint();
+            Ok(message)
+        })?;
+        let Some(message) = message else {
             return Ok(PreparedAnalysisJob {
                 message: None,
                 text_snapshot: None,
             });
-        }
-        let message = v8_to_json(scope, value, "analysis input")?;
+        };
         let text_snapshot = if analysis.snapshot_text {
             let object = message.as_object().ok_or_else(|| {
                 ScriptError::new("analysis input must return an object for a text snapshot")
@@ -475,37 +801,42 @@ impl ScriptHost {
         result: &serde_json::Value,
     ) -> Result<bool, ScriptError> {
         let v8_context = self.context.clone();
-        v8::scope_with_context!(scope, &mut self.isolate, v8_context);
-        v8::tc_scope!(let scope, scope);
-        let argument = content_context_object(scope, context, false)?;
-        let content_state = json_to_v8(scope, &state.data)?;
         let content_state_name = api_version.content_state_name();
-        set_value(scope, argument, content_state_name, content_state);
-        set_number(scope, argument, "jobVersion", version as f64);
-        let result_value = json_to_v8(scope, result)?;
-        set_value(scope, argument, "arguments", result_value);
-        let callback = v8::Local::new(scope, callback);
-        let receiver = v8::undefined(scope).into();
-        let value = callback
-            .call(scope, receiver, &[argument.into()])
-            .ok_or_else(|| current_exception(scope, "script content applyJob", "execute"))?;
-        let decorations = parse_decorations_property(
-            scope,
-            value,
-            "contentDecorations",
-            context.buffer().and_then(|context| context.text_snapshot()),
-            context.content_revision(),
-        )?;
-        let next = property(scope, argument, content_state_name).ok_or_else(|| {
-            ScriptError::new(format!("script removed context.{content_state_name}"))
+        let current = state.data.clone();
+        let callback = callback.clone();
+        let (next, decorations) = self.invoke(ScriptInvocationKind::ContentJob, |isolate| {
+            v8::scope_with_context!(scope, isolate, v8_context);
+            v8::tc_scope!(let scope, scope);
+            let argument = content_context_object(scope, context, false)?;
+            let content_state = json_to_v8(scope, &current)?;
+            set_value(scope, argument, content_state_name, content_state);
+            set_number(scope, argument, "jobVersion", version as f64);
+            let result_value = json_to_v8(scope, result)?;
+            set_value(scope, argument, "arguments", result_value);
+            let callback = v8::Local::new(scope, callback);
+            let receiver = v8::undefined(scope).into();
+            let value = callback
+                .call(scope, receiver, &[argument.into()])
+                .ok_or_else(|| current_exception(scope, "script content applyJob", "execute"))?;
+            let decorations = parse_decorations_property(
+                scope,
+                value,
+                "contentDecorations",
+                context.buffer().and_then(|context| context.text_snapshot()),
+                context.content_revision(),
+            )?;
+            let next = property(scope, argument, content_state_name).ok_or_else(|| {
+                ScriptError::new(format!("script removed context.{content_state_name}"))
+            })?;
+            let next = v8_to_json(scope, next, content_state_name)?;
+            scope.perform_microtask_checkpoint();
+            Ok((next, decorations))
         })?;
-        let next = v8_to_json(scope, next, content_state_name)?;
         let changed = next != state.data || decorations.is_some();
         state.data = next;
         if let Some(decorations) = decorations {
             state.decorations = DecorationSet::new(decorations);
         }
-        scope.perform_microtask_checkpoint();
         Ok(changed)
     }
 
@@ -517,28 +848,34 @@ impl ScriptHost {
         result: &serde_json::Value,
     ) -> Result<bool, ScriptError> {
         let v8_context = self.context.clone();
-        v8::scope_with_context!(scope, &mut self.isolate, v8_context);
-        v8::tc_scope!(let scope, scope);
-        let argument = content_context_object(scope, context, false)?;
-        let content_state = json_to_v8(scope, &state.data)?;
-        set_value(scope, argument, "state", content_state);
-        let result_value = json_to_v8(scope, result)?;
-        set_value(scope, argument, "arguments", result_value);
-        let callback = v8::Local::new(scope, &analysis.apply);
-        let receiver = v8::undefined(scope).into();
-        let value = callback
-            .call(scope, receiver, &[argument.into()])
-            .ok_or_else(|| current_exception(scope, "script analysis apply", "execute"))?;
-        let decorations = parse_decorations_property(
-            scope,
-            value,
-            "contentDecorations",
-            context.buffer().and_then(|context| context.text_snapshot()),
-            context.content_revision(),
-        )?;
-        let next = property(scope, argument, "state")
-            .ok_or_else(|| ScriptError::new("script removed context.state"))?;
-        let next = v8_to_json(scope, next, "state")?;
+        let current = state.data.clone();
+        let callback = analysis.apply.clone();
+        let (next, decorations) = self.invoke(ScriptInvocationKind::AnalysisApply, |isolate| {
+            v8::scope_with_context!(scope, isolate, v8_context);
+            v8::tc_scope!(let scope, scope);
+            let argument = content_context_object(scope, context, false)?;
+            let content_state = json_to_v8(scope, &current)?;
+            set_value(scope, argument, "state", content_state);
+            let result_value = json_to_v8(scope, result)?;
+            set_value(scope, argument, "arguments", result_value);
+            let callback = v8::Local::new(scope, callback);
+            let receiver = v8::undefined(scope).into();
+            let value = callback
+                .call(scope, receiver, &[argument.into()])
+                .ok_or_else(|| current_exception(scope, "script analysis apply", "execute"))?;
+            let decorations = parse_decorations_property(
+                scope,
+                value,
+                "contentDecorations",
+                context.buffer().and_then(|context| context.text_snapshot()),
+                context.content_revision(),
+            )?;
+            let next = property(scope, argument, "state")
+                .ok_or_else(|| ScriptError::new("script removed context.state"))?;
+            let next = v8_to_json(scope, next, "state")?;
+            scope.perform_microtask_checkpoint();
+            Ok((next, decorations))
+        })?;
         let changed = next != state.data || decorations.is_some();
         state.data = next;
         if let Some(decorations) = decorations {
@@ -546,7 +883,6 @@ impl ScriptHost {
                 .analysis_decorations
                 .insert(analysis.slot.clone(), DecorationSet::new(decorations));
         }
-        scope.perform_microtask_checkpoint();
         Ok(changed)
     }
 
@@ -555,24 +891,32 @@ impl ScriptHost {
         specifier: &str,
         source: &str,
     ) -> Result<String, ScriptError> {
-        let javascript = transpile_typescript(specifier, source)?;
+        ensure_size("TypeScript source", source.len(), MAX_SCRIPT_SOURCE_BYTES)?;
         let context = self.context.clone();
-        v8::scope_with_context!(scope, &mut self.isolate, context);
-        v8::tc_scope!(let scope, scope);
+        self.invoke(ScriptInvocationKind::ModuleEvaluation, |isolate| {
+            let javascript = transpile_typescript(specifier, source)?;
+            ensure_size(
+                "transpiled JavaScript",
+                javascript.len(),
+                MAX_SCRIPT_SOURCE_BYTES,
+            )?;
+            v8::scope_with_context!(scope, isolate, context);
+            v8::tc_scope!(let scope, scope);
 
-        let source = v8::String::new(scope, &javascript)
-            .ok_or_else(|| ScriptError::new("script source is too large for V8"))?;
-        let script = match v8::Script::compile(scope, source, None) {
-            Some(script) => script,
-            None => return Err(current_exception(scope, specifier, "compile")),
-        };
-        let value = match script.run(scope) {
-            Some(value) => value,
-            None => return Err(current_exception(scope, specifier, "execute")),
-        };
+            let source = v8::String::new(scope, &javascript)
+                .ok_or_else(|| ScriptError::new("script source is too large for V8"))?;
+            let script = match v8::Script::compile(scope, source, None) {
+                Some(script) => script,
+                None => return Err(current_exception(scope, specifier, "compile")),
+            };
+            let value = match script.run(scope) {
+                Some(value) => value,
+                None => return Err(current_exception(scope, specifier, "execute")),
+            };
 
-        scope.perform_microtask_checkpoint();
-        Ok(value.to_rust_string_lossy(scope))
+            scope.perform_microtask_checkpoint();
+            Ok(value.to_rust_string_lossy(scope))
+        })
     }
 }
 
@@ -597,7 +941,7 @@ enum ScriptApiVersion {
     V2,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ScriptDiagnostics {
     messages: Vec<String>,
     v1_deprecation_reported: bool,
@@ -1045,7 +1389,7 @@ impl Mode for ScriptMode {
             .map(|state| Box::new(ScriptModeState::new(state)) as Box<dyn ModeState>)
             .map_err(|error| ModeError::CallbackFailed {
                 mode: self.name.clone(),
-                message: error.to_string(),
+                message: format!("callback '<content-state>': {error}"),
             })
     }
 
@@ -1128,7 +1472,7 @@ impl Mode for ScriptMode {
             )
             .map_err(|error| ModeError::CallbackFailed {
                 mode: self.name.clone(),
-                message: error.to_string(),
+                message: format!("callback '<input>': {error}"),
             })
     }
 
@@ -1408,7 +1752,7 @@ impl Mode for ScriptMode {
             )
             .map_err(|error| ModeError::CallbackFailed {
                 mode: self.name.clone(),
-                message: error.to_string(),
+                message: format!("callback '{}': {error}", action.as_str()),
             })
     }
 }
@@ -1564,6 +1908,9 @@ fn default_config_path() -> Option<PathBuf> {
 
 fn initialize_v8() {
     V8_INIT.call_once(|| {
+        // Worker isolates already run off the UI thread. Keeping Wasm compilation
+        // there avoids cross-isolate platform tasks delaying cancellation.
+        v8::V8::set_flags_from_string("--no-wasm-async-compilation");
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform);
         v8::V8::initialize();
@@ -2307,6 +2654,11 @@ fn parse_decorations_property(
     let spans = property(scope, snapshot_value, "spans")
         .and_then(|value| v8::Local::<v8::Array>::try_from(value).ok())
         .ok_or_else(|| ScriptError::new(format!("{name}.spans must be an array")))?;
+    ensure_count(
+        "decorations",
+        spans.length() as usize,
+        MAX_SCRIPT_DECORATIONS,
+    )?;
     let mut decorations = Vec::with_capacity(spans.length() as usize);
     for index in 0..spans.length() {
         let span = spans
@@ -2490,6 +2842,7 @@ fn json_to_v8<'scope>(
 ) -> Result<v8::Local<'scope, v8::Value>, ScriptError> {
     let json = serde_json::to_string(value)
         .map_err(|error| ScriptError::new(format!("failed to encode mode state: {error}")))?;
+    ensure_size("structured input", json.len(), MAX_SCRIPT_INPUT_BYTES)?;
     let json = v8::String::new(scope, &json)
         .ok_or_else(|| ScriptError::new("mode state is too large for V8"))?;
     v8::json::parse(scope, json).ok_or_else(|| ScriptError::new("failed to decode mode state"))
@@ -2501,8 +2854,9 @@ fn v8_to_json(
     name: &str,
 ) -> Result<serde_json::Value, ScriptError> {
     let json = v8::json::stringify(scope, value)
-        .ok_or_else(|| ScriptError::new(format!("{name} must contain only structured data")))?
-        .to_rust_string_lossy(scope);
+        .ok_or_else(|| ScriptError::new(format!("{name} must contain only structured data")))?;
+    ensure_size(name, json.utf8_length(scope), MAX_SCRIPT_JSON_BYTES)?;
+    let json = json.to_rust_string_lossy(scope);
     serde_json::from_str(&json)
         .map_err(|error| ScriptError::new(format!("invalid {name}: {error}")))
 }
@@ -2670,6 +3024,7 @@ fn transpile_module(path: &Path, source: &str) -> Result<String, ScriptError> {
 #[derive(Default)]
 struct ModuleMap {
     root: PathBuf,
+    source_bytes: usize,
     by_path: HashMap<PathBuf, v8::Global<v8::Module>>,
     by_id: HashMap<i32, Vec<(PathBuf, v8::Global<v8::Module>)>>,
 }
@@ -2677,6 +3032,7 @@ struct ModuleMap {
 impl ModuleMap {
     fn reset(&mut self, root: PathBuf) {
         self.root = root;
+        self.source_bytes = 0;
         self.by_path.clear();
         self.by_id.clear();
     }
@@ -2684,6 +3040,13 @@ impl ModuleMap {
     fn insert(&mut self, path: PathBuf, module: v8::Global<v8::Module>, id: i32) {
         self.by_path.insert(path.clone(), module.clone());
         self.by_id.entry(id).or_default().push((path, module));
+    }
+
+    fn reserve_source(&mut self, bytes: usize) -> Result<(), ScriptError> {
+        let total = self.source_bytes.saturating_add(bytes);
+        ensure_size("module graph", total, MAX_MODULE_GRAPH_BYTES)?;
+        self.source_bytes = total;
+        Ok(())
     }
 
     fn path_for(&self, id: i32, module: &v8::Global<v8::Module>) -> Option<&PathBuf> {
@@ -2704,9 +3067,13 @@ fn load_module_tree<'scope>(
         return Ok(v8::Local::new(scope, module));
     }
 
+    ensure_file_size(path, "module source", MAX_SCRIPT_SOURCE_BYTES)?;
     let source = fs::read_to_string(path)
         .map_err(|error| ScriptError::new(format!("failed to read {}: {error}", path.display())))?;
+    ensure_size("module source", source.len(), MAX_SCRIPT_SOURCE_BYTES)?;
+    modules.borrow_mut().reserve_source(source.len())?;
     let source = transpile_module(path, &source)?;
+    ensure_size("transpiled module", source.len(), MAX_SCRIPT_SOURCE_BYTES)?;
     let source = v8::String::new(scope, &source)
         .ok_or_else(|| ScriptError::new(format!("script is too large: {}", path.display())))?;
     let origin = module_origin(scope, path);
@@ -2872,12 +3239,199 @@ mod tests {
     }
 
     #[test]
+    fn startup_timeout_interrupts_script_and_host_recovers() {
+        let mut host =
+            ScriptHost::with_timeouts(Duration::from_millis(50), Duration::from_millis(50));
+
+        let error = host
+            .execute_typescript(
+                "file:///loop.ts",
+                r#"
+editor.modes.define({ name: "partial", actions: {} });
+while (true) {}
+"#,
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("timeout during module evaluation"),
+            "{error}"
+        );
+        assert!(host.definitions.borrow().is_empty());
+        assert_eq!(
+            host.evaluate_typescript("file:///after-loop.ts", "6 * 7")
+                .unwrap(),
+            "42"
+        );
+    }
+
+    #[test]
+    fn startup_timeout_interrupts_infinite_microtasks() {
+        let mut host =
+            ScriptHost::with_timeouts(Duration::from_millis(50), Duration::from_millis(50));
+
+        let error = host
+            .evaluate_typescript(
+                "file:///microtasks.ts",
+                r#"
+const spin = () => Promise.resolve().then(spin);
+Promise.resolve().then(spin);
+"#,
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("timeout during module evaluation"),
+            "{error}"
+        );
+        assert_eq!(
+            host.evaluate_typescript("file:///after-microtasks.ts", "21 + 21")
+                .unwrap(),
+            "42"
+        );
+    }
+
+    #[test]
+    fn heap_limit_interrupts_script_without_terminating_host() {
+        let host_budget = ScriptExecutionBudget {
+            callback_timeout: Duration::from_secs(5),
+            startup_timeout: Duration::from_secs(5),
+        };
+        let mut host = ScriptHost::with_budget_and_heap(host_budget, 16 * 1024 * 1024);
+
+        let error = host
+            .evaluate_typescript(
+                "file:///heap.ts",
+                r#"
+const retained = [];
+while (true) retained.push(new Array(100_000).fill(42));
+"#,
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("heap limit exceeded"), "{error}");
+        assert_eq!(
+            host.evaluate_typescript("file:///after-heap.ts", "40 + 2")
+                .unwrap(),
+            "42"
+        );
+    }
+
+    #[test]
     fn reports_typescript_parse_errors() {
         let error = transpile_typescript("file:///config.ts", "const value: = 1;")
             .unwrap_err()
             .to_string();
 
         assert!(error.contains("Expected"));
+    }
+
+    #[test]
+    fn rejects_oversized_typescript_before_transpiling() {
+        let mut host = ScriptHost::new();
+        let source = " ".repeat(MAX_SCRIPT_SOURCE_BYTES + 1);
+
+        let error = host
+            .execute_typescript("file:///oversized.ts", &source)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("limit exceeded for TypeScript source"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rejects_module_graphs_over_the_total_source_limit() {
+        let mut modules = ModuleMap::default();
+        modules.reserve_source(MAX_MODULE_GRAPH_BYTES).unwrap();
+
+        let error = modules.reserve_source(1).unwrap_err().to_string();
+
+        assert!(error.contains("limit exceeded for module graph"), "{error}");
+    }
+
+    #[test]
+    fn rejects_oversized_module_before_reading_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("oversized.ts");
+        fs::write(&path, vec![b' '; MAX_SCRIPT_SOURCE_BYTES + 1]).unwrap();
+        let mut host = ScriptHost::new();
+
+        let error = host.execute_module(&path).unwrap_err().to_string();
+
+        assert!(
+            error.contains("limit exceeded for module source"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_mode_state_and_host_recovers() {
+        let mut host = ScriptHost::with_timeouts(Duration::from_secs(5), Duration::from_secs(5));
+        host.execute_typescript(
+            "file:///oversized-state.ts",
+            &format!(
+                r#"
+editor.modes.define({{
+  name: "oversized-state",
+  on: {{ buffer: {{ state: () => "x".repeat({}) }} }},
+}});
+"#,
+                MAX_SCRIPT_JSON_BYTES + 1
+            ),
+        )
+        .unwrap();
+        let host = Rc::new(RefCell::new(host));
+        let mode = ScriptHost::script_modes(&host).pop().unwrap();
+        let content_id = ContentId(0);
+        let mut contents = ContentStore::default();
+        contents
+            .insert(content_id, Content::Buffer(Buffer::new()))
+            .unwrap();
+        let context = ModeContentContext::new(content_id, &contents);
+
+        let error = match mode.create_content_state(&context) {
+            Ok(_) => panic!("oversized state unexpectedly succeeded"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(
+            error.contains("limit exceeded for mode content state"),
+            "{error}"
+        );
+        assert_eq!(
+            host.borrow_mut()
+                .evaluate_typescript("file:///after-state.ts", "14 * 3")
+                .unwrap(),
+            "42"
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_analysis_input_result() {
+        let mut host = ScriptHost::with_timeouts(Duration::from_secs(5), Duration::from_secs(5));
+        let context = host.context.clone();
+        let source = format!("({{ payload: 'x'.repeat({}) }})", MAX_SCRIPT_JSON_BYTES + 1);
+        let error = host
+            .invoke(ScriptInvocationKind::AnalysisInput, |isolate| {
+                v8::scope_with_context!(scope, isolate, context);
+                let source = v8::String::new(scope, &source).unwrap();
+                let script = v8::Script::compile(scope, source, None).unwrap();
+                let value = script.run(scope).unwrap();
+                v8_to_json(scope, value, "analysis input")
+            })
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("limit exceeded for analysis input"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -3452,6 +4006,188 @@ editor.modes.define({
                 "viewPolicy": { "cursorStyle": "block" },
             })
         );
+    }
+
+    #[test]
+    fn timed_out_action_discards_state_and_operations_then_recovers() {
+        let mut host =
+            ScriptHost::with_timeouts(Duration::from_millis(50), Duration::from_millis(100));
+        host.execute_typescript(
+            "file:///timed-out-action.ts",
+            r#"
+editor.modes.define({
+  name: "timed-out-action",
+  content: { create: () => ({ calls: 0 }) },
+  view: {
+    create: () => ({
+      calls: 0,
+      viewPolicy: { cursorStyle: "bar" },
+    }),
+  },
+  actions: {
+    hang(context) {
+      context.contentState.calls++;
+      context.viewState.calls++;
+      context.viewState.viewPolicy.cursorStyle = "block";
+      context.text.insert("discarded");
+      while (true) {}
+    },
+    recover(context) {
+      context.contentState.calls++;
+      context.viewState.calls++;
+      return context.handled();
+    },
+  },
+});
+"#,
+        )
+        .unwrap();
+        let host = Rc::new(RefCell::new(host));
+        let mode = ScriptHost::script_modes(&host).pop().unwrap();
+        let content_id = ContentId(0);
+        let mut contents = ContentStore::default();
+        contents
+            .insert(content_id, Content::Buffer(Buffer::new()))
+            .unwrap();
+        let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
+        let context = ModeViewContext::new(ViewId(0), &view, &contents).unwrap();
+        let content_context = ModeContentContext::new(content_id, &contents);
+        let mut content_state = mode.create_content_state(&content_context).unwrap();
+        let mut view_state = mode
+            .create_view_state(content_state.as_ref(), &context)
+            .unwrap();
+
+        let error = mode
+            .execute_view_with_arguments(
+                content_state.as_mut(),
+                view_state.as_mut(),
+                &context,
+                &ModeActionName::new("hang"),
+                &ModeValue::Null,
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("timeout during action"), "{error}");
+        assert_eq!(
+            script_state(content_state.as_ref(), mode.name())
+                .unwrap()
+                .data,
+            serde_json::json!({ "calls": 0 })
+        );
+        assert_eq!(
+            script_state(view_state.as_ref(), mode.name()).unwrap().data,
+            serde_json::json!({
+                "calls": 0,
+                "viewPolicy": { "cursorStyle": "bar" },
+            })
+        );
+
+        let result = mode
+            .execute_view_with_arguments(
+                content_state.as_mut(),
+                view_state.as_mut(),
+                &context,
+                &ModeActionName::new("recover"),
+                &ModeValue::Null,
+            )
+            .unwrap();
+        assert!(result.into_parts().1.is_empty());
+        assert_eq!(
+            script_state(content_state.as_ref(), mode.name())
+                .unwrap()
+                .data,
+            serde_json::json!({ "calls": 1 })
+        );
+        assert_eq!(
+            script_state(view_state.as_ref(), mode.name()).unwrap().data,
+            serde_json::json!({
+                "calls": 1,
+                "viewPolicy": { "cursorStyle": "bar" },
+            })
+        );
+    }
+
+    #[test]
+    fn action_output_limits_discard_staged_state_and_operations() {
+        let budget = ScriptExecutionBudget {
+            callback_timeout: Duration::from_secs(5),
+            startup_timeout: Duration::from_secs(5),
+        };
+        let mut host = ScriptHost::with_budget_and_heap(budget, SCRIPT_HEAP_LIMIT_BYTES);
+        host.execute_typescript(
+            "file:///output-limits.ts",
+            &format!(
+                r#"
+editor.modes.define({{
+  name: "output-limits",
+  content: {{ create: () => ({{ calls: 0 }}) }},
+  actions: {{
+    operations(context) {{
+      context.contentState.calls++;
+      for (let index = 0; index < {}; index++) context.text.insert("x");
+      return context.handled();
+    }},
+    decorations(context) {{
+      context.contentState.calls++;
+      return {{
+        contentDecorations: {{
+          revision: context.revision,
+          spans: Array.from({{ length: {} }}, () => ({{
+            range: {{
+              start: {{ line: 0, character: 0 }},
+              end: {{ line: 0, character: 0 }},
+            }},
+            face: "limit",
+          }})),
+        }},
+      }};
+    }},
+  }},
+}});
+"#,
+                MAX_SCRIPT_OPERATIONS + 1,
+                MAX_SCRIPT_DECORATIONS + 1
+            ),
+        )
+        .unwrap();
+        let host = Rc::new(RefCell::new(host));
+        let mode = ScriptHost::script_modes(&host).pop().unwrap();
+        let content_id = ContentId(0);
+        let mut contents = ContentStore::default();
+        contents
+            .insert(content_id, Content::Buffer(Buffer::new()))
+            .unwrap();
+        let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
+        let context = ModeViewContext::new(ViewId(0), &view, &contents).unwrap();
+        let content_context = ModeContentContext::new(content_id, &contents);
+        let mut content_state = mode.create_content_state(&content_context).unwrap();
+        let mut view_state = mode
+            .create_view_state(content_state.as_ref(), &context)
+            .unwrap();
+
+        for (action, expected) in [
+            ("operations", "limit exceeded for operations"),
+            ("decorations", "limit exceeded for decorations"),
+        ] {
+            let error = mode
+                .execute_view_with_arguments(
+                    content_state.as_mut(),
+                    view_state.as_mut(),
+                    &context,
+                    &ModeActionName::new(action),
+                    &ModeValue::Null,
+                )
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            assert_eq!(
+                script_state(content_state.as_ref(), mode.name())
+                    .unwrap()
+                    .data,
+                serde_json::json!({ "calls": 0 })
+            );
+        }
     }
 
     #[test]

@@ -48,8 +48,8 @@
 
 主 ScriptHost 仍在 UI 线程同步执行输入和 action callback。只有显式声明的
 后台 worker 用于解析等 CPU 密集工作，因此没有引入通用 Web、Node 或 Deno
-运行时。worker 已有取消与超时约束；主 isolate 的 callback deadline、heap
-上限和 terminate 恢复尚未实现，跟踪于编辑器 Roadmap 的 M1。
+运行时。主 isolate 和 worker 均有执行 deadline、heap 上限和 terminate
+恢复；脚本仍共享主 isolate，因此这不是恶意代码的进程级隔离。
 
 ## 1. 定位
 
@@ -138,9 +138,10 @@ App runtime
 同步 callback 期间 app 本来就必须等待 ModeResult，独立 VM 线程不会改善输入
 响应，反而要求额外的序列化和请求通道。因此第一版不建立 VM worker thread。
 
-目标实现中，超时 watchdog 在独立线程持有 `IsolateHandle`。callback 到期时
-终止 V8 执行；callback 正常返回时取消 watchdog。当前只有后台 worker 实现了
-对应机制，主 `ScriptHost` 尚未实现。
+超时 watchdog 在独立线程持有 `IsolateHandle`。callback 到期时终止 V8
+执行；callback 正常返回时取消 watchdog。终止异常传播出 V8 scope 后，宿主
+清理 terminate 状态并验证后续调用仍可执行。接近 heap 上限时采用同一终止
+路径，并在恢复后还原上限。
 
 ## 6. 初始化顺序
 
@@ -429,6 +430,19 @@ draft，并恢复本次输入的 Content、View、input 和 transaction checkpoi
 
 V8 exception 不自动销毁整个 runtime。timeout 终止传播完成后，runtime 只有在
 V8 允许恢复执行时才继续使用，否则禁用脚本层并保留 native 编辑能力。
+
+当前默认预算如下：
+
+- 普通 callback 为 2 秒，module startup 为 5 秒；
+- isolate heap 为 128 MiB，并保留 16 MiB 终止恢复余量；
+- 单文件 TypeScript/module 为 4 MiB，module graph 为 16 MiB；
+- 结构化输入为 32 MiB，state 和 callback result 为 4 MiB；
+- 单次调用最多暂存 10,000 个 operation 和 100,000 个 decoration。
+
+超时、heap 超限、转换失败和输出超限均在 Rust 侧发布 state、operation 与
+presentation 之前返回。启动脚本失败还会撤销本次新增的 Mode definition 和
+diagnostic。module 全局变量等 V8 内部状态不参与事务回滚；这也是共享 isolate
+不等同于不受信任插件隔离的原因。
 
 ## 18. 分层
 

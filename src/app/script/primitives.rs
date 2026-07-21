@@ -20,8 +20,8 @@ use crate::protocol::viewport::{
 };
 
 use super::{
-    ScriptError, json_to_mode_value, parse_position, property, required_object, required_string,
-    set_number, set_object, throw_script_error, v8_to_json,
+    MAX_SCRIPT_OPERATIONS, ScriptError, ensure_count, json_to_mode_value, parse_position, property,
+    required_object, required_string, set_number, set_object, throw_script_error, v8_to_json,
 };
 
 const OPCODE_BITS: u32 = 8;
@@ -359,13 +359,17 @@ fn call_primitive(
     };
     match primitive_effects(scope, &arguments, primitive, &runtime) {
         Ok(effects) => {
-            runtime
-                .borrow_mut()
-                .current
-                .as_mut()
-                .expect("active invocation")
-                .effects
-                .extend(effects);
+            let mut runtime = runtime.borrow_mut();
+            let invocation = runtime.current.as_mut().expect("active invocation");
+            if let Err(error) = ensure_count(
+                "operations",
+                invocation.effects.len().saturating_add(effects.len()),
+                MAX_SCRIPT_OPERATIONS,
+            ) {
+                throw_script_error(scope, &error.to_string());
+                return;
+            }
+            invocation.effects.extend(effects);
             return_value.set_undefined();
         }
         Err(error) => throw_script_error(scope, &error.to_string()),

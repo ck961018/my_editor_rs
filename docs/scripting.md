@@ -167,7 +167,10 @@ analyses keep independent cached decoration layers.
 
 Workers may return a Promise. The worker isolate pumps V8 microtasks, observes
 editor cancellation, and rejects a request that exceeds its execution budget.
-The main ScriptHost remains synchronous for input and command callbacks.
+The main ScriptHost remains synchronous for input and command callbacks, but a
+watchdog bounds each invocation and terminates V8 on timeout or heap pressure.
+Validated state, operations, and presentation data are published only after the
+invocation succeeds.
 
 Standalone commands remain intentionally deferred. There is no command palette
 or non-Mode invocation entry yet, so `context.commands.invoke()` resolves only

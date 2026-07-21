@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    DEFAULT_PLUGIN_ASSETS, ScriptError, current_exception, initialize_v8, json_to_v8, set_object,
+    DEFAULT_PLUGIN_ASSETS, InvocationWatchdog, MAX_SCRIPT_SOURCE_BYTES, SCRIPT_HEAP_LIMIT_BYTES,
+    SCRIPT_STARTUP_TIMEOUT, ScriptError, ScriptInvocationKind, current_exception, ensure_size,
+    initialize_v8, install_heap_limit, json_to_v8, recover_heap_limit, set_object,
     throw_script_error, transpile_typescript, v8_to_json,
 };
 
@@ -41,7 +43,13 @@ impl ScriptWorker {
         let source = std::str::from_utf8(source)
             .map_err(|error| ScriptError::new(format!("invalid UTF-8 in {path}: {error}")))?
             .to_owned();
+        ensure_size("worker source", source.len(), MAX_SCRIPT_SOURCE_BYTES)?;
         let javascript = transpile_typescript(&format!("file:///runtime/plugins/{path}"), &source)?;
+        ensure_size(
+            "transpiled worker",
+            javascript.len(),
+            MAX_SCRIPT_SOURCE_BYTES,
+        )?;
         let (sender, receiver) = mpsc::channel();
         std::thread::Builder::new()
             .name(format!("script-worker-{path}"))
@@ -85,7 +93,8 @@ fn run_worker(
     receiver: mpsc::Receiver<WorkerRequest>,
 ) {
     initialize_v8();
-    let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+    let params = v8::CreateParams::default().heap_limits(0, SCRIPT_HEAP_LIMIT_BYTES);
+    let mut isolate = v8::Isolate::new(params);
     isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
     isolate.set_capture_stack_trace_for_uncaught_exceptions(true, 10);
     let handler: WorkerHandler = Rc::new(RefCell::new(None));
@@ -96,11 +105,30 @@ fn run_worker(
         let context = v8::Context::new(scope, Default::default());
         v8::Global::new(scope, context)
     };
-    let startup = {
-        v8::scope_with_context!(scope, &mut isolate, context.clone());
-        v8::tc_scope!(let scope, scope);
-        install_worker_api(scope);
-        evaluate_worker(scope, &path, &javascript)
+    let mut heap_limit = install_heap_limit(&mut isolate);
+    let watchdog = InvocationWatchdog::start(
+        isolate.thread_safe_handle(),
+        ScriptInvocationKind::ModuleEvaluation,
+        SCRIPT_STARTUP_TIMEOUT,
+    );
+    let startup = match watchdog {
+        Ok(watchdog) => {
+            let startup = {
+                v8::scope_with_context!(scope, &mut isolate, context.clone());
+                v8::tc_scope!(let scope, scope);
+                install_worker_api(scope);
+                evaluate_worker(scope, &path, &javascript)
+            };
+            watchdog.finish(startup)
+        }
+        Err(error) => Err(error),
+    };
+    let startup = if recover_heap_limit(&mut isolate, &mut heap_limit, SCRIPT_HEAP_LIMIT_BYTES) {
+        Err(ScriptError::new(
+            "script worker heap limit exceeded during startup",
+        ))
+    } else {
+        startup
     };
     let startup_error = startup
         .err()
@@ -113,15 +141,20 @@ fn run_worker(
         .map(|error| error.to_string());
 
     while let Ok(request) = receiver.recv() {
-        let result = match startup_error.as_ref() {
-            Some(error) => Err(error.clone()),
-            None => execute_request_with_watchdog(
-                &mut isolate,
-                context.clone(),
-                handler.borrow().as_ref().expect("checked handler"),
-                request.message,
-                &request.cancellation,
-            ),
+        let result = if request.cancellation.is_cancelled() {
+            Err("script worker request cancelled".to_owned())
+        } else {
+            match startup_error.as_ref() {
+                Some(error) => Err(error.clone()),
+                None => execute_request_with_watchdog(
+                    &mut isolate,
+                    context.clone(),
+                    handler.borrow().as_ref().expect("checked handler"),
+                    request.message,
+                    &request.cancellation,
+                    &mut heap_limit,
+                ),
+            }
         };
         let _ = request.response.send(result);
     }
@@ -133,6 +166,7 @@ fn execute_request_with_watchdog(
     handler: &v8::Global<v8::Function>,
     message: serde_json::Value,
     cancellation: &CancellationToken,
+    heap_limit: &mut Box<super::HeapLimitState>,
 ) -> Result<serde_json::Value, String> {
     let handle = isolate.thread_safe_handle();
     let finished = Arc::new(AtomicBool::new(false));
@@ -141,28 +175,37 @@ fn execute_request_with_watchdog(
     let watcher_interrupted = interrupted.clone();
     let watcher_cancellation = cancellation.clone();
     let watcher_handle = handle.clone();
-    let watchdog = std::thread::spawn(move || {
-        let deadline = Instant::now() + WORKER_TIMEOUT;
-        while !watcher_finished.load(Ordering::Acquire) {
-            if watcher_cancellation.is_cancelled() || Instant::now() >= deadline {
-                watcher_interrupted.store(true, Ordering::Release);
-                watcher_handle.terminate_execution();
-                return;
+    let watchdog = std::thread::Builder::new()
+        .name("script-worker-watchdog".to_owned())
+        .spawn(move || {
+            let deadline = Instant::now() + WORKER_TIMEOUT;
+            while !watcher_finished.load(Ordering::Acquire) {
+                if watcher_cancellation.is_cancelled() || Instant::now() >= deadline {
+                    watcher_interrupted.store(true, Ordering::Release);
+                    watcher_handle.terminate_execution();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(1));
             }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    });
+        })
+        .map_err(|error| format!("failed to start script worker watchdog: {error}"))?;
     let result = execute_request(isolate, context, handler, message, cancellation)
         .map_err(|error| error.to_string());
     finished.store(true, Ordering::Release);
     let _ = watchdog.join();
     if interrupted.load(Ordering::Acquire) {
         handle.cancel_terminate_execution();
+        if recover_heap_limit(isolate, heap_limit, SCRIPT_HEAP_LIMIT_BYTES) {
+            return Err("script worker heap limit exceeded".to_owned());
+        }
         return Err(if cancellation.is_cancelled() {
             "script worker request cancelled".to_owned()
         } else {
             "script worker request timed out".to_owned()
         });
+    }
+    if recover_heap_limit(isolate, heap_limit, SCRIPT_HEAP_LIMIT_BYTES) {
+        return Err("script worker heap limit exceeded".to_owned());
     }
     result
 }
