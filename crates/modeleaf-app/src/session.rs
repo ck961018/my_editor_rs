@@ -169,7 +169,6 @@ impl ClientSession {
         &self.views
     }
 
-    #[cfg(test)]
     pub(super) fn view_modes(&self) -> &ModeViewStore {
         &self.view_modes
     }

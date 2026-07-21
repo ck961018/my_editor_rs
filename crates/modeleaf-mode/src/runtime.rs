@@ -407,23 +407,79 @@ impl ModeDraftJournal {
 
 #[derive(Default)]
 pub struct FaceRegistry {
-    faces: HashMap<FaceName, Face>,
+    faces: HashMap<FaceName, RegisteredFace>,
+    conflicts: Vec<FaceConflict>,
+}
+
+struct RegisteredFace {
+    face: Face,
+    provider: Option<ModeName>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FaceConflict {
+    pub face: FaceName,
+    pub active_provider: Option<ModeName>,
+    pub rejected_provider: ModeName,
 }
 
 impl FaceRegistry {
     fn register_defaults(&mut self, mode: &dyn Mode) {
         for (name, face) in mode.faces() {
-            self.faces.entry(name).or_insert(face);
+            let provider = mode.name().clone();
+            if let Some(existing) = self.faces.get(&name) {
+                if existing.provider.as_ref() != Some(&provider)
+                    && !self.conflicts.iter().any(|conflict| {
+                        conflict.face == name && conflict.rejected_provider == provider
+                    })
+                {
+                    self.conflicts.push(FaceConflict {
+                        face: name,
+                        active_provider: existing.provider.clone(),
+                        rejected_provider: provider,
+                    });
+                }
+                continue;
+            }
+            self.faces.insert(
+                name,
+                RegisteredFace {
+                    face,
+                    provider: Some(provider),
+                },
+            );
         }
     }
 
     pub fn resolve(&self, name: &FaceName) -> Face {
-        self.faces.get(name).cloned().unwrap_or_default()
+        self.faces
+            .get(name)
+            .map(|registered| registered.face.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn provider(&self, name: &FaceName) -> Option<&ModeName> {
+        self.faces.get(name)?.provider.as_ref()
+    }
+
+    pub fn conflicts(&self) -> &[FaceConflict] {
+        &self.conflicts
     }
 
     #[allow(dead_code, reason = "theme and script adapters override named faces")]
     pub fn set(&mut self, name: FaceName, face: Face) {
-        self.faces.insert(name, face);
+        for conflict in &mut self.conflicts {
+            if conflict.face == name {
+                conflict.active_provider = None;
+            }
+        }
+        self.faces.insert(
+            name,
+            RegisteredFace {
+                face,
+                provider: None,
+            },
+        );
     }
 }
 
@@ -1197,6 +1253,10 @@ impl ModeRegistry {
         self.ids_by_name.get(name).copied()
     }
 
+    pub fn mode_name(&self, mode: ModeId) -> Option<&ModeName> {
+        Some(self.definitions.get(&mode)?.mode().name())
+    }
+
     pub fn adapter(&self, mode: ModeId, kind: ContentKind) -> Option<ModeAdapter<'_>> {
         self.definitions.get(&mode)?.adapter(kind)
     }
@@ -1383,6 +1443,11 @@ pub struct ModeContentStore {
 }
 
 impl ModeContentStore {
+    pub fn is_faulted(&self, mode: ModeId, content: ContentId) -> bool {
+        self.instances
+            .get(&(mode, content))
+            .is_some_and(|instance| instance.faulted)
+    }
     #[cfg(any(test, feature = "test-support"))]
     pub fn faults_for_test(&self) -> Vec<(String, ContentId)> {
         self.instances
@@ -1768,6 +1833,11 @@ pub struct ModeViewStore {
 }
 
 impl ModeViewStore {
+    pub fn is_faulted(&self, mode: ModeId, view: ViewId) -> bool {
+        self.instances
+            .get(&(mode, view))
+            .is_some_and(|instance| instance.faulted)
+    }
     #[cfg(any(test, feature = "test-support"))]
     pub fn faults_for_test(&self) -> Vec<(String, ViewId)> {
         self.instances

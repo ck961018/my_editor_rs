@@ -9,6 +9,7 @@ mod application;
 mod behavior;
 mod bootstrap;
 mod command_resolver;
+mod diagnostics;
 mod dispatcher;
 mod execution;
 mod kernel;
@@ -29,6 +30,7 @@ pub(crate) use modeleaf_mode as mode;
 pub(crate) use modeleaf_mode::{action, command, mode_name, presentation};
 
 pub use application::App;
+pub use diagnostics::{ModeDecorationDiagnostics, NamedPolicySources, ViewModeDiagnostics};
 
 #[cfg(test)]
 mod tests;

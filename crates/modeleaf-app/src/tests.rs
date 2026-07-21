@@ -3218,6 +3218,48 @@ fn mode_decorations_are_resolved_through_named_faces() {
 }
 
 #[test]
+fn mode_diagnostics_report_policy_decorations_and_face_conflicts() {
+    let mut app = make_app(vec![], None);
+    let first = ModeName::new("diagnostic-highlight-first");
+    let second = ModeName::new("diagnostic-highlight-second");
+    for name in [&first, &second] {
+        app.kernel
+            .modes_mut()
+            .register(HighlightMode { name: name.clone() })
+            .unwrap();
+        app.attach_mode_to_content(editor_cid(), name).unwrap();
+    }
+    let view = view_id(&app, app.session.focused());
+
+    let diagnostics = app
+        .mode_diagnostics()
+        .into_iter()
+        .find(|entry| entry.view == view)
+        .unwrap();
+    assert_eq!(
+        diagnostics.policy_sources.selection_face,
+        Some(first.clone())
+    );
+    assert_eq!(
+        diagnostics
+            .decorations
+            .iter()
+            .find(|entry| entry.mode == first)
+            .map(|entry| entry.view_count),
+        Some(1)
+    );
+    assert_eq!(
+        app.face_provider(&FaceName::new("syntax.test")),
+        Some(&first)
+    );
+    assert!(app.face_conflicts().iter().any(|conflict| {
+        conflict.face == FaceName::new("syntax.test")
+            && conflict.active_provider.as_ref() == Some(&first)
+            && conflict.rejected_provider == second
+    }));
+}
+
+#[test]
 fn render_reads_cached_presentation_without_calling_mode() {
     let mut app = make_app(vec![], None);
     let calls = Rc::new(Cell::new(0));

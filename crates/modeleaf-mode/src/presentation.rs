@@ -21,6 +21,29 @@ pub struct ViewPresentationLayer {
     pub decorations: Vec<NamedTextDecoration>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PolicySources {
+    pub cursor_style: Option<ModeId>,
+    pub cursor_domain: Option<ModeId>,
+    pub selection_shape: Option<ModeId>,
+    pub selection_face: Option<ModeId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModeDecorationDiagnostics {
+    pub mode: ModeId,
+    pub content_count: usize,
+    pub view_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViewPresentationDiagnostics {
+    pub modes: Vec<ModeId>,
+    pub policy: ModeViewPolicy,
+    pub policy_sources: PolicySources,
+    pub decorations: Vec<ModeDecorationDiagnostics>,
+}
+
 #[derive(Default)]
 pub struct PresentationLayerStore {
     content_layers: HashMap<(ModeId, ContentId), ContentPresentationLayer>,
@@ -149,6 +172,59 @@ impl PresentationLayerStore {
             }
         }
         decorations
+    }
+
+    pub fn diagnostics(
+        &self,
+        view: ViewId,
+        content_revision: Revision,
+        view_revision: Revision,
+    ) -> Option<ViewPresentationDiagnostics> {
+        let content = self.view_contents.get(&view).copied()?;
+        let modes = self.view_order.get(&view)?.clone();
+        let mut policy = ModeViewPolicy::default();
+        let mut policy_sources = PolicySources::default();
+        let mut decorations = Vec::with_capacity(modes.len());
+        for mode in &modes {
+            let content_count = self
+                .content_layers
+                .get(&(*mode, content))
+                .filter(|layer| layer.source_revision == content_revision)
+                .map_or(0, |layer| layer.decorations.len());
+            let view_layer = self.view_layers.get(&(*mode, view)).filter(|layer| {
+                layer.content_revision == content_revision && layer.view_revision == view_revision
+            });
+            let view_count = view_layer.map_or(0, |layer| layer.decorations.len());
+            if let Some(layer) = view_layer {
+                if policy_sources.cursor_style.is_none() && layer.policy.cursor_style.is_some() {
+                    policy_sources.cursor_style = Some(*mode);
+                }
+                if policy_sources.cursor_domain.is_none() && layer.policy.cursor_domain.is_some() {
+                    policy_sources.cursor_domain = Some(*mode);
+                }
+                if policy_sources.selection_shape.is_none()
+                    && layer.policy.selection_shape.is_some()
+                {
+                    policy_sources.selection_shape = Some(*mode);
+                }
+                if policy_sources.selection_face.is_none() && layer.policy.selection_face.is_some()
+                {
+                    policy_sources.selection_face = Some(*mode);
+                }
+                policy.merge_missing(layer.policy.clone());
+            }
+            decorations.push(ModeDecorationDiagnostics {
+                mode: *mode,
+                content_count,
+                view_count,
+            });
+        }
+        Some(ViewPresentationDiagnostics {
+            modes,
+            policy,
+            policy_sources,
+            decorations,
+        })
     }
 
     #[cfg(any(test, feature = "test-support"))]
