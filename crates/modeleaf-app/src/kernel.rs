@@ -545,7 +545,7 @@ mod tests {
         let key = ModeJobKey {
             mode,
             content: ContentId(0),
-            slot: "parse".to_owned(),
+            slot: "parse".into(),
         };
         let request = |version| {
             ModeJobRequest::new("parse", version, move |cancellation| {
@@ -573,7 +573,7 @@ mod tests {
         let key = ModeJobKey {
             mode,
             content: ContentId(0),
-            slot: "parse".to_owned(),
+            slot: "parse".into(),
         };
         kernel.queue_mode_job(
             mode,

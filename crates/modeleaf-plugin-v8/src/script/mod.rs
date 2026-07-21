@@ -14,8 +14,8 @@ use modeleaf_core::keymap::Keymap;
 use modeleaf_mode::command::{Command, ModeCommand, ModeValue};
 use modeleaf_mode::mode_name::{ModeActionName, ModeName};
 use modeleaf_mode::{
-    Mode, ModeAdapters, ModeContentContext, ModeError, ModeJobRequest, ModeJobResult, ModeResult,
-    ModeState, ModeViewContext, ModeViewPolicy,
+    Mode, ModeAdapters, ModeContentContext, ModeError, ModeJobRequest, ModeJobResult, ModeJobSlot,
+    ModeResult, ModeState, ModeViewContext, ModeViewPolicy,
 };
 use modeleaf_protocol::content_query::{Color, Face, FaceName, NamedTextDecoration, RowRange};
 use modeleaf_protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
@@ -184,7 +184,7 @@ struct ScriptModeDefinition {
     adapters: ScriptAdapterDefinitions,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct ScriptModeState {
     data: serde_json::Value,
     decorations: DecorationSet,
@@ -194,7 +194,7 @@ struct ScriptModeState {
     analysis_input_epoch: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct ScriptAnalysisSchedule {
     version: u64,
     content_revision: u64,
@@ -202,7 +202,7 @@ struct ScriptAnalysisSchedule {
     message: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 struct DecorationSet {
     values: Arc<Vec<NamedTextDecoration>>,
     prefix_max_end: Arc<Vec<usize>>,
@@ -785,10 +785,11 @@ impl Mode for ScriptMode {
         &self,
         state: &mut dyn ModeState,
         context: &ModeContentContext<'_>,
-        slot: &str,
+        slot: &ModeJobSlot,
         version: u64,
         result: ModeJobResult,
     ) -> Result<bool, ModeError> {
+        let slot = slot.as_str();
         let adapter = self.adapter(context.content_kind());
         let state = script_state_mut(state, &self.name)?;
         let current_revision = context.content_revision().map(|revision| revision.0);
@@ -2596,7 +2597,7 @@ editor.modes.define({
             .apply_background_job(
                 state.as_mut(),
                 &context,
-                "analysis:first",
+                &ModeJobSlot::from("analysis:first"),
                 1,
                 Ok(Box::new(ScriptJobOutput::Response(serde_json::json!({})))),
             )
@@ -2608,7 +2609,7 @@ editor.modes.define({
         let first = initial.remove(0);
         let second = initial.remove(0);
         let (first_slot, first_version, _) = first.into_parts();
-        assert_eq!(first_slot, "analysis:first");
+        assert_eq!(first_slot.as_str(), "analysis:first");
         assert_eq!(first_version, 0);
         assert!(
             mode.apply_background_job(
@@ -2626,7 +2627,7 @@ editor.modes.define({
                 .is_empty()
         );
         let (second_slot, second_version, _) = second.into_parts();
-        assert_eq!(second_slot, "analysis:second");
+        assert_eq!(second_slot.as_str(), "analysis:second");
         assert_eq!(second_version, 1);
         mode.apply_background_job(
             state.as_mut(),
@@ -2700,7 +2701,7 @@ editor.modes.define({
             .zip(["analysis:first", "analysis:second"])
         {
             let (slot, version, _) = request.into_parts();
-            assert_eq!(slot, expected_slot);
+            assert_eq!(slot.as_str(), expected_slot);
             mode.apply_background_job(
                 state.as_mut(),
                 &context,
@@ -2717,7 +2718,7 @@ editor.modes.define({
             .next()
             .unwrap();
         let (slot, version, _) = refreshed.into_parts();
-        assert_eq!(slot, "analysis:first");
+        assert_eq!(slot.as_str(), "analysis:first");
         assert_eq!(version, 2);
     }
 
@@ -2761,7 +2762,7 @@ editor.modes.define({
             .next()
             .unwrap();
         let (slot, version, _) = first.into_parts();
-        assert_eq!(slot, "analysis:syntax");
+        assert_eq!(slot.as_str(), "analysis:syntax");
         assert_eq!(version, 0);
 
         script_state_mut(state.as_mut(), mode.name())
@@ -2773,7 +2774,7 @@ editor.modes.define({
             .next()
             .unwrap();
         let (slot, version, run) = disabled.into_parts();
-        assert_eq!(slot, "analysis:syntax");
+        assert_eq!(slot.as_str(), "analysis:syntax");
         assert_eq!(version, 1);
         let output = run(tokio_util::sync::CancellationToken::new()).unwrap();
         assert!(matches!(
@@ -2835,7 +2836,7 @@ editor.modes.define({
             .into_iter()
             .map(|request| {
                 let (slot, version, _) = request.into_parts();
-                (slot, version)
+                (slot.as_str().to_owned(), version)
             })
             .collect::<Vec<_>>();
         assert_eq!(

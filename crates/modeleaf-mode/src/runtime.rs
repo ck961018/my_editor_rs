@@ -2,9 +2,9 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
-use std::sync::LazyLock;
 #[cfg(feature = "test-support")]
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 #[cfg(feature = "test-support")]
 use std::time::Instant;
 
@@ -145,6 +145,7 @@ pub trait ModeState: Any {
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn clone_box(&self) -> Box<dyn ModeState>;
+    fn eq_box(&self, other: &dyn ModeState) -> bool;
 }
 
 #[cfg(feature = "test-support")]
@@ -181,21 +182,46 @@ pub type ModeJobResult = Result<Box<dyn Any + Send>, String>;
 pub type ModeJobRunner = Box<dyn FnOnce(CancellationToken) -> ModeJobResult + Send>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ModeJobSlot(Arc<str>);
+
+impl ModeJobSlot {
+    pub fn new(value: impl Into<Arc<str>>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for ModeJobSlot {
+    fn from(value: String) -> Self {
+        Self(value.into())
+    }
+}
+
+impl From<&str> for ModeJobSlot {
+    fn from(value: &str) -> Self {
+        Self(value.into())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ModeJobKey {
     pub mode: ModeId,
     pub content: ContentId,
-    pub slot: String,
+    pub slot: ModeJobSlot,
 }
 
 pub struct ModeJobRequest {
-    slot: String,
+    slot: ModeJobSlot,
     version: u64,
     run: ModeJobRunner,
 }
 
 impl ModeJobRequest {
     pub fn new(
-        slot: impl Into<String>,
+        slot: impl Into<ModeJobSlot>,
         version: u64,
         run: impl FnOnce(CancellationToken) -> ModeJobResult + Send + 'static,
     ) -> Self {
@@ -206,12 +232,12 @@ impl ModeJobRequest {
         }
     }
 
-    pub fn into_parts(self) -> (String, u64, ModeJobRunner) {
+    pub fn into_parts(self) -> (ModeJobSlot, u64, ModeJobRunner) {
         (self.slot, self.version, self.run)
     }
 }
 
-impl<T: Any + Clone> ModeState for T {
+impl<T: Any + Clone + PartialEq> ModeState for T {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -233,6 +259,10 @@ impl<T: Any + Clone> ModeState for T {
             MODE_STATE_CLONE_INLINE_BYTES.fetch_add(bytes, Ordering::Relaxed);
         }
         cloned
+    }
+
+    fn eq_box(&self, other: &dyn ModeState) -> bool {
+        other.as_any().downcast_ref::<T>() == Some(self)
     }
 }
 
@@ -327,6 +357,12 @@ impl ModeDraftJournal {
                 .instances
                 .get_mut(&key)
                 .expect("drafted mode content still exists");
+            if draft.state.eq_box(instance.state.as_ref())
+                && draft.faulted == instance.faulted
+                && draft.background_job_dirty == instance.background_job_dirty
+            {
+                continue;
+            }
             instance.state = draft.state;
             instance.faulted = draft.faulted;
             instance.background_job_dirty = draft.background_job_dirty;
@@ -340,6 +376,9 @@ impl ModeDraftJournal {
                 .instances
                 .get_mut(&key)
                 .expect("drafted mode view still exists");
+            if draft.state.eq_box(instance.state.as_ref()) && draft.faulted == instance.faulted {
+                continue;
+            }
             instance.state = draft.state;
             instance.faulted = draft.faulted;
             instance.revision.next();
@@ -852,7 +891,7 @@ pub trait Mode {
         &self,
         _state: &mut dyn ModeState,
         _context: &ModeContentContext<'_>,
-        _slot: &str,
+        _slot: &ModeJobSlot,
         _version: u64,
         _result: ModeJobResult,
     ) -> Result<bool, ModeError> {
@@ -1382,7 +1421,7 @@ impl ModeContentStore {
         mode: ModeId,
         content: ContentId,
         contents: &ContentStore,
-        slot: &str,
+        slot: &ModeJobSlot,
         version: u64,
         result: ModeJobResult,
     ) -> bool {
@@ -2393,6 +2432,31 @@ mod tests {
             content_modes.state_for_test::<u8>(mode_id, content),
             Some(&2)
         );
+    }
+
+    #[test]
+    fn unchanged_draft_does_not_advance_mode_revision() {
+        let name = ModeName::new("unchanged-draft");
+        let mut registry = ModeRegistry::new();
+        registry
+            .register(CountingJobMode {
+                name: name.clone(),
+                calls: Rc::new(Cell::new(0)),
+            })
+            .unwrap();
+        let mode = registry.instantiate(&name).unwrap();
+        let mode_id = mode.registered.id;
+        let content = ContentId(1);
+        let mut content_modes = ModeContentStore::default();
+        content_modes.attach_view(content, &mode);
+        let revision = content_modes.revision(mode_id, content).unwrap();
+        let instance = content_modes.instance(mode_id, content).unwrap();
+        let mut drafts = ModeDraftJournal::default();
+
+        drafts.content_mut(mode_id, content, instance);
+        drafts.commit_content(&mut content_modes);
+
+        assert_eq!(content_modes.revision(mode_id, content), Some(revision));
     }
 
     #[test]

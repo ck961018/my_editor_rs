@@ -105,12 +105,12 @@ struct AdapterProbeState {
     kind: ContentKind,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct SharedContentState {
     executions: u8,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct SharedViewState {
     awaiting: bool,
 }
