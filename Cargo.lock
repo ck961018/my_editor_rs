@@ -1106,18 +1106,15 @@ dependencies = [
 name = "modeleaf"
 version = "0.1.0"
 dependencies = [
- "crossterm",
  "deno_ast",
- "futures",
  "modeleaf-core",
  "modeleaf-frontend",
  "modeleaf-protocol",
+ "modeleaf-tui",
  "serde_json",
- "taffy",
  "tempfile",
  "tokio",
  "tokio-util",
- "unicode-width 0.2.2",
  "v8",
 ]
 
@@ -1140,6 +1137,19 @@ dependencies = [
 [[package]]
 name = "modeleaf-protocol"
 version = "0.1.0"
+
+[[package]]
+name = "modeleaf-tui"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "futures",
+ "modeleaf-frontend",
+ "modeleaf-protocol",
+ "taffy",
+ "tokio",
+ "unicode-width 0.2.2",
+]
 
 [[package]]
 name = "new_debug_unreachable"

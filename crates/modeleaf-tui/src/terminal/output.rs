@@ -113,13 +113,6 @@ impl<W: Write> Output<W> {
     }
 
     /// 清空整个终端画布，供切换 screen buffer 等生命周期操作使用。
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "scene rendering currently clears individual lines"
-        )
-    )]
     pub fn clear_screen(&mut self) -> io::Result<()> {
         queue!(self.out, terminal::Clear(terminal::ClearType::All))
     }
@@ -129,13 +122,6 @@ impl<W: Write> Output<W> {
     }
 
     /// 取回底层 writer，主要用于验证生成的终端输出。
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "writer extraction is retained for output verification"
-        )
-    )]
     pub fn into_inner(self) -> W {
         self.out
     }

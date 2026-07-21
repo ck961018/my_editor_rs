@@ -1,19 +1,16 @@
 mod app;
-mod terminal;
-mod tui;
 
 use modeleaf_core as core;
 use modeleaf_frontend as frontend;
 use modeleaf_protocol as protocol;
+use modeleaf_tui::TuiFrontend;
+use modeleaf_tui::terminal::lifecycle::TerminalGuard;
+use modeleaf_tui::terminal::output::Output;
+use modeleaf_tui::terminal::size as term_size;
 
 use std::io;
 
 use app::App;
-use crossterm::terminal::size as term_size;
-use terminal::lifecycle::TerminalGuard;
-use terminal::output::Output;
-use tui::TuiFrontend;
-
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
