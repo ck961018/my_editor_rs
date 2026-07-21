@@ -55,6 +55,8 @@ use crate::protocol::viewport::{
 };
 use std::collections::VecDeque;
 
+mod baseline;
+
 struct ScriptedFrontend {
     events: VecDeque<FrontendEvent>,
     renders: usize,

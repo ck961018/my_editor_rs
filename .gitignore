@@ -2,4 +2,5 @@
 !/.cargo/
 !/.cargo/config.toml
 /target
+/node_modules/
 /.worktrees/

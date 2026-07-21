@@ -1,0 +1,11 @@
+{
+  "name": "my-editor-rs-development",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit -p runtime/type-tests/tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  },
+  "packageManager": "pnpm@11.9.0"
+}

@@ -42,13 +42,14 @@
 - 内建 Vim 与 Tree-sitter 已迁移到 v2；有效 v1 用户定义每个宿主只输出一次
   deprecation 诊断，删除 parser 留给单独版本决策。
 - v2 的静态 context 收窄由 `runtime/type-tests/tsconfig.json` 固化；使用
-  `tsc.cmd --noEmit -p runtime/type-tests/tsconfig.json` 验证负向类型用例。
+  `pnpm typecheck` 验证负向类型用例。
 - `changed` 当前只属于 Buffer adapter；StatusBar 是派生 Content，没有独立的
   `ContentChange` 通知源，因此 schema 和类型定义均不暴露该 hook。
 
 主 ScriptHost 仍在 UI 线程同步执行输入和 action callback。只有显式声明的
 后台 worker 用于解析等 CPU 密集工作，因此没有引入通用 Web、Node 或 Deno
-运行时。
+运行时。worker 已有取消与超时约束；主 isolate 的 callback deadline、heap
+上限和 terminate 恢复尚未实现，跟踪于编辑器 Roadmap 的 M1。
 
 ## 1. 定位
 
@@ -137,8 +138,9 @@ App runtime
 同步 callback 期间 app 本来就必须等待 ModeResult，独立 VM 线程不会改善输入
 响应，反而要求额外的序列化和请求通道。因此第一版不建立 VM worker thread。
 
-超时 watchdog 在 Tokio worker 上持有 `IsolateHandle`。callback 到期时终止 V8
-执行；callback 正常返回时取消 watchdog。
+目标实现中，超时 watchdog 在独立线程持有 `IsolateHandle`。callback 到期时
+终止 V8 执行；callback 正常返回时取消 watchdog。当前只有后台 worker 实现了
+对应机制，主 `ScriptHost` 尚未实现。
 
 ## 6. 初始化顺序
 

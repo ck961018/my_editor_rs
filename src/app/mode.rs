@@ -3,6 +3,10 @@ use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 use std::sync::LazyLock;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
 
@@ -144,6 +148,36 @@ pub trait ModeState: Any {
     fn clone_box(&self) -> Box<dyn ModeState>;
 }
 
+#[cfg(test)]
+static MODE_STATE_CLONE_COUNT: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static MODE_STATE_CLONE_NANOS: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static MODE_STATE_CLONE_INLINE_BYTES: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) struct ModeStateCloneMetrics {
+    pub(crate) count: u64,
+    pub(crate) nanos: u64,
+    pub(crate) inline_bytes: u64,
+}
+
+#[cfg(test)]
+pub(crate) fn reset_mode_state_clone_metrics() {
+    MODE_STATE_CLONE_COUNT.store(0, Ordering::Relaxed);
+    MODE_STATE_CLONE_NANOS.store(0, Ordering::Relaxed);
+    MODE_STATE_CLONE_INLINE_BYTES.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn mode_state_clone_metrics() -> ModeStateCloneMetrics {
+    ModeStateCloneMetrics {
+        count: MODE_STATE_CLONE_COUNT.load(Ordering::Relaxed),
+        nanos: MODE_STATE_CLONE_NANOS.load(Ordering::Relaxed),
+        inline_bytes: MODE_STATE_CLONE_INLINE_BYTES.load(Ordering::Relaxed),
+    }
+}
+
 pub type ModeJobResult = Result<Box<dyn Any + Send>, String>;
 pub(crate) type ModeJobRunner = Box<dyn FnOnce(CancellationToken) -> ModeJobResult + Send>;
 
@@ -188,7 +222,18 @@ impl<T: Any + Clone> ModeState for T {
     }
 
     fn clone_box(&self) -> Box<dyn ModeState> {
-        Box::new(self.clone())
+        #[cfg(test)]
+        let started = Instant::now();
+        let cloned: Box<dyn ModeState> = Box::new(self.clone());
+        #[cfg(test)]
+        {
+            let nanos = started.elapsed().as_nanos().min(u64::MAX.into()) as u64;
+            let bytes = u64::try_from(std::mem::size_of_val(self)).unwrap_or(u64::MAX);
+            MODE_STATE_CLONE_COUNT.fetch_add(1, Ordering::Relaxed);
+            MODE_STATE_CLONE_NANOS.fetch_add(nanos, Ordering::Relaxed);
+            MODE_STATE_CLONE_INLINE_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        }
+        cloned
     }
 }
 
