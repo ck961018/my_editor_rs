@@ -19,8 +19,8 @@ use crate::app::command::{
     AppCommand, Command, ContentCommand, ModeCommand, ModeValue, TransactionCommand,
 };
 use crate::app::mode::{
-    Mode, ModeActionScope, ModeContentContext, ModeError, ModeResult, ModeState, ModeViewContext,
-    ModeViewInstance, ModeViewPolicy,
+    Mode, ModeActionScope, ModeAdapters, ModeAttachmentError, ModeContentContext, ModeContextError,
+    ModeError, ModeResult, ModeState, ModeViewContext, ModeViewInstance, ModeViewPolicy,
 };
 use crate::app::mode_name::{ModeActionName, ModeName};
 use crate::app::operation::{
@@ -30,7 +30,7 @@ use crate::app::operation::{
 use crate::core::action::ContentAction;
 use crate::core::buffer::Buffer;
 use crate::core::command::EditCommand;
-use crate::core::content::{Content, ContentChange};
+use crate::core::content::{Content, ContentChange, ContentKind};
 use crate::core::content_view_state::ContentViewState;
 use crate::core::keymap::Keymap;
 use crate::core::transaction::{TextChangeSet, TextEdit};
@@ -91,6 +91,15 @@ struct SharedContentMode {
     name: ModeName,
     actions: Vec<ModeActionName>,
     keymap: Keymap<Command>,
+}
+
+struct AdapterProbeMode {
+    name: ModeName,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AdapterProbeState {
+    kind: ContentKind,
 }
 
 #[derive(Clone)]
@@ -207,6 +216,10 @@ impl Mode for HighlightMode {
         &[]
     }
 
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer()
+    }
+
     fn create_content_state(
         &self,
         context: &ModeContentContext<'_>,
@@ -214,6 +227,8 @@ impl Mode for HighlightMode {
         assert_eq!(context.content_id(), editor_cid());
         assert_eq!(
             context
+                .buffer()
+                .expect("highlight mode has a Buffer adapter")
                 .text_snapshot()
                 .expect("text mode requires a snapshot")
                 .to_owned_string(),
@@ -293,6 +308,10 @@ impl Mode for PresentationProbeMode {
         &[]
     }
 
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer()
+    }
+
     fn content_decorations(
         &self,
         _content_state: &dyn ModeState,
@@ -342,6 +361,10 @@ impl Mode for FaultingHighlightMode {
         &[]
     }
 
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer()
+    }
+
     fn view_decorations(
         &self,
         _content_state: &dyn ModeState,
@@ -376,6 +399,10 @@ impl Mode for FactoryFaultMode {
 
     fn actions(&self) -> &[ModeActionName] {
         &[]
+    }
+
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer()
     }
 
     fn create_content_state(
@@ -424,6 +451,10 @@ impl Mode for ArgumentProbeMode {
 
     fn actions(&self) -> &[ModeActionName] {
         &self.actions
+    }
+
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer()
     }
 
     fn execute_view_with_arguments(
@@ -490,6 +521,10 @@ impl Mode for ChainProbeMode {
         &self.actions
     }
 
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer()
+    }
+
     fn input_keymap<'a>(
         &'a self,
         _content_state: &dyn ModeState,
@@ -549,6 +584,10 @@ impl Mode for SharedContentMode {
 
     fn actions(&self) -> &[ModeActionName] {
         &self.actions
+    }
+
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer()
     }
 
     fn action_scope(&self, _action: &ModeActionName) -> ModeActionScope {
@@ -659,6 +698,56 @@ impl Mode for SharedContentMode {
     }
 }
 
+impl Mode for AdapterProbeMode {
+    fn name(&self) -> &ModeName {
+        &self.name
+    }
+
+    fn actions(&self) -> &[ModeActionName] {
+        &[]
+    }
+
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer_and_status_bar()
+    }
+
+    fn create_content_state(
+        &self,
+        context: &ModeContentContext<'_>,
+    ) -> Result<Box<dyn ModeState>, ModeError> {
+        match context.content_kind() {
+            ContentKind::Buffer => assert!(context.buffer().is_some()),
+            ContentKind::StatusBar => {
+                assert!(context.status_bar().unwrap().status_bar_data().is_some())
+            }
+        }
+        Ok(Box::new(AdapterProbeState {
+            kind: context.content_kind(),
+        }))
+    }
+
+    fn create_view_state(
+        &self,
+        _content_state: &dyn ModeState,
+        context: &ModeViewContext<'_>,
+    ) -> Result<Box<dyn ModeState>, ModeError> {
+        match context.content_kind() {
+            ContentKind::Buffer => {
+                assert_eq!(
+                    context.buffer().unwrap().selections().primary().head(),
+                    TextOffset::origin()
+                )
+            }
+            ContentKind::StatusBar => {
+                assert!(context.status_bar().unwrap().status_bar_data().is_some())
+            }
+        }
+        Ok(Box::new(AdapterProbeState {
+            kind: context.content_kind(),
+        }))
+    }
+}
+
 impl LoopMode {
     fn new() -> Self {
         Self {
@@ -718,6 +807,10 @@ impl Mode for PresentationMutationMode {
 
     fn actions(&self) -> &[ModeActionName] {
         &[]
+    }
+
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer()
     }
 
     fn create_view_state(
@@ -826,6 +919,10 @@ impl Mode for ContentAwareKeymapMode {
         &self.actions
     }
 
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer()
+    }
+
     fn action_scope(&self, _action: &ModeActionName) -> ModeActionScope {
         ModeActionScope::Content
     }
@@ -836,12 +933,14 @@ impl Mode for ContentAwareKeymapMode {
         _view_state: &dyn ModeState,
         context: &ModeViewContext<'_>,
     ) -> &'a Keymap<Command> {
-        match context.query_content(ContentQuery::TextRows(RowRange { start: 0, end: 1 })) {
-            ContentData::TextRows(rows) if rows.first().is_some_and(String::is_empty) => {
-                &self.empty_keymap
-            }
-            ContentData::TextRows(_) => &self.nonempty_keymap,
-            _ => unreachable!("content-aware mode is bound to text content"),
+        match context
+            .buffer()
+            .expect("content-aware mode has a Buffer adapter")
+            .text_rows(RowRange { start: 0, end: 1 })
+        {
+            Some(rows) if rows.first().is_some_and(String::is_empty) => &self.empty_keymap,
+            Some(_) => &self.nonempty_keymap,
+            None => unreachable!("content-aware mode is bound to text content"),
         }
     }
 
@@ -883,6 +982,10 @@ impl Mode for CaptureFailureMode {
 
     fn actions(&self) -> &[ModeActionName] {
         &[]
+    }
+
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer()
     }
 
     fn create_view_state(
@@ -1008,6 +1111,10 @@ impl Mode for LoopMode {
         &self.actions
     }
 
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer()
+    }
+
     fn create_view_state(
         &self,
         _content_state: &dyn ModeState,
@@ -1072,13 +1179,12 @@ impl Mode for LoopMode {
             .expect("loop mode owns its state") += 1;
         assert_eq!(context.content_id(), editor_cid());
         let _ = context.view_id();
-        let _ = context.selections();
-        let _ = context.query_content(ContentQuery::DocumentStatus);
-        let ContentData::TextRows(rows) =
-            context.query_content(ContentQuery::TextRows(RowRange { start: 0, end: 1 }))
-        else {
-            unreachable!("loop mode is bound to a text content")
-        };
+        let buffer = context.buffer().expect("loop mode has a Buffer adapter");
+        let _ = buffer.selections();
+        let _ = buffer.document_status();
+        let rows = buffer
+            .text_rows(RowRange { start: 0, end: 1 })
+            .expect("loop mode is bound to text content");
         let offset = rows[0].chars().count();
         let change = TextChangeSet::from_edits(offset, vec![TextEdit::new(offset..offset, "x")])
             .expect("loop mode creates a valid insertion");
@@ -1393,7 +1499,8 @@ fn replace_view_mode_for_test(
             mode_contents.detach_view(content, mode_id);
         }
         let content_context = ModeContentContext::new(content, contents);
-        let view_context = ModeViewContext::new(view, &app.session.views()[&view], contents);
+        let view_context =
+            ModeViewContext::new(view, &app.session.views()[&view], contents).unwrap();
         mode_contents.attach_view_with_context(content, &mut mode, &content_context, &view_context);
     }
     app.session.view_modes_mut_for_test().insert(view, mode);
@@ -1758,7 +1865,7 @@ async fn behavior_snapshot_uses_explicit_mode_probes_and_reports_faults() {
         .modes_mut()
         .register(SharedContentMode::new())
         .unwrap();
-    assert!(app.attach_mode_to_content(editor_cid(), &shared));
+    app.attach_mode_to_content(editor_cid(), &shared).unwrap();
     let shared_id = app.kernel.modes().resolve_mode(&shared).unwrap();
     let view = view_id(&app, app.session.focused());
 
@@ -1773,7 +1880,7 @@ async fn behavior_snapshot_uses_explicit_mode_probes_and_reports_faults() {
             name: faulting.clone(),
         })
         .unwrap();
-    assert!(app.attach_mode_to_content(editor_cid(), &faulting));
+    app.attach_mode_to_content(editor_cid(), &faulting).unwrap();
     app.behavior.reset();
     let result = app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("x".to_string())),
@@ -2287,6 +2394,167 @@ async fn two_views_of_one_buffer_keep_independent_mode_instances() {
     assert_eq!(right_text.selections.primary().head(), TextOffset::origin());
 }
 
+#[test]
+fn one_mode_can_attach_canonical_adapters_to_both_content_kinds() {
+    let mut app = make_app(vec![], None);
+    let name = ModeName::new("adapter-probe");
+    let mode = app
+        .kernel
+        .modes_mut()
+        .register(AdapterProbeMode { name: name.clone() })
+        .unwrap();
+
+    assert!(
+        app.kernel
+            .modes()
+            .adapter(mode, ContentKind::Buffer)
+            .is_some()
+    );
+    assert!(
+        app.kernel
+            .modes()
+            .adapter(mode, ContentKind::StatusBar)
+            .is_some()
+    );
+    app.attach_mode_to_content(editor_cid(), &name).unwrap();
+    app.attach_mode_to_content(ContentId(1), &name).unwrap();
+
+    assert_eq!(
+        app.kernel
+            .content_modes()
+            .state_for_test::<AdapterProbeState>(mode, editor_cid()),
+        Some(&AdapterProbeState {
+            kind: ContentKind::Buffer,
+        })
+    );
+    assert_eq!(
+        app.kernel
+            .content_modes()
+            .state_for_test::<AdapterProbeState>(mode, ContentId(1)),
+        Some(&AdapterProbeState {
+            kind: ContentKind::StatusBar,
+        })
+    );
+    for (view, kind) in app
+        .session
+        .views()
+        .iter()
+        .map(|(id, view)| (*id, app.kernel.contents().kind(view.content()).unwrap()))
+    {
+        assert_eq!(
+            app.session
+                .view_modes()
+                .state_for_test::<AdapterProbeState>(mode, view),
+            Some(&AdapterProbeState { kind })
+        );
+    }
+}
+
+#[test]
+fn unsupported_attachment_is_structured_and_leaves_no_partial_profile() {
+    let mut app = make_app(vec![], None);
+    let name = ModeName::new("buffer-only");
+    let mode = app
+        .kernel
+        .modes_mut()
+        .register(HighlightMode { name: name.clone() })
+        .unwrap();
+    let status = ContentId(1);
+    let profile_before = app.session.mode_chain_for_new_view(status);
+
+    let error = app.attach_mode_to_content(status, &name).unwrap_err();
+
+    assert_eq!(
+        error,
+        ModeAttachmentError::UnsupportedContent {
+            mode: name.clone(),
+            content: status,
+            kind: ContentKind::StatusBar,
+        }
+    );
+    assert_eq!(app.session.mode_chain_for_new_view(status), profile_before);
+    assert!(app.kernel.content_modes().revision(mode, status).is_none());
+    let status_view = app
+        .session
+        .views()
+        .iter()
+        .find_map(|(id, view)| (view.content() == status).then_some(*id))
+        .unwrap();
+    assert!(!app.session.view_modes().contains(status_view, &name));
+
+    assert_eq!(
+        app.attach_mode_to_content(status, &ModeName::new("missing")),
+        Err(ModeAttachmentError::UnknownMode(ModeName::new("missing")))
+    );
+    assert_eq!(
+        app.attach_mode_to_content(ContentId(99), &name),
+        Err(ModeAttachmentError::UnknownContent(ContentId(99)))
+    );
+}
+
+#[test]
+fn attachment_rejects_an_incompatible_view_before_mutating_profile() {
+    let mut app = make_app(vec![], None);
+    let name = ModeName::new("adapter-probe");
+    let mode = app
+        .kernel
+        .modes_mut()
+        .register(AdapterProbeMode { name: name.clone() })
+        .unwrap();
+    let content = ContentId(1);
+    let view = app
+        .session
+        .views()
+        .iter()
+        .find_map(|(id, view)| (view.content() == content).then_some(*id))
+        .unwrap();
+    *app.session.view_mut(view).unwrap().state_mut() = ContentViewState::buffer();
+    let profile_before = app.session.mode_chain_for_new_view(content);
+
+    let error = app.attach_mode_to_content(content, &name).unwrap_err();
+
+    assert_eq!(
+        error,
+        ModeAttachmentError::InvalidViewContext(ModeContextError::IncompatibleViewState {
+            view,
+            content,
+            content_kind: ContentKind::StatusBar,
+            state_kind: ContentKind::Buffer,
+        })
+    );
+    assert_eq!(app.session.mode_chain_for_new_view(content), profile_before);
+    assert!(app.kernel.content_modes().revision(mode, content).is_none());
+    assert!(!app.session.view_modes().contains(view, &name));
+}
+
+#[test]
+fn mode_invocation_rejects_a_content_without_the_registered_adapter() {
+    let mut app = make_app(vec![], None);
+    let mode = ModeName::new("shared-content");
+    app.kernel
+        .modes_mut()
+        .register(SharedContentMode::new())
+        .unwrap();
+    let status = ContentId(1);
+    let status_view = app
+        .session
+        .views()
+        .iter()
+        .find_map(|(id, view)| (view.content() == status).then_some(*id))
+        .unwrap();
+
+    let error = app
+        .execute_command(DispatchCommand::Mode {
+            command: ModeCommand::new(mode, ModeActionName::new("advance")),
+            view: status_view,
+            content: status,
+        })
+        .unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("has no StatusBar adapter"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn content_mode_binding_is_shared_and_coexists_with_view_modes() {
     let mut app = make_app(vec![], None);
@@ -2297,7 +2565,7 @@ async fn content_mode_binding_is_shared_and_coexists_with_view_modes() {
         .unwrap();
     let existing_view = view_id(&app, app.session.focused());
     let existing_revision = app.session.views()[&existing_view].revision();
-    assert!(app.attach_mode_to_content(editor_cid(), &mode));
+    app.attach_mode_to_content(editor_cid(), &mode).unwrap();
     assert!(app.session.views()[&existing_view].revision() > existing_revision);
 
     let left = app.session.focused();
@@ -2354,7 +2622,7 @@ fn dynamic_attachment_profiles_content_before_its_first_view() {
         .insert(other, Content::Buffer(Buffer::new()))
         .unwrap();
 
-    assert!(app.attach_mode_to_content(other, &mode));
+    app.attach_mode_to_content(other, &mode).unwrap();
     let space = app
         .split_space(
             app.session.focused(),
@@ -2378,7 +2646,7 @@ async fn content_mode_keymap_tracks_current_content() {
         .modes_mut()
         .register(ContentAwareKeymapMode::new())
         .unwrap();
-    assert!(app.attach_mode_to_content(editor_cid(), &mode));
+    app.attach_mode_to_content(editor_cid(), &mode).unwrap();
 
     app.handle_event(FrontendEvent::Key(KeyEvent::char('q')))
         .await
@@ -2409,8 +2677,10 @@ async fn mode_can_handle_input_then_continue_to_the_next_mode() {
             false,
         ))
         .unwrap();
-    assert!(app.attach_mode_to_content(editor_cid(), &ModeName::new("first-probe")));
-    assert!(app.attach_mode_to_content(editor_cid(), &ModeName::new("second-probe")));
+    app.attach_mode_to_content(editor_cid(), &ModeName::new("first-probe"))
+        .unwrap();
+    app.attach_mode_to_content(editor_cid(), &ModeName::new("second-probe"))
+        .unwrap();
 
     app.handle_event(FrontendEvent::Key(KeyEvent::char('q')))
         .await
@@ -2439,8 +2709,10 @@ async fn later_mode_prefix_does_not_delay_an_earlier_exact_binding() {
             false,
         ))
         .unwrap();
-    assert!(app.attach_mode_to_content(editor_cid(), &ModeName::new("first-probe")));
-    assert!(app.attach_mode_to_content(editor_cid(), &ModeName::new("second-probe")));
+    app.attach_mode_to_content(editor_cid(), &ModeName::new("first-probe"))
+        .unwrap();
+    app.attach_mode_to_content(editor_cid(), &ModeName::new("second-probe"))
+        .unwrap();
 
     app.handle_event(FrontendEvent::Key(KeyEvent::char('q')))
         .await
@@ -2462,7 +2734,8 @@ fn mode_decorations_are_resolved_through_named_faces() {
             name: ModeName::new("highlight-probe"),
         })
         .unwrap();
-    assert!(app.attach_mode_to_content(editor_cid(), &ModeName::new("highlight-probe"),));
+    app.attach_mode_to_content(editor_cid(), &ModeName::new("highlight-probe"))
+        .unwrap();
     let view = view_id(&app, app.session.focused());
     let query = AppQuery {
         contents: app.kernel.contents(),
@@ -2500,7 +2773,7 @@ fn render_reads_cached_presentation_without_calling_mode() {
             max_rows: None,
         })
         .unwrap();
-    assert!(app.attach_mode_to_content(editor_cid(), &name));
+    app.attach_mode_to_content(editor_cid(), &name).unwrap();
     let calls_after_refresh = calls.get();
     assert!(calls_after_refresh > 0);
 
@@ -2522,7 +2795,7 @@ fn presentation_refresh_recomputes_only_dirty_layers() {
             max_rows: None,
         })
         .unwrap();
-    assert!(app.attach_mode_to_content(editor_cid(), &name));
+    app.attach_mode_to_content(editor_cid(), &name).unwrap();
 
     let after_attach = calls.get();
     app.session
@@ -2571,7 +2844,7 @@ fn presentation_refresh_uses_a_finite_large_document_range() {
             max_rows: Some(max_rows.clone()),
         })
         .unwrap();
-    assert!(app.attach_mode_to_content(editor_cid(), &name));
+    app.attach_mode_to_content(editor_cid(), &name).unwrap();
 
     assert_eq!(max_rows.get(), 10_001);
 }
@@ -2584,7 +2857,7 @@ fn passive_mode_failure_does_not_rollback_text_and_suspends_presentation() {
         .modes_mut()
         .register(FaultingHighlightMode { name: mode.clone() })
         .unwrap();
-    assert!(app.attach_mode_to_content(editor_cid(), &mode));
+    app.attach_mode_to_content(editor_cid(), &mode).unwrap();
     let view = view_id(&app, app.session.focused());
     {
         let query = AppQuery {
@@ -2635,7 +2908,7 @@ fn mode_factory_failures_suspend_only_the_failed_attachments() {
                 fail_content,
             })
             .unwrap();
-        assert!(app.attach_mode_to_content(editor_cid(), &mode));
+        app.attach_mode_to_content(editor_cid(), &mode).unwrap();
     }
     let view = view_id(&app, app.session.focused());
 
@@ -2672,7 +2945,7 @@ fn mode_command_delivers_owned_language_neutral_arguments() {
             actions: vec![action.clone()],
         })
         .unwrap();
-    assert!(app.attach_mode_to_content(editor_cid(), &mode));
+    app.attach_mode_to_content(editor_cid(), &mode).unwrap();
     let view = view_id(&app, app.session.focused());
 
     app.execute_command(DispatchCommand::Mode {
@@ -2709,8 +2982,10 @@ async fn failure_in_a_later_mode_rolls_back_the_whole_input() {
             false,
         ))
         .unwrap();
-    assert!(app.attach_mode_to_content(editor_cid(), &ModeName::new("first-probe")));
-    assert!(app.attach_mode_to_content(editor_cid(), &ModeName::new("failing-probe")));
+    app.attach_mode_to_content(editor_cid(), &ModeName::new("first-probe"))
+        .unwrap();
+    app.attach_mode_to_content(editor_cid(), &ModeName::new("failing-probe"))
+        .unwrap();
 
     let error = app
         .handle_event(FrontendEvent::Key(KeyEvent::char('q')))
@@ -2736,7 +3011,8 @@ async fn failed_sequence_action_restores_the_modes_pending_prefix() {
             false,
         ))
         .unwrap();
-    assert!(app.attach_mode_to_content(editor_cid(), &ModeName::new("failing-sequence"),));
+    app.attach_mode_to_content(editor_cid(), &ModeName::new("failing-sequence"))
+        .unwrap();
 
     app.handle_event(FrontendEvent::Key(KeyEvent::char('q')))
         .await
@@ -2760,7 +3036,7 @@ async fn mode_input_state_is_per_view_while_content_state_is_shared() {
         .modes_mut()
         .register(SharedContentMode::new())
         .unwrap();
-    assert!(app.attach_mode_to_content(editor_cid(), &mode));
+    app.attach_mode_to_content(editor_cid(), &mode).unwrap();
 
     let left = app.session.focused();
     let right = app
@@ -2796,7 +3072,7 @@ async fn leaving_content_cancels_view_input_without_resetting_content_state() {
         .modes_mut()
         .register(SharedContentMode::new())
         .unwrap();
-    assert!(app.attach_mode_to_content(editor_cid(), &mode));
+    app.attach_mode_to_content(editor_cid(), &mode).unwrap();
     app.handle_event(FrontendEvent::Key(KeyEvent::char('q')))
         .await
         .unwrap();

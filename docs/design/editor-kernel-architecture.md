@@ -161,18 +161,33 @@ Mode profile:     ContentId          -> ordered ModeName[]
 ```
 
 每个 View 可以附加多个有序 Mode。native 与 TypeScript Mode 实现同一个
-`Mode` contract；app 不按实现类型分支。`ModeContentContext` 只提供目标
-Content 和只读 query，`ModeViewContext` 额外提供目标 View 与 selections。
-Context 不借出 `&mut Content`、`&mut View` 或宿主对象。
+`Mode` contract；app 不按实现类型分支。每个定义通过 `ModeAdapters` 提供
+Buffer、StatusBar 中的一种或多种支持 slot。registry 在注册时冻结
+这张封闭 support table，并可按 `(ModeId, ContentKind)` 查询绑定了
+Mode definition 的 adapter。第一版的各 slot 共用同一个 definition，
+通过强类型 context 区分行为；runtime callback 只从已注册 adapter
+进入。
+
+`ModeContentContext` 和 `ModeViewContext` 都是按 `ContentKind` 封闭的
+enum。Buffer variant 仅提供强类型文本查询、snapshot 和 selections；
+StatusBar variant 只提供状态栏数据。一个多 adapter native Mode 可以按
+当前 variant 创建不同 state，不支持的能力不会出现在对应的强类型
+context 上。Context 不借出 `&mut Content`、`&mut View` 或宿主对象。
+第一版保留一个 Rust `Mode` trait 和 closed adapter table，不复制两套
+生命周期 callback；TypeScript v2 再把相同边界映射为内容专属的用户
+context。
 
 Mode action 返回有序 operation。action scope 决定允许的目标：content
 scope 不能产生 View operation，view scope 可以作用于绑定 View 与 Content。
 脚本 primitive 和 native Mode 都直接创建 `OperationRequest`。`ModeResult`
 只携带有序的 typed operation，不保留第二套 effect algebra。
 
-新 View 的 Mode profile 属于 `ClientSession`。动态 attachment 会同时更新
-profile 和该 Content 的已有 View；split 与 replace 都从同一 profile 创建
-chain。`Kernel` 不保存新 View 创建策略。
+新 View 的 Mode profile 属于 `ClientSession`。动态 attachment 先验证
+Content、Mode、adapter 和所有已有 View 的 `(ContentKind, ViewState)`
+配对，再更新 profile 和该 Content 的 View；失败以
+`ModeAttachmentError` 返回，不创建 state、不注册 face，也不保留部分
+profile。split 与 replace 都从同一 profile 创建 chain。`Kernel` 不保存新
+View 创建策略。
 
 Mode state 的可变 callback 不直接发布持久状态。第一次写时，
 `ModeDraftJournal` 用 `clone_box()` 建立 owned draft；同一 execution frame

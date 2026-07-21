@@ -530,6 +530,10 @@ mod tests {
         fn actions(&self) -> &[crate::app::mode_name::ModeActionName] {
             &[]
         }
+
+        fn adapters(&self) -> crate::app::mode::ModeAdapters {
+            crate::app::mode::ModeAdapters::buffer()
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

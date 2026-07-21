@@ -722,10 +722,21 @@ impl<F: Frontend> App<F> {
                         "nested mode invocation needs a source view",
                     ));
                 }
+                let origin_content = origin
+                    .content
+                    .ok_or_else(|| invalid_operation("mode invocation has no content target"))?;
+                let content_kind =
+                    self.kernel.contents().kind(origin_content).ok_or_else(|| {
+                        invalid_operation("mode invocation targets missing content")
+                    })?;
                 let command_scope = self
                     .kernel
                     .modes()
-                    .command_scope(&invocation.command.mode, &invocation.command.action)
+                    .command_scope(
+                        &invocation.command.mode,
+                        &invocation.command.action,
+                        content_kind,
+                    )
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
                 let mode = self
                     .kernel

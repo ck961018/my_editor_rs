@@ -15,14 +15,13 @@ use deno_ast::{
 
 use crate::app::command::{Command, ModeCommand, ModeValue};
 use crate::app::mode::{
-    CursorDomain, Mode, ModeContentContext, ModeError, ModeJobRequest, ModeJobResult, ModeResult,
-    ModeState, ModeViewContext, ModeViewPolicy,
+    CursorDomain, Mode, ModeAdapters, ModeContentContext, ModeError, ModeJobRequest, ModeJobResult,
+    ModeResult, ModeState, ModeViewContext, ModeViewPolicy,
 };
 use crate::app::mode_name::{ModeActionName, ModeName};
 use crate::core::keymap::Keymap;
 use crate::protocol::content_query::{
-    Color, ContentData, ContentQuery, CursorStyle, Face, FaceName, NamedTextDecoration, RowRange,
-    SelectionShape,
+    Color, CursorStyle, Face, FaceName, NamedTextDecoration, RowRange, SelectionShape,
 };
 use crate::protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
 
@@ -230,14 +229,14 @@ impl ScriptHost {
             scope,
             result,
             "contentDecorations",
-            context.text_snapshot(),
+            context.buffer().and_then(|context| context.text_snapshot()),
             context.content_revision(),
         )?;
         let view_decorations = parse_decorations_property(
             scope,
             result,
             "viewDecorations",
-            context.text_snapshot(),
+            context.buffer().and_then(|context| context.text_snapshot()),
             context.content_revision(),
         )?;
         let result = parse_action_result(scope, result, operations)?;
@@ -360,7 +359,8 @@ impl ScriptHost {
         if job.include_text {
             job.text_snapshot = Some(
                 context
-                    .text_snapshot()
+                    .buffer()
+                    .and_then(|context| context.text_snapshot())
                     .ok_or_else(|| ScriptError::new("content job text requires text content"))?,
             );
         }
@@ -393,7 +393,7 @@ impl ScriptHost {
             scope,
             value,
             "contentDecorations",
-            context.text_snapshot(),
+            context.buffer().and_then(|context| context.text_snapshot()),
             context.content_revision(),
         )?;
         let next = property(scope, argument, "contentState")
@@ -650,6 +650,10 @@ impl Mode for ScriptMode {
         &self.actions
     }
 
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer()
+    }
+
     fn faces(&self) -> Vec<(FaceName, Face)> {
         self.faces.clone()
     }
@@ -856,7 +860,7 @@ impl Mode for ScriptMode {
         context: &ModeContentContext<'_>,
         visible_rows: RowRange,
     ) -> Vec<NamedTextDecoration> {
-        let Some(snapshot) = context.text_snapshot() else {
+        let Some(snapshot) = context.buffer().and_then(|context| context.text_snapshot()) else {
             return Vec::new();
         };
         script_state(content_state, &self.name)
@@ -871,7 +875,7 @@ impl Mode for ScriptMode {
         context: &ModeViewContext<'_>,
         visible_rows: RowRange,
     ) -> Vec<NamedTextDecoration> {
-        let Some(snapshot) = context.text_snapshot() else {
+        let Some(snapshot) = context.buffer().and_then(|context| context.text_snapshot()) else {
             return Vec::new();
         };
         script_state(view_state, &self.name)
@@ -1710,11 +1714,13 @@ fn content_context_object<'scope>(
     if let Some(revision) = context.content_revision() {
         set_number(scope, argument, "revision", revision.0 as f64);
     }
-    if include_text && let Some(snapshot) = context.text_snapshot() {
+    let buffer = context
+        .buffer()
+        .ok_or_else(|| ScriptError::new("v1 script mode requires a Buffer adapter"))?;
+    if include_text && let Some(snapshot) = buffer.text_snapshot() {
         set_string(scope, argument, "text", &snapshot.to_owned_string());
     }
-    if let ContentData::DocumentStatus(status) = context.query_content(ContentQuery::DocumentStatus)
-    {
+    if let Some(status) = buffer.document_status() {
         let document = v8::Object::new(scope);
         if let Some(file_name) = status.file_name {
             set_string(scope, document, "fileName", &file_name);
@@ -1986,12 +1992,12 @@ fn current_exception(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::mode::InputFlow;
+    use crate::app::mode::{InputFlow, ModeRegistry};
     use crate::app::view::View;
     use crate::core::action::ContentAction;
     use crate::core::buffer::Buffer;
     use crate::core::command::EditCommand;
-    use crate::core::content::Content;
+    use crate::core::content::{Content, ContentKind};
     use crate::core::content_store::ContentStore;
     use crate::protocol::ids::{ContentId, ViewId};
 
@@ -2095,6 +2101,15 @@ editor.modes.define({
         let mut host = ScriptHost::new();
         host.execute_module(&config).unwrap();
         let host = Rc::new(RefCell::new(host));
+        let registered_mode = ScriptHost::script_modes(&host).pop().unwrap();
+        let mut registry = ModeRegistry::new();
+        let registered = registry.register(registered_mode).unwrap();
+        assert!(registry.adapter(registered, ContentKind::Buffer).is_some());
+        assert!(
+            registry
+                .adapter(registered, ContentKind::StatusBar)
+                .is_none()
+        );
         let mut modes = ScriptHost::script_modes(&host);
         let mode = modes.pop().unwrap();
         assert_eq!(mode.name().as_str(), "pairs");
@@ -2106,7 +2121,7 @@ editor.modes.define({
             .insert(content_id, Content::Buffer(Buffer::new()))
             .unwrap();
         let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context = ModeViewContext::new(ViewId(0), &view, &contents);
+        let context = ModeViewContext::new(ViewId(0), &view, &contents).unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode
@@ -2195,7 +2210,7 @@ editor.modes.define({
             .insert(content_id, Content::Buffer(Buffer::new()))
             .unwrap();
         let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context = ModeViewContext::new(ViewId(0), &view, &contents);
+        let context = ModeViewContext::new(ViewId(0), &view, &contents).unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode
@@ -2311,8 +2326,8 @@ editor.modes.define({
             .insert(content_id, Content::Buffer(buffer))
             .unwrap();
         let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context = ModeViewContext::new(ViewId(0), &view, &contents);
-        let before = context.text_snapshot().unwrap();
+        let context = ModeViewContext::new(ViewId(0), &view, &contents).unwrap();
+        let before = context.buffer().unwrap().text_snapshot().unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode
@@ -2375,7 +2390,7 @@ editor.modes.define({
             .insert(content_id, Content::Buffer(Buffer::new()))
             .unwrap();
         let view = View::new(content_id, contents.create_view_state(content_id).unwrap());
-        let context = ModeViewContext::new(ViewId(0), &view, &contents);
+        let context = ModeViewContext::new(ViewId(0), &view, &contents).unwrap();
         let content_context = ModeContentContext::new(content_id, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
         let mut view_state = mode

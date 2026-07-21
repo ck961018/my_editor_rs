@@ -202,7 +202,9 @@ impl Dispatcher {
                 let Some(view_data) = views.get(&focused_view) else {
                     return DispatchOutcome::Consumed;
                 };
-                let context = ModeViewContext::new(focused_view, view_data, contents);
+                let Ok(context) = ModeViewContext::new(focused_view, view_data, contents) else {
+                    return DispatchOutcome::Consumed;
+                };
                 fallback(key, 0, &context, views, modes, content_modes, drafts)
             }
             DispatchInput::Continue { key, mode_index } => self.start_sequence(
@@ -285,8 +287,8 @@ impl Dispatcher {
         contents: &ContentStore,
     ) -> bool {
         let cancelled_view_mode = modes.is_active(view);
-        if cancelled_view_mode {
-            let context = ModeViewContext::new(view, view_data, contents);
+        if cancelled_view_mode && let Ok(context) = ModeViewContext::new(view, view_data, contents)
+        {
             modes.cancel_chain(view, &context, content_modes, contents);
         }
         self.invalidate_view_binding(view);
@@ -361,7 +363,8 @@ impl Dispatcher {
                             view,
                             views.get(&view).expect("timeout view exists"),
                             contents,
-                        );
+                        )
+                        .ok()?;
                         modes
                             .timeout_at(view, index, &context, content_modes, drafts)
                             .map(|operations| {
@@ -488,7 +491,9 @@ impl Dispatcher {
         let Some(view) = views.get(&focused_view) else {
             return DispatchOutcome::Consumed;
         };
-        let context = ModeViewContext::new(focused_view, view, contents);
+        let Ok(context) = ModeViewContext::new(focused_view, view, contents) else {
+            return DispatchOutcome::Consumed;
+        };
         for index in start_mode..modes.mode_ids(focused_view).len() {
             let source = CommandSource::Mode {
                 view: focused_view,
@@ -765,7 +770,7 @@ impl Dispatcher {
         match source {
             CommandSource::Mode { view, index } => {
                 let view_data = views.get(&view)?;
-                let context = ModeViewContext::new(view, view_data, contents);
+                let context = ModeViewContext::new(view, view_data, contents).ok()?;
                 let keymap = modes.keymap_at(view, index, &context, content_modes, drafts)?;
                 Some(query(&KeymapLayer { source, keymap }))
             }
@@ -803,12 +808,12 @@ fn context_status(
     source: CommandSource,
 ) -> InputStatus {
     match source {
-        CommandSource::Mode { view, index } => {
-            views.get(&view).map_or(InputStatus::Ready, |view_data| {
-                let context = ModeViewContext::new(view, view_data, contents);
+        CommandSource::Mode { view, index } => views
+            .get(&view)
+            .and_then(|view_data| ModeViewContext::new(view, view_data, contents).ok())
+            .map_or(InputStatus::Ready, |context| {
                 modes.status_at(view, index, &context, content_modes, drafts)
-            })
-        }
+            }),
         CommandSource::Global => InputStatus::Ready,
     }
 }
@@ -916,6 +921,10 @@ mod tests {
 
         fn actions(&self) -> &[ModeActionName] {
             &self.actions
+        }
+
+        fn adapters(&self) -> crate::app::mode::ModeAdapters {
+            crate::app::mode::ModeAdapters::buffer()
         }
 
         fn input_keymap<'a>(

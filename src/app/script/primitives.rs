@@ -156,7 +156,7 @@ impl PrimitiveRuntime {
         self.next_id = if id == MAX_INVOCATION_ID { 1 } else { id + 1 };
         self.current = Some(PrimitiveInvocation {
             id,
-            snapshot: context.text_snapshot(),
+            snapshot: context.buffer().and_then(|context| context.text_snapshot()),
             effects: Vec::new(),
         });
         Ok(id)

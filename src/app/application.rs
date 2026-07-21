@@ -5,6 +5,7 @@ use std::time::Instant;
 use crate::app::behavior::BehaviorRecorder;
 use crate::app::bootstrap::bootstrap_editor;
 use crate::app::kernel::Kernel;
+use crate::app::mode::ModeAttachmentError;
 use crate::app::mode_name::ModeName;
 use crate::app::script::{ScriptHost, ScriptMode, load_default_plugins, load_user_config};
 use crate::app::session::ClientSession;
@@ -67,19 +68,19 @@ impl<F: Frontend> App<F> {
         not(test),
         allow(dead_code, reason = "Mode attachment is an app extension seam")
     )]
-    pub(super) fn attach_mode_to_content(&mut self, content: ContentId, mode: &ModeName) -> bool {
+    pub(super) fn attach_mode_to_content(
+        &mut self,
+        content: ContentId,
+        mode: &ModeName,
+    ) -> Result<(), ModeAttachmentError> {
         let (contents, modes, mode_contents) = self.kernel.mode_attachment_parts();
-        if !self
-            .session
-            .attach_mode_to_content_views(content, mode, modes, mode_contents, contents)
-        {
-            return false;
-        }
+        self.session
+            .attach_mode_to_content_views(content, mode, modes, mode_contents, contents)?;
         self.session
             .sync_focused_input(Instant::now(), mode_contents, contents);
         self.kernel.schedule_mode_jobs();
         self.session
             .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
-        true
+        Ok(())
     }
 }

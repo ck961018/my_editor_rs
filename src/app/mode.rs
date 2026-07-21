@@ -11,18 +11,19 @@ use crate::app::mode_name::{ModeActionName, ModeName};
 use crate::app::operation::OperationRequest;
 use crate::app::presentation::{ContentPresentationLayer, ViewPresentationLayer};
 use crate::app::view::View;
-use crate::core::content::ContentChange;
+use crate::core::content::{ContentChange, ContentKind};
 use crate::core::content_store::ContentStore;
+use crate::core::content_view_state::{BufferViewState, ContentViewState};
 use crate::core::input::{InputDecision, InputStatus};
 use crate::core::keymap::Keymap;
 use crate::protocol::content_query::{
-    ContentData, ContentQuery, CursorStyle, Face, FaceName, NamedTextDecoration, RowRange,
-    SelectionShape,
+    ContentData, ContentQuery, CursorStyle, DocumentStatus, Face, FaceName, NamedTextDecoration,
+    RowRange, SelectionShape, StatusBarData,
 };
 use crate::protocol::ids::{ContentId, ViewId};
 use crate::protocol::key_event::KeyEvent;
 use crate::protocol::revision::Revision;
-use crate::protocol::selection::Selections;
+use crate::protocol::selection::{Selections, TextOffset, TextPoint};
 
 static EMPTY_KEYMAP: LazyLock<Keymap<Command>> = LazyLock::new(Keymap::new);
 
@@ -50,6 +51,11 @@ pub enum ModeError {
         requested: ModeName,
         active: Option<ModeName>,
     },
+    UnsupportedContent {
+        mode: ModeName,
+        kind: ContentKind,
+    },
+    InvalidViewContext(ModeContextError),
 }
 
 impl fmt::Display for ModeError {
@@ -82,11 +88,55 @@ impl fmt::Display for ModeError {
                     requested.as_str()
                 ),
             },
+            Self::UnsupportedContent { mode, kind } => write!(
+                formatter,
+                "mode '{}' has no {kind:?} adapter",
+                mode.as_str()
+            ),
+            Self::InvalidViewContext(error) => error.fmt(formatter),
         }
     }
 }
 
 impl std::error::Error for ModeError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModeContextError {
+    MissingContent {
+        view: ViewId,
+        content: ContentId,
+    },
+    IncompatibleViewState {
+        view: ViewId,
+        content: ContentId,
+        content_kind: ContentKind,
+        state_kind: ContentKind,
+    },
+}
+
+impl fmt::Display for ModeContextError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingContent { view, content } => write!(
+                formatter,
+                "view {} references missing content {}",
+                view.0, content.0
+            ),
+            Self::IncompatibleViewState {
+                view,
+                content,
+                content_kind,
+                state_kind,
+            } => write!(
+                formatter,
+                "view {} for content {} has {state_kind:?} state, expected {content_kind:?}",
+                view.0, content.0
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ModeContextError {}
 
 pub trait ModeState: Any {
     fn as_any(&self) -> &dyn Any;
@@ -279,7 +329,19 @@ impl FaceRegistry {
     dead_code,
     reason = "native Mode content contexts are used by extensions"
 )]
-pub struct ModeContentContext<'a> {
+pub enum ModeContentContext<'a> {
+    Buffer(BufferModeContentContext<'a>),
+    StatusBar(StatusBarModeContentContext<'a>),
+}
+
+#[allow(dead_code, reason = "native Mode adapter capability surface")]
+pub struct BufferModeContentContext<'a> {
+    content_id: ContentId,
+    contents: &'a ContentStore,
+}
+
+#[allow(dead_code, reason = "native Mode adapter capability surface")]
+pub struct StatusBarModeContentContext<'a> {
     content_id: ContentId,
     contents: &'a ContentStore,
 }
@@ -290,22 +352,87 @@ pub struct ModeContentContext<'a> {
 )]
 impl<'a> ModeContentContext<'a> {
     pub(crate) fn new(content_id: ContentId, contents: &'a ContentStore) -> Self {
-        Self {
-            content_id,
-            contents,
+        match contents
+            .kind(content_id)
+            .expect("mode content context references existing content")
+        {
+            ContentKind::Buffer => Self::Buffer(BufferModeContentContext {
+                content_id,
+                contents,
+            }),
+            ContentKind::StatusBar => Self::StatusBar(StatusBarModeContentContext {
+                content_id,
+                contents,
+            }),
         }
     }
 
     pub fn content_id(&self) -> ContentId {
-        self.content_id
+        match self {
+            Self::Buffer(context) => context.content_id,
+            Self::StatusBar(context) => context.content_id,
+        }
     }
 
-    pub fn query_content(&self, query: ContentQuery) -> ContentData {
-        self.contents.query(self.content_id, query)
+    pub fn content_kind(&self) -> ContentKind {
+        match self {
+            Self::Buffer(_) => ContentKind::Buffer,
+            Self::StatusBar(_) => ContentKind::StatusBar,
+        }
     }
 
     pub fn content_revision(&self) -> Option<Revision> {
-        self.contents.revision(self.content_id)
+        match self {
+            Self::Buffer(context) => context.contents.revision(context.content_id),
+            Self::StatusBar(context) => context.contents.revision(context.content_id),
+        }
+    }
+
+    pub fn buffer(&self) -> Option<&BufferModeContentContext<'a>> {
+        match self {
+            Self::Buffer(context) => Some(context),
+            Self::StatusBar(_) => None,
+        }
+    }
+
+    pub fn status_bar(&self) -> Option<&StatusBarModeContentContext<'a>> {
+        match self {
+            Self::Buffer(_) => None,
+            Self::StatusBar(context) => Some(context),
+        }
+    }
+}
+
+#[allow(dead_code, reason = "native Mode adapter capability surface")]
+impl BufferModeContentContext<'_> {
+    pub fn text_rows(&self, rows: RowRange) -> Option<Vec<String>> {
+        match self
+            .contents
+            .query(self.content_id, ContentQuery::TextRows(rows))
+        {
+            ContentData::TextRows(rows) => Some(rows),
+            _ => None,
+        }
+    }
+
+    pub fn text_points(&self, offsets: Vec<TextOffset>) -> Option<Vec<TextPoint>> {
+        match self
+            .contents
+            .query(self.content_id, ContentQuery::TextPoints(offsets))
+        {
+            ContentData::TextPoints(points) => Some(points),
+            _ => None,
+        }
+    }
+
+    pub fn document_status(&self) -> Option<DocumentStatus> {
+        match self
+            .contents
+            .query(self.content_id, ContentQuery::DocumentStatus)
+        {
+            ContentData::DocumentStatus(status) => Some(status),
+            _ => None,
+        }
     }
 
     pub fn text_snapshot(&self) -> Option<crate::core::text_snapshot::TextSnapshot> {
@@ -313,45 +440,173 @@ impl<'a> ModeContentContext<'a> {
     }
 }
 
+#[allow(dead_code, reason = "native Mode adapter capability surface")]
+impl StatusBarModeContentContext<'_> {
+    pub fn status_bar_data(&self) -> Option<StatusBarData> {
+        match self
+            .contents
+            .query(self.content_id, ContentQuery::StatusBarData)
+        {
+            ContentData::StatusBarData(data) => Some(data),
+            _ => None,
+        }
+    }
+}
+
 #[allow(dead_code, reason = "reserved for generic Mode extensions")]
-pub struct ModeViewContext<'a> {
+pub enum ModeViewContext<'a> {
+    Buffer(BufferModeViewContext<'a>),
+    StatusBar(StatusBarModeViewContext<'a>),
+}
+
+#[allow(dead_code, reason = "native Mode adapter capability surface")]
+pub struct BufferModeViewContext<'a> {
     view_id: ViewId,
-    view: &'a View,
+    content_id: ContentId,
+    state: &'a BufferViewState,
+    contents: &'a ContentStore,
+}
+
+#[allow(dead_code, reason = "native Mode adapter capability surface")]
+pub struct StatusBarModeViewContext<'a> {
+    view_id: ViewId,
+    content_id: ContentId,
     contents: &'a ContentStore,
 }
 
 #[allow(dead_code, reason = "reserved for generic Mode extensions")]
 impl<'a> ModeViewContext<'a> {
-    pub(crate) fn new(view_id: ViewId, view: &'a View, contents: &'a ContentStore) -> Self {
-        Self {
-            view_id,
-            view,
-            contents,
+    pub(crate) fn new(
+        view_id: ViewId,
+        view: &'a View,
+        contents: &'a ContentStore,
+    ) -> Result<Self, ModeContextError> {
+        let content_id = view.content();
+        let content_kind = contents
+            .kind(content_id)
+            .ok_or(ModeContextError::MissingContent {
+                view: view_id,
+                content: content_id,
+            })?;
+        match (content_kind, view.state()) {
+            (ContentKind::Buffer, ContentViewState::Buffer(state)) => {
+                Ok(Self::Buffer(BufferModeViewContext {
+                    view_id,
+                    content_id,
+                    state,
+                    contents,
+                }))
+            }
+            (ContentKind::StatusBar, ContentViewState::StatusBar(_)) => {
+                Ok(Self::StatusBar(StatusBarModeViewContext {
+                    view_id,
+                    content_id,
+                    contents,
+                }))
+            }
+            (_, state) => Err(ModeContextError::IncompatibleViewState {
+                view: view_id,
+                content: content_id,
+                content_kind,
+                state_kind: state.kind(),
+            }),
         }
     }
 
     pub fn view_id(&self) -> ViewId {
-        self.view_id
+        match self {
+            Self::Buffer(context) => context.view_id,
+            Self::StatusBar(context) => context.view_id,
+        }
     }
 
     pub fn content_id(&self) -> ContentId {
-        self.view.content()
+        match self {
+            Self::Buffer(context) => context.content_id,
+            Self::StatusBar(context) => context.content_id,
+        }
     }
 
-    pub fn selections(&self) -> Option<&Selections> {
-        self.view.selections()
-    }
-
-    pub fn query_content(&self, query: ContentQuery) -> ContentData {
-        self.contents.query(self.content_id(), query)
+    pub fn content_kind(&self) -> ContentKind {
+        match self {
+            Self::Buffer(_) => ContentKind::Buffer,
+            Self::StatusBar(_) => ContentKind::StatusBar,
+        }
     }
 
     pub fn content_revision(&self) -> Option<Revision> {
-        self.contents.revision(self.content_id())
+        match self {
+            Self::Buffer(context) => context.contents.revision(context.content_id),
+            Self::StatusBar(context) => context.contents.revision(context.content_id),
+        }
+    }
+
+    pub fn buffer(&self) -> Option<&BufferModeViewContext<'a>> {
+        match self {
+            Self::Buffer(context) => Some(context),
+            Self::StatusBar(_) => None,
+        }
+    }
+
+    pub fn status_bar(&self) -> Option<&StatusBarModeViewContext<'a>> {
+        match self {
+            Self::Buffer(_) => None,
+            Self::StatusBar(context) => Some(context),
+        }
+    }
+}
+
+#[allow(dead_code, reason = "native Mode adapter capability surface")]
+impl BufferModeViewContext<'_> {
+    pub fn selections(&self) -> &Selections {
+        self.state.selections()
+    }
+
+    pub fn text_rows(&self, rows: RowRange) -> Option<Vec<String>> {
+        match self
+            .contents
+            .query(self.content_id, ContentQuery::TextRows(rows))
+        {
+            ContentData::TextRows(rows) => Some(rows),
+            _ => None,
+        }
+    }
+
+    pub fn text_points(&self, offsets: Vec<TextOffset>) -> Option<Vec<TextPoint>> {
+        match self
+            .contents
+            .query(self.content_id, ContentQuery::TextPoints(offsets))
+        {
+            ContentData::TextPoints(points) => Some(points),
+            _ => None,
+        }
+    }
+
+    pub fn document_status(&self) -> Option<DocumentStatus> {
+        match self
+            .contents
+            .query(self.content_id, ContentQuery::DocumentStatus)
+        {
+            ContentData::DocumentStatus(status) => Some(status),
+            _ => None,
+        }
     }
 
     pub fn text_snapshot(&self) -> Option<crate::core::text_snapshot::TextSnapshot> {
-        self.contents.text_snapshot(self.content_id())
+        self.contents.text_snapshot(self.content_id)
+    }
+}
+
+#[allow(dead_code, reason = "native Mode adapter capability surface")]
+impl StatusBarModeViewContext<'_> {
+    pub fn status_bar_data(&self) -> Option<StatusBarData> {
+        match self
+            .contents
+            .query(self.content_id, ContentQuery::StatusBarData)
+        {
+            ContentData::StatusBarData(data) => Some(data),
+            _ => None,
+        }
     }
 }
 
@@ -434,9 +689,72 @@ pub enum ModeActionScope {
     View,
 }
 
+#[derive(Clone, Copy)]
+pub enum ModeAdapter<'a> {
+    Buffer(&'a dyn Mode),
+    StatusBar(&'a dyn Mode),
+}
+
+impl<'a> ModeAdapter<'a> {
+    fn behavior(self) -> &'a dyn Mode {
+        match self {
+            Self::Buffer(mode) | Self::StatusBar(mode) => mode,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct ModeAdapters {
+    buffer: bool,
+    status_bar: bool,
+}
+
+impl ModeAdapters {
+    pub fn buffer() -> Self {
+        Self {
+            buffer: true,
+            status_bar: false,
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "native modes may adapt multiple closed content kinds"
+    )]
+    pub fn status_bar() -> Self {
+        Self {
+            buffer: false,
+            status_bar: true,
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "native modes may adapt multiple closed content kinds"
+    )]
+    pub fn buffer_and_status_bar() -> Self {
+        Self {
+            buffer: true,
+            status_bar: true,
+        }
+    }
+
+    pub fn contains(self, kind: ContentKind) -> bool {
+        match kind {
+            ContentKind::Buffer => self.buffer,
+            ContentKind::StatusBar => self.status_bar,
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        !self.buffer && !self.status_bar
+    }
+}
+
 pub trait Mode {
     fn name(&self) -> &ModeName;
     fn actions(&self) -> &[ModeActionName];
+    fn adapters(&self) -> ModeAdapters;
     fn faces(&self) -> Vec<(FaceName, Face)> {
         Vec::new()
     }
@@ -593,6 +911,7 @@ pub trait Mode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ModeRegistrationError {
     DuplicateMode(ModeName),
+    MissingAdapter(ModeName),
     DuplicateAction {
         mode: ModeName,
         action: ModeActionName,
@@ -604,6 +923,13 @@ impl fmt::Display for ModeRegistrationError {
         match self {
             Self::DuplicateMode(mode) => {
                 write!(formatter, "mode '{}' is already registered", mode.as_str())
+            }
+            Self::MissingAdapter(mode) => {
+                write!(
+                    formatter,
+                    "mode '{}' defines no content adapter",
+                    mode.as_str()
+                )
             }
             Self::DuplicateAction { mode, action } => write!(
                 formatter,
@@ -617,6 +943,48 @@ impl fmt::Display for ModeRegistrationError {
 
 impl std::error::Error for ModeRegistrationError {}
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ModeAttachmentError {
+    UnknownContent(ContentId),
+    UnknownMode(ModeName),
+    InvalidViewContext(ModeContextError),
+    UnsupportedContent {
+        mode: ModeName,
+        content: ContentId,
+        kind: ContentKind,
+    },
+}
+
+impl fmt::Display for ModeAttachmentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownContent(content) => {
+                write!(formatter, "content {} does not exist", content.0)
+            }
+            Self::UnknownMode(mode) => write!(formatter, "unknown mode '{}'", mode.as_str()),
+            Self::InvalidViewContext(error) => error.fmt(formatter),
+            Self::UnsupportedContent {
+                mode,
+                content,
+                kind,
+            } => write!(
+                formatter,
+                "mode '{}' has no {kind:?} adapter for content {}",
+                mode.as_str(),
+                content.0
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ModeAttachmentError {}
+
+impl From<ModeContextError> for ModeAttachmentError {
+    fn from(error: ModeContextError) -> Self {
+        Self::InvalidViewContext(error)
+    }
+}
+
 pub(crate) struct ModeRegistry {
     definitions: HashMap<ModeId, Rc<ModeRegistration>>,
     ids_by_name: HashMap<ModeName, ModeId>,
@@ -625,13 +993,20 @@ pub(crate) struct ModeRegistry {
 
 struct ModeRegistration {
     id: ModeId,
-    definition: Box<dyn Mode>,
+    definition: Rc<dyn Mode>,
+    adapters: RegisteredModeAdapters,
     action_names: Vec<ModeActionName>,
     actions: HashMap<ModeActionName, ModeActionId>,
 }
 
+struct RegisteredModeAdapters {
+    buffer: Option<Rc<dyn Mode>>,
+    status_bar: Option<Rc<dyn Mode>>,
+}
+
 pub(crate) struct ModeViewInstance {
     registered: Rc<ModeRegistration>,
+    adapter_kind: ContentKind,
     state: Box<dyn ModeState>,
     faulted: bool,
     revision: Revision,
@@ -664,6 +1039,12 @@ impl ModeRegistry {
         if self.ids_by_name.contains_key(&name) {
             return Err(ModeRegistrationError::DuplicateMode(name));
         }
+        let declared_adapters = definition.adapters();
+        if declared_adapters.is_empty() {
+            return Err(ModeRegistrationError::MissingAdapter(name));
+        }
+        let has_buffer = declared_adapters.contains(ContentKind::Buffer);
+        let has_status_bar = declared_adapters.contains(ContentKind::StatusBar);
         let mut actions = HashMap::new();
         for (index, action_name) in action_names.iter().cloned().enumerate() {
             let action = ModeActionId(u32::try_from(index).expect("mode action id overflow"));
@@ -676,9 +1057,15 @@ impl ModeRegistry {
         }
         let id = ModeId(self.next_id);
         self.next_id = self.next_id.checked_add(1).expect("mode id overflow");
+        let definition: Rc<dyn Mode> = Rc::from(definition);
+        let adapters = RegisteredModeAdapters {
+            buffer: has_buffer.then(|| definition.clone()),
+            status_bar: has_status_bar.then(|| definition.clone()),
+        };
         let registered = Rc::new(ModeRegistration {
             id,
             definition,
+            adapters,
             action_names,
             actions,
         });
@@ -689,6 +1076,29 @@ impl ModeRegistry {
 
     pub(crate) fn resolve_mode(&self, name: &ModeName) -> Option<ModeId> {
         self.ids_by_name.get(name).copied()
+    }
+
+    pub(crate) fn adapter(&self, mode: ModeId, kind: ContentKind) -> Option<ModeAdapter<'_>> {
+        self.definitions.get(&mode)?.adapter(kind)
+    }
+
+    pub(crate) fn ensure_adapter(
+        &self,
+        name: &ModeName,
+        content: ContentId,
+        kind: ContentKind,
+    ) -> Result<(), ModeAttachmentError> {
+        let id = self
+            .resolve_mode(name)
+            .ok_or_else(|| ModeAttachmentError::UnknownMode(name.clone()))?;
+        if self.adapter(id, kind).is_none() {
+            return Err(ModeAttachmentError::UnsupportedContent {
+                mode: name.clone(),
+                content,
+                kind,
+            });
+        }
+        Ok(())
     }
 
     pub(crate) fn resolve_action(
@@ -720,18 +1130,28 @@ impl ModeRegistry {
         &self,
         mode: &ModeName,
         action: &ModeActionName,
+        kind: ContentKind,
     ) -> Result<ModeActionScope, ModeError> {
         let (mode_id, _) = self.resolve_command_checked(mode, action)?;
-        Ok(self.definitions[&mode_id].mode().action_scope(action))
+        let registered = &self.definitions[&mode_id];
+        let adapter = registered
+            .adapter(kind)
+            .ok_or_else(|| ModeError::UnsupportedContent {
+                mode: mode.clone(),
+                kind,
+            })?;
+        Ok(adapter.behavior().action_scope(action))
     }
 
     #[cfg(test)]
     pub(crate) fn instantiate(&self, name: &ModeName) -> Option<ModeViewInstance> {
         let id = self.resolve_mode(name)?;
         let registered = self.definitions.get(&id)?.clone();
+        registered.adapter(ContentKind::Buffer)?;
         Some(ModeViewInstance {
             state: Box::new(()),
             registered,
+            adapter_kind: ContentKind::Buffer,
             faulted: false,
             revision: Revision::default(),
         })
@@ -741,20 +1161,35 @@ impl ModeRegistry {
         &self,
         name: &ModeName,
         content: ContentId,
+        kind: ContentKind,
         mode_contents: &mut ModeContentStore,
         content_context: &ModeContentContext<'_>,
         view_context: &ModeViewContext<'_>,
-    ) -> Option<ModeViewInstance> {
-        let id = self.resolve_mode(name)?;
-        let registered = self.definitions.get(&id)?.clone();
+    ) -> Result<ModeViewInstance, ModeAttachmentError> {
+        let id = self
+            .resolve_mode(name)
+            .ok_or_else(|| ModeAttachmentError::UnknownMode(name.clone()))?;
+        let registered = self
+            .definitions
+            .get(&id)
+            .expect("resolved mode exists")
+            .clone();
+        if registered.adapter(kind).is_none() {
+            return Err(ModeAttachmentError::UnsupportedContent {
+                mode: name.clone(),
+                content,
+                kind,
+            });
+        }
         let mut mode = ModeViewInstance {
             state: Box::new(()),
             registered,
+            adapter_kind: kind,
             faulted: false,
             revision: Revision::default(),
         };
         mode_contents.attach_view_with_context(content, &mut mode, content_context, view_context);
-        Some(mode)
+        Ok(mode)
     }
 }
 
@@ -762,11 +1197,23 @@ impl ModeRegistration {
     fn mode(&self) -> &dyn Mode {
         self.definition.as_ref()
     }
+
+    fn adapter(&self, kind: ContentKind) -> Option<ModeAdapter<'_>> {
+        match kind {
+            ContentKind::Buffer => self.adapters.buffer.as_deref().map(ModeAdapter::Buffer),
+            ContentKind::StatusBar => self
+                .adapters
+                .status_bar
+                .as_deref()
+                .map(ModeAdapter::StatusBar),
+        }
+    }
 }
 
 pub(crate) struct ModeContentInstance {
     content: ContentId,
     registered: Rc<ModeRegistration>,
+    adapter_kind: ContentKind,
     state: Box<dyn ModeState>,
     attachments: usize,
     faulted: bool,
@@ -775,6 +1222,13 @@ pub(crate) struct ModeContentInstance {
 }
 
 impl ModeContentInstance {
+    fn adapter(&self) -> &dyn Mode {
+        self.registered
+            .adapter(self.adapter_kind)
+            .expect("attached content mode keeps its registered adapter")
+            .behavior()
+    }
+
     fn execute(
         &self,
         state: &mut dyn ModeState,
@@ -797,8 +1251,7 @@ impl ModeContentInstance {
             .get(usize::try_from(action.0).expect("mode action index overflow"))
             .expect("mode action id belongs to registered mode");
         let context = ModeContentContext::new(self.content, contents);
-        self.registered
-            .mode()
+        self.adapter()
             .execute_content_with_arguments(state, &context, action, arguments)
     }
 }
@@ -855,8 +1308,7 @@ impl ModeContentStore {
             draft.background_job_dirty = false;
             let context = ModeContentContext::new(content, contents);
             if let Some(job) = instance
-                .registered
-                .mode()
+                .adapter()
                 .take_background_job(draft.state.as_mut(), &context)
             {
                 jobs.push((mode, content, job));
@@ -884,7 +1336,7 @@ impl ModeContentStore {
         }
         let checkpoint = draft.state.clone_box();
         let context = ModeContentContext::new(content, contents);
-        let changed = match instance.registered.mode().apply_background_job(
+        let changed = match instance.adapter().apply_background_job(
             draft.state.as_mut(),
             &context,
             version,
@@ -919,7 +1371,7 @@ impl ModeContentStore {
         Some(ContentPresentationLayer {
             source_revision: context.content_revision()?,
             mode_revision: instance.revision,
-            decorations: instance.registered.mode().content_decorations(
+            decorations: instance.adapter().content_decorations(
                 instance.state.as_ref(),
                 &context,
                 visible_rows,
@@ -934,11 +1386,16 @@ impl ModeContentStore {
             existing.attachments += 1;
             return;
         }
-        let contents = ContentStore::default();
+        let mut contents = ContentStore::default();
+        contents
+            .insert(
+                content,
+                crate::core::content::Content::Buffer(crate::core::buffer::Buffer::new()),
+            )
+            .expect("test helper inserts one content");
         let context = ModeContentContext::new(content, &contents);
         let state = mode
-            .registered
-            .mode()
+            .adapter()
             .create_content_state(&context)
             .expect("test mode creates content state");
         self.instances.insert(
@@ -946,6 +1403,7 @@ impl ModeContentStore {
             ModeContentInstance {
                 content,
                 registered: mode.registered.clone(),
+                adapter_kind: mode.adapter_kind,
                 state,
                 attachments: 1,
                 faulted: false,
@@ -966,16 +1424,16 @@ impl ModeContentStore {
         if let Some(existing) = self.instances.get_mut(&(id, content)) {
             existing.attachments += 1;
         } else {
-            let (state, faulted) =
-                match mode.registered.mode().create_content_state(content_context) {
-                    Ok(state) => (state, false),
-                    Err(_) => (Box::new(()) as Box<dyn ModeState>, true),
-                };
+            let (state, faulted) = match mode.adapter().create_content_state(content_context) {
+                Ok(state) => (state, false),
+                Err(_) => (Box::new(()) as Box<dyn ModeState>, true),
+            };
             self.instances.insert(
                 (id, content),
                 ModeContentInstance {
                     content,
                     registered: mode.registered.clone(),
+                    adapter_kind: mode.adapter_kind,
                     state,
                     attachments: 1,
                     faulted,
@@ -1030,8 +1488,7 @@ impl ModeContentStore {
             let checkpoint = draft.state.clone_box();
             let context = ModeContentContext::new(content, contents);
             if instance
-                .registered
-                .mode()
+                .adapter()
                 .on_content_changed(draft.state.as_mut(), &context, change)
                 .is_err()
             {
@@ -1091,6 +1548,13 @@ impl ModeContentStore {
 }
 
 impl ModeViewInstance {
+    fn adapter(&self) -> &dyn Mode {
+        self.registered
+            .adapter(self.adapter_kind)
+            .expect("attached view mode keeps its registered adapter")
+            .behavior()
+    }
+
     fn initialize(
         &mut self,
         content_state: &dyn ModeState,
@@ -1100,11 +1564,7 @@ impl ModeViewInstance {
         if content_faulted {
             return;
         }
-        match self
-            .registered
-            .mode()
-            .create_view_state(content_state, context)
-        {
+        match self.adapter().create_view_state(content_state, context) {
             Ok(state) => self.state = state,
             Err(_) => self.faulted = true,
         }
@@ -1138,7 +1598,7 @@ impl ModeViewInstance {
             .action_names
             .get(usize::try_from(action.0).expect("mode action index overflow"))
             .expect("mode action id belongs to registered mode");
-        self.registered.mode().execute_view_with_arguments(
+        self.adapter().execute_view_with_arguments(
             content_state,
             view_state,
             context,
@@ -1159,8 +1619,7 @@ impl ModeViewInstance {
         if faulted {
             return;
         }
-        self.registered
-            .mode()
+        self.adapter()
             .input_cancel(content_state, view_state, context);
     }
 }
@@ -1246,7 +1705,9 @@ impl ModeViewStore {
             .filter_map(|(view, data)| (data.content() == content).then_some(*view))
             .collect();
         for view in targets {
-            let context = ModeViewContext::new(view, &views[&view], contents);
+            let Ok(context) = ModeViewContext::new(view, &views[&view], contents) else {
+                continue;
+            };
             let modes = self.mode_ids(view).to_vec();
             for mode in modes {
                 let Some(content_instance) = mode_contents.instance(mode, content) else {
@@ -1268,8 +1729,7 @@ impl ModeViewStore {
                 let content_checkpoint = content_draft.state.clone_box();
                 let view_checkpoint = view_draft.state.clone_box();
                 if view_instance
-                    .registered
-                    .mode()
+                    .adapter()
                     .on_view_content_changed(
                         content_draft.state.as_mut(),
                         view_draft.state.as_mut(),
@@ -1300,7 +1760,7 @@ impl ModeViewStore {
         if content_instance.faulted || view_instance.faulted {
             return None;
         }
-        let definition = view_instance.registered.mode();
+        let definition = view_instance.adapter();
         Some(ViewPresentationLayer {
             content_revision: context.content_revision()?,
             view_revision,
@@ -1348,8 +1808,7 @@ impl ModeViewStore {
         let (view_state, view_faulted) = drafts.view(mode, view, instance);
         (!content_faulted && !view_faulted).then(|| {
             instance
-                .registered
-                .mode()
+                .adapter()
                 .input_keymap(content_state, view_state, context)
         })
     }
@@ -1373,8 +1832,7 @@ impl ModeViewStore {
             return None;
         }
         instance
-            .registered
-            .mode()
+            .adapter()
             .input_typing(content_state, view_state, context, key)
     }
 
@@ -1402,8 +1860,7 @@ impl ModeViewStore {
             return InputStatus::Ready;
         }
         instance
-            .registered
-            .mode()
+            .adapter()
             .mode_input_status(content_state, view_state, context)
     }
 
@@ -1430,7 +1887,7 @@ impl ModeViewStore {
         if content_draft.faulted || view_draft.faulted {
             return InputDecision::Pass;
         }
-        instance.registered.mode().input_capture(
+        instance.adapter().input_capture(
             content_draft.state.as_mut(),
             view_draft.state.as_mut(),
             context,
@@ -1456,8 +1913,7 @@ impl ModeViewStore {
         }
         Some(
             instance
-                .registered
-                .mode()
+                .adapter()
                 .input_timeout(
                     content_draft.state.as_mut(),
                     view_draft.state.as_mut(),
@@ -1490,8 +1946,7 @@ impl ModeViewStore {
                     return None;
                 }
                 view_instance
-                    .registered
-                    .mode()
+                    .adapter()
                     .input_typing(content_state, view_state, context, key)
                     .map(|command| (index, command))
             })
@@ -1552,7 +2007,7 @@ impl ModeViewStore {
             if content_faulted || view_faulted {
                 continue;
             }
-            policy.merge_missing(view_instance.registered.mode().view_policy(
+            policy.merge_missing(view_instance.adapter().view_policy(
                 content_state,
                 view_state,
                 context,
@@ -1614,6 +2069,33 @@ mod tests {
         fail_observer: bool,
     }
 
+    fn contents_with_buffer(content: ContentId) -> ContentStore {
+        let mut contents = ContentStore::default();
+        contents
+            .insert(
+                content,
+                crate::core::content::Content::Buffer(crate::core::buffer::Buffer::new()),
+            )
+            .unwrap();
+        contents
+    }
+
+    struct NoAdapterMode(ModeName);
+
+    impl Mode for NoAdapterMode {
+        fn name(&self) -> &ModeName {
+            &self.0
+        }
+
+        fn actions(&self) -> &[ModeActionName] {
+            &[]
+        }
+
+        fn adapters(&self) -> ModeAdapters {
+            ModeAdapters::default()
+        }
+    }
+
     impl Mode for DraftStateMode {
         fn name(&self) -> &ModeName {
             &self.name
@@ -1621,6 +2103,10 @@ mod tests {
 
         fn actions(&self) -> &[ModeActionName] {
             &self.actions
+        }
+
+        fn adapters(&self) -> ModeAdapters {
+            ModeAdapters::buffer()
         }
 
         fn action_scope(&self, _action: &ModeActionName) -> ModeActionScope {
@@ -1672,6 +2158,10 @@ mod tests {
             &[]
         }
 
+        fn adapters(&self) -> ModeAdapters {
+            ModeAdapters::buffer()
+        }
+
         fn take_background_job(
             &self,
             _state: &mut dyn ModeState,
@@ -1680,6 +2170,17 @@ mod tests {
             self.calls.set(self.calls.get() + 1);
             None
         }
+    }
+
+    #[test]
+    fn registration_rejects_a_mode_without_content_adapters() {
+        let name = ModeName::new("no-adapter");
+        let mut registry = ModeRegistry::new();
+
+        assert_eq!(
+            registry.register(NoAdapterMode(name.clone())),
+            Err(ModeRegistrationError::MissingAdapter(name))
+        );
     }
 
     #[test]
@@ -1696,7 +2197,7 @@ mod tests {
         let mode = registry.instantiate(&name).unwrap();
         let mut content_modes = ModeContentStore::default();
         content_modes.attach_view(ContentId(1), &mode);
-        let contents = ContentStore::default();
+        let contents = contents_with_buffer(ContentId(1));
 
         assert!(content_modes.take_background_jobs(&contents).is_empty());
         assert!(content_modes.take_background_jobs(&contents).is_empty());
@@ -1743,7 +2244,7 @@ mod tests {
         let content = ContentId(1);
         let mut content_modes = ModeContentStore::default();
         content_modes.attach_view(content, &mode);
-        let contents = ContentStore::default();
+        let contents = contents_with_buffer(content);
         let command = crate::app::command::ModeCommand::new(name, action);
         let mut drafts = ModeDraftJournal::default();
 
@@ -1794,7 +2295,7 @@ mod tests {
         let content = ContentId(1);
         let mut content_modes = ModeContentStore::default();
         content_modes.attach_view(content, &mode);
-        let contents = ContentStore::default();
+        let contents = contents_with_buffer(content);
         let change = ContentChange::Text(
             crate::core::transaction::TextChangeSet::from_edits(
                 0,
