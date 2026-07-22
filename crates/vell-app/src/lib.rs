@@ -23,6 +23,7 @@ mod save;
 mod scene_model;
 mod session;
 mod tasks;
+mod theme;
 mod transaction;
 mod view;
 
@@ -33,6 +34,7 @@ pub use application::App;
 pub use diagnostics::{
     ModeDecorationDiagnostics, NamedPolicySources, RuntimeDiagnostic, ViewModeDiagnostics,
 };
+pub use vell_mode::{FaceRegistrationError, FaceRegistrationErrorReason};
 pub use layout::{StatusBarHandle, StatusBarPlacement};
 
 #[cfg(test)]

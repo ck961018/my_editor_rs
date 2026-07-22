@@ -10,8 +10,105 @@ pub(super) fn install_editor_api(scope: &mut v8::PinScope<'_, '_>) {
         .get_function(scope)
         .unwrap();
     modes.set(scope, define_name.into(), define.into());
+    let theme = v8::Object::new(scope);
+    let use_name = v8::String::new(scope, "use").unwrap();
+    let use_theme = v8::FunctionTemplate::new(scope, select_theme)
+        .get_function(scope)
+        .unwrap();
+    theme.set(scope, use_name.into(), use_theme.into());
+    let faces = v8::Object::new(scope);
+    let override_name = v8::String::new(scope, "override").unwrap();
+    let override_face = v8::FunctionTemplate::new(scope, define_face_override)
+        .get_function(scope)
+        .unwrap();
+    faces.set(scope, override_name.into(), override_face.into());
     set_object(scope, editor, "modes", modes);
+    set_object(scope, editor, "theme", theme);
+    set_object(scope, editor, "faces", faces);
     set_object(scope, global, "editor", editor);
+}
+
+fn select_theme(
+    scope: &mut v8::PinScope,
+    arguments: v8::FunctionCallbackArguments,
+    mut return_value: v8::ReturnValue,
+) {
+    let value = arguments.get(0);
+    if !value.is_string() {
+        throw_script_error(scope, "editor.theme.use expects a theme name");
+        return;
+    }
+    let name = value.to_rust_string_lossy(scope);
+    if name.is_empty() {
+        throw_script_error(scope, "editor.theme.use expects a non-empty theme name");
+        return;
+    }
+    let Some(configuration) = scope
+        .get_slot::<Rc<RefCell<ScriptConfigurationDraft>>>()
+        .cloned()
+    else {
+        throw_script_error(scope, "script configuration draft is unavailable");
+        return;
+    };
+    configuration.borrow_mut().theme = Some(ThemeName::new(name));
+    return_value.set_undefined();
+}
+
+fn define_face_override(
+    scope: &mut v8::PinScope,
+    arguments: v8::FunctionCallbackArguments,
+    mut return_value: v8::ReturnValue,
+) {
+    let name = arguments.get(0);
+    if !name.is_string() {
+        throw_script_error(scope, "editor.faces.override expects a face name");
+        return;
+    }
+    let name = name.to_rust_string_lossy(scope);
+    if name.is_empty() {
+        throw_script_error(scope, "editor.faces.override expects a non-empty face name");
+        return;
+    }
+    let patch = match v8::Local::<v8::Object>::try_from(arguments.get(1)) {
+        Ok(object) => match parse_face_patch(scope, object) {
+            Ok(patch) => patch,
+            Err(error) => {
+                throw_script_error(scope, &error.to_string());
+                return;
+            }
+        },
+        Err(_) => {
+            throw_script_error(scope, "editor.faces.override expects a face object");
+            return;
+        }
+    };
+    let theme = match v8::Local::<v8::Object>::try_from(arguments.get(2)) {
+        Ok(options) => match optional_string(scope, options, "theme") {
+            Ok(theme) => theme.map(ThemeName::new),
+            Err(error) => {
+                throw_script_error(scope, &error.to_string());
+                return;
+            }
+        },
+        Err(_) if arguments.get(2).is_null_or_undefined() => None,
+        Err(_) => {
+            throw_script_error(scope, "face override options must be an object");
+            return;
+        }
+    };
+    let Some(configuration) = scope
+        .get_slot::<Rc<RefCell<ScriptConfigurationDraft>>>()
+        .cloned()
+    else {
+        throw_script_error(scope, "script configuration draft is unavailable");
+        return;
+    };
+    configuration.borrow_mut().face_overrides.push(FaceOverride {
+        face: FaceName::new(name),
+        theme,
+        patch,
+    });
+    return_value.set_undefined();
 }
 
 fn define_mode(
@@ -69,7 +166,7 @@ fn parse_mode_definition(
         .map_err(|_| ScriptError::new("editor.modes.define expects an object"))?;
     let name = required_string(scope, object, "name")?;
     let before = optional_string(scope, object, "before")?.map(ModeName::new);
-    let faces = parse_faces(scope, object)?;
+    let face_definitions = parse_face_definitions(scope, object)?;
     let (version, adapters) = match property(scope, object, "on") {
         Some(value) if !value.is_null_or_undefined() => (
             ScriptApiVersion::V2,
@@ -86,7 +183,7 @@ fn parse_mode_definition(
     Ok(ScriptModeDefinition {
         name: ModeName::new(name),
         version,
-        faces,
+        face_definitions,
         before,
         adapters,
     })
@@ -474,10 +571,10 @@ fn optional_section_callback(
     Ok(Some(v8::Global::new(scope, callback)))
 }
 
-fn parse_faces(
+fn parse_face_definitions(
     scope: &mut v8::PinScope,
     definition: v8::Local<v8::Object>,
-) -> Result<Vec<(FaceName, Face)>, ScriptError> {
+) -> Result<Vec<FaceDefinition>, ScriptError> {
     let Some(value) = property(scope, definition, "faces") else {
         return Ok(Vec::new());
     };
@@ -498,18 +595,197 @@ fn parse_faces(
             .get(scope, name)
             .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
             .ok_or_else(|| ScriptError::new("mode face must be an object"))?;
-        parsed.push((
-            FaceName::new(name.to_rust_string_lossy(scope)),
-            Face {
-                foreground: parse_color(scope, face, "foreground")?,
-                background: parse_color(scope, face, "background")?,
-                bold: optional_bool(scope, face, "bold")?,
-                italic: optional_bool(scope, face, "italic")?,
-                underline: optional_bool(scope, face, "underline")?,
-            },
-        ));
+        let name = FaceName::new(name.to_rust_string_lossy(scope));
+        let extended = property(scope, face, "inherits").is_some()
+            || property(scope, face, "fallback").is_some();
+        let (inherits, fallback) = if extended {
+            let inherits = parse_face_inherits(scope, face)?;
+            let fallback = match property(scope, face, "fallback") {
+                Some(value) if !value.is_null_or_undefined() => {
+                    let fallback = v8::Local::<v8::Object>::try_from(value)
+                        .map_err(|_| ScriptError::new("face fallback must be an object"))?;
+                    parse_face_patch(scope, fallback)?
+                }
+                _ => FacePatch::default(),
+            };
+            (inherits, fallback)
+        } else {
+            (Vec::new(), FacePatch::from(&parse_legacy_face(scope, face)?))
+        };
+        parsed.push(FaceDefinition {
+            name,
+            inherits,
+            fallback,
+        });
     }
     Ok(parsed)
+}
+
+fn parse_legacy_face(
+    scope: &mut v8::PinScope,
+    face: v8::Local<v8::Object>,
+) -> Result<Face, ScriptError> {
+    Ok(Face {
+        foreground: parse_color(scope, face, "foreground")?,
+        background: parse_color(scope, face, "background")?,
+        bold: optional_bool(scope, face, "bold")?,
+        dim: optional_bool(scope, face, "dim")?,
+        italic: optional_bool(scope, face, "italic")?,
+        underline: optional_bool(scope, face, "underline")?,
+        underline_style: optional_underline_style(scope, face)?,
+        strikethrough: optional_bool(scope, face, "strikethrough")?,
+    })
+}
+
+fn parse_face_inherits(
+    scope: &mut v8::PinScope,
+    face: v8::Local<v8::Object>,
+) -> Result<Vec<FaceName>, ScriptError> {
+    let Some(value) = property(scope, face, "inherits") else {
+        return Ok(Vec::new());
+    };
+    if value.is_null_or_undefined() {
+        return Ok(Vec::new());
+    }
+    let values = v8::Local::<v8::Array>::try_from(value)
+        .map_err(|_| ScriptError::new("face inherits must be an array"))?;
+    let mut inherits = Vec::with_capacity(values.length() as usize);
+    for index in 0..values.length() {
+        let value = values
+            .get_index(scope, index)
+            .ok_or_else(|| ScriptError::new("failed to read inherited face"))?;
+        if !value.is_string() {
+            return Err(ScriptError::new("inherited face names must be strings"));
+        }
+        let name = value.to_rust_string_lossy(scope);
+        if name.is_empty() {
+            return Err(ScriptError::new("inherited face name must not be empty"));
+        }
+        inherits.push(FaceName::new(name));
+    }
+    Ok(inherits)
+}
+
+pub(super) fn parse_face_patch(
+    scope: &mut v8::PinScope,
+    face: v8::Local<v8::Object>,
+) -> Result<FacePatch, ScriptError> {
+    Ok(FacePatch {
+        foreground: parse_patch_color(scope, face, "foreground")?,
+        background: parse_patch_color(scope, face, "background")?,
+        bold: parse_patch_bool(scope, face, "bold")?,
+        dim: parse_patch_bool(scope, face, "dim")?,
+        italic: parse_patch_bool(scope, face, "italic")?,
+        underline: parse_patch_bool(scope, face, "underline")?,
+        underline_style: parse_patch_underline_style(scope, face)?,
+        strikethrough: parse_patch_bool(scope, face, "strikethrough")?,
+    })
+}
+
+fn optional_underline_style(
+    scope: &mut v8::PinScope,
+    face: v8::Local<v8::Object>,
+) -> Result<Option<UnderlineStyle>, ScriptError> {
+    let Some(value) = property(scope, face, "underlineStyle") else {
+        return Ok(None);
+    };
+    if value.is_null_or_undefined() {
+        return Ok(None);
+    }
+    parse_underline_style(scope, value).map(Some)
+}
+
+fn parse_patch_underline_style(
+    scope: &mut v8::PinScope,
+    face: v8::Local<v8::Object>,
+) -> Result<FaceValue<UnderlineStyle>, ScriptError> {
+    let Some(value) = property(scope, face, "underlineStyle") else {
+        return Ok(FaceValue::Unspecified);
+    };
+    if value.is_null_or_undefined() {
+        return Ok(FaceValue::Unspecified);
+    }
+    if is_reset_value(scope, value)? {
+        return Ok(FaceValue::Reset);
+    }
+    parse_underline_style(scope, value).map(FaceValue::Value)
+}
+
+fn parse_underline_style(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<UnderlineStyle, ScriptError> {
+    if !value.is_string() {
+        return Err(ScriptError::new("face underlineStyle must be a string"));
+    }
+    match value.to_rust_string_lossy(scope).as_str() {
+        "line" => Ok(UnderlineStyle::Line),
+        "double" => Ok(UnderlineStyle::Double),
+        "curl" => Ok(UnderlineStyle::Curl),
+        "dotted" => Ok(UnderlineStyle::Dotted),
+        "dashed" => Ok(UnderlineStyle::Dashed),
+        _ => Err(ScriptError::new(
+            "face underlineStyle must be line, double, curl, dotted, or dashed",
+        )),
+    }
+}
+
+fn parse_patch_color(
+    scope: &mut v8::PinScope,
+    face: v8::Local<v8::Object>,
+    name: &str,
+) -> Result<FaceValue<Color>, ScriptError> {
+    let Some(value) = property(scope, face, name) else {
+        return Ok(FaceValue::Unspecified);
+    };
+    if value.is_null_or_undefined() {
+        return Ok(FaceValue::Unspecified);
+    }
+    if is_reset_value(scope, value)? {
+        return Ok(FaceValue::Reset);
+    }
+    Ok(match parse_color(scope, face, name)? {
+        Some(color) => FaceValue::Value(color),
+        None => FaceValue::Unspecified,
+    })
+}
+
+fn parse_patch_bool(
+    scope: &mut v8::PinScope,
+    face: v8::Local<v8::Object>,
+    name: &str,
+) -> Result<FaceValue<bool>, ScriptError> {
+    let Some(value) = property(scope, face, name) else {
+        return Ok(FaceValue::Unspecified);
+    };
+    if value.is_null_or_undefined() {
+        return Ok(FaceValue::Unspecified);
+    }
+    if is_reset_value(scope, value)? {
+        return Ok(FaceValue::Reset);
+    }
+    if !value.is_boolean() {
+        return Err(ScriptError::new(format!(
+            "face {name} must be a boolean or reset"
+        )));
+    }
+    Ok(FaceValue::Value(value.boolean_value(scope)))
+}
+
+fn is_reset_value(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<bool, ScriptError> {
+    let Ok(object) = v8::Local::<v8::Object>::try_from(value) else {
+        return Ok(false);
+    };
+    let Some(reset) = property(scope, object, "reset") else {
+        return Err(ScriptError::new("face reset must be { reset: true }"));
+    };
+    if !reset.is_boolean() || !reset.boolean_value(scope) {
+        return Err(ScriptError::new("face reset must be { reset: true }"));
+    }
+    Ok(true)
 }
 
 fn parse_color(
@@ -523,11 +799,17 @@ fn parse_color(
     if value.is_null_or_undefined() {
         return Ok(None);
     }
-    if let Some(ansi) = value
-        .integer_value(scope)
-        .and_then(|value| u8::try_from(value).ok())
-    {
-        return Ok(Some(Color::Ansi(ansi)));
+    if value.is_number() {
+        let ansi = value
+            .number_value(scope)
+            .filter(|value| value.is_finite() && value.fract() == 0.0)
+            .filter(|value| (0.0..=u8::MAX as f64).contains(value))
+            .map(|value| value as u8);
+        return ansi.map(Color::Ansi).map(Some).ok_or_else(|| {
+            ScriptError::new(format!(
+                "face {name} ANSI index must be an integer from 0 to 255"
+            ))
+        });
     }
     if value.is_string() {
         let value = value.to_rust_string_lossy(scope);

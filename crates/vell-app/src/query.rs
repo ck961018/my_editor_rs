@@ -1,15 +1,16 @@
 use std::collections::HashMap;
 
-use crate::mode::FaceRegistry;
 use crate::presentation::PresentationLayerStore;
+use crate::theme::SessionFaces;
 use crate::view::View;
 use vell_core::content::ContentKind;
 use vell_core::content_store::ContentStore;
 use vell_core::content_view_state::ContentViewState;
 use vell_protocol::content_query::{
-    BufferBackingState, ContentData, ContentQuery, ContentQueryKind, CursorStyle, DirtyState, Face,
-    RenderQuery, RenderQueryError, RowRange, SaveState, SelectionShape, StatusBarPresentation,
-    StatusBarSegment, TextDecoration, TextPresentation, ViewData, ViewPresentation,
+    BufferBackingState, ContentData, ContentQuery, ContentQueryKind, CursorStyle, DirtyState,
+    FaceName, FacePatch, RenderQuery, RenderQueryError, RowRange, SaveState, SelectionShape,
+    StatusBarPresentation, StatusBarSegment, TextDecoration, TextPresentation, ViewData,
+    ViewPresentation,
 };
 use vell_protocol::ids::{ContentId, ViewId};
 
@@ -17,7 +18,7 @@ pub(super) struct AppQuery<'a> {
     pub(super) contents: &'a ContentStore,
     pub(super) views: &'a HashMap<ViewId, View>,
     pub(super) presentation: &'a PresentationLayerStore,
-    pub(super) faces: &'a FaceRegistry,
+    pub(super) faces: &'a SessionFaces,
 }
 
 impl RenderQuery for AppQuery<'_> {
@@ -59,14 +60,25 @@ impl RenderQuery for AppQuery<'_> {
                     .presentation
                     .policy(id, content_revision, view.revision());
                 ViewPresentation::Text(TextPresentation {
+                    base_face: self.faces.resolve_root_for(
+                        &FaceName::new("ui.editor"),
+                        content,
+                        id,
+                    ),
                     selections: state.selections().clone(),
                     cursor_style: policy.cursor_style.unwrap_or(CursorStyle::Default),
                     selection_shape: policy.selection_shape.unwrap_or(SelectionShape::Character),
                     selection_face: policy
                         .selection_face
                         .as_ref()
-                        .map(|face| self.faces.resolve(face))
-                        .unwrap_or_default(),
+                        .map(|face| self.faces.resolve_for(face, content, id))
+                        .unwrap_or_else(|| {
+                            self.faces.resolve_for(
+                                &FaceName::new("ui.selection"),
+                                content,
+                                id,
+                            )
+                        }),
                 })
             }
             (ContentKind::StatusBar, ContentViewState::StatusBar(state)) => {
@@ -90,12 +102,33 @@ impl RenderQuery for AppQuery<'_> {
                             target_content,
                             self.contents,
                             self.views,
+                            self.faces,
+                            content,
+                            id,
                         )
                     },
                     |presentation| StatusBarPresentation {
-                        left: resolve_status_segments(&presentation.left, self.faces),
-                        center: resolve_status_segments(&presentation.center, self.faces),
-                        right: resolve_status_segments(&presentation.right, self.faces),
+                        base_face: self
+                            .faces
+                            .resolve_status_bar_root(target_view, content, id),
+                        left: resolve_status_segments(
+                            &presentation.left,
+                            self.faces,
+                            content,
+                            id,
+                        ),
+                        center: resolve_status_segments(
+                            &presentation.center,
+                            self.faces,
+                            content,
+                            id,
+                        ),
+                        right: resolve_status_segments(
+                            &presentation.right,
+                            self.faces,
+                            content,
+                            id,
+                        ),
                     },
                 );
                 ViewPresentation::StatusBar(presentation)
@@ -157,7 +190,7 @@ impl RenderQuery for AppQuery<'_> {
             .map(|decoration| TextDecoration {
                 start: decoration.start,
                 end: decoration.end,
-                face: self.faces.resolve(&decoration.face),
+                face: self.faces.resolve_for(&decoration.face, content, id),
             })
             .collect())
     }
@@ -165,7 +198,9 @@ impl RenderQuery for AppQuery<'_> {
 
 fn resolve_status_segments(
     segments: &[crate::mode::NamedStatusBarSegment],
-    faces: &FaceRegistry,
+    faces: &SessionFaces,
+    content: ContentId,
+    view: ViewId,
 ) -> Vec<StatusBarSegment> {
     segments
         .iter()
@@ -174,7 +209,7 @@ fn resolve_status_segments(
             face: segment
                 .face
                 .as_ref()
-                .map(|face| faces.resolve(face))
+                .map(|face| faces.resolve_for(face, content, view))
                 .unwrap_or_default(),
         })
         .collect()
@@ -185,6 +220,9 @@ fn default_status_bar_presentation(
     target: ContentId,
     contents: &ContentStore,
     views: &HashMap<ViewId, View>,
+    faces: &SessionFaces,
+    status_content: ContentId,
+    status_view: ViewId,
 ) -> StatusBarPresentation {
     let name = match contents.query(target, ContentQuery::ResourceName) {
         ContentData::ResourceName(name) => name.unwrap_or_else(|| "[No Name]".to_owned()),
@@ -200,18 +238,18 @@ fn default_status_bar_presentation(
     );
     let mut left = vec![StatusBarSegment {
         text: name,
-        face: Face::default(),
+        face: FacePatch::default(),
     }];
     if dirty {
         left.push(StatusBarSegment {
             text: " [+]".to_owned(),
-            face: Face::default(),
+            face: FacePatch::default(),
         });
     }
     if unmaterialized {
         left.push(StatusBarSegment {
             text: " [New]".to_owned(),
-            face: Face::default(),
+            face: FacePatch::default(),
         });
     }
 
@@ -230,7 +268,7 @@ fn default_status_bar_presentation(
         .map(|point| {
             vec![StatusBarSegment {
                 text: format!("{}:{}", point.row + 1, point.col + 1),
-                face: Face::default(),
+                face: FacePatch::default(),
             }]
         })
         .unwrap_or_default();
@@ -238,16 +276,17 @@ fn default_status_bar_presentation(
     let center = match contents.query(target, ContentQuery::SaveState) {
         ContentData::SaveState(SaveState::Saved) => vec![StatusBarSegment {
             text: "Saved".to_owned(),
-            face: Face::default(),
+            face: FacePatch::default(),
         }],
         ContentData::SaveState(SaveState::Failed) => vec![StatusBarSegment {
             text: "Save failed".to_owned(),
-            face: Face::default(),
+            face: FacePatch::default(),
         }],
         _ => Vec::new(),
     };
 
     StatusBarPresentation {
+        base_face: faces.resolve_status_bar_root(target_view, status_content, status_view),
         left,
         center,
         right,

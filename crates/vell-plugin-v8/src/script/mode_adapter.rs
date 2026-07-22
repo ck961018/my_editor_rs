@@ -9,7 +9,7 @@ use vell_mode::{
     Mode, ModeAdapters, ModeContentContext, ModeError, ModeJobRequest, ModeJobResult, ModeJobSlot,
     ModeResult, ModeState, ModeViewContext, ModeViewPolicy,
 };
-use vell_protocol::content_query::{Face, FaceName, NamedTextDecoration, RowRange};
+use vell_protocol::content_query::{FaceDefinition, NamedTextDecoration, RowRange};
 use vell_protocol::key_event::KeyEvent;
 
 use super::bridge::view_policy_from_json;
@@ -27,7 +27,7 @@ pub(super) struct ScriptMode {
     version: ScriptApiVersion,
     actions: Vec<ModeActionName>,
     adapters: ScriptAdapters,
-    faces: Vec<(FaceName, Face)>,
+    face_definitions: Vec<FaceDefinition>,
     before: Option<ModeName>,
 }
 
@@ -118,7 +118,7 @@ impl ScriptMode {
             version: definition.version,
             actions,
             adapters,
-            faces: definition.faces,
+            face_definitions: definition.face_definitions,
             before: definition.before,
         }
     }
@@ -155,8 +155,8 @@ impl Mode for ScriptMode {
         self.before.as_ref()
     }
 
-    fn faces(&self) -> Vec<(FaceName, Face)> {
-        self.faces.clone()
+    fn face_definitions(&self) -> Vec<FaceDefinition> {
+        self.face_definitions.clone()
     }
 
     fn create_content_state(

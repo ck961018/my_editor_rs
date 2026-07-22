@@ -7,11 +7,13 @@ use crate::mode::{Mode, ModeId, ModeRegistry};
 #[cfg(test)]
 use crate::mode_name::ModeName;
 use crate::session::{ClientSession, EditorSessionInit, InitialView};
+use crate::theme::FaceEnvironment;
 use vell_core::buffer::Buffer;
 use vell_core::content::{Content, ContentKind};
 use vell_core::content_store::ContentStore;
 use vell_core::status_bar::StatusBar;
 use vell_protocol::ids::{ContentId, ViewId};
+use vell_protocol::content_query::{FaceOverride, ThemeName};
 
 pub(super) struct EditorBootstrap {
     pub kernel: Kernel,
@@ -68,6 +70,17 @@ pub(super) fn bootstrap_editor(
     height: usize,
     configured_modes: Vec<Box<dyn Mode>>,
 ) -> io::Result<EditorBootstrap> {
+    bootstrap_editor_with_theme(buffer, width, height, configured_modes, None, Vec::new())
+}
+
+pub(super) fn bootstrap_editor_with_theme(
+    buffer: Buffer,
+    width: usize,
+    height: usize,
+    configured_modes: Vec<Box<dyn Mode>>,
+    theme: Option<&ThemeName>,
+    face_overrides: Vec<FaceOverride>,
+) -> io::Result<EditorBootstrap> {
     let mut ids = BootstrapIds::default();
     let editor_content = ids.content();
     let status_content = ids.content();
@@ -121,6 +134,8 @@ pub(super) fn bootstrap_editor(
         .collect();
     let mut kernel = Kernel::new(contents, modes);
     let (contents, modes, mode_contents) = kernel.mode_attachment_parts();
+    let face_environment = FaceEnvironment::with_overrides(theme, face_overrides)
+        .map_err(io::Error::other)?;
     let session = ClientSession::editor(
         contents,
         modes,
@@ -140,6 +155,7 @@ pub(super) fn bootstrap_editor(
             },
             next_view_id: ids.next_view,
         },
+        face_environment,
     );
     Ok(EditorBootstrap { kernel, session })
 }
@@ -290,6 +306,7 @@ pub(super) fn create_editor_session(
             },
             next_view_id: ids.next_view,
         },
+        FaceEnvironment::new(None).expect("built-in themes must be valid"),
     )
 }
 

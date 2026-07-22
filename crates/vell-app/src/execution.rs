@@ -1,13 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::dispatcher::DispatcherInputSnapshot;
 use crate::mode::ModeDraftJournal;
 use crate::operation::OperationError;
 use crate::transaction::TransactionRecord;
+use crate::theme::{FaceRemapOwner, ResolvedFaceOperation};
 use vell_core::content::SaveSnapshot;
 use vell_core::content_store::ContentSnapshot;
 use vell_core::transaction::TransactionDirection;
 use vell_mode::operation::MAX_OPERATIONS_PER_FRAME;
+use vell_protocol::content_query::{FaceName, FaceRemapScope, FaceRemapToken};
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 use vell_protocol::revision::Revision;
 use vell_protocol::selection::Selections;
@@ -22,6 +24,8 @@ pub(super) struct ExecutionFrame {
     mode_drafts: ModeDraftJournal,
     view_touches: HashMap<ViewId, Revision>,
     prepared_effects: Vec<PreparedEffect>,
+    prepared_face_bases: HashMap<(FaceRemapScope, FaceName), FaceRemapOwner>,
+    prepared_face_tokens: HashSet<FaceRemapToken>,
     topology_effect_prepared: bool,
     viewport_effect_prepared: bool,
     budget: ExecutionBudget,
@@ -68,6 +72,7 @@ pub(super) enum PreparedEffect {
     Focus {
         target: SpaceId,
     },
+    Face(ResolvedFaceOperation),
     Quit,
 }
 
@@ -90,6 +95,8 @@ impl ExecutionFrame {
             mode_drafts: ModeDraftJournal::default(),
             view_touches: HashMap::new(),
             prepared_effects: Vec::new(),
+            prepared_face_bases: HashMap::new(),
+            prepared_face_tokens: HashSet::new(),
             topology_effect_prepared: false,
             viewport_effect_prepared: false,
             budget: ExecutionBudget::default(),
@@ -98,6 +105,42 @@ impl ExecutionFrame {
 
     pub(super) fn prepare(&mut self, effect: PreparedEffect) {
         self.prepared_effects.push(effect);
+    }
+
+    pub(super) fn prepare_face(
+        &mut self,
+        operation: ResolvedFaceOperation,
+    ) -> Result<(), OperationError> {
+        match &operation {
+            ResolvedFaceOperation::SetBase {
+                scope,
+                face,
+                owner,
+                ..
+            } => {
+                let key = (*scope, face.clone());
+                if self
+                    .prepared_face_bases
+                    .get(&key)
+                    .is_some_and(|prepared_owner| prepared_owner != owner)
+                {
+                    return Err(OperationError::new(
+                        "face remap base has multiple owners in one execution frame",
+                    ));
+                }
+                self.prepared_face_bases.insert(key, *owner);
+            }
+            ResolvedFaceOperation::AddRelative { token, .. }
+            | ResolvedFaceOperation::RemoveRelative { token, .. } => {
+                if !self.prepared_face_tokens.insert(*token) {
+                    return Err(OperationError::new(
+                        "face remap token is used more than once in one execution frame",
+                    ));
+                }
+            }
+        }
+        self.prepared_effects.push(PreparedEffect::Face(operation));
+        Ok(())
     }
 
     pub(super) fn prepare_topology(
@@ -278,5 +321,24 @@ mod tests {
             .consume_replayed_inputs(DEFAULT_REPLAYED_INPUT_BUDGET)
             .unwrap();
         assert!(frame.consume_replayed_inputs(1).is_err());
+    }
+
+    #[test]
+    fn frame_rejects_conflicting_face_contributions_before_publish() {
+        let mut frame = ExecutionFrame::new(None, None);
+        let first = ResolvedFaceOperation::AddRelative {
+            scope: FaceRemapScope::Session,
+            face: FaceName::new("ui.editor"),
+            token: FaceRemapToken(7),
+            expressions: vec![vell_protocol::content_query::FaceExpr::Patch(
+                vell_protocol::content_query::FacePatch::default(),
+            )],
+            owner: FaceRemapOwner::User,
+        };
+        frame.prepare_face(first.clone()).unwrap();
+
+        assert!(frame.prepare_face(first).is_err());
+        let (_, _, _, effects) = frame.into_parts();
+        assert_eq!(effects.len(), 1);
     }
 }

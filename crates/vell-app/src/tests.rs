@@ -266,7 +266,7 @@ impl Mode for HighlightMode {
     fn faces(&self) -> Vec<(FaceName, Face)> {
         vec![
             (
-                FaceName::new("syntax.test"),
+                FaceName::new("plugin.highlight-test.syntax"),
                 Face {
                     foreground: Some(Color::Rgb {
                         red: 1,
@@ -308,7 +308,7 @@ impl Mode for HighlightMode {
         vec![NamedTextDecoration {
             start: TextOffset { char_index: 0 },
             end: TextOffset { char_index: 1 },
-            face: FaceName::new("syntax.test"),
+            face: FaceName::new("plugin.highlight-test.syntax"),
         }]
     }
 }
@@ -3944,11 +3944,11 @@ fn mode_diagnostics_report_policy_decorations_and_face_conflicts() {
         Some(1)
     );
     assert_eq!(
-        app.face_provider(&FaceName::new("syntax.test")),
+        app.face_provider(&FaceName::new("plugin.highlight-test.syntax")),
         Some(&first)
     );
     assert!(app.face_conflicts().iter().any(|conflict| {
-        conflict.face == FaceName::new("syntax.test")
+        conflict.face == FaceName::new("plugin.highlight-test.syntax")
             && conflict.active_provider.as_ref() == Some(&first)
             && conflict.rejected_provider == second
     }));

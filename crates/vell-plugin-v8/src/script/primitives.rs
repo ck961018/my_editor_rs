@@ -11,9 +11,10 @@ use vell_mode::ModeViewContext;
 use vell_mode::command::{AppCommand, ModeCommand, ModeValue};
 use vell_mode::mode_name::{ModeActionName, ModeName};
 use vell_mode::operation::{
-    AppOperation, ContentOperation, ContentTarget, ModeFlowPropagation, ModeInvocation, ModeTarget,
-    OperationRequest, ViewOperation, ViewTarget,
+    AppOperation, ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget,
+    ModeFlowPropagation, ModeInvocation, ModeTarget, OperationRequest, ViewOperation, ViewTarget,
 };
+use vell_protocol::content_query::{FaceExpr, FaceName, FaceRemapToken};
 use vell_protocol::space::SplitDirection;
 use vell_protocol::viewport::{
     ViewportAlignment, ViewportCommand, ViewportCursorBehavior, ViewportMoveAmount,
@@ -28,6 +29,7 @@ use super::{
 const OPCODE_BITS: u32 = 8;
 const OPCODE_MASK: u64 = (1 << OPCODE_BITS) - 1;
 const MAX_INVOCATION_ID: u64 = (1 << (53 - OPCODE_BITS)) - 1;
+const MAX_FACE_REMAP_TOKEN: u64 = (1 << 53) - 1;
 
 macro_rules! primitives {
     ($( $variant:ident => ($namespace:literal, $name:literal) ),+ $(,)?) => {
@@ -128,6 +130,9 @@ primitives! {
     AlignBottom => ("viewport", "alignBottom"),
     InvokeMode => ("mode", "invoke"),
     InvokeCommand => ("commands", "invoke"),
+    SetFaceBase => ("faces", "setBase"),
+    AddRelativeFace => ("faces", "addRelative"),
+    RemoveRelativeFace => ("faces", "removeRelative"),
     Save => ("app", "save"),
     Quit => ("app", "quit"),
     ClosePane => ("app", "closePane"),
@@ -147,6 +152,7 @@ struct PrimitiveInvocation {
 
 pub(super) struct PrimitiveRuntime {
     next_id: u64,
+    next_face_remap_token: u64,
     current: Option<PrimitiveInvocation>,
 }
 
@@ -154,6 +160,7 @@ impl PrimitiveRuntime {
     pub(super) fn new() -> Rc<RefCell<Self>> {
         Rc::new(RefCell::new(Self {
             next_id: 1,
+            next_face_remap_token: 1,
             current: None,
         }))
     }
@@ -183,6 +190,15 @@ impl PrimitiveRuntime {
             ));
         }
         Ok(invocation.effects)
+    }
+
+    fn allocate_face_remap_token(&mut self) -> Result<FaceRemapToken, ScriptError> {
+        let token = self.next_face_remap_token;
+        if token > MAX_FACE_REMAP_TOKEN {
+            return Err(ScriptError::new("face remap token space is exhausted"));
+        }
+        self.next_face_remap_token = token + 1;
+        Ok(FaceRemapToken(token))
     }
 }
 
@@ -225,9 +241,10 @@ pub(super) fn install_v2(
             ("history", "history"),
             ("viewport", "viewport"),
             ("commands", "commands"),
+            ("faces", "faces"),
             ("app", "app"),
         ],
-        ContentKind::StatusBar => &[("commands", "commands")],
+        ContentKind::StatusBar => &[("commands", "commands"), ("faces", "faces")],
     };
     for &(primitive_namespace, context_namespace) in namespaces {
         let object = v8::Object::new(scope);
@@ -366,7 +383,7 @@ fn call_primitive(
         }
     };
     match primitive_effects(scope, &arguments, primitive, &runtime) {
-        Ok(effects) => {
+        Ok((effects, result)) => {
             let mut runtime = runtime.borrow_mut();
             let invocation = runtime.current.as_mut().expect("active invocation");
             if let Err(error) = ensure_count(
@@ -378,7 +395,10 @@ fn call_primitive(
                 return;
             }
             invocation.effects.extend(effects);
-            return_value.set_undefined();
+            match result {
+                Some(number) => return_value.set(v8::Number::new(scope, number as f64).into()),
+                None => return_value.set_undefined(),
+            }
         }
         Err(error) => throw_script_error(scope, &error.to_string()),
     }
@@ -403,7 +423,7 @@ fn primitive_effects(
     arguments: &v8::FunctionCallbackArguments,
     primitive: Primitive,
     runtime: &Rc<RefCell<PrimitiveRuntime>>,
-) -> Result<Vec<OperationRequest>, ScriptError> {
+) -> Result<(Vec<OperationRequest>, Option<u64>), ScriptError> {
     use Primitive::*;
 
     let deferred = |command| {
@@ -412,7 +432,8 @@ fn primitive_effects(
             operation: ViewOperation::Edit(command),
         }]
     };
-    Ok(match primitive {
+    let mut result = None;
+    let effects = match primitive {
         MoveLeft => deferred(EditCommand::MoveLeftBy(count(scope, arguments, 0)?)),
         MoveRight => deferred(EditCommand::MoveRightBy(count(scope, arguments, 0)?)),
         MoveWithinLineLeft => deferred(EditCommand::MoveWithinLineLeftBy(count(
@@ -624,6 +645,33 @@ fn primitive_effects(
                 },
             })
         }
+        SetFaceBase => {
+            let face = face_name(scope, arguments.get(0))?;
+            let value = arguments.get(1);
+            let expressions = if value.is_null_or_undefined() {
+                None
+            } else {
+                Some(face_expressions(scope, value, false)?)
+            };
+            vec![OperationRequest::Face(FaceOperation::SetBase {
+                target: face_remap_target(scope, arguments.get(2))?,
+                face,
+                expressions,
+            })]
+        }
+        AddRelativeFace => {
+            let token = runtime.borrow_mut().allocate_face_remap_token()?;
+            result = Some(token.0);
+            vec![OperationRequest::Face(FaceOperation::AddRelative {
+                target: face_remap_target(scope, arguments.get(2))?,
+                face: face_name(scope, arguments.get(0))?,
+                token,
+                expressions: face_expressions(scope, arguments.get(1), true)?,
+            })]
+        }
+        RemoveRelativeFace => vec![OperationRequest::Face(FaceOperation::RemoveRelative {
+            token: face_remap_token(scope, arguments.get(0))?,
+        })],
         Save => nested(OperationRequest::Content {
             target: ContentTarget::Current,
             operation: ContentOperation::Save,
@@ -652,7 +700,81 @@ fn primitive_effects(
         FocusRight => nested(OperationRequest::App(AppOperation::Command(
             AppCommand::Focus(SplitDirection::Right),
         ))),
-    })
+    };
+    Ok((effects, result))
+}
+
+fn face_name(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<FaceName, ScriptError> {
+    let name = string(scope, value, "face")?;
+    if name.is_empty() {
+        return Err(ScriptError::new("face must not be empty"));
+    }
+    Ok(FaceName::new(name))
+}
+
+fn face_expressions(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+    require_non_empty: bool,
+) -> Result<Vec<FaceExpr>, ScriptError> {
+    let values = v8::Local::<v8::Array>::try_from(value)
+        .map_err(|_| ScriptError::new("face expressions must be an array"))?;
+    if require_non_empty && values.length() == 0 {
+        return Err(ScriptError::new(
+            "relative face remap requires an expression",
+        ));
+    }
+    let mut expressions = Vec::with_capacity(values.length() as usize);
+    for index in 0..values.length() {
+        let value = values
+            .get_index(scope, index)
+            .ok_or_else(|| ScriptError::new("failed to read face expression"))?;
+        if value.is_string() {
+            expressions.push(FaceExpr::Named(face_name(scope, value)?));
+            continue;
+        }
+        let patch = v8::Local::<v8::Object>::try_from(value)
+            .map_err(|_| ScriptError::new("face expression must be a name or patch object"))?;
+        expressions.push(FaceExpr::Patch(super::schema::parse_face_patch(
+            scope, patch,
+        )?));
+    }
+    Ok(expressions)
+}
+
+fn face_remap_target(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<FaceRemapTarget, ScriptError> {
+    if value.is_null_or_undefined() {
+        return Ok(FaceRemapTarget::CurrentView);
+    }
+    match string(scope, value, "face remap scope")?.as_str() {
+        "session" => Ok(FaceRemapTarget::Session),
+        "content" => Ok(FaceRemapTarget::CurrentContent),
+        "view" => Ok(FaceRemapTarget::CurrentView),
+        _ => Err(ScriptError::new(
+            "face remap scope must be 'session', 'content', or 'view'",
+        )),
+    }
+}
+
+fn face_remap_token(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<FaceRemapToken, ScriptError> {
+    let token = non_negative_integer(scope, value, "face remap token")?;
+    let token = u64::try_from(token)
+        .map_err(|_| ScriptError::new("face remap token is too large"))?;
+    if token == 0 || token > MAX_FACE_REMAP_TOKEN {
+        return Err(ScriptError::new(
+            "face remap token must be a positive safe integer",
+        ));
+    }
+    Ok(FaceRemapToken(token))
 }
 
 fn history(operation: vell_mode::action::TransactionIntent) -> OperationRequest {

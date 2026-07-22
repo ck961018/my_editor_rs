@@ -41,9 +41,40 @@ interface EditorFace {
   foreground?: number | `#${string}`;
   background?: number | `#${string}`;
   bold?: boolean;
+  dim?: boolean;
   italic?: boolean;
   underline?: boolean;
+  underlineStyle?: "line" | "double" | "curl" | "dotted" | "dashed";
+  strikethrough?: boolean;
 }
+
+interface EditorFaceReset {
+  readonly reset: true;
+}
+
+interface EditorFacePatch {
+  foreground?: number | `#${string}` | EditorFaceReset;
+  background?: number | `#${string}` | EditorFaceReset;
+  bold?: boolean | EditorFaceReset;
+  dim?: boolean | EditorFaceReset;
+  italic?: boolean | EditorFaceReset;
+  underline?: boolean | EditorFaceReset;
+  underlineStyle?:
+    | "line"
+    | "double"
+    | "curl"
+    | "dotted"
+    | "dashed"
+    | EditorFaceReset;
+  strikethrough?: boolean | EditorFaceReset;
+}
+
+interface EditorFaceDefinition {
+  inherits?: string[];
+  fallback?: EditorFacePatch;
+}
+
+type EditorModeFace = EditorFace | EditorFaceDefinition;
 
 interface EditorKeyEvent {
   code:
@@ -188,6 +219,23 @@ interface CommandPrimitives {
   invoke(command: `${string}.${string}`, arguments?: ScriptData): void;
 }
 
+type FaceRemapScope = "session" | "content" | "view";
+type EditorFaceExpression = string | EditorFacePatch;
+
+interface FacePrimitives {
+  setBase(
+    face: string,
+    expressions: readonly EditorFaceExpression[] | null,
+    scope?: FaceRemapScope,
+  ): void;
+  addRelative(
+    face: string,
+    expressions: readonly EditorFaceExpression[],
+    scope?: FaceRemapScope,
+  ): number;
+  removeRelative(token: number): void;
+}
+
 interface AppPrimitives {
   save(): void;
   quit(): void;
@@ -228,6 +276,7 @@ interface BufferCommandContext<ContentState, ViewState, Arguments = ScriptData>
   readonly history: HistoryPrimitives;
   readonly viewport: ViewportPrimitives;
   readonly commands: CommandPrimitives;
+  readonly faces: FacePrimitives;
   readonly app: AppPrimitives;
   state: ContentState;
   viewState: ViewState;
@@ -253,6 +302,7 @@ interface StatusBarCommandContext<
   };
   readonly arguments: Arguments;
   readonly commands: CommandPrimitives;
+  readonly faces: FacePrimitives;
   state: ContentState;
   viewState: ViewState;
   pass(): Pass;
@@ -363,7 +413,7 @@ interface ModeDefinitionV2<
 > {
   name: string;
   before?: string;
-  faces?: Record<string, EditorFace>;
+  faces?: Record<string, EditorModeFace>;
   on: {
     buffer?: BufferAdapterDefinition<
       BufferState,
@@ -433,7 +483,7 @@ interface ModeDefinition<
   name: string;
   before?: string;
   worker?: string;
-  faces?: Record<string, EditorFace>;
+  faces?: Record<string, EditorModeFace>;
   content?: {
     create(
       context: Omit<ContentContext<never>, "contentState" | "arguments">,
@@ -461,6 +511,16 @@ interface ModeDefinition<
 }
 
 declare const editor: {
+  readonly theme: {
+    use(name: string): void;
+  };
+  readonly faces: {
+    override(
+      name: string,
+      patch: EditorFacePatch,
+      options?: { readonly theme?: string },
+    ): void;
+  };
   readonly modes: {
     define<
       BufferState = ScriptData,

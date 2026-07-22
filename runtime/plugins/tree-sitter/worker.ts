@@ -56,6 +56,16 @@ function faceForCapture(capture: string): string {
     return `syntax.${capture}`;
   }
   const root = capture.split(".", 1)[0];
+  const aliases: Record<string, string> = {
+    constructor: "syntax.constructor",
+    escape: "syntax.string.escape",
+    field: "syntax.property",
+    module: "syntax.namespace",
+  };
+  const alias = aliases[root];
+  if (alias !== undefined) {
+    return alias;
+  }
   switch (root) {
     case "attribute":
     case "comment":
@@ -71,15 +81,7 @@ function faceForCapture(capture: string): string {
     case "string":
     case "type":
     case "variable":
-      return `syntax.${root}`;
-    case "constructor":
-      return "syntax.type";
-    case "escape":
-      return "syntax.string";
-    case "field":
-      return "syntax.property";
-    case "module":
-      return "syntax.namespace";
+      return `syntax.${capture}`;
     default:
       return "syntax.variable";
   }

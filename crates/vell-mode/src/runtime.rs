@@ -20,8 +20,9 @@ use vell_core::content_view_state::{BufferViewState, ContentViewState, StatusBar
 use vell_core::input::{InputDecision, InputStatus};
 use vell_core::keymap::Keymap;
 use vell_protocol::content_query::{
-    BufferBackingState, ContentData, ContentQuery, CursorStyle, DirtyState, Face, FaceName,
-    NamedTextDecoration, RowRange, SaveState, SelectionShape, TextMetrics,
+    BufferBackingState, ContentData, ContentQuery, CursorStyle, DirtyState, Face, FaceDefinition,
+    FaceName, FacePatch, NamedTextDecoration, RowRange, SaveState, SelectionShape, TextMetrics,
+    is_host_face_name,
 };
 use vell_protocol::ids::{ContentId, ViewId};
 use vell_protocol::key_event::KeyEvent;
@@ -32,6 +33,13 @@ static EMPTY_KEYMAP: LazyLock<Keymap<Command>> = LazyLock::new(Keymap::new);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ModeId(u32);
+
+impl ModeId {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(id: u32) -> Self {
+        Self(id)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ModeActionId(u32);
@@ -521,10 +529,12 @@ impl ModeDraftJournal {
 pub struct FaceRegistry {
     faces: HashMap<FaceName, RegisteredFace>,
     conflicts: Vec<FaceConflict>,
+    registration_errors: Vec<FaceRegistrationError>,
 }
 
+#[derive(Clone)]
 struct RegisteredFace {
-    face: Face,
+    definition: FaceDefinition,
     provider: Option<ModeName>,
 }
 
@@ -535,12 +545,47 @@ pub struct FaceConflict {
     pub rejected_provider: ModeName,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FaceRegistrationError {
+    pub face: FaceName,
+    pub rejected_provider: ModeName,
+    pub reason: FaceRegistrationErrorReason,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaceRegistrationErrorReason {
+    HostNamespace,
+    InheritanceCycle,
+}
+
 impl FaceRegistry {
     fn register_defaults(&mut self, mode: &dyn Mode) {
-        for (name, face) in mode.faces() {
-            let provider = mode.name().clone();
-            if let Some(existing) = self.faces.get(&name) {
-                if existing.provider.as_ref() != Some(&provider)
+        self.register_definitions(mode.name().clone(), mode.face_definitions());
+    }
+
+    pub fn register_definitions(
+        &mut self,
+        provider: ModeName,
+        definitions: Vec<FaceDefinition>,
+    ) {
+        let mut candidate = self.faces.clone();
+        let mut inserted = Vec::new();
+        for definition in definitions {
+            let name = definition.name.clone();
+            if is_host_face_name(&name) {
+                if !self.registration_errors.iter().any(|error| {
+                    error.face == name && error.rejected_provider == provider
+                }) {
+                    self.registration_errors.push(FaceRegistrationError {
+                        face: name,
+                        rejected_provider: provider.clone(),
+                        reason: FaceRegistrationErrorReason::HostNamespace,
+                    });
+                }
+                continue;
+            }
+            if let Some(existing) = candidate.get(&name) {
+                if existing.definition != definition
                     && !self.conflicts.iter().any(|conflict| {
                         conflict.face == name && conflict.rejected_provider == provider
                     })
@@ -548,34 +593,79 @@ impl FaceRegistry {
                     self.conflicts.push(FaceConflict {
                         face: name,
                         active_provider: existing.provider.clone(),
-                        rejected_provider: provider,
+                        rejected_provider: provider.clone(),
                     });
                 }
                 continue;
             }
-            self.faces.insert(
-                name,
+            candidate.insert(
+                name.clone(),
                 RegisteredFace {
-                    face,
-                    provider: Some(provider),
+                    definition,
+                    provider: Some(provider.clone()),
                 },
             );
+            inserted.push(name);
+        }
+        let cyclic = inserted
+            .iter()
+            .filter(|name| face_inheritance_has_cycle(&candidate, name))
+            .cloned()
+            .collect::<Vec<_>>();
+        if cyclic.is_empty() {
+            self.faces = candidate;
+        } else {
+            for face in cyclic {
+                if !self.registration_errors.iter().any(|error| {
+                    error.face == face
+                        && error.rejected_provider == provider
+                        && error.reason == FaceRegistrationErrorReason::InheritanceCycle
+                }) {
+                    self.registration_errors.push(FaceRegistrationError {
+                        face,
+                        rejected_provider: provider.clone(),
+                        reason: FaceRegistrationErrorReason::InheritanceCycle,
+                    });
+                }
+            }
         }
     }
 
-    pub fn resolve(&self, name: &FaceName) -> Face {
-        self.faces
-            .get(name)
-            .map(|registered| registered.face.clone())
-            .unwrap_or_default()
+    pub fn resolve(&self, name: &FaceName) -> FacePatch {
+        self.resolve_inner(name, &mut Vec::new())
+    }
+
+    fn resolve_inner(&self, name: &FaceName, visiting: &mut Vec<FaceName>) -> FacePatch {
+        if visiting.contains(name) {
+            return FacePatch::default();
+        }
+        let Some(registered) = self.faces.get(name) else {
+            return FacePatch::default();
+        };
+        visiting.push(name.clone());
+        let mut resolved = FacePatch::default();
+        for parent in registered.definition.inherits.iter().rev() {
+            resolved.overlay(&self.resolve_inner(parent, visiting));
+        }
+        visiting.pop();
+        resolved.overlay(&registered.definition.fallback);
+        resolved
     }
 
     pub fn provider(&self, name: &FaceName) -> Option<&ModeName> {
         self.faces.get(name)?.provider.as_ref()
     }
 
+    pub fn definition(&self, name: &FaceName) -> Option<&FaceDefinition> {
+        self.faces.get(name).map(|registered| &registered.definition)
+    }
+
     pub fn conflicts(&self) -> &[FaceConflict] {
         &self.conflicts
+    }
+
+    pub fn registration_errors(&self) -> &[FaceRegistrationError] {
+        &self.registration_errors
     }
 
     #[allow(dead_code, reason = "theme and script adapters override named faces")]
@@ -585,14 +675,46 @@ impl FaceRegistry {
                 conflict.active_provider = None;
             }
         }
+        let definition_name = name.clone();
         self.faces.insert(
             name,
             RegisteredFace {
-                face,
+                definition: FaceDefinition {
+                    name: definition_name,
+                    inherits: Vec::new(),
+                    fallback: FacePatch::from(&face),
+                },
                 provider: None,
             },
         );
     }
+}
+
+fn face_inheritance_has_cycle(
+    faces: &HashMap<FaceName, RegisteredFace>,
+    start: &FaceName,
+) -> bool {
+    fn visit(
+        faces: &HashMap<FaceName, RegisteredFace>,
+        name: &FaceName,
+        visiting: &mut Vec<FaceName>,
+    ) -> bool {
+        if visiting.contains(name) {
+            return true;
+        }
+        let Some(face) = faces.get(name) else {
+            return false;
+        };
+        visiting.push(name.clone());
+        let cyclic = face
+            .definition
+            .inherits
+            .iter()
+            .any(|parent| visit(faces, parent, visiting));
+        visiting.pop();
+        cyclic
+    }
+    visit(faces, start, &mut Vec::new())
 }
 
 #[allow(
@@ -1207,6 +1329,16 @@ pub trait Mode {
     }
     fn faces(&self) -> Vec<(FaceName, Face)> {
         Vec::new()
+    }
+    fn face_definitions(&self) -> Vec<FaceDefinition> {
+        self.faces()
+            .into_iter()
+            .map(|(name, face)| FaceDefinition {
+                name,
+                inherits: Vec::new(),
+                fallback: FacePatch::from(&face),
+            })
+            .collect()
     }
     fn action_scope(&self, _action: &ModeActionName) -> ModeActionScope {
         ModeActionScope::View
@@ -2161,6 +2293,10 @@ pub struct ModeViewStore {
 }
 
 impl ModeViewStore {
+    pub fn contains_mode(&self, mode: ModeId) -> bool {
+        self.instances.keys().any(|(candidate, _)| *candidate == mode)
+    }
+
     pub fn is_faulted(&self, mode: ModeId, view: ViewId) -> bool {
         self.instances
             .get(&(mode, view))
@@ -2678,6 +2814,8 @@ mod tests {
 
     struct NoAdapterMode(ModeName);
 
+    struct StandardFaceMode(ModeName);
+
     impl Mode for NoAdapterMode {
         fn name(&self) -> &ModeName {
             &self.0
@@ -2689,6 +2827,30 @@ mod tests {
 
         fn adapters(&self) -> ModeAdapters {
             ModeAdapters::default()
+        }
+    }
+
+    impl Mode for StandardFaceMode {
+        fn name(&self) -> &ModeName {
+            &self.0
+        }
+
+        fn actions(&self) -> &[ModeActionName] {
+            &[]
+        }
+
+        fn adapters(&self) -> ModeAdapters {
+            ModeAdapters::buffer()
+        }
+
+        fn faces(&self) -> Vec<(FaceName, Face)> {
+            vec![(
+                FaceName::new("syntax.keyword"),
+                Face {
+                    bold: Some(true),
+                    ..Face::default()
+                },
+            )]
         }
     }
 
@@ -2803,6 +2965,102 @@ mod tests {
             registry.register(NoAdapterMode(name.clone())),
             Err(ModeRegistrationError::MissingAdapter(name))
         );
+    }
+
+    #[test]
+    fn face_registry_rejects_mode_owned_host_namespaces() {
+        let mode = StandardFaceMode(ModeName::new("standard-face"));
+        let mut registry = FaceRegistry::default();
+
+        registry.register_defaults(&mode);
+
+        assert_eq!(
+            registry.resolve(&FaceName::new("syntax.keyword")),
+            FacePatch::default()
+        );
+        assert_eq!(
+            registry.registration_errors(),
+            &[FaceRegistrationError {
+                face: FaceName::new("syntax.keyword"),
+                rejected_provider: ModeName::new("standard-face"),
+                reason: FaceRegistrationErrorReason::HostNamespace,
+            }]
+        );
+    }
+
+    #[test]
+    fn face_registry_resolves_multiple_parents_in_declared_priority_order() {
+        let mut registry = FaceRegistry::default();
+        registry.register_definitions(
+            ModeName::new("faces"),
+            vec![
+                FaceDefinition {
+                    name: FaceName::new("plugin.faces.low"),
+                    inherits: Vec::new(),
+                    fallback: FacePatch {
+                        bold: vell_protocol::content_query::FaceValue::Value(false),
+                        italic: vell_protocol::content_query::FaceValue::Value(true),
+                        ..FacePatch::default()
+                    },
+                },
+                FaceDefinition {
+                    name: FaceName::new("plugin.faces.high"),
+                    inherits: Vec::new(),
+                    fallback: FacePatch {
+                        bold: vell_protocol::content_query::FaceValue::Value(true),
+                        ..FacePatch::default()
+                    },
+                },
+                FaceDefinition {
+                    name: FaceName::new("plugin.faces.child"),
+                    inherits: vec![
+                        FaceName::new("plugin.faces.high"),
+                        FaceName::new("plugin.faces.low"),
+                    ],
+                    fallback: FacePatch::default(),
+                },
+            ],
+        );
+
+        let resolved = registry.resolve(&FaceName::new("plugin.faces.child"));
+        assert_eq!(
+            resolved.bold,
+            vell_protocol::content_query::FaceValue::Value(true)
+        );
+        assert_eq!(
+            resolved.italic,
+            vell_protocol::content_query::FaceValue::Value(true)
+        );
+    }
+
+    #[test]
+    fn cyclic_face_definition_batch_is_rejected_atomically() {
+        let mut registry = FaceRegistry::default();
+        registry.register_definitions(
+            ModeName::new("cyclic"),
+            vec![
+                FaceDefinition {
+                    name: FaceName::new("plugin.cyclic.a"),
+                    inherits: vec![FaceName::new("plugin.cyclic.b")],
+                    fallback: FacePatch::default(),
+                },
+                FaceDefinition {
+                    name: FaceName::new("plugin.cyclic.b"),
+                    inherits: vec![FaceName::new("plugin.cyclic.a")],
+                    fallback: FacePatch::default(),
+                },
+            ],
+        );
+
+        assert!(
+            registry
+                .definition(&FaceName::new("plugin.cyclic.a"))
+                .is_none()
+        );
+        assert_eq!(registry.registration_errors().len(), 2);
+        assert!(registry.registration_errors().iter().all(|error| {
+            error.reason == FaceRegistrationErrorReason::InheritanceCycle
+        }));
     }
 
     #[test]

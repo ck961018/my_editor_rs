@@ -2395,6 +2395,7 @@ dependencies = [
  "tokio",
  "vell-app",
  "vell-plugin-v8",
+ "vell-protocol",
  "vell-tui",
 ]
 
@@ -2410,6 +2411,7 @@ dependencies = [
  "vell-mode",
  "vell-plugin-v8",
  "vell-protocol",
+ "vell-theme",
 ]
 
 [[package]]
@@ -2454,6 +2456,13 @@ dependencies = [
 [[package]]
 name = "vell-protocol"
 version = "0.1.0"
+
+[[package]]
+name = "vell-theme"
+version = "0.1.0"
+dependencies = [
+ "vell-protocol",
+]
 
 [[package]]
 name = "vell-tui"

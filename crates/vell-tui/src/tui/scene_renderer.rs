@@ -5,9 +5,9 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 
 use crate::protocol::content_query::{
-    ContentData, ContentQuery, ContentQueryKind, Face, RenderQuery, RenderQueryError, RowRange,
-    SelectionShape, StatusBarPresentation, StatusBarSegment, TextPresentation, ViewData,
-    ViewPresentation,
+    ContentData, ContentQuery, ContentQueryKind, FacePatch, PaintFace, RenderQuery,
+    RenderQueryError, RowRange, SelectionShape, StatusBarPresentation, StatusBarSegment,
+    TextPresentation, ViewData, ViewPresentation,
 };
 use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::revision::Revision;
@@ -39,13 +39,13 @@ struct DisplayPoint {
 struct DisplayDecoration {
     start: TextPoint,
     end: TextPoint,
-    face: Face,
+    face: FacePatch,
 }
 
 struct RowDecoration {
     start: usize,
     end: usize,
-    face: Face,
+    face: FacePatch,
 }
 
 impl SceneRenderer {
@@ -150,6 +150,7 @@ impl SceneRenderer {
             )?;
             canvas.show_cursor()?;
         }
+        canvas.set_face(&PaintFace::default())?;
         canvas.flush()
     }
 
@@ -504,6 +505,7 @@ fn paint_text_item(
             width,
             linewise_highlight,
             &text.selection_face,
+            &text.base_face,
         )?;
         let hi = if linewise_highlight {
             Some((0, usize::MAX))
@@ -557,11 +559,18 @@ fn paint_text_item(
             hi,
             &text.selection_face,
             &row_decorations,
+            &text.base_face,
         )?;
     }
     for row in lines.len()..height {
         let screen_row = (item.rect.y + row as i32) as usize;
-        clear_item_row(canvas, screen_row, item.rect.x as usize, width)?;
+        clear_item_row(
+            canvas,
+            screen_row,
+            item.rect.x as usize,
+            width,
+            &text.base_face,
+        )?;
     }
     Ok(())
 }
@@ -577,7 +586,7 @@ fn paint_status_bar(
     let width = item.rect.width.max(0) as usize;
     let row = item.rect.y as usize;
     let col = item.rect.x as usize;
-    clear_item_row(canvas, row, col, width)?;
+    clear_item_row(canvas, row, col, width, &presentation.base_face)?;
 
     let right_width = status_segments_width(&presentation.right).min(width);
     let right_start = width - right_width;
@@ -590,13 +599,21 @@ fn paint_status_bar(
     };
     let left_width = center_start.min(right_start);
 
-    paint_status_segments(canvas, row, col, left_width, &presentation.left)?;
+    paint_status_segments(
+        canvas,
+        row,
+        col,
+        left_width,
+        &presentation.left,
+        &presentation.base_face,
+    )?;
     paint_status_segments(
         canvas,
         row,
         col + center_start,
         center_width,
         &presentation.center,
+        &presentation.base_face,
     )?;
     paint_status_segments(
         canvas,
@@ -604,8 +621,9 @@ fn paint_status_bar(
         col + right_start,
         right_width,
         &presentation.right,
+        &presentation.base_face,
     )?;
-    canvas.set_face(&Face::default())
+    canvas.set_face(&presentation.base_face)
 }
 
 fn status_segments_width(segments: &[StatusBarSegment]) -> usize {
@@ -624,6 +642,7 @@ fn paint_status_segments(
     col: usize,
     width: usize,
     segments: &[StatusBarSegment],
+    base_face: &PaintFace,
 ) -> io::Result<()> {
     let mut written = 0;
     for segment in segments {
@@ -636,15 +655,29 @@ fn paint_status_segments(
             continue;
         }
         canvas.move_cursor(row, col + written)?;
-        canvas.set_face(&segment.face)?;
+        canvas.set_face(&segment.face.resolve(base_face))?;
         canvas.write_str(&clipped)?;
         written += display_width_before_col(&clipped, clipped.chars().count());
     }
     Ok(())
 }
 
-fn clear_item_row(canvas: &mut dyn Canvas, row: usize, col: usize, width: usize) -> io::Result<()> {
-    clear_item_row_with_highlight(canvas, row, col, width, false, &Face::default())
+fn clear_item_row(
+    canvas: &mut dyn Canvas,
+    row: usize,
+    col: usize,
+    width: usize,
+    base_face: &PaintFace,
+) -> io::Result<()> {
+    clear_item_row_with_highlight(
+        canvas,
+        row,
+        col,
+        width,
+        false,
+        &FacePatch::default(),
+        base_face,
+    )
 }
 
 fn clear_item_row_with_highlight(
@@ -653,22 +686,24 @@ fn clear_item_row_with_highlight(
     col: usize,
     width: usize,
     highlighted: bool,
-    selection_face: &Face,
+    selection_face: &FacePatch,
+    base_face: &PaintFace,
 ) -> io::Result<()> {
     canvas.move_cursor(row, col)?;
     if width > 0 {
-        if highlighted && selection_face != &Face::default() {
-            canvas.set_face(selection_face)?;
+        canvas.set_face(base_face)?;
+        if highlighted && selection_face != &FacePatch::default() {
+            canvas.set_face(&selection_face.resolve(base_face))?;
         }
         if highlighted {
-            canvas.set_reverse(selection_face == &Face::default())?;
+            canvas.set_reverse(selection_face == &FacePatch::default())?;
         }
         canvas.write_str(&" ".repeat(width))?;
-        if highlighted && selection_face == &Face::default() {
+        if highlighted && selection_face == &FacePatch::default() {
             canvas.set_reverse(false)?;
         }
-        if highlighted && selection_face != &Face::default() {
-            canvas.set_face(&Face::default())?;
+        if highlighted && selection_face != &FacePatch::default() {
+            canvas.set_face(base_face)?;
         }
         canvas.move_cursor(row, col)?;
     }
@@ -684,8 +719,9 @@ fn paint_line_with_highlight(
     left_col: usize,
     width: usize,
     hi: Option<(usize, usize)>,
-    selection_face: &Face,
+    selection_face: &FacePatch,
     decorations: &[RowDecoration],
+    base_face: &PaintFace,
 ) -> io::Result<()> {
     if width == 0 {
         return Ok(());
@@ -694,7 +730,7 @@ fn paint_line_with_highlight(
     let visible_end = left_col.saturating_add(width);
     let mut cell_col: usize = 0;
     let mut reverse_on = false;
-    let mut active_face = Face::default();
+    let mut active_face = base_face.clone();
     let mut previous_char_was_visible = false;
     let mut decoration_events: Vec<_> = decorations
         .iter()
@@ -742,8 +778,8 @@ fn paint_line_with_highlight(
         }
 
         let highlighted = hi.is_some_and(|(start, end)| logical_col >= start && logical_col < end);
-        let reverse_highlighted = highlighted && selection_face == &Face::default();
-        let mut face = Face::default();
+        let reverse_highlighted = highlighted && selection_face == &FacePatch::default();
+        let mut face = base_face.clone();
         while let Some(&(col, entering, index)) = decoration_events.get(next_event)
             && col <= logical_col
         {
@@ -756,10 +792,10 @@ fn paint_line_with_highlight(
             next_event += 1;
         }
         for &index in &active_decorations {
-            face.overlay(&decorations[index].face);
+            face.apply_patch(&decorations[index].face, base_face);
         }
         if highlighted {
-            face.overlay(selection_face);
+            face.apply_patch(selection_face, base_face);
         }
         if face != active_face {
             canvas.set_face(&face)?;
@@ -779,8 +815,8 @@ fn paint_line_with_highlight(
     if reverse_on {
         canvas.set_reverse(false)?;
     }
-    if active_face != Face::default() {
-        canvas.set_face(&Face::default())?;
+    if active_face != *base_face {
+        canvas.set_face(base_face)?;
     }
     Ok(())
 }
@@ -789,9 +825,9 @@ fn paint_line_with_highlight(
 mod tests {
     use super::*;
     use crate::protocol::content_query::{
-        BufferBackingState, ContentData, ContentQuery, CursorStyle, DirtyState, RenderQuery,
-        SaveState, StatusBarPresentation, StatusBarSegment, TextMetrics, TextPresentation,
-        ViewData, ViewPresentation,
+        BufferBackingState, Color, ContentData, ContentQuery, CursorStyle, DirtyState, FaceValue,
+        RenderQuery, SaveState, StatusBarPresentation, StatusBarSegment, TextMetrics,
+        TextPresentation, ViewData, ViewPresentation,
     };
     use crate::protocol::ids::{ContentId, ViewId};
     use crate::protocol::selection::{Selection, Selections, TextOffset};
@@ -841,10 +877,11 @@ mod tests {
         ViewData {
             content,
             presentation: ViewPresentation::Text(TextPresentation {
+                base_face: PaintFace::default(),
                 selections,
                 cursor_style,
                 selection_shape,
-                selection_face: Face::default(),
+                selection_face: FacePatch::default(),
             }),
         }
     }
@@ -853,9 +890,10 @@ mod tests {
         ViewData {
             content,
             presentation: ViewPresentation::StatusBar(StatusBarPresentation {
+                base_face: PaintFace::default(),
                 left: vec![StatusBarSegment {
                     text: "f.txt".to_owned(),
-                    face: Face::default(),
+                    face: FacePatch::default(),
                 }],
                 center: Vec::new(),
                 right: Vec::new(),
@@ -1610,8 +1648,17 @@ mod tests {
     fn selection_highlight_uses_logical_columns_with_wide_unicode() {
         let mut out = Output::new(Vec::new());
 
-        paint_line_with_highlight(&mut out, "中文a", 0, 5, Some((1, 2)), &Face::default(), &[])
-            .unwrap();
+        paint_line_with_highlight(
+            &mut out,
+            "中文a",
+            0,
+            5,
+            Some((1, 2)),
+            &FacePatch::default(),
+            &[],
+            &PaintFace::default(),
+        )
+        .unwrap();
 
         let output = String::from_utf8(out.into_inner()).unwrap();
         assert_eq!(output, "中\x1b[7m文\x1b[27ma");
@@ -1728,8 +1775,9 @@ mod tests {
             0,
             40,
             None,
-            &Face::default(),
+            &FacePatch::default(),
             &[],
+            &PaintFace::default(),
         )
         .unwrap();
 
@@ -1748,15 +1796,16 @@ mod tests {
             0,
             2,
             Some((0, 1)),
-            &Face::default(),
+            &FacePatch::default(),
             &[RowDecoration {
                 start: 0,
                 end: 1,
-                face: Face {
-                    foreground: Some(crate::protocol::content_query::Color::Ansi(1)),
-                    ..Face::default()
+                face: FacePatch {
+                    foreground: FaceValue::Value(Color::Ansi(1)),
+                    ..FacePatch::default()
                 },
             }],
+            &PaintFace::default(),
         )
         .unwrap();
 
@@ -1774,25 +1823,26 @@ mod tests {
             0,
             3,
             None,
-            &Face::default(),
+            &FacePatch::default(),
             &[
                 RowDecoration {
                     start: 0,
                     end: 3,
-                    face: Face {
-                        foreground: Some(crate::protocol::content_query::Color::Ansi(1)),
-                        ..Face::default()
+                    face: FacePatch {
+                        foreground: FaceValue::Value(Color::Ansi(1)),
+                        ..FacePatch::default()
                     },
                 },
                 RowDecoration {
                     start: 1,
                     end: 2,
-                    face: Face {
-                        foreground: Some(crate::protocol::content_query::Color::Ansi(2)),
-                        ..Face::default()
+                    face: FacePatch {
+                        foreground: FaceValue::Value(Color::Ansi(2)),
+                        ..FacePatch::default()
                     },
                 },
             ],
+            &PaintFace::default(),
         )
         .unwrap();
 
@@ -1811,11 +1861,12 @@ mod tests {
             0,
             2,
             Some((0, 1)),
-            &Face {
-                background: Some(crate::protocol::content_query::Color::Ansi(4)),
-                ..Face::default()
+            &FacePatch {
+                background: FaceValue::Value(Color::Ansi(4)),
+                ..FacePatch::default()
             },
             &[],
+            &PaintFace::default(),
         )
         .unwrap();
 
@@ -1843,9 +1894,10 @@ mod tests {
         let mut out = Output::new(Vec::new());
 
         let presentation = StatusBarPresentation {
+            base_face: PaintFace::default(),
             left: vec![StatusBarSegment {
                 text: "f.txt".to_owned(),
-                face: Face::default(),
+                face: FacePatch::default(),
             }],
             center: Vec::new(),
             right: Vec::new(),
@@ -1855,5 +1907,42 @@ mod tests {
         let output = String::from_utf8(out.into_inner()).unwrap();
         assert!(output.contains("f.t"), "output: {output}");
         assert!(!output.contains("f.txt"), "output: {output}");
+    }
+
+    #[test]
+    fn status_bar_base_face_fills_the_unwritten_width() {
+        let item = RenderItem {
+            space_id: SpaceId(1),
+            view_id: ViewId(1),
+            rect: crate::protocol::geometry::Rect {
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 1,
+            },
+            clip: None,
+            layer: crate::protocol::space::Layer::Base,
+            z_index: 0,
+            order: 0,
+        };
+        let mut out = Output::new(Vec::new());
+        let presentation = StatusBarPresentation {
+            base_face: PaintFace {
+                background: Some(Color::Ansi(4)),
+                ..PaintFace::default()
+            },
+            left: vec![StatusBarSegment {
+                text: "x".to_owned(),
+                face: FacePatch::default(),
+            }],
+            center: Vec::new(),
+            right: Vec::new(),
+        };
+
+        paint_status_bar(&item, &presentation, &mut out).unwrap();
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert!(output.contains("\x1b[48;5;4m"), "output: {output:?}");
+        assert!(output.contains("    "), "output: {output:?}");
     }
 }

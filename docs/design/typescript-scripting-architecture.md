@@ -20,8 +20,9 @@ embedded plugins / optional config.ts
 ```
 
 `vell-app` 的普通依赖不含 V8。根二进制先调用
-`vell_plugin_v8::load_user_modes()`，再把 `Vec<Box<dyn Mode>>` 注入
-`App::with_modes`。V8 类型不跨出 `vell-plugin-v8` 的公共边界。
+`vell_plugin_v8::load_user_configuration()`，再把 Mode、ThemeName 和纯
+protocol Face override DTO 注入 App。V8 类型不跨出 `vell-plugin-v8` 的
+公共边界。
 
 ## 2. 加载与所有权
 
@@ -30,10 +31,10 @@ embedded plugins / optional config.ts
 
 1. 枚举内嵌 `plugin.json`；
 2. 按 manifest `order` 稳定加载入口；
-3. 在同一 `ScriptHost` 中收集 Mode definition；
+3. 在同一 `ScriptHost` draft 中收集 Mode 和视觉配置；
 4. 加载可选用户 `config.ts`；
 5. 把每个 definition 包装为 `ScriptMode`；
-6. 将通用 Mode 交给 App bootstrap。
+6. 将通用 Mode 与视觉 DTO 交给 App bootstrap。
 
 所有 `ScriptMode` 通过 `Rc<RefCell<ScriptHost>>` 共享主 isolate、context、
 module map、callback registry 和 diagnostics。Mode definition 进入
@@ -41,7 +42,8 @@ module map、callback registry 和 diagnostics。Mode definition 进入
 识别 ScriptHost。
 
 内建插件失败表示安装损坏，会阻止启动。可选用户配置失败会输出 warning，
-回滚该模块新增的 definition，并继续使用内建 Mode。
+原子回滚该模块新增的 definition、Theme 选择和 Face override，并继续使用
+内建配置。
 
 ## 3. 配置发现
 

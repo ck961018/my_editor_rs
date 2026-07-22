@@ -11,6 +11,7 @@ pub struct ScriptHost {
     modules: Rc<RefCell<ModuleMap>>,
     pub(super) definitions: Rc<RefCell<Vec<ScriptModeDefinition>>>,
     pub(super) diagnostics: Rc<RefCell<ScriptDiagnostics>>,
+    pub(super) configuration: Rc<RefCell<ScriptConfigurationDraft>>,
     plugin_root: Rc<RefCell<Option<String>>>,
     primitives: Rc<RefCell<PrimitiveRuntime>>,
 }
@@ -40,11 +41,13 @@ impl ScriptHost {
         let modules = Rc::new(RefCell::new(ModuleMap::default()));
         let definitions = Rc::new(RefCell::new(Vec::new()));
         let diagnostics = Rc::new(RefCell::new(ScriptDiagnostics::default()));
+        let configuration = Rc::new(RefCell::new(ScriptConfigurationDraft::default()));
         let plugin_root = Rc::new(RefCell::new(None));
         let primitives = PrimitiveRuntime::new();
         isolate.set_slot(modules.clone());
         isolate.set_slot(definitions.clone());
         isolate.set_slot(diagnostics.clone());
+        isolate.set_slot(configuration.clone());
         isolate.set_slot(plugin_root.clone());
         isolate.set_slot(primitives.clone());
 
@@ -68,6 +71,7 @@ impl ScriptHost {
             modules,
             definitions,
             diagnostics,
+            configuration,
             plugin_root,
             primitives,
         }
@@ -109,10 +113,12 @@ impl ScriptHost {
     pub fn execute_typescript(&mut self, specifier: &str, source: &str) -> Result<(), ScriptError> {
         let definition_count = self.definitions.borrow().len();
         let diagnostics = self.diagnostics.borrow().clone();
+        let configuration = self.configuration.borrow().clone();
         let result = self.evaluate_typescript(specifier, source).map(|_| ());
         if result.is_err() {
             self.definitions.borrow_mut().truncate(definition_count);
             self.diagnostics.replace(diagnostics);
+            self.configuration.replace(configuration);
         }
         result
     }
@@ -139,6 +145,7 @@ impl ScriptHost {
         self.modules.borrow_mut().reset(root.clone());
         let definition_count = self.definitions.borrow().len();
         let diagnostics = self.diagnostics.borrow().clone();
+        let configuration = self.configuration.borrow().clone();
 
         let modules = self.modules.clone();
         let context = self.context.clone();
@@ -186,6 +193,7 @@ impl ScriptHost {
         if result.is_err() {
             self.definitions.borrow_mut().truncate(definition_count);
             self.diagnostics.replace(diagnostics);
+            self.configuration.replace(configuration);
             self.modules.borrow_mut().reset(root);
         }
         result

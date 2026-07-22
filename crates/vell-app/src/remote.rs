@@ -82,7 +82,7 @@ mod tests {
         contents: ContentStore,
         views: HashMap<ViewId, View>,
         presentation: crate::presentation::PresentationLayerStore,
-        faces: crate::mode::FaceRegistry,
+        faces: crate::theme::SessionFaces,
     }
 
     impl Fixture {
@@ -100,7 +100,7 @@ mod tests {
                 contents,
                 views: HashMap::from([(ViewId(0), view)]),
                 presentation: crate::presentation::PresentationLayerStore::default(),
-                faces: crate::mode::FaceRegistry::default(),
+                faces: crate::theme::SessionFaces::default(),
             }
         }
 

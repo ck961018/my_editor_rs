@@ -414,6 +414,34 @@ mod tests {
     }
 
     #[test]
+    fn worker_preserves_specific_tree_sitter_capture_names() {
+        let worker =
+            ScriptWorker::start("tree-sitter/".to_owned(), "worker.ts".to_owned()).unwrap();
+        let result = worker
+            .request(
+                serde_json::json!({
+                    "contentId": 8,
+                    "generation": 0,
+                    "language": "rust",
+                    "revision": 0,
+                    "text": "fn show(value: bool) { println!(\"{value}\"); }",
+                }),
+                CancellationToken::new(),
+            )
+            .unwrap();
+
+        let faces = result["spans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|span| span["face"].as_str())
+            .collect::<Vec<_>>();
+        assert!(faces.contains(&"syntax.variable.parameter"), "{result:#}");
+        assert!(faces.contains(&"syntax.function.macro"), "{result:#}");
+        assert!(faces.contains(&"syntax.type.builtin"), "{result:#}");
+    }
+
+    #[test]
     fn rust_highlighter_returns_valid_spans_during_incomplete_edits() {
         let worker =
             ScriptWorker::start("tree-sitter/".to_owned(), "worker.ts".to_owned()).unwrap();

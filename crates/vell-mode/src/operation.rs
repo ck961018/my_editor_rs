@@ -3,6 +3,7 @@ use crate::command::{AppCommand, ModeCommand, ModeInputCommand};
 use vell_core::action::ContentAction;
 use vell_core::command::EditCommand;
 use vell_protocol::ids::{ContentId, ViewId};
+use vell_protocol::content_query::{FaceExpr, FaceName, FaceRemapToken};
 use vell_protocol::revision::Revision;
 use vell_protocol::selection::Selections;
 use vell_protocol::viewport::ViewportCommand;
@@ -63,7 +64,33 @@ pub enum OperationRequest {
         target: ViewTarget,
         input: ModeInputCommand,
     },
+    Face(FaceOperation),
     App(AppOperation),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaceRemapTarget {
+    Session,
+    CurrentContent,
+    CurrentView,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FaceOperation {
+    SetBase {
+        target: FaceRemapTarget,
+        face: FaceName,
+        expressions: Option<Vec<FaceExpr>>,
+    },
+    AddRelative {
+        target: FaceRemapTarget,
+        face: FaceName,
+        token: FaceRemapToken,
+        expressions: Vec<FaceExpr>,
+    },
+    RemoveRelative {
+        token: FaceRemapToken,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
