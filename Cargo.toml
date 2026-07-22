@@ -7,6 +7,7 @@ members = [
     "crates/vell-mode",
     "crates/vell-plugin-v8",
     "crates/vell-protocol",
+    "crates/vell-theme",
     "crates/vell-tui",
 ]
 default-members = ["."]

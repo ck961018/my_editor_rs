@@ -1,0 +1,48 @@
+schema = 1
+name = "catppuccin-base"
+appearance = "dark"
+selectable = false
+
+[faces]
+"ui.editor" = { foreground = "text", background = "base" }
+"ui.selection" = { background = "surface1" }
+"ui.status-bar" = { foreground = "text", background = "mantle" }
+"ui.status-bar.inactive" = { foreground = "subtext0", background = "surface0" }
+"ui.popup" = { foreground = "text", background = "mantle" }
+"ui.popup.border" = { foreground = "surface2" }
+"ui.cursor-line" = { background = "surface0" }
+"syntax.attribute" = { foreground = "yellow" }
+"syntax.comment" = { foreground = "overlay2", italic = true }
+"syntax.constant" = { foreground = "peach" }
+"syntax.constant.builtin" = { foreground = "peach" }
+"syntax.constructor" = { foreground = "sapphire" }
+"syntax.function" = { foreground = "blue" }
+"syntax.function.macro" = { foreground = "mauve" }
+"syntax.keyword" = { foreground = "mauve" }
+"syntax.label" = { foreground = "sapphire" }
+"syntax.markup.bold" = { bold = true }
+"syntax.markup.heading" = { foreground = "blue", bold = true }
+"syntax.markup.italic" = { italic = true }
+"syntax.markup.link" = { foreground = "blue", underline = true }
+"syntax.markup.list" = { foreground = "mauve" }
+"syntax.markup.quote" = { foreground = "overlay2" }
+"syntax.markup.raw" = { foreground = "green" }
+"syntax.namespace" = { foreground = "yellow" }
+"syntax.number" = { foreground = "peach" }
+"syntax.operator" = { foreground = "sky" }
+"syntax.property" = { foreground = "lavender" }
+"syntax.punctuation" = { foreground = "overlay2" }
+"syntax.string" = { foreground = "green" }
+"syntax.string.escape" = { foreground = "pink" }
+"syntax.type" = { foreground = "yellow" }
+"syntax.type.builtin" = { foreground = "yellow", italic = true }
+"syntax.variable" = { foreground = "text" }
+"syntax.variable.builtin" = { foreground = "red" }
+"syntax.variable.parameter" = { foreground = "maroon", italic = true }
+"diagnostic.error" = { foreground = "red", underline = true }
+"diagnostic.warning" = { foreground = "yellow", underline = true }
+"diagnostic.info" = { foreground = "sky", underline = true }
+"diagnostic.hint" = { foreground = "teal", underline = true }
+"diff.plus" = { foreground = "green" }
+"diff.minus" = { foreground = "red" }
+"diff.delta" = { foreground = "blue" }

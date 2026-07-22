@@ -9,6 +9,7 @@ vell-core = { path = "../vell-core" }
 vell-frontend = { path = "../vell-frontend" }
 vell-mode = { path = "../vell-mode" }
 vell-protocol = { path = "../vell-protocol" }
+vell-theme = { path = "../vell-theme" }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["full"] }

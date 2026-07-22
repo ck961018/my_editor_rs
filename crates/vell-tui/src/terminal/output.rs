@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use crate::protocol::content_query::{Color, CursorStyle, Face};
+use crate::protocol::content_query::{Color, CursorStyle, PaintFace};
 use crossterm::style::{
     Attribute, Color as TerminalColor, ResetColor, SetAttribute, SetBackgroundColor,
     SetForegroundColor,
@@ -17,7 +17,7 @@ pub trait Canvas {
     fn show_cursor(&mut self) -> io::Result<()>;
     fn set_cursor_style(&mut self, style: CursorStyle) -> io::Result<()>;
     fn set_reverse(&mut self, on: bool) -> io::Result<()>;
-    fn set_face(&mut self, face: &Face) -> io::Result<()>;
+    fn set_face(&mut self, face: &PaintFace) -> io::Result<()>;
     fn flush(&mut self) -> io::Result<()>;
 }
 
@@ -40,7 +40,7 @@ impl<W: Write> Canvas for Output<W> {
     fn set_reverse(&mut self, on: bool) -> io::Result<()> {
         Output::set_reverse(self, on)
     }
-    fn set_face(&mut self, face: &Face) -> io::Result<()> {
+    fn set_face(&mut self, face: &PaintFace) -> io::Result<()> {
         Output::set_face(self, face)
     }
     fn flush(&mut self) -> io::Result<()> {
@@ -87,7 +87,7 @@ impl<W: Write> Output<W> {
         queue!(self.out, SetAttribute(attr))
     }
 
-    pub fn set_face(&mut self, face: &Face) -> io::Result<()> {
+    pub fn set_face(&mut self, face: &PaintFace) -> io::Result<()> {
         queue!(self.out, ResetColor, SetAttribute(Attribute::Reset))?;
         if let Some(color) = face.foreground {
             queue!(self.out, SetForegroundColor(terminal_color(color)))?;
@@ -100,7 +100,7 @@ impl<W: Write> Output<W> {
             (face.italic, Attribute::Italic),
             (face.underline, Attribute::Underlined),
         ] {
-            if enabled == Some(true) {
+            if enabled {
                 queue!(self.out, SetAttribute(attribute))?;
             }
         }

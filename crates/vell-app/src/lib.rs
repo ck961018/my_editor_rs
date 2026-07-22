@@ -23,6 +23,7 @@ mod save;
 mod scene_model;
 mod session;
 mod tasks;
+mod theme;
 mod transaction;
 mod view;
 

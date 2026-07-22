@@ -15,6 +15,7 @@ use crate::mode::{
 };
 use crate::presentation::PresentationLayerStore;
 use crate::scene_model::{CloseResult, SceneBuilder, SceneError, SplitResult, build_editor_scene};
+use crate::theme::{FaceEnvironment, SessionFaces};
 use crate::view::View;
 use vell_core::content::ContentChange;
 use vell_core::content_store::ContentStore;
@@ -32,7 +33,7 @@ pub(super) struct ClientSession {
     views: HashMap<ViewId, View>,
     mode_profiles: HashMap<ContentId, Vec<crate::mode_name::ModeName>>,
     view_modes: ModeViewStore,
-    faces: FaceRegistry,
+    faces: SessionFaces,
     presentation: PresentationLayerStore,
     next_view_id: u64,
     focused: SpaceId,
@@ -63,6 +64,7 @@ impl ClientSession {
         width: usize,
         height: usize,
         init: EditorSessionInit,
+        face_environment: FaceEnvironment,
     ) -> Self {
         let editor = create_view(init.editor.content, contents, &init.editor.modes)
             .expect("editor content exists");
@@ -151,7 +153,7 @@ impl ClientSession {
             views,
             mode_profiles,
             view_modes,
-            faces,
+            faces: SessionFaces::new(faces, face_environment),
             presentation: PresentationLayerStore::default(),
             next_view_id: init.next_view_id,
             focused,
@@ -382,7 +384,7 @@ impl ClientSession {
         }
     }
 
-    pub(super) fn faces(&self) -> &FaceRegistry {
+    pub(super) fn faces(&self) -> &SessionFaces {
         &self.faces
     }
 
@@ -881,7 +883,7 @@ impl ClientSession {
                 &content_context,
                 &view_context,
             )?;
-            mode.register_faces(&mut self.faces);
+            mode.register_faces(self.faces.registry_mut());
             self.view_modes.insert(view, mode);
             self.dispatcher.invalidate_mode_chain(view);
             self.views
@@ -1198,7 +1200,7 @@ impl ClientSession {
                     &view_context,
                 )
                 .expect("new-view mode must be registered");
-            mode.register_faces(&mut self.faces);
+            mode.register_faces(self.faces.registry_mut());
             self.view_modes.insert(id, mode);
         }
         Ok(id)
