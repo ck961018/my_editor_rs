@@ -2,12 +2,12 @@
 
 **状态：** 当前实现架构
 
-**更新日期：** 2026-07-21
+**更新日期：** 2026-07-22
 
 ## 1. 文档定位
 
-本文描述当前源码已经实现的所有权、执行事务、Mode 和渲染数据流。
-未来方向记录在 `docs/roadmap/`，不作为当前代码契约。
+本文描述当前源码已经实现的 crate 边界、所有权、执行事务、Mode 和渲染
+数据流。本文只记录当前实现，不混入未来演进计划。
 
 编辑内核不依赖具体界面：
 
@@ -21,27 +21,29 @@ TUI 是当前唯一生产 Frontend，但 `app` 不依赖 `tui`，`tui` 也不反
 ## 2. 分层与依赖方向
 
 ```text
-frontend -> protocol
-app      -> frontend + core + protocol
-tui      -> frontend + terminal + protocol
-main     -> app + tui + terminal
-terminal -> protocol
-core     -> protocol/std
-protocol -> std
+vell-frontend  -> vell-protocol
+vell-core      -> vell-protocol
+vell-mode      -> vell-core + vell-protocol
+vell-plugin-v8 -> vell-mode + vell-core + vell-protocol
+vell-app       -> vell-frontend + vell-mode + vell-core + vell-protocol
+vell-tui       -> vell-frontend + vell-protocol
+vell binary    -> vell-app + vell-plugin-v8 + vell-tui
 ```
 
 | 层 | 当前职责 |
 | --- | --- |
-| `protocol` | ID、几何、Scene、selection、按键、viewport 和查询数据 |
-| `core` | Buffer、Content、领域 action、文本事务和通用输入算法 |
-| `frontend` | 只定义 `Frontend` 行为接缝 |
-| `app` | 主循环、命令执行、View/Mode、Scene、history 和后台任务 |
-| `terminal` | crossterm 输入翻译、终端生命周期和 `Canvas` 输出 |
-| `tui` | Taffy 布局、viewport 跟随、pull 查询和终端绘制 |
-| `main` | 组装 Terminal、TUI Frontend 与 `App<TuiFrontend<_>>` |
+| `vell-protocol` | ID、Scene、输入、viewport、查询与远程语义数据 |
+| `vell-core` | Content、Buffer、领域 action、文本事务和输入算法 |
+| `vell-mode` | Mode、adapter、state、命令、operation 和 presentation |
+| `vell-frontend` | 只定义 `Frontend` 行为接缝 |
+| `vell-app` | 主循环、执行、View、Scene、history、保存和后台任务 |
+| `vell-plugin-v8` | TypeScript/V8 宿主与通用 Mode adapter |
+| `vell-tui` | 终端 IO、Taffy、viewport、pull 查询和绘制 |
+| 根二进制 | 加载脚本 Mode，组装 TUI 与 `App<TuiFrontend<_>>` |
 
-`core` 不感知终端、布局、异步任务或渲染；`protocol` 不执行业务 IO；
-具体前后端接线只在 `main.rs`。
+`vell-core` 不感知 Mode、终端、布局、异步任务或渲染；
+`vell-protocol` 不执行业务 IO；`vell-app` 的普通依赖不含 V8 或 TUI。
+具体 V8、App 与 TUI 接线只在 `src/main.rs`。
 
 ## 3. 顶层所有权
 
@@ -69,7 +71,8 @@ App<F: Frontend>
 任务。`ClientSession` 保存 Scene、View、Mode view state、输入状态和呈现
 缓存。当前仍是一对一组合，没有 session registry 或并发共享容器。
 
-启动由 `app::bootstrap` 分配 editor/status 的 `ContentId` 与初始 `ViewId`。
+根二进制先加载内建与用户 TypeScript Mode，再由 `vell-app::bootstrap`
+分配 editor/status 的 `ContentId` 与初始 `ViewId`。
 每个 `ClientSession` 持有唯一 `SceneBuilder`。TUI 的 `SceneRenderer` 按
 `ViewId` 持有 viewport；后端 session 不保存终端滚动位置。
 
@@ -356,7 +359,8 @@ render(&Scene, Revision, &dyn RenderQuery, focused)
 - Content 继续使用静态 enum；
 - `App` 使用泛型 `F: Frontend`，不引入 app 层前端枚举或 trait object；
 - 当前只有单 Frontend、单 `ClientSession`；
-- Mode state v1 使用 `clone_box()` draft，不承诺零复制；
+- Mode state 使用 `clone_box()` draft，不承诺零复制；
 - Mode callback 只使用 content/view state 均显式可见的 canonical contract；
 - Presentation 只包含现有 policy 与 decorations；
-- 不提前实现通用 Plugin API、热重载、capability 或 crate 拆分。
+- 远程协议只有 owned 语义消息，尚无 transport 与连接管理；
+- 插件不拥有 Content，热重载、包管理和通用 capability 尚未实现。

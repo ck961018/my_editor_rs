@@ -1,44 +1,86 @@
-# Core 依赖方向设计
+# Core 与 workspace 依赖方向
 
-**状态：** 已实施的历史决策；当前依赖边界见
-[`editor-kernel-architecture.md`](editor-kernel-architecture.md)
-**日期：** 2026-07-17
-**对应路线图：** R04
+**状态：** 当前实现
+
+**更新日期：** 2026-07-22
 
 ## 1. 目标
 
-消除 `command <-> mode`、`buffer <-> motion` 以及
-`command -> mode -> keymap -> command`，使基础数据结构不依赖具体编辑命令，文本运动解析
-不反向依赖 Buffer 实体，同时保留 Mode 对 Vim grammar 的所有权。
+Vell 使用 workspace 的物理 crate 边界固定依赖方向。底层数据与算法不认识
+具体界面、异步编排或 V8；扩展协议和具体脚本宿主分离；根二进制只负责组合。
 
-## 2. 依赖方向
+## 2. 当前依赖图
+
+以下只列内部 crate 的普通依赖：
 
 ```text
-mode_name <- command <- mode
-                    \-> keymap
+vell-protocol
 
-text data <- motion <- buffer
+vell-frontend  -> vell-protocol
+vell-core      -> vell-protocol
+
+vell-mode      -> vell-core
+              -> vell-protocol
+
+vell-plugin-v8 -> vell-mode
+               -> vell-core
+               -> vell-protocol
+
+vell-app       -> vell-frontend
+               -> vell-mode
+               -> vell-core
+               -> vell-protocol
+
+vell-tui       -> vell-frontend
+               -> vell-protocol
+
+vell binary    -> vell-app
+               -> vell-plugin-v8
+               -> vell-tui
 ```
 
-- `mode_name` 只保存动态边界使用的 owned `ModeName` 与 `ModeActionName`；`command` 和
-  `mode` 都可依赖它，二者不再互相借用名称类型。
-- `Keymap<A>` 不提供默认 action 类型，也不认识 `Command`、`ContentCommand` 或
-  `EditCommand`。把编辑命令包装成顶层命令的 convenience API 归 Mode 的 keymap 构造代码。
-- `motion` 拥有 operator/motion 数据类型以及解析它们所需的词法、行边界算法；Buffer
-  调用 Motion，不再被 Motion 反向调用。
+`vell-app` 只在测试依赖中使用 `vell-plugin-v8`，用于跨层脚本集成测试；
+其普通依赖图不含 V8。
 
-## 3. 不变项
+## 3. 各层边界
 
-- `Command` 的执行归属和 R03 契约不变。
-- `Mode` 仍持有 Vim action、count、operator、capture 和 keymap 构造。
-- Buffer 持有文本和编辑领域状态，不持有 View selection 或 history；
-  不引入 Vim 按键语义。
-- 只移动或收紧依赖，不改变运动、编辑和输入行为。
+- `vell-protocol` 保存 ID、几何、Scene、输入、viewport、render query、
+  status 和远程语义消息。它没有内部依赖，也不执行业务 IO。
+- `vell-core` 保存封闭 Content 模型、Buffer、ContentStore、编辑计划、
+  文本事务和通用输入算法。它不依赖 Mode、Tokio、Frontend 或终端。
+- `vell-mode` 定义 Mode、typed adapter、state store、presentation、
+  command 和 `OperationRequest`。它不知道 app 执行器和具体 VM。
+- `vell-frontend` 只定义 `Frontend` trait，避免 app 与具体前端互相依赖。
+- `vell-app` 拥有运行时编排、目标解析和宿主状态，不依赖 TUI 或 V8。
+- `vell-plugin-v8` 把 TypeScript schema 适配为通用 Mode，不向外泄漏 V8
+  类型。
+- `vell-tui` 同时拥有 crossterm 封装、Taffy 布局和渲染，不依赖 app、
+  core、mode 或 V8。
+- 根 `vell` 二进制加载脚本 Mode，并组装 App 与 TUI。
 
-## 4. 验收
+## 4. Core 内部方向
 
-- `core::keymap` 不导入任何具体 core command；
-- `core::command` 不导入 `core::mode`；
-- `core::motion` 不导入 `core::buffer`；
-- 现有行为测试通过，Motion 的词法与行边界辅助拥有直接单元测试；
-- 架构文档和 roadmap 与实际依赖一致。
+`vell-core` 内继续保持算法与实体解耦：
+
+```text
+generic input trie <- dispatcher consumers
+text motion/range  <- Buffer edit planning
+Content            -> Buffer / StatusBar
+ContentStore       -> Content
+```
+
+- `Keymap<A>` 和输入匹配算法不认识具体命令类型。
+- `motion` 拥有纯文本运动、target 和 operator 解析。
+- Buffer 调用纯算法生成编辑计划，算法不反向依赖 Buffer。
+- Content 与 `ContentViewState` 按 `ContentKind` 封闭对应。
+- ContentStore 只通过 Content 的静态分派管理内容，不向 app 暴露具体变体。
+
+## 5. 验证约束
+
+跨 crate 重构至少应确认：
+
+- `cargo metadata --no-deps` 的内部依赖仍符合上图；
+- `cargo tree -p vell-app -e normal` 不出现 V8、Taffy 或 crossterm；
+- `vell-tui` 不反向依赖 app；
+- `vell-plugin-v8` 的公共 API 只暴露通用 Mode 与结构化诊断；
+- workspace 测试、Clippy 和 Rustdoc 通过。

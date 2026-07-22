@@ -1,131 +1,132 @@
-# Mode 与 Action 所有权设计
+# Mode 与 Action 所有权
 
-**状态：** 历史基线；当前 Mode 类型模型见
-[`editor-kernel-architecture.md`](editor-kernel-architecture.md)
+**状态：** 当前实现
 
-**日期：** 2026-07-17
+**更新日期：** 2026-07-22
 
-## 1. 目标
+## 1. 核心规则
 
-本文保留早期 Mode、View、Content 和顶层路由的能力边界决策。
-`ContentMode`/`ViewMode` 二选一模型已被当前统一 Mode contract 取代，
-不再描述当前实现。
+Mode 解释输入、维护扩展状态并编排 operation；Content 保存编辑领域数据；
+View 保存与一个 Content 绑定的会话状态；app 解析目标并原子执行结果。
 
-核心规则是：Mode 负责解释输入和编排操作，View 保存会话状态，Content
-保存领域数据，app 验证目标并执行有序结果。
+当前实现只有一个统一 `Mode` contract，不再区分互斥的 `ContentMode` 与
+`ViewMode`。每个 Mode 可以为多个封闭 ContentKind 提供 adapter。
 
-## 2. 静态 Mode 契约
+## 2. 定义与 adapter
 
-注册表只接受两种定义：
+`ModeRegistry` 为定义分配 `ModeId`，并冻结以下静态信息：
 
-```rust
-enum RegisteredMode {
-    PerContent(Box<dyn ContentMode>),
-    PerView(Box<dyn ViewMode>),
-}
-```
+- owned `ModeName` 与限定 command 名；
+- 支持的 `ModeAdapters`；
+- keymap、输入与 callback；
+- attachment ordering 约束；
+- named Face 默认值。
 
-`ContentModeContext` 只暴露 `ContentId` 和只读 `ContentQuery`。它没有
-`ViewId`、selection 或 View mutation 能力。
+`ModeAdapters` 当前可包含 Buffer 和 StatusBar slot。native Mode 可以直接
+实现 `Mode`，也可以通过 `TypedMode` 与 `ErasedMode` 在静态状态类型和
+运行时类型擦除之间建立单一 adapter。TypeScript Mode 使用相同的 erased
+contract。
 
-`ViewModeContext` 暴露来源 `ViewId`、该 View 的只读 selections，以及
-绑定 Content 的只读 query。它不借出可变 View 或 Content。
+不支持当前 `ContentKind` 的 Mode 不能附加；不匹配的 context 或 state 类型
+返回结构化错误。
 
-两种 Context 都只在一次调用期间有效。Mode 不能保存 Context 中的引用。
-
-## 3. 实例 identity 与 effective binding
-
-实例由集中表拥有：
+## 3. 状态与 identity
 
 ```text
-ContentModeInstances: (ModeId, ContentId) -> ContentModeInstance
-ViewModeInstances:    (ModeId, ViewId)    -> ViewModeInstance
+ModeContentStore: (ModeId, ContentId) -> Mode content state
+ModeViewStore:    (ModeId, ViewId)    -> Mode view state
+Mode chain:       ViewId             -> ordered ModeId[]
+Mode profile:     ContentId          -> ordered ModeName[]
 ```
 
-每个 Content 最多绑定一个 ContentMode。绑定后，所有引用该 Content 的
-View 都解析到同一个实例，已有 ViewMode 会被移除，新 View 也不会建立
-ViewMode。
+Mode content state 在同一 Content 的所有 View 间共享。Mode view state、
+key sequence、capture 和 timeout 按 View 隔离。
 
-没有 ContentMode 时，每个 View 可以独立绑定一个 ViewMode 或不绑定。
-Vim 是 ViewMode，因此两个 View 可以分别处于 Normal 和 Insert。
-
-Space 只负责布局。移动 View 不改变实例，关闭 View 只删除对应
-ViewModeInstance；ContentModeInstance 跟随 Content 生命周期。
-
-## 4. Action 边界
-
-旧 `ContentCommand` 同时包含 selection 移动、文本修改、事务控制和保存，
-不能继续作为 Content 的输入。目标类型分为：
-
-```text
-ViewAction        -> app 修改目标 View
-ContentAction     -> Content 验证并修改领域数据
-TransactionIntent -> TransactionManager 修改事务生命周期
-AppAction         -> app 修改应用状态
-```
-
-`ViewAction` 包含移动、扩展、压缩 selections 和其他 View 会话操作。
-`ContentAction` 使用已解析的文本范围，不依赖可变 `ContentViewState`。
-motion 和 operator 的解析可以复用 core 纯算法，但解析结果必须在进入
-Content 前固定。
-
-保存、undo、redo 和 Content event 使用各自的 typed app 路径，不伪装成
-ContentAction，也不要求存在 Mode。
-
-## 5. 有序结果
-
-Mode 返回有序 operation，而不是先修改 View 或 Content 再返回命令。
-
-`ContentModeResult` 只能包含 ContentAction 和 TransactionIntent。
-`ViewModeResult` 可以包含 ViewAction、ContentAction、TransactionIntent
-和 AppAction。
-
-执行器严格按顺序验证并应用 operation。ModeState 使用 provisional
-snapshot：调用前复制状态；任一步验证或应用失败时，反向恢复本次已应用的
-Content、View、TransactionManager 和 ModeState。成功后 snapshot 丢弃。
-
-timeout 和普通 action 返回相同结果类型，因此它们走同一事务边界路径。
-
-## 6. Content 与 View
-
-`View` 只保存：
+`View` 自身只持有：
 
 - `ContentId`；
-- `ContentViewState`；
+- 与 ContentKind 对齐的 `ContentViewState`；
 - View revision。
 
-`ContentViewState` 只表达可复用的 View 会话能力，不镜像 `Content` 枚举；
-View 不匹配 `Buffer`、`StatusBar` 等具体 Content 变体。具体 Content 创建
-所需能力状态，`ContentStore` 在映射 ContentChange 时验证匹配关系。
+View 不持有 Mode instance、history、viewport 或 presentation layer。
+Space 只标识 Scene 布局节点，也不拥有 View 或 Mode 状态。
 
-它不保存 ModeInstance，也不代理 keymap、timeout、presentation 或 Mode
-action。
+## 4. Context 能力
 
-Content 不声明默认 Mode，不接收 `ContentInput::View`，也不借入可变
-`ContentViewState`。它负责查询数据、应用 ContentAction、产生
-ContentChange、维护 text state identity，并生成或应用自己的事务数据。
+`ModeContentContext` 和 `ModeViewContext` 都按 ContentKind 封闭：
 
-app 收到 ContentChange 后，将 change 映射到所有绑定 View。来源 View 的
-显式 ViewAction 与通用 change mapping 按 ModeResult 中声明的顺序执行。
+- Buffer content context 可以查询文档状态、稳定文本快照和范围；
+- Buffer view context 还包含目标 View 的 selections；
+- StatusBar context 只提供状态栏相关 owned 数据；
+- 不合法的 cursor、edit 或 analysis 能力不会出现在对应 adapter 上。
 
-## 7. 顶层路由
+Context 只在 callback 期间有效，不借出 `&mut Content`、`&mut View`、
+`ContentStore` 或 App。脚本 context 中的 native function 在 callback
+结束后必须拒绝调用。
 
-`Command`、`AppCommand`、`ModeCommand` 和目标解析属于 app。core 只保留
-ContentAction、motion/target 纯算法和 Content 事务数据。
+## 5. Action 与 operation
 
-Dispatcher 可以记录输入来源 View，用于解析结果目标和事务 participant，
-但不得把该 View identity 放入 ContentModeContext。
+Mode action 返回 `ModeResult`，其中包含 flow 决策和有序
+`OperationRequest`。
 
-渲染只组合 View 与活动 ViewMode 的 cursor style 和 selection shape。
-ContentMode 不提供 View presentation；绑定 ContentMode 的 View 使用中立
-presentation。
+content scope 可以：
 
-## 8. 迁移顺序
+- 产生绑定 Content 的 `ContentAction`；
+- 请求 history 或保存；
+- 调用 content-scoped Mode command；
+- 产生仍需 app 验证的无目标应用操作。
 
-1. 提升 Mode 定义并集中管理两类实例。
-2. 删除 Content 默认 Mode，改由 bootstrap/session 建立绑定。
-3. 拆分 ViewAction 与 ContentAction。
-4. 将顶层命令和目标路由迁入 app。
-5. 删除 `ContentInput::View` 和 Content 的 View 会话修改。
-6. 接入有序 typed result 和 ModeState runtime rollback。
-7. 在该边界上建立统一 TransactionManager。
+view scope 还可以：
+
+- 产生绑定 View 的 `ViewAction` 或 selection-relative `EditCommand`；
+- 请求 viewport；
+- 调用 view-scoped Mode command。
+
+所有目标在 app 中结合 operation origin 解析。Mode 不能直接修改其他 Mode
+state，也不能保存另一个 Mode 的实例引用；跨 Mode 调用使用限定命令名并进入
+同一个 execution frame。
+
+## 6. Draft 与 fault isolation
+
+第一次写入 Mode state 时，`ModeDraftJournal` 通过 `clone_box()` 创建
+owned draft。同一 frame 内的后续 callback 读取最新 draft：
+
+- frame 成功时，content 和 view draft 分别提交到持久 store；
+- frame 失败时，普通 draft 被丢弃；
+- 主动 callback fault 使当前 frame 失败；
+- 被动 presentation、content-changed 或 background callback fault 只暂停对应
+  attachment，不阻止基础文本编辑；
+- fault、state 与 presentation revision 用于决定后续刷新和诊断。
+
+Mode state 不属于 undo/redo history。TypeScript 模块全局与 V8 heap 状态也不
+参与宿主 rollback。
+
+## 7. Attachment 与排序
+
+每个 Content 的新 View profile 由 `ClientSession` 管理。初始 profile 按
+ContentKind 对 Mode 的 `before` 约束执行稳定拓扑排序：
+
+- 前向引用有效；
+- 无约束 Mode 保持注册顺序；
+- 目标不支持当前 ContentKind 时，该边不进入这条 chain；
+- 缺失目标和同一 ContentKind 的环返回结构化启动错误。
+
+动态 attachment 先验证 Content、adapter 和所有已有 View 的
+ContentKind/ViewState 配对，再一次性更新 profile、chain、state 与 Face。
+失败时不留下部分 attachment。
+
+## 8. Presentation 与后台任务
+
+Mode 可以贡献：
+
+- content decoration layer；
+- view decoration layer；
+- cursor、selection shape 与 face policy；
+- named Face 默认值。
+
+这些数据先发布到 Rust 的 presentation cache。render path 只读取缓存，不调用
+Mode、V8 或 worker。
+
+后台任务由 Mode 提供 owned request，`Kernel` 按
+`(ModeId, ContentId, ModeJobSlot)` 管理运行版本与取消。结果返回主循环后，
+只有 slot、version 和输入仍有效时才能通过短生命周期 draft 安装。

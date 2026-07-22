@@ -1,518 +1,286 @@
 # TypeScript 脚本架构
 
-**状态：** 当前脚本子系统设计；总架构见
-[`editor-kernel-architecture.md`](editor-kernel-architecture.md)
-**日期：** 2026-07-21
+**状态：** 当前实现
 
-## 0. 实现补充
-
-当前实现已经完成以下边界；这些结论取代本文后续仍保留的过渡期描述：
-
-- 默认功能也通过 `runtime/plugins/*/plugin.json` 加载，不在 Rust registry
-  中注册具体 Mode；
-- Rust 生产代码不识别 Vim、Tree-sitter 或具体语言名称；
-- Vim 输入行为和语法高亮均由内嵌 TypeScript 插件定义；
-- Script Mode 可定义 Face、decoration、view policy 和原始输入 action；
-- Content 分析使用持久的独立 V8 worker isolate；
-- Tree-sitter worker 按 Content 保留旧语法树，并以最小文本差异执行增量解析；
-- worker 只接收结构化消息和插件目录内的只读内嵌资源；
-- worker Promise 由显式 microtask checkpoint 驱动，并受取消和超时约束；
-- 后台任务复用通用 `(ModeId, ContentId, slot)` 调度和最新版本合并；
-- 新版本后台任务会取消仍在运行的旧版本，不执行过期的完整分析；
-- v2 Buffer adapter 通过命名 `analysis` 声明 worker、输入快照和结果应用，
-  task slot 与 revision 由宿主管理；
-- `snapshot: "text"` 在 worker 线程构造全文消息，UI 线程只捕获低成本
-  TextSnapshot；
-- 渲染只读取 Rust 侧缓存的 presentation snapshot，不同步进入 V8；
-- decoration 缓存按可见行裁剪后再交给 TUI；
-- 文本变化期间旧 decoration 会经过位置映射，直到新 revision 安装。
-- 输入和显式 action 通过 callback-scoped native functions 调用 Rust 原语；
-- 原语直接暂存 `OperationRequest`，不使用字符串命令或 `ScriptEffect` DTO；
-- callback 结束后旧 context 的原语函数失效，不能持有宿主引用；
-- callback 或返回值验证失败时丢弃本次暂存操作，不进入 app executor；
-- `ModeName`、action 名和 Face 名仍是字符串，因为它们属于插件扩展命名空间。
-- v2 定义通过 `on.buffer` 和 `on.statusBar` 生成 canonical
-  Mode-Content adapter，不支持的 adapter 不会挂载到对应 Content；
-- v2 以 `state`、`viewState`、`commands` 和 `keys` 为基础组织，
-  `void` 表示处理，`ctx.pass()` 表示继续 Mode chain；
-- Buffer 和 StatusBar 拥有独立的 TypeScript context 类型与运行时原语
-  集，StatusBar 不安装 `edit`、`cursor` 或文本原语；
-- v1 `content/view/actions/keys` schema 暂时作为兼容入口，但与 v2
-  共用 `ScriptMode`、Mode state、typed operation 和 execution frame。
-- 内建 Vim 与 Tree-sitter 已迁移到 v2；有效 v1 用户定义每个宿主只输出一次
-  deprecation 诊断，删除 parser 留给单独版本决策。
-- v2 的静态 context 收窄由 `runtime/type-tests/tsconfig.json` 固化；使用
-  `pnpm typecheck` 验证负向类型用例。
-- `changed` 当前只属于 Buffer adapter；StatusBar 是派生 Content，没有独立的
-  `ContentChange` 通知源，因此 schema 和类型定义均不暴露该 hook。
-
-主 ScriptHost 仍在 UI 线程同步执行输入和 action callback。只有显式声明的
-后台 worker 用于解析等 CPU 密集工作，因此没有引入通用 Web、Node 或 Deno
-运行时。主 isolate 和 worker 均有执行 deadline、heap 上限和 terminate
-恢复；脚本仍共享主 isolate，因此这不是恶意代码的进程级隔离。
+**更新日期：** 2026-07-22
 
 ## 1. 定位
 
-TypeScript 是动态定义 Mode 的语言前端，不建立第二套编辑器内核。
-
-第一版参考 RSVim 的 `rusty_v8` runtime：长期存活的 isolate/context、
-ES module loader、TypeScript 转译、显式 microtask checkpoint 和统一异常处理。
-编辑器绑定不照搬 RSVim 直接持有 buffer、UI tree 等共享对象的方式，而是映射到
-现有 Mode、Command、operation 和事务边界。
+`vell-plugin-v8` 是 TypeScript 到通用 Mode contract 的具体 adapter。它使用
+`rusty_v8` 执行脚本，使用 `deno_ast` 转译 TypeScript，但不建立第二套
+编辑器内核。
 
 ```text
-config.ts / local modules
--> ScriptHost (rusty_v8)
--> ScriptMode adapter
--> ModeResult / OperationRequest
--> app command executor
--> ContentStore / View / history transaction
+embedded plugins / optional config.ts
+-> ScriptHost
+-> ScriptMode
+-> vell-mode contract
+-> vell-app operation executor
+-> Content / View / history / presentation
 ```
 
-## 2. 目标
+`vell-app` 的普通依赖不含 V8。根二进制先调用
+`vell_plugin_v8::load_user_modes()`，再把 `Vec<Box<dyn Mode>>` 注入
+`App::with_modes`。V8 类型不跨出 `vell-plugin-v8` 的公共边界。
 
-第一版必须支持：
+## 2. 加载与所有权
 
-- 加载并转译用户 `config.ts` 和本地 TypeScript/JavaScript ES modules；
-- 动态注册多个可共存的 Script Mode；
-- 为每个 Script Mode 定义 content state、view state 和两类 action；
-- 按既有 ModeChain 顺序处理输入并返回 Continue/Stop；
-- 使用脚本 keymap 和 key sequence 调用 action；
-- 读取 Content 快照、revision、document status 和 View selections；
-- 通过 typed operation 动态修改 selection 和 Content 文本；
-- 使用既有事务、undo/redo、selection 变换和 ContentChange 通知；
-- 定义 Face、decoration 和 View policy；
-- 通过 ModeCommand 调用其他 native 或 script Mode；
-- 提供 `.d.ts`、TypeScript source map 和可定位的错误信息；
-- 限制单次 callback 的执行时间和 V8 heap。
+构建脚本把 `runtime/plugins/` 的清单、TypeScript、worker 和资源嵌入
+`vell-plugin-v8`。启动时：
 
-## 3. 非目标
+1. 枚举内嵌 `plugin.json`；
+2. 按 manifest `order` 稳定加载入口；
+3. 在同一 `ScriptHost` 中收集 Mode definition；
+4. 加载可选用户 `config.ts`；
+5. 把每个 definition 包装为 `ScriptMode`；
+6. 将通用 Mode 交给 App bootstrap。
 
-第一版不包含：
+所有 `ScriptMode` 通过 `Rc<RefCell<ScriptHost>>` 共享主 isolate、context、
+module map、callback registry 和 diagnostics。Mode definition 进入
+`ModeRegistry` 后，host 的生命周期由这些 adapter 保持；App 不直接保存或
+识别 ScriptHost。
 
-- npm、远程 URL import 或 Node/Deno 兼容层；
-- 网络、子进程和任意异步文件 API；
-- 通用 Web/WinterTC runtime；
-- project-local 脚本自动信任和执行；
-- 插件包管理器、依赖解析器或版本求解；
-- inspector、debug adapter 或 REPL；
-- 热重载时迁移旧 Mode state；
-- 对整个 V8 heap 或模块闭包状态进行事务 checkpoint；
-- callback 中直接借出可变 Buffer、View、ContentStore 或 App。
+内建插件失败表示安装损坏，会阻止启动。可选用户配置失败会输出 warning，
+回滚该模块新增的 definition，并继续使用内建 Mode。
 
-## 4. 运行时选择
+## 3. 配置发现
 
-第一版直接使用 `rusty_v8`，不依赖 `deno_core`。
+用户配置只从以下位置加载：
 
-原因是 Script Mode callback 必须同步完成，且编辑器已经拥有 Tokio 主循环、
-Command executor、后台 Mode job 和事务框架。第一版只需要本地静态 module、
-callback registry 和少量宿主绑定，不需要第二套通用异步资源系统。
+- `VELL_CONFIG` 指定的文件；
+- Windows：`%APPDATA%\vell\config.ts`；
+- Linux/macOS：`$XDG_CONFIG_HOME/vell/config.ts`；
+- fallback：`$HOME/.config/vell/config.ts`。
 
-TypeScript 由与所选 V8 版本兼容的成熟 SWC 版本转译。依赖版本必须作为一个
-经过构建验证的集合固定，不能分别盲目升级。
+编辑器不会自动执行当前工作目录或所打开项目中的脚本。
 
-如果未来需要 dynamic import、top-level await、timer、异步文件、网络或进程，
-应先重新评估 `deno_core`，而不是继续扩张自制 event loop。
+用户配置支持 `.ts`、`.js` 与配置目录内的静态相对 import。以下能力被
+拒绝：
 
-## 5. 所有权与线程
+- URL 与裸 package specifier；
+- CommonJS `require`；
+- dynamic import 和 top-level await；
+- 越出配置根目录的路径；
+- Node、Deno、网络、timer、子进程和任意异步文件 API。
 
-`ScriptHost` 由 app runtime 在主线程持有。所有 Script Mode definition 共享同一
-host，但 content/view state 仍由现有 Mode stores 按各自作用域持有。
+## 4. 公开 schema
 
-```text
-App runtime
-├── Kernel
-│   ├── ModeRegistry
-│   │   ├── native Mode
-│   │   └── ScriptMode -> shared ScriptHost
-│   └── ModeContentStore
-├── ClientSession
-│   └── ModeViewStore
-└── ScriptHost
-    ├── Isolate
-    ├── Context
-    ├── ModuleMap
-    └── CallbackRegistry
-```
+`runtime/editor.d.ts` 是公开 TypeScript schema 的唯一真相源，并通过
+`TYPESCRIPT_DECLARATIONS` 内嵌到 Rust API。CI 对声明、内建插件和迁移示例
+运行严格类型检查。
 
-同步 callback 期间 app 本来就必须等待 ModeResult，独立 VM 线程不会改善输入
-响应，反而要求额外的序列化和请求通道。因此第一版不建立 VM worker thread。
-
-超时 watchdog 在独立线程持有 `IsolateHandle`。callback 到期时
-终止 V8 执行；callback 正常返回时取消 watchdog。主 isolate
-和 worker 共用同一 RAII lifecycle：在发送停止信号前判定
-执行时间，回收时 join 线程，并在 unwind 时也保证清理。
-终止异常传播出 V8 scope 后，宿主清理 terminate 状态。
-接近 heap 上限时采用同一终止路径，并在恢复后还原上限。
-
-## 6. 初始化顺序
-
-```text
-初始化 V8 platform
--> 创建 isolate/context
--> 安装内置 editor API
--> 定位并转译用户 config.ts
--> 递归加载本地静态 ES modules
--> 执行 config，收集 Mode 定义和 attachment policy
--> 注册 native + script Mode
--> 创建 Content/View 和初始 ModeChain
--> 进入 app event loop
-```
-
-配置入口只从用户配置目录或显式 CLI/环境覆盖路径加载。不得自动执行工作目录
-或所打开项目中的脚本。
-
-配置顶层运行时尚未创建编辑 Content，因此只负责注册定义、Face 和 attachment
-规则，不直接修改 Content。文本修改由后续 input/action callback 产生。
-
-## 7. Script Mode 定义
-
-脚本定义与 native Mode 共享一个后端契约。v2 以 Content adapter
-为行为边界：
-
-```text
-name
-adapter state factory
-adapter view-state factory
-mode-local commands
-adapter input handler
-adapter keymap
-content change callbacks
-faces
-decorations
-view policy
-attachment policy
-```
-
-TypeScript API 保持 command-first：
+`PLUGIN_API_VERSION` 当前为 2。v2 使用 ContentKind adapter：
 
 ```ts
 editor.modes.define({
   name: "pairs",
   on: {
     buffer: {
-      state: () => ({ enabled: true }),
-      viewState: () => ({ inserted: 0 }),
+      state: () => ({ inserted: 0 }),
+      viewState: () => ({ enabled: true }),
       commands: {
         quote(ctx) {
-          if (!ctx.state.enabled) return ctx.pass();
-          ctx.viewState.inserted++;
-          ctx.edit.insert('\"\"');
+          if (!ctx.viewState.enabled) return ctx.pass();
+          ctx.state.inserted++;
+          ctx.edit.insert('""');
           ctx.cursor.moveLeft();
         },
       },
-      keys: {
-        '\"': "quote",
-      },
+      keys: { '"': "quote" },
     },
   },
 });
 ```
 
-定义中的 callback 保存在 V8 CallbackRegistry。`ScriptMode` 只保存稳定的
-callback identity 和静态 keymap/presentation metadata，不保存宿主可变引用。
+Buffer 与 StatusBar adapter 获得不同的静态 context。StatusBar 不暴露
+cursor、text edit 或 background analysis。
 
-## 8. 状态语义
+v1 `content/view/actions/keys` schema 只作为兼容 parser 存在。每个 host 最多
+产生一条结构化弃用诊断；`V1_REMOVAL_VERSION` 为 `0.3.0`。兼容层不会改变
+Rust Mode contract。
 
-正式 Script Mode 状态只有：
+## 5. ScriptMode 与状态
+
+脚本定义中的 callback 保存在 V8 callback registry。`ScriptMode` 只保存稳定
+callback identity、静态 keymap/adapter 元数据和共享 host，不保存可变 App、
+Content 或 View 引用。
+
+正式脚本状态只有：
 
 ```text
 state:     每 (ModeId, ContentId) 一份
 viewState: 每 (ModeId, ViewId) 一份
 ```
 
-它们必须是可结构化复制的数据：
+状态必须是 JSON-compatible owned data：null、boolean、number、string、
+array 和普通 object。函数、Promise、V8 handle、循环引用、host object 与
+非有限数值不能进入持久 Mode state。
 
-```ts
-type ScriptData =
-  | null
-  | boolean
-  | number
-  | string
-  | ScriptData[]
-  | { [key: string]: ScriptData };
-```
+每次 callback 读取当前 Mode draft，并在返回时完整提取和验证新 state。宿主
+operation 成功后才提交 draft。callback、返回值或后续 operation 失败时，
+draft 被丢弃。JavaScript module global 与闭包状态遵循 V8 语义，不参与宿主
+rollback。
 
-函数、Promise、V8 handle、循环引用和宿主对象不能存入 Mode state。callback 前
-checkpoint 这两份状态；callback 和后续 operation 成功后安装新值，执行帧失败时由
-现有 Mode state snapshot 恢复。
-
-模块级变量和闭包状态遵循普通 JavaScript 语义，长期存在但不属于编辑器事务。
-脚本抛错前已经发生的纯 JavaScript 全局状态变化不回滚。这与文件句柄、缓存等
-runtime 外部资源一致，不尝试为整个 V8 heap 制造伪事务。
-
-## 9. Callback 调用边界
-
-callback 获得一次调用期间有效的 context 和可变的 Script Mode state 草稿。
-context 包含 owned/共享快照和 callback-scoped native functions。脚本可以保存
-普通快照值，但旧 context 中的原语函数在 callback 结束后必须拒绝调用。
+## 6. Callback 边界
 
 ```text
-Rust Mode state checkpoint
--> 建立 V8 callback scope
--> 暴露快照、state draft 和 native functions
--> 调用 JS function
--> 提取 flow、新 state、presentation snapshot 和暂存操作
--> 验证全部返回值
--> 退出 V8 scope
--> app 按顺序执行 OperationRequest
+create Mode draft
+-> build callback-scoped context
+-> call V8 function
+-> collect flow, state, operations and presentation
+-> validate all output
+-> leave V8 scope
+-> app executes OperationRequest in order
+-> frame success publishes state
 ```
 
-V8 callback 内不得重新进入 app command executor。
-`context.commands.invoke("mode.command")` 只暂存类型化
-`ModeCommand`，等 callback scope 退出后再由 app 深度优先执行。
+Context 中的 native function 只在当前 invocation 有效。保留旧 context 并在
+callback 结束后调用会被拒绝。
 
-`onContentChanged` 等被动 callback 只能更新所属 Mode state，不能返回编辑或
-其他宿主 operation。需要修改文本的行为必须由 input 或显式 action 触发，避免隐式
-递归编辑循环。
+V8 callback 不重入 app executor。`ctx.commands.invoke("mode.command")` 只把
+typed Mode invocation 暂存到结果；app 在 scope 退出后深度优先执行。
 
-## 10. Callback 结果和原语
+v2 command 正常返回 `void` 表示 Stop；只有 `return ctx.pass()` 继续到
+下一 Mode。普通返回值不承载 mutation。
 
-v2 command 正常返回 `void` 表示已处理；只有 `return ctx.pass()`
-会继续后续 Mode。boolean 和旧 `ModeActionResult.continue` 不是 v2 流向
-语义。编辑操作不放在返回值中，而是调用 Buffer context 的
-`cursor`、`edit`、`history`、`viewport`、`commands` 和 `app`
-原语。StatusBar context 只安装其合法能力。
+## 7. Native primitives
 
-v1 callback 暂时仍使用 `handled()`、`forward()` 和原有的结果对象，
-兼容语义由脚本 parser 边界吸收，不进入 Rust Mode contract。
+Buffer adapter 按能力安装：
 
-每个 native function 立即校验参数，并把 `OperationRequest` 追加到本次 callback
-的 Rust 暂存区。adapter 必须在执行任何宿主操作前完整验证返回值和 state。
-错误参数、非法坐标、冲突编辑和超出预算都使 callback 失败，并丢弃全部暂存
-操作，不允许部分执行。
+- `ctx.cursor`：selection/cursor movement；
+- `ctx.edit`：selection-relative edit 与绝对 edit batch；
+- `ctx.history`：transaction、undo 和 redo；
+- `ctx.viewport`：滚动与 cursor alignment；
+- `ctx.commands`：限定 Mode command；
+- `ctx.app`：受限的 App operation。
 
-## 11. Content 读取
+每次调用立即校验参数，并追加 typed `OperationRequest`。单 callback 的
+operation 上限来自 `vell-mode` 的共享常量，不能与 App frame 上限漂移。
 
-脚本读取的是 callback 开始时的 Content 快照：
+绝对 edit batch 使用零起点 UTF-16 `line/character`，并绑定 callback 开始时
+捕获的 Content snapshot。adapter 拒绝：
 
-- revision；
-- document status；
--行数和文本长度；
--按范围读取文本；
--位置与 offset 转换；
--当前 View selections（只有 view/input callback 可用）。
+- 落在 surrogate pair 中间的位置；
+- 越界、倒序或互相重叠的 range；
+- stale snapshot；
+- 超过结构化输入或 operation 预算的结果。
 
-不在每次 callback 时把全文转成一个 JavaScript string。快照由 Rust 持有，脚本
-通过窄范围查询读取所需内容；只有请求的文本跨 V8 边界。
+合法 batch 一次转换为 `TextChangeSet`，由 App 统一获得 history、selection
+映射、undo/redo 与 rollback。
 
-需要分析全文的命名 analysis 声明 `snapshot: "text"`。宿主捕获
-TextSnapshot，并在 worker 线程上把正文加入消息的 `text` 字段，避免阻塞输入
-线程。analysis 名称映射到内部 slot；宿主为请求分配单调 generation，并捕获
-Content revision 和输入 Mode state。TypeScript callback 不接触 slot、
-generation 或取消队列。
+## 8. Presentation
 
-analysis `input` 是纯函数，只捕获 Content 元数据和深只读 Mode state；其返回
-message 同时作为输入签名，意外状态修改不会发布。宿主在一次 poll 中先计算并
-发布所有 slot 的签名，再提交全部取消或替换请求，关闭跨 slot stale 窗口。只有
-revision、input epoch 和 message 仍匹配的当前 generation 可以进入 `apply`。
+脚本可以定义 named Face、content decoration、view decoration 和 View policy。
+callback 返回的数据转换为 owned Rust presentation layer。
 
-`apply` 复用 Mode draft，验证完成后原子发布 state 和独立 decoration layer。
-当前 slot 的 post-apply input 被视为该结果的一部分，不会自触发循环；其他 slot
-仅在自己的 input message 变化时重跑。完成结果按内部 slot 路由，不能覆盖其他
-analysis 的缓存。
+render path 不进入 V8：
 
-## 12. 脚本坐标
-
-TypeScript API 使用独立的 UTF-16 `line/character` 坐标，符合 JavaScript string、
-LSP 和常见 TypeScript 编辑器 API 的习惯。
-
-```ts
-interface Position {
-  line: number;
-  character: number;
-}
-
-interface Range {
-  start: Position;
-  end: Position;
-}
+```text
+Script callback
+-> Rust presentation snapshot
+-> PresentationLayerStore
+-> AppQuery visible-range clipping
+-> RenderQuery
+-> SceneRenderer
 ```
 
-adapter 将它转换成内部字符 offset。位置不能落在 surrogate pair 中间。脚本坐标
-类型不得复用内部字符列 `TextPoint` 或 Tree-sitter UTF-8 byte point。
+Content decoration 带 Content revision。文本变化后，旧 decoration 可先通过
+`ContentChange` 映射，直到新的异步 snapshot 安装，避免空白高亮帧。
 
-## 13. View-relative 编辑
+## 9. 命名后台 analysis
 
-input/view action 可以调用基于当前 selections 的原语，例如：
-
-```ts
-ctx.edit.insert("hello")
-ctx.edit.deleteBackward(1)
-ctx.cursor.moveLeft(1)
-```
-
-这些原语在 Rust 中直接构造现有 `EditCommand`，并在实际执行时依据当时的 View
-selections 解析。多个有序操作可以观察前一个操作已成功产生的状态。
-
-## 14. Content edit batch
-
-view action 可以对所属 Content 暂存绝对范围编辑：
+Buffer adapter 可以声明多个命名 analysis：
 
 ```ts
-ctx.text.applyEdits([
-  {
-    range: {
-      start: { line: 1, character: 4 },
-      end: { line: 1, character: 7 },
+analysis: {
+  syntax: {
+    worker: "worker.ts",
+    snapshot: "text",
+    input(ctx) {
+      return { language: ctx.state.language, revision: ctx.revision };
     },
-    text: "replacement",
+    apply(ctx) {
+      return {
+        contentDecorations: {
+          revision: ctx.revision,
+          spans: ctx.arguments.spans,
+        },
+      };
+    },
   },
-])
+}
 ```
 
-语义为：
+analysis 名称映射为宿主内部 job slot。`input` 是纯函数，其返回 message
+同时是依赖签名。`snapshot: "text"` 让宿主在线程边界把稳定文本快照加入
+message；普通 UI callback 不复制全文到 V8。
 
-- 一个 batch 的全部范围基于同一份 callback 输入快照；
-- batch 隐式绑定本次 callback 开始时捕获的 Content snapshot；
--范围经过 UTF-16 到内部字符 offset 的严格转换；
--多个范围不得重叠或产生歧义；
-- adapter 一次性构造 `TextChangeSet::from_edits`；
--一个 batch 映射为一个 `ContentAction::Text`；
--全文替换只是覆盖完整文档范围，不增加专用 mutation API；
--第一版只能修改当前 Script Mode 所附着的 Content。
+宿主为请求分配单调 generation，并捕获 Content revision 与 input epoch：
 
-ContentAction 继续由 app 执行，因此自动获得：
+- 同 slot 的新 message 或 `void` 取消旧请求；
+- 一次 poll 先计算所有 slot 的签名，再发布替换；
+- stale revision、epoch、message 或 generation 不进入 `apply`；
+- `apply` 使用短生命周期 Mode draft；
+- 当前 slot 接受 post-apply signature，避免自身 state 形成反馈循环；
+- 不同 slot 的结果和 decoration cache 彼此隔离。
 
--所有关联 View 的 selection 变换；
-- Content revision 更新；
-- ContentChange 通知；
-- execution frame 恢复；
-- history transaction、undo 和 redo。
+Worker 使用独立 isolate 和线程，只能读取嵌入插件目录的只读资源。它没有网络、
+timer、Node API 或任意文件访问。Promise 通过受控 microtask pump 完成，并响应
+cancellation 与执行预算。
 
-## 15. 呈现
+## 10. 预算与恢复
 
-渲染查询不能每帧同步进入 V8。脚本 callback 更新 owned presentation snapshot，
-`ScriptMode::decorations` 和 `view_policy` 只读取 Rust 侧缓存。
+当前默认限制：
 
-第一版允许脚本定义：
+- 普通 callback 2 秒，module startup 5 秒；
+- worker request 30 秒；
+- isolate heap 128 MiB，另保留 16 MiB 终止恢复余量；
+- 单个脚本或 module 4 MiB，module graph 16 MiB；
+- 普通 JSON state/result 4 MiB，结构化输入 32 MiB；
+- 单 callback 最多 255 个 operation；
+- 单次 presentation 最多 100,000 个 decoration。
 
-- named Face 的默认值；
--按文本范围排序的 decoration spans；
-- cursor style/domain；
-- selection shape/face。
+主 isolate 的 watchdog 在线程中持有 `IsolateHandle`。超时或 heap pressure
+触发 V8 termination；termination 传播出 scope 后，RAII 清理 watchdog，
+恢复 terminate 状态与 heap limit。只有 runtime 可安全恢复时才继续调用。
 
-可见范围查询继续由 app 裁剪缓存，TUI 不知道 decoration 来自脚本还是 native
-Mode。
+所有大小、超时、转换和 presentation 检查都发生在发布 state、operation 或
+cache 之前。
 
-## 16. 模块系统
+## 11. 故障隔离
 
-第一版支持：
+主动 input/command callback 错误映射为 Mode fault，并使当前 execution frame
+失败。App 恢复 Content、View、input 与 history checkpoint，丢弃 operation 和
+Mode draft，但事件循环继续。
 
-- `.ts` 和 `.js`；
--相对或用户配置目录内的绝对本地 import；
--静态 ES module graph；
-- `import.meta.filename`、`dirname` 和 `url`；
-- module compile/evaluation cache；
-- TypeScript source map。
+被动 content-change、presentation、state factory 或 analysis apply 失败时，只
+fault 对应 attachment。基础文本编辑、其他 Mode 与渲染继续工作；诊断包含
+Mode、callback phase 和 message。
 
-第一版拒绝：
+主 isolate 由全部 ScriptMode 共享，因此这些限制不是恶意代码的进程级隔离。
+在需要自动运行不受信任插件前，必须重新评估 isolate 或进程边界。
 
-- `http:`、`https:` 和裸 npm specifier；
--配置目录之外的隐式搜索；
-- dynamic import；
-- CommonJS `require`。
-
-内置 editor API 作为预注册 module 或只读 global namespace 暴露。实现时选择
-其中最小的一种，不同时维护两套公共入口。
-
-## 17. 错误与资源限制
-
-错误至少包含：
-
--配置或 module 路径；
-- TypeScript 原始行列；
-- callback/mode/action 名；
--异常 message 和 stack；
--超时、heap limit、转换或 operation 验证失败类别。
-
-主动 callback 错误映射为 `ModeError`，交给当前
-`ExecutionFrame` 丢弃 Mode draft，并恢复本次输入的 Content、View、
-input 和 transaction checkpoint。仅结构化 `ModeFault` 会跨失败边界
-提交。事件循环记录诊断后继续处理输入，但前端 I/O 和渲染
-错误仍然向上返回。
-被动 callback 错误使用 attachment fault isolation，不阻止基础文本编辑。
-
-V8 exception 不自动销毁整个 runtime。timeout 终止传播完成后，runtime 只有在
-V8 允许恢复执行时才继续使用，否则禁用脚本层并保留 native 编辑能力。
-
-当前默认预算如下：
-
-- 普通 callback 为 2 秒，module startup 为 5 秒；
-- isolate heap 为 128 MiB，并保留 16 MiB 终止恢复余量；
-- 单文件 TypeScript/module 为 4 MiB，module graph 为 16 MiB；
-- 结构化输入为 32 MiB，state 和 callback result 为 4 MiB；
-- 单次调用最多暂存 255 个 operation 和 100,000 个
-  decoration；callback 上限由 app execution frame 的 256
-  operation 上限扣除调用自身后得到，二者
-  共用 `vell-mode` 中的同一契约常量。
-
-超时、heap 超限、转换失败和输出超限均在 Rust 侧发布 state、operation 与
-presentation 之前返回。启动脚本失败还会撤销本次新增的 Mode definition 和
-diagnostic。module 全局变量等 V8 内部状态不参与事务回滚；这也是共享 isolate
-不等同于不受信任插件隔离的原因。
-
-## 18. 分层
-
-不新增通用 `script` trait 或多语言 VM abstraction。第一版只有一个 runtime，
-直接实现最小边界：
+## 12. 物理模块
 
 ```text
 vell-plugin-v8::script
-├── mod            façade、共享运行时类型和 presentation 映射
-├── host           rusty_v8 isolate、context 和 module 生命周期
-├── invocation     callback、microtask、watchdog 和 heap 恢复
-├── mode_adapter   ScriptMode、Mode state 编排和后台 job 接线
-├── module         loader、module map 和 TypeScript transpile
-├── bridge         Rust 与 V8 的窄值转换
-├── schema         插件 Mode definition 解析
-├── primitives     callback-scoped native functions 和操作暂存
-└── worker         后台 isolate、取消和 Promise 驱动
+├── mod          façade、加载、共享运行时类型
+├── host         isolate、context、definition 与 callback registry
+├── invocation   调用、microtask、watchdog 与 heap 恢复
+├── mode_adapter ScriptMode、状态与后台 job 接线
+├── module       本地 ES module graph 与 TypeScript 转译
+├── bridge       Rust、JSON 与 V8 值转换
+├── schema       v1/v2 definition 解析
+├── primitives   callback-scoped native function
+└── worker       后台 isolate、资源、取消与 Promise
 ```
 
-`mode_adapter.rs` 依赖 façade 中的封闭定义和转换函数，不向
-`host` 或 `schema` 反向暴露 V8 callback 细节。`mod.rs` 保留
-跨子模块共享的类型，避免为拆文件复制一套状态模型。
-schema API version 是 Mode 级不变量，只在 definition 和运行时
-ScriptMode 各保留一份；Content adapter 不复制该字段。
-
-依赖保持：
+依赖方向保持：
 
 ```text
 vell-plugin-v8 -> vell-mode + vell-core + vell-protocol
-vell-core      -> vell-protocol/std
-vell-tui       -> vell-frontend + vell-terminal + vell-protocol
+vell-app       -X-> vell-plugin-v8
+vell-tui       -X-> vell-plugin-v8
 ```
 
-`core`、Content、View、frontend 和 TUI 不依赖 V8，也不识别 Script Mode。
-
-## 19. 测试
-
-第一版至少覆盖：
-
-- TypeScript 转译并执行配置；
--本地静态 module import 和缓存；
--脚本注册 Mode 并附加到初始 View；
--输入 Continue/Stop 与后续 native Mode 顺序；
-- content/view state 的作用域和 checkpoint；
-- selection-based insert；
-- Unicode UTF-16 range 转换；
--多范围 Content edit、selection 变换和 undo；
-- stale revision、重叠 range 和非法返回值整体失败；
--跨 ModeCommand；
--脚本错误恢复编辑器状态；
--超时不会永久阻塞 native 编辑；
--渲染只读取缓存，不在 pull query 中调用 V8。
-
-## 20. 实现顺序
-
-1. 固定并验证 V8/SWC 依赖集合和 MSRV；
-2. 实现 ScriptHost、内置 API 安装和 TypeScript 单文件执行；
-3. 加入本地静态 module graph 和 config discovery；
-4. 实现 Script Mode 注册、state 和 input/action callback；
-5. 映射 view edit、Content edit batch 和 ModeCommand；
-6. 加入 presentation snapshot、错误映射和资源限制；
-7. 提供 `.d.ts` 和用户配置示例。
-
-每一步都必须保持脚本 Vim、Tree-sitter、事务、保存、viewport 和 TUI 行为，
-并通过项目要求的测试、clippy、fmt 和空白检查。
+脚本作者使用的 API 见 [`docs/scripting.md`](../scripting.md)。
