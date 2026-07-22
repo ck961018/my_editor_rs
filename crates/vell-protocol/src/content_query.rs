@@ -179,8 +179,16 @@ pub struct PaintFace {
 
 impl PaintFace {
     pub fn apply_patch(&mut self, patch: &FacePatch, root: &Self) {
-        apply_value(&mut self.foreground, &patch.foreground, &root.foreground);
-        apply_value(&mut self.background, &patch.background, &root.background);
+        apply_optional_color(
+            &mut self.foreground,
+            &patch.foreground,
+            &root.foreground,
+        );
+        apply_optional_color(
+            &mut self.background,
+            &patch.background,
+            &root.background,
+        );
         apply_value(&mut self.bold, &patch.bold, &root.bold);
         apply_value(&mut self.dim, &patch.dim, &root.dim);
         apply_value(&mut self.italic, &patch.italic, &root.italic);
@@ -208,6 +216,18 @@ fn apply_value<T: Clone>(target: &mut T, patch: &FaceValue<T>, root: &T) {
         FaceValue::Unspecified => {}
         FaceValue::Value(value) => *target = value.clone(),
         FaceValue::Reset => *target = root.clone(),
+    }
+}
+
+fn apply_optional_color(
+    target: &mut Option<Color>,
+    patch: &FaceValue<Color>,
+    root: &Option<Color>,
+) {
+    match patch {
+        FaceValue::Unspecified => {}
+        FaceValue::Value(value) => *target = Some(*value),
+        FaceValue::Reset => *target = *root,
     }
 }
 
