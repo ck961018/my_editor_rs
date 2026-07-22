@@ -22,8 +22,8 @@ use crate::operation::{
     ViewOperation, ViewPrecondition, ViewTarget, adapt_dispatch_command, prepend_operations,
 };
 use crate::query::AppQuery;
-use crate::transaction::{TransactionData, TransactionRecord, ViewTransactionData};
 use crate::theme::{FaceRemapOwner, ResolvedFaceOperation};
+use crate::transaction::{TransactionData, TransactionRecord, ViewTransactionData};
 use vell_core::command::EditCommand;
 use vell_core::content::{ContentActionResult, ContentEffect, ContentInput, ContentResult};
 use vell_core::transaction::TransactionDirection;
@@ -146,9 +146,7 @@ impl<F: Frontend> App<F> {
         frame: &mut ExecutionFrame,
         operation: ResolvedFaceOperation,
     ) -> io::Result<()> {
-        frame
-            .prepare_face(operation)
-            .map_err(operation_error)?;
+        frame.prepare_face(operation).map_err(operation_error)?;
         #[cfg(test)]
         self.behavior.record_prepared(EffectBehavior::Face);
         Ok(())
@@ -936,7 +934,9 @@ impl<F: Frontend> App<F> {
         match request {
             OperationRequest::App(operation) => Ok(ResolvedOperation::App(operation)),
             OperationRequest::Face(operation) => {
-                let owner = origin.mode.map_or(FaceRemapOwner::User, FaceRemapOwner::Mode);
+                let owner = origin
+                    .mode
+                    .map_or(FaceRemapOwner::User, FaceRemapOwner::Mode);
                 let resolve_scope = |target| match target {
                     FaceRemapTarget::Session => {
                         Ok(vell_protocol::content_query::FaceRemapScope::Session)
@@ -946,9 +946,7 @@ impl<F: Frontend> App<F> {
                         .map(vell_protocol::content_query::FaceRemapScope::Content),
                     FaceRemapTarget::CurrentView => self
                         .resolve_view_target(ViewTarget::Current, origin)
-                        .map(|(view, _)| {
-                            vell_protocol::content_query::FaceRemapScope::View(view)
-                        }),
+                        .map(|(view, _)| vell_protocol::content_query::FaceRemapScope::View(view)),
                 };
                 let operation = match operation {
                     FaceOperation::SetBase {

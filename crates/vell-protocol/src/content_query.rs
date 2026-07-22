@@ -179,16 +179,8 @@ pub struct PaintFace {
 
 impl PaintFace {
     pub fn apply_patch(&mut self, patch: &FacePatch, root: &Self) {
-        apply_optional_color(
-            &mut self.foreground,
-            &patch.foreground,
-            &root.foreground,
-        );
-        apply_optional_color(
-            &mut self.background,
-            &patch.background,
-            &root.background,
-        );
+        apply_optional_color(&mut self.foreground, &patch.foreground, &root.foreground);
+        apply_optional_color(&mut self.background, &patch.background, &root.background);
         apply_value(&mut self.bold, &patch.bold, &root.bold);
         apply_value(&mut self.dim, &patch.dim, &root.dim);
         apply_value(&mut self.italic, &patch.italic, &root.italic);
@@ -283,9 +275,7 @@ impl From<&Face> for FacePatch {
                 .map_or(FaceValue::Unspecified, FaceValue::Value),
             bold: face.bold.map_or(FaceValue::Unspecified, FaceValue::Value),
             dim: face.dim.map_or(FaceValue::Unspecified, FaceValue::Value),
-            italic: face
-                .italic
-                .map_or(FaceValue::Unspecified, FaceValue::Value),
+            italic: face.italic.map_or(FaceValue::Unspecified, FaceValue::Value),
             underline: face
                 .underline
                 .map_or(FaceValue::Unspecified, FaceValue::Value),
@@ -314,7 +304,10 @@ impl DisplayProfile {
                 UnderlineStyle::Line => style,
                 UnderlineStyle::Curl if self.supports_undercurl => style,
                 UnderlineStyle::Double | UnderlineStyle::Dotted | UnderlineStyle::Dashed
-                    if self.supports_extended_underline => style,
+                    if self.supports_extended_underline =>
+                {
+                    style
+                }
                 UnderlineStyle::Double
                 | UnderlineStyle::Curl
                 | UnderlineStyle::Dotted

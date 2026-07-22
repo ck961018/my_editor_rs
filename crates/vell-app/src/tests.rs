@@ -195,6 +195,7 @@ fn view_action(action: ViewAction) -> OperationRequest {
 
 struct HighlightMode {
     name: ModeName,
+    syntax_color: Color,
 }
 
 struct PresentationProbeMode {
@@ -268,11 +269,7 @@ impl Mode for HighlightMode {
             (
                 FaceName::new("plugin.highlight-test.syntax"),
                 Face {
-                    foreground: Some(Color::Rgb {
-                        red: 1,
-                        green: 2,
-                        blue: 3,
-                    }),
+                    foreground: Some(self.syntax_color),
                     ..Face::default()
                 },
             ),
@@ -3401,7 +3398,14 @@ fn unsupported_attachment_is_structured_and_leaves_no_partial_profile() {
     let mode = app
         .kernel
         .modes_mut()
-        .register(HighlightMode { name: name.clone() })
+        .register(HighlightMode {
+            name: name.clone(),
+            syntax_color: Color::Rgb {
+                red: 1,
+                green: 2,
+                blue: 3,
+            },
+        })
         .unwrap();
     let status = ContentId(1);
     let profile_before = app.session.mode_chain_for_new_view(status);
@@ -3882,6 +3886,11 @@ fn mode_decorations_are_resolved_through_named_faces() {
         .modes_mut()
         .register(HighlightMode {
             name: ModeName::new("highlight-probe"),
+            syntax_color: Color::Rgb {
+                red: 1,
+                green: 2,
+                blue: 3,
+            },
         })
         .unwrap();
     app.attach_mode_to_content(editor_cid(), &ModeName::new("highlight-probe"))
@@ -3917,10 +3926,32 @@ fn mode_diagnostics_report_policy_decorations_and_face_conflicts() {
     let mut app = make_app(vec![], None);
     let first = ModeName::new("diagnostic-highlight-first");
     let second = ModeName::new("diagnostic-highlight-second");
-    for name in [&first, &second] {
+    // The theme registry treats identical face definitions as idempotent, so
+    // the second mode must register a diverging definition to surface a conflict.
+    for (name, color) in [
+        (
+            &first,
+            Color::Rgb {
+                red: 1,
+                green: 2,
+                blue: 3,
+            },
+        ),
+        (
+            &second,
+            Color::Rgb {
+                red: 4,
+                green: 5,
+                blue: 6,
+            },
+        ),
+    ] {
         app.kernel
             .modes_mut()
-            .register(HighlightMode { name: name.clone() })
+            .register(HighlightMode {
+                name: name.clone(),
+                syntax_color: color,
+            })
             .unwrap();
         app.attach_mode_to_content(editor_cid(), name).unwrap();
     }

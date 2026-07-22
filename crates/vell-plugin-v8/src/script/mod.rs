@@ -18,8 +18,8 @@ use vell_mode::{
     Mode, ModeContentContext, ModeError, ModeJobRequest, ModeResult, ModeState, ModeViewContext,
 };
 use vell_protocol::content_query::{
-    Color, Face, FaceDefinition, FaceName, FaceOverride, FacePatch, FaceValue,
-    NamedTextDecoration, RowRange, ThemeName, UnderlineStyle,
+    Color, Face, FaceDefinition, FaceName, FaceOverride, FacePatch, FaceValue, NamedTextDecoration,
+    RowRange, ThemeName, UnderlineStyle,
 };
 use vell_protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
 
@@ -615,8 +615,7 @@ pub fn load_user_configuration() -> Result<LoadedEditorConfiguration, ScriptErro
         .collect();
     let configuration = {
         let host = host.borrow();
-        let configuration = host.configuration.borrow().clone();
-        configuration
+        host.configuration.borrow().clone()
     };
     Ok(LoadedEditorConfiguration {
         modes,
@@ -1034,7 +1033,13 @@ throw new Error("invalid user config");
             host.borrow().configuration.borrow().theme.clone(),
             Some(ThemeName::new("terminal-default"))
         );
-        assert!(host.borrow().configuration.borrow().face_overrides.is_empty());
+        assert!(
+            host.borrow()
+                .configuration
+                .borrow()
+                .face_overrides
+                .is_empty()
+        );
         assert_eq!(
             host.borrow_mut()
                 .evaluate_typescript("file:///probe.ts", "40 + 2")
@@ -1457,7 +1462,10 @@ editor.modes.define({
         let definitions = mode.face_definitions();
         assert_eq!(definitions.len(), 1);
         assert_eq!(definitions[0].name.as_str(), "plugin.pairs.match");
-        assert_eq!(definitions[0].inherits, vec![FaceName::new("syntax.string")]);
+        assert_eq!(
+            definitions[0].inherits,
+            vec![FaceName::new("syntax.string")]
+        );
 
         let content_id = ContentId(0);
         let mut contents = ContentStore::default();

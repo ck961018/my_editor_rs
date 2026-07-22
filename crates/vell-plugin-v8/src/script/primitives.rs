@@ -767,8 +767,8 @@ fn face_remap_token(
     value: v8::Local<v8::Value>,
 ) -> Result<FaceRemapToken, ScriptError> {
     let token = non_negative_integer(scope, value, "face remap token")?;
-    let token = u64::try_from(token)
-        .map_err(|_| ScriptError::new("face remap token is too large"))?;
+    let token =
+        u64::try_from(token).map_err(|_| ScriptError::new("face remap token is too large"))?;
     if token == 0 || token > MAX_FACE_REMAP_TOKEN {
         return Err(ScriptError::new(
             "face remap token must be a positive safe integer",

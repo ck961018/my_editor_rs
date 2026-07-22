@@ -52,10 +52,7 @@ impl FacePatchDefinition {
         self.strikethrough.overlay(&patch.strikethrough);
     }
 
-    fn resolve(
-        &self,
-        palette: &HashMap<String, Color>,
-    ) -> Result<FacePatch, ThemeError> {
+    fn resolve(&self, palette: &HashMap<String, Color>) -> Result<FacePatch, ThemeError> {
         Ok(FacePatch {
             foreground: resolve_color_value(&self.foreground, palette)?,
             background: resolve_color_value(&self.background, palette)?,
@@ -76,9 +73,7 @@ fn resolve_color_value(
     match value {
         FaceValue::Unspecified => Ok(FaceValue::Unspecified),
         FaceValue::Reset => Ok(FaceValue::Reset),
-        FaceValue::Value(ColorDefinition::Literal(color)) => {
-            Ok(FaceValue::Value(*color))
-        }
+        FaceValue::Value(ColorDefinition::Literal(color)) => Ok(FaceValue::Value(*color)),
         FaceValue::Value(ColorDefinition::Palette(name)) => palette
             .get(name)
             .copied()
@@ -119,9 +114,7 @@ impl ResolvedTheme {
             if let Some(face) = self.faces.get(&FaceName::new(candidate)) {
                 return Some(face);
             }
-            let Some((parent, _)) = candidate.rsplit_once('.') else {
-                return None;
-            };
+            let (parent, _) = candidate.rsplit_once('.')?;
             candidate = parent;
         }
     }
@@ -207,9 +200,7 @@ impl ThemeRegistry {
         let mut visiting = Vec::new();
         let mut visited = HashSet::new();
         let merged = self.merge_definition(name, &mut visiting, &mut visited)?;
-        if merged.selectable
-            && !merged.faces.contains_key(&FaceName::new("ui.editor"))
-        {
+        if merged.selectable && !merged.faces.contains_key(&FaceName::new("ui.editor")) {
             return Err(ThemeError::MissingRequiredFace {
                 theme: name.as_str().to_owned(),
                 face: "ui.editor".to_owned(),
@@ -262,11 +253,7 @@ impl ThemeRegistry {
         merged.selectable = definition.selectable;
         merged.palette.extend(definition.palette.clone());
         for (name, patch) in &definition.faces {
-            merged
-                .faces
-                .entry(name.clone())
-                .or_default()
-                .overlay(patch);
+            merged.faces.entry(name.clone()).or_default().overlay(patch);
         }
         Ok(merged)
     }
@@ -315,8 +302,8 @@ fn parse_theme(source: &str) -> Result<ThemeDefinition, ThemeError> {
                 return syntax(line_number, "unknown section");
             }
             _ => {
-                let (key, value) = split_assignment(line)
-                    .ok_or_else(|| ThemeError::InvalidSyntax {
+                let (key, value) =
+                    split_assignment(line).ok_or_else(|| ThemeError::InvalidSyntax {
                         line: line_number,
                         message: "expected key = value".to_owned(),
                     })?;
@@ -335,7 +322,9 @@ fn parse_theme(source: &str) -> Result<ThemeDefinition, ThemeError> {
                             appearance = Some(match parse_string(value, line_number)?.as_str() {
                                 "light" => Appearance::Light,
                                 "dark" => Appearance::Dark,
-                                _ => return syntax(line_number, "appearance must be light or dark"),
+                                _ => {
+                                    return syntax(line_number, "appearance must be light or dark");
+                                }
                             });
                         }
                         "inherits" if inherits.is_none() => {
@@ -392,11 +381,10 @@ fn parse_face(value: &str, line: usize) -> Result<FacePatchDefinition, ThemeErro
         if member.trim().is_empty() {
             continue;
         }
-        let (key, value) = split_assignment(member)
-            .ok_or_else(|| ThemeError::InvalidSyntax {
-                line,
-                message: "invalid face attribute".to_owned(),
-            })?;
+        let (key, value) = split_assignment(member).ok_or_else(|| ThemeError::InvalidSyntax {
+            line,
+            message: "invalid face attribute".to_owned(),
+        })?;
         if !attributes.insert(key) {
             return syntax(line, "duplicate face attribute");
         }
@@ -407,9 +395,7 @@ fn parse_face(value: &str, line: usize) -> Result<FacePatchDefinition, ThemeErro
             "dim" => face.dim = parse_face_bool(value, line)?,
             "italic" => face.italic = parse_face_bool(value, line)?,
             "underline" => face.underline = parse_face_bool(value, line)?,
-            "underline-style" => {
-                face.underline_style = parse_underline_style(value, line)?
-            }
+            "underline-style" => face.underline_style = parse_underline_style(value, line)?,
             "strikethrough" => face.strikethrough = parse_face_bool(value, line)?,
             _ => return syntax(line, "unknown face attribute"),
         }
@@ -448,15 +434,17 @@ fn parse_color_definition(
         return Ok(FaceValue::Reset);
     }
     if let Ok(index) = value.trim().parse::<u16>() {
-        let index = u8::try_from(index)
-            .map_err(|_| ThemeError::InvalidColor(value.trim().to_owned()))?;
-        return Ok(FaceValue::Value(ColorDefinition::Literal(Color::Ansi(index))));
+        let index =
+            u8::try_from(index).map_err(|_| ThemeError::InvalidColor(value.trim().to_owned()))?;
+        return Ok(FaceValue::Value(ColorDefinition::Literal(Color::Ansi(
+            index,
+        ))));
     }
     let name = parse_string(value, line)?;
     if name.starts_with('#') {
-        Ok(FaceValue::Value(ColorDefinition::Literal(
-            parse_hex_color(&name)?,
-        )))
+        Ok(FaceValue::Value(ColorDefinition::Literal(parse_hex_color(
+            &name,
+        )?)))
     } else {
         Ok(FaceValue::Value(ColorDefinition::Palette(name)))
     }
@@ -509,7 +497,10 @@ fn parse_string(value: &str, line: usize) -> Result<String, ThemeError> {
     let value = value.trim();
     if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
         let inner = &value[1..value.len() - 1];
-        if !inner.chars().any(|character| matches!(character, '"' | '\\')) {
+        if !inner
+            .chars()
+            .any(|character| matches!(character, '"' | '\\'))
+        {
             return Ok(inner.to_owned());
         }
     }
@@ -525,13 +516,10 @@ fn parse_bool(value: &str, line: usize) -> Result<bool, ThemeError> {
 }
 
 fn parse_u32(value: &str, line: usize) -> Result<u32, ThemeError> {
-    value
-        .trim()
-        .parse()
-        .map_err(|_| ThemeError::InvalidSyntax {
-            line,
-            message: "expected an unsigned integer".to_owned(),
-        })
+    value.trim().parse().map_err(|_| ThemeError::InvalidSyntax {
+        line,
+        message: "expected an unsigned integer".to_owned(),
+    })
 }
 
 fn split_assignment(line: &str) -> Option<(&str, &str)> {
@@ -633,9 +621,7 @@ mod tests {
             theme
                 .face(&FaceName::new("syntax.function.macro.rust"))
                 .unwrap(),
-            theme
-                .face(&FaceName::new("syntax.function.macro"))
-                .unwrap()
+            theme.face(&FaceName::new("syntax.function.macro")).unwrap()
         );
     }
 
@@ -665,11 +651,9 @@ mod tests {
         }
         assert_eq!(
             registry.resolve(&ThemeName::new("a")).unwrap_err(),
-            ThemeError::ThemeInheritanceCycle(vec![
-                "a".to_owned(),
-                "b".to_owned(),
-                "a".to_owned(),
-            ])
+            ThemeError::ThemeInheritanceCycle(
+                vec!["a".to_owned(), "b".to_owned(), "a".to_owned(),]
+            )
         );
     }
 
@@ -694,10 +678,7 @@ selectable = false
 
         assert_eq!(face.dim, FaceValue::Value(true));
         assert_eq!(face.underline, FaceValue::Value(true));
-        assert_eq!(
-            face.underline_style,
-            FaceValue::Value(UnderlineStyle::Curl)
-        );
+        assert_eq!(face.underline_style, FaceValue::Value(UnderlineStyle::Curl));
         assert_eq!(face.strikethrough, FaceValue::Value(true));
     }
 

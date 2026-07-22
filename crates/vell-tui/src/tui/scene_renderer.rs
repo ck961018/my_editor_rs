@@ -713,6 +713,10 @@ fn clear_item_row_with_highlight(
 /// Paint the visible display-cell interval `[left_col, left_col + width)` of one logical row.
 /// A trailing logical newline is discarded. `hi`, when present, remains an absolute logical-char
 /// range; each complete visible character is highlighted according to its logical column.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "rendering hot line paints from flat inputs"
+)]
 fn paint_line_with_highlight(
     canvas: &mut dyn Canvas,
     line: &str,

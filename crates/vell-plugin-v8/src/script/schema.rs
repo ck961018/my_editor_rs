@@ -103,11 +103,14 @@ fn define_face_override(
         throw_script_error(scope, "script configuration draft is unavailable");
         return;
     };
-    configuration.borrow_mut().face_overrides.push(FaceOverride {
-        face: FaceName::new(name),
-        theme,
-        patch,
-    });
+    configuration
+        .borrow_mut()
+        .face_overrides
+        .push(FaceOverride {
+            face: FaceName::new(name),
+            theme,
+            patch,
+        });
     return_value.set_undefined();
 }
 
@@ -596,8 +599,9 @@ fn parse_face_definitions(
             .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
             .ok_or_else(|| ScriptError::new("mode face must be an object"))?;
         let name = FaceName::new(name.to_rust_string_lossy(scope));
-        let extended = property(scope, face, "inherits").is_some()
-            || property(scope, face, "fallback").is_some();
+        let extended = property(scope, face, "inherits")
+            .is_some_and(|value| !value.is_null_or_undefined())
+            || property(scope, face, "fallback").is_some_and(|value| !value.is_null_or_undefined());
         let (inherits, fallback) = if extended {
             let inherits = parse_face_inherits(scope, face)?;
             let fallback = match property(scope, face, "fallback") {
@@ -610,7 +614,10 @@ fn parse_face_definitions(
             };
             (inherits, fallback)
         } else {
-            (Vec::new(), FacePatch::from(&parse_legacy_face(scope, face)?))
+            (
+                Vec::new(),
+                FacePatch::from(&parse_legacy_face(scope, face)?),
+            )
         };
         parsed.push(FaceDefinition {
             name,

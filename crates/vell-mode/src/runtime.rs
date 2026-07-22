@@ -563,19 +563,17 @@ impl FaceRegistry {
         self.register_definitions(mode.name().clone(), mode.face_definitions());
     }
 
-    pub fn register_definitions(
-        &mut self,
-        provider: ModeName,
-        definitions: Vec<FaceDefinition>,
-    ) {
+    pub fn register_definitions(&mut self, provider: ModeName, definitions: Vec<FaceDefinition>) {
         let mut candidate = self.faces.clone();
         let mut inserted = Vec::new();
         for definition in definitions {
             let name = definition.name.clone();
             if is_host_face_name(&name) {
-                if !self.registration_errors.iter().any(|error| {
-                    error.face == name && error.rejected_provider == provider
-                }) {
+                if !self
+                    .registration_errors
+                    .iter()
+                    .any(|error| error.face == name && error.rejected_provider == provider)
+                {
                     self.registration_errors.push(FaceRegistrationError {
                         face: name,
                         rejected_provider: provider.clone(),
@@ -657,7 +655,9 @@ impl FaceRegistry {
     }
 
     pub fn definition(&self, name: &FaceName) -> Option<&FaceDefinition> {
-        self.faces.get(name).map(|registered| &registered.definition)
+        self.faces
+            .get(name)
+            .map(|registered| &registered.definition)
     }
 
     pub fn conflicts(&self) -> &[FaceConflict] {
@@ -690,10 +690,7 @@ impl FaceRegistry {
     }
 }
 
-fn face_inheritance_has_cycle(
-    faces: &HashMap<FaceName, RegisteredFace>,
-    start: &FaceName,
-) -> bool {
+fn face_inheritance_has_cycle(faces: &HashMap<FaceName, RegisteredFace>, start: &FaceName) -> bool {
     fn visit(
         faces: &HashMap<FaceName, RegisteredFace>,
         name: &FaceName,
@@ -2294,7 +2291,9 @@ pub struct ModeViewStore {
 
 impl ModeViewStore {
     pub fn contains_mode(&self, mode: ModeId) -> bool {
-        self.instances.keys().any(|(candidate, _)| *candidate == mode)
+        self.instances
+            .keys()
+            .any(|(candidate, _)| *candidate == mode)
     }
 
     pub fn is_faulted(&self, mode: ModeId, view: ViewId) -> bool {
@@ -3058,9 +3057,12 @@ mod tests {
                 .is_none()
         );
         assert_eq!(registry.registration_errors().len(), 2);
-        assert!(registry.registration_errors().iter().all(|error| {
-            error.reason == FaceRegistrationErrorReason::InheritanceCycle
-        }));
+        assert!(
+            registry
+                .registration_errors()
+                .iter()
+                .all(|error| { error.reason == FaceRegistrationErrorReason::InheritanceCycle })
+        );
     }
 
     #[test]

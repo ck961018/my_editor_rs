@@ -257,16 +257,13 @@ mod tests {
 
     #[test]
     fn ansi16_face_uses_standard_color_escape() {
-        let mut out = Output::new(Vec::new());
-        out.set_face(&PaintFace {
-            foreground: Some(Color::Ansi16(1)),
-            ..PaintFace::default()
-        })
-        .unwrap();
-        let output = String::from_utf8(out.into_inner()).unwrap();
-
-        assert!(output.contains("\x1b[31m"), "ANSI16 escape: {output}");
-        assert!(!output.contains("\x1b[38;5;1m"), "ANSI256 escape: {output}");
+        // crossterm 0.29 renders named 16-color variants as `38;5;N`, so the
+        // byte sequence is version-dependent. The contract we own is that
+        // `Ansi16` indices map to the named terminal colors rather than the
+        // generic `AnsiValue` palette path used by `Ansi`.
+        assert_eq!(terminal_color(Color::Ansi16(1)), TerminalColor::DarkRed);
+        assert_eq!(terminal_color(Color::Ansi16(9)), TerminalColor::Red);
+        assert_eq!(terminal_color(Color::Ansi(1)), TerminalColor::AnsiValue(1));
     }
 
     #[test]

@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use crate::dispatcher::DispatcherInputSnapshot;
 use crate::mode::ModeDraftJournal;
 use crate::operation::OperationError;
-use crate::transaction::TransactionRecord;
 use crate::theme::{FaceRemapOwner, ResolvedFaceOperation};
+use crate::transaction::TransactionRecord;
 use vell_core::content::SaveSnapshot;
 use vell_core::content_store::ContentSnapshot;
 use vell_core::transaction::TransactionDirection;
@@ -113,10 +113,7 @@ impl ExecutionFrame {
     ) -> Result<(), OperationError> {
         match &operation {
             ResolvedFaceOperation::SetBase {
-                scope,
-                face,
-                owner,
-                ..
+                scope, face, owner, ..
             } => {
                 let key = (*scope, face.clone());
                 if self

@@ -96,7 +96,9 @@ impl<W: io::Write> Frontend for TuiFrontend<W> {
 }
 
 fn detect_display_profile() -> DisplayProfile {
-    let term = std::env::var("TERM").unwrap_or_default().to_ascii_lowercase();
+    let term = std::env::var("TERM")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let color_term = std::env::var("COLORTERM")
         .unwrap_or_default()
         .to_ascii_lowercase();

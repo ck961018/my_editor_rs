@@ -11,8 +11,8 @@ use crate::mode_name::ModeName;
 use crate::session::ClientSession;
 use vell_core::buffer::Buffer;
 use vell_frontend::Frontend;
-use vell_protocol::ids::ContentId;
 use vell_protocol::content_query::{FaceOverride, ThemeName};
+use vell_protocol::ids::ContentId;
 
 pub struct App<F: Frontend> {
     pub(super) kernel: Kernel,
@@ -94,25 +94,18 @@ impl<F: Frontend> App<F> {
             buffer.open_path(p)?;
         }
         let mut bootstrap = match theme {
-            Some(theme) => {
-                bootstrap_editor_with_theme(
-                    buffer,
-                    width,
-                    height,
-                    modes,
-                    Some(theme),
-                    face_overrides,
-                )?
-            }
-            None if face_overrides.is_empty() => bootstrap_editor(buffer, width, height, modes)?,
-            None => bootstrap_editor_with_theme(
+            Some(theme) => bootstrap_editor_with_theme(
                 buffer,
                 width,
                 height,
                 modes,
-                None,
+                Some(theme),
                 face_overrides,
             )?,
+            None if face_overrides.is_empty() => bootstrap_editor(buffer, width, height, modes)?,
+            None => {
+                bootstrap_editor_with_theme(buffer, width, height, modes, None, face_overrides)?
+            }
         };
         bootstrap
             .session

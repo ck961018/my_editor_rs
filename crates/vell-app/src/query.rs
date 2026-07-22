@@ -73,11 +73,8 @@ impl RenderQuery for AppQuery<'_> {
                         .as_ref()
                         .map(|face| self.faces.resolve_for(face, content, id))
                         .unwrap_or_else(|| {
-                            self.faces.resolve_for(
-                                &FaceName::new("ui.selection"),
-                                content,
-                                id,
-                            )
+                            self.faces
+                                .resolve_for(&FaceName::new("ui.selection"), content, id)
                         }),
                 })
             }
@@ -108,15 +105,8 @@ impl RenderQuery for AppQuery<'_> {
                         )
                     },
                     |presentation| StatusBarPresentation {
-                        base_face: self
-                            .faces
-                            .resolve_status_bar_root(target_view, content, id),
-                        left: resolve_status_segments(
-                            &presentation.left,
-                            self.faces,
-                            content,
-                            id,
-                        ),
+                        base_face: self.faces.resolve_status_bar_root(target_view, content, id),
+                        left: resolve_status_segments(&presentation.left, self.faces, content, id),
                         center: resolve_status_segments(
                             &presentation.center,
                             self.faces,

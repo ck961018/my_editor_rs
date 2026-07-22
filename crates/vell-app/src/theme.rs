@@ -3,11 +3,11 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use vell_protocol::ids::ViewId;
 use vell_protocol::content_query::{
     DisplayProfile, FaceExpr, FaceName, FaceOverride, FacePatch, FaceRemapScope, FaceRemapToken,
     PaintFace, ThemeName,
 };
+use vell_protocol::ids::ViewId;
 use vell_protocol::revision::Revision;
 use vell_theme::{ResolvedTheme, ThemeError, ThemeRegistry};
 
@@ -81,8 +81,7 @@ impl FaceEnvironment {
             None => fallback_theme.clone(),
         };
         let mut global_overrides = HashMap::new();
-        let mut theme_overrides: HashMap<ThemeName, HashMap<FaceName, FacePatch>> =
-            HashMap::new();
+        let mut theme_overrides: HashMap<ThemeName, HashMap<FaceName, FacePatch>> = HashMap::new();
         for face_override in overrides {
             let target = match face_override.theme {
                 Some(theme) => theme_overrides.entry(theme).or_default(),
@@ -218,13 +217,9 @@ impl SessionFaces {
         view: ViewId,
     ) -> FacePatch {
         let global = self.resolve(name);
-        let mut resolved = self.remaps.resolve(
-            name,
-            content,
-            view,
-            global,
-            |named| self.resolve(named),
-        );
+        let mut resolved = self
+            .remaps
+            .resolve(name, content, view, global, |named| self.resolve(named));
         self.environment.adapt_to_display(&mut resolved);
         resolved
     }
@@ -261,10 +256,7 @@ impl SessionFaces {
         self.resolve_root_for(&FaceName::new(name), content, view)
     }
 
-    pub(super) fn provider(
-        &self,
-        name: &FaceName,
-    ) -> Option<&crate::mode_name::ModeName> {
+    pub(super) fn provider(&self, name: &FaceName) -> Option<&crate::mode_name::ModeName> {
         self.registry.provider(name)
     }
 
@@ -302,10 +294,7 @@ impl SessionFaces {
         }
     }
 
-    pub(super) fn remove_content_remaps(
-        &mut self,
-        content: vell_protocol::ids::ContentId,
-    ) {
+    pub(super) fn remove_content_remaps(&mut self, content: vell_protocol::ids::ContentId) {
         if self.remaps.remove_scope(FaceRemapScope::Content(content)) {
             self.environment.bump_revision();
         }
@@ -362,9 +351,7 @@ impl FaceRemapStore {
                 }
             }
             ResolvedFaceOperation::AddRelative {
-                token,
-                expressions,
-                ..
+                token, expressions, ..
             } => {
                 if self.tokens.contains_key(token) {
                     return Err(FaceRemapError("face remap token already exists".to_owned()));
@@ -400,10 +387,7 @@ impl FaceRemapStore {
             } => {
                 let key = (scope, face);
                 let entry = self.entries.entry(key.clone()).or_default();
-                entry.base = expressions.map(|expressions| BaseFaceRemap {
-                    owner,
-                    expressions,
-                });
+                entry.base = expressions.map(|expressions| BaseFaceRemap { owner, expressions });
                 if entry.base.is_none() && entry.relatives.is_empty() {
                     self.entries.remove(&key);
                 }
@@ -541,12 +525,8 @@ mod tests {
 
     #[test]
     fn active_theme_overlays_terminal_fallback_by_attribute() {
-        let environment =
-            FaceEnvironment::new(Some(&ThemeName::new("catppuccin-mocha"))).unwrap();
-        let face = environment.resolve(
-            &FaceName::new("syntax.comment"),
-            &FacePatch::default(),
-        );
+        let environment = FaceEnvironment::new(Some(&ThemeName::new("catppuccin-mocha"))).unwrap();
+        let face = environment.resolve(&FaceName::new("syntax.comment"), &FacePatch::default());
         assert_eq!(face.italic, FaceValue::Value(true));
         assert_eq!(
             face.foreground,
@@ -560,8 +540,7 @@ mod tests {
 
     #[test]
     fn display_profile_is_applied_after_all_visual_layers() {
-        let environment =
-            FaceEnvironment::new(Some(&ThemeName::new("catppuccin-mocha"))).unwrap();
+        let environment = FaceEnvironment::new(Some(&ThemeName::new("catppuccin-mocha"))).unwrap();
         let mut faces = SessionFaces::new(FaceRegistry::default(), environment);
         faces.set_display_profile(DisplayProfile {
             color_depth: ColorDepth::Ansi16,
@@ -615,21 +594,14 @@ mod tests {
 
     #[test]
     fn status_bar_uses_inactive_face_for_non_focused_target() {
-        let environment =
-            FaceEnvironment::new(Some(&ThemeName::new("catppuccin-mocha"))).unwrap();
+        let environment = FaceEnvironment::new(Some(&ThemeName::new("catppuccin-mocha"))).unwrap();
         let faces = SessionFaces::new(FaceRegistry::default(), environment);
         faces.set_active_view(Some(ViewId(1)));
 
-        let active = faces.resolve_status_bar_root(
-            ViewId(1),
-            vell_protocol::ids::ContentId(1),
-            ViewId(10),
-        );
-        let inactive = faces.resolve_status_bar_root(
-            ViewId(2),
-            vell_protocol::ids::ContentId(1),
-            ViewId(10),
-        );
+        let active =
+            faces.resolve_status_bar_root(ViewId(1), vell_protocol::ids::ContentId(1), ViewId(10));
+        let inactive =
+            faces.resolve_status_bar_root(ViewId(2), vell_protocol::ids::ContentId(1), ViewId(10));
 
         assert_eq!(
             active.background,
@@ -674,10 +646,7 @@ mod tests {
         )
         .unwrap();
 
-        let face = environment.resolve(
-            &FaceName::new("syntax.comment"),
-            &FacePatch::default(),
-        );
+        let face = environment.resolve(&FaceName::new("syntax.comment"), &FacePatch::default());
 
         assert_eq!(face.italic, FaceValue::Value(false));
         assert_eq!(face.underline, FaceValue::Value(true));
