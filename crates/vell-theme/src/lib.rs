@@ -284,10 +284,12 @@ fn parse_theme(source: &str) -> Result<ThemeDefinition, ThemeError> {
     let mut name = None;
     let mut appearance = None;
     let mut inherits = None;
-    let mut selectable = true;
+    let mut selectable = None;
     let mut palette = HashMap::new();
     let mut faces = HashMap::new();
     let mut section = Section::Root;
+    let mut seen_palette = false;
+    let mut seen_faces = false;
     for (index, raw) in source.lines().enumerate() {
         let line_number = index + 1;
         let line = strip_comment(raw).trim();
@@ -295,8 +297,20 @@ fn parse_theme(source: &str) -> Result<ThemeDefinition, ThemeError> {
             continue;
         }
         section = match line {
-            "[palette]" => Section::Palette,
-            "[faces]" => Section::Faces,
+            "[palette]" => {
+                if seen_palette {
+                    return syntax(line_number, "duplicate palette section");
+                }
+                seen_palette = true;
+                Section::Palette
+            }
+            "[faces]" => {
+                if seen_faces {
+                    return syntax(line_number, "duplicate faces section");
+                }
+                seen_faces = true;
+                Section::Faces
+            }
             _ if line.starts_with('[') => {
                 return syntax(line_number, "unknown section");
             }
@@ -308,29 +322,45 @@ fn parse_theme(source: &str) -> Result<ThemeDefinition, ThemeError> {
                     })?;
                 match section {
                     Section::Root => match key {
-                        "schema" => schema = Some(parse_u32(value, line_number)?),
-                        "name" => name = Some(ThemeName::new(parse_string(value, line_number)?)),
+                        "schema" if schema.is_none() => {
+                            schema = Some(parse_u32(value, line_number)?)
+                        }
+                        "name" if name.is_none() => {
+                            name = Some(ThemeName::new(parse_string(value, line_number)?))
+                        }
                         "appearance" => {
+                            if appearance.is_some() {
+                                return syntax(line_number, "duplicate root property");
+                            }
                             appearance = Some(match parse_string(value, line_number)?.as_str() {
                                 "light" => Appearance::Light,
                                 "dark" => Appearance::Dark,
                                 _ => return syntax(line_number, "appearance must be light or dark"),
                             });
                         }
-                        "inherits" => {
+                        "inherits" if inherits.is_none() => {
                             inherits = Some(ThemeName::new(parse_string(value, line_number)?));
                         }
-                        "selectable" => selectable = parse_bool(value, line_number)?,
+                        "selectable" if selectable.is_none() => {
+                            selectable = Some(parse_bool(value, line_number)?)
+                        }
+                        "schema" | "name" | "inherits" | "selectable" => {
+                            return syntax(line_number, "duplicate root property");
+                        }
                         _ => return syntax(line_number, "unknown root property"),
                     },
                     Section::Palette => {
                         let key = parse_key(key, line_number)?;
                         let value = parse_string(value, line_number)?;
-                        palette.insert(key, parse_hex_color(&value)?);
+                        if palette.insert(key, parse_hex_color(&value)?).is_some() {
+                            return syntax(line_number, "duplicate palette entry");
+                        }
                     }
                     Section::Faces => {
                         let key = FaceName::new(parse_key(key, line_number)?);
-                        faces.insert(key, parse_face(value, line_number)?);
+                        if faces.insert(key, parse_face(value, line_number)?).is_some() {
+                            return syntax(line_number, "duplicate face");
+                        }
                     }
                 }
                 section
@@ -345,7 +375,7 @@ fn parse_theme(source: &str) -> Result<ThemeDefinition, ThemeError> {
         name: name.ok_or(ThemeError::MissingField("name"))?,
         appearance: appearance.ok_or(ThemeError::MissingField("appearance"))?,
         inherits,
-        selectable,
+        selectable: selectable.unwrap_or(true),
         palette,
         faces,
     })
@@ -357,6 +387,7 @@ fn parse_face(value: &str, line: usize) -> Result<FacePatchDefinition, ThemeErro
         return syntax(line, "face must be an inline table");
     }
     let mut face = FacePatchDefinition::default();
+    let mut attributes = HashSet::new();
     for member in split_members(&value[1..value.len() - 1]) {
         if member.trim().is_empty() {
             continue;
@@ -366,6 +397,9 @@ fn parse_face(value: &str, line: usize) -> Result<FacePatchDefinition, ThemeErro
                 line,
                 message: "invalid face attribute".to_owned(),
             })?;
+        if !attributes.insert(key) {
+            return syntax(line, "duplicate face attribute");
+        }
         match key {
             "foreground" => face.foreground = parse_color_definition(value, line)?,
             "background" => face.background = parse_color_definition(value, line)?,
@@ -665,5 +699,19 @@ selectable = false
             FaceValue::Value(UnderlineStyle::Curl)
         );
         assert_eq!(face.strikethrough, FaceValue::Value(true));
+    }
+
+    #[test]
+    fn duplicate_theme_fields_are_rejected() {
+        for source in [
+            "schema=1\nschema=1\nname=\"a\"\nappearance=\"dark\"",
+            "schema=1\nname=\"a\"\nappearance=\"dark\"\n[faces]\n\"x\"={}\n\"x\"={}",
+            "schema=1\nname=\"a\"\nappearance=\"dark\"\n[faces]\n\"x\"={bold=true,bold=false}",
+        ] {
+            assert!(matches!(
+                parse_theme(source),
+                Err(ThemeError::InvalidSyntax { .. })
+            ));
+        }
     }
 }
