@@ -16,13 +16,14 @@ use crate::execution::{ExecutionFrame, InputCheckpoint, PreparedEffect, StateRol
 use crate::layout::LayoutError;
 use crate::mode::{CursorDomain, InputFlow};
 use crate::operation::{
-    AppOperation, ContentOperation, ContentTarget, ModeFlowPropagation, ModeTarget, OperationError,
-    OperationOrigin, OperationOriginScope, OperationRequest, QueuedOperation, ResolvedModeScope,
-    ResolvedOperation, ViewEditPlan, ViewOperation, ViewPrecondition, ViewTarget,
-    adapt_dispatch_command, prepend_operations,
+    AppOperation, ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget,
+    ModeFlowPropagation, ModeTarget, OperationError, OperationOrigin, OperationOriginScope,
+    OperationRequest, QueuedOperation, ResolvedModeScope, ResolvedOperation, ViewEditPlan,
+    ViewOperation, ViewPrecondition, ViewTarget, adapt_dispatch_command, prepend_operations,
 };
 use crate::query::AppQuery;
 use crate::transaction::{TransactionData, TransactionRecord, ViewTransactionData};
+use crate::theme::{FaceRemapOwner, ResolvedFaceOperation};
 use vell_core::command::EditCommand;
 use vell_core::content::{ContentActionResult, ContentEffect, ContentInput, ContentResult};
 use vell_core::transaction::TransactionDirection;
@@ -62,6 +63,7 @@ impl PreparedEffect {
             },
             Self::Close { target } => EffectBehavior::Close { target: *target },
             Self::Focus { target } => EffectBehavior::Focus { target: *target },
+            Self::Face(_) => EffectBehavior::Face,
             Self::Quit => EffectBehavior::Quit,
         }
     }
@@ -84,7 +86,7 @@ fn operation_error(error: OperationError) -> io::Error {
     recoverable_execution_error(io::ErrorKind::InvalidData, error)
 }
 
-fn invalid_operation(message: &'static str) -> io::Error {
+fn invalid_operation(message: impl Into<String>) -> io::Error {
     operation_error(OperationError::new(message))
 }
 
@@ -137,6 +139,19 @@ impl<F: Frontend> App<F> {
         #[cfg(test)]
         self.behavior.record_prepared(effect.behavior());
         frame.prepare(effect);
+    }
+
+    fn prepare_face_effect(
+        &mut self,
+        frame: &mut ExecutionFrame,
+        operation: ResolvedFaceOperation,
+    ) -> io::Result<()> {
+        frame
+            .prepare_face(operation)
+            .map_err(operation_error)?;
+        #[cfg(test)]
+        self.behavior.record_prepared(EffectBehavior::Face);
+        Ok(())
     }
 
     fn prepare_topology_effect(
@@ -468,6 +483,12 @@ impl<F: Frontend> App<F> {
                         .focus_space(target, content_modes, contents)
                         .expect("validated focus target remains valid until frame commit");
                 }
+                PreparedEffect::Face(operation) => {
+                    self.session
+                        .faces_mut()
+                        .apply_operation(operation)
+                        .expect("validated face operation remains valid until frame commit");
+                }
                 PreparedEffect::Quit => self.kernel.cancel(),
             }
         }
@@ -784,6 +805,13 @@ impl<F: Frontend> App<F> {
                     owner,
                     operation,
                 } => self.execute_transaction_intent(operation, owner, content, frame),
+                ResolvedOperation::Face(operation) => {
+                    self.session
+                        .faces()
+                        .validate_operation(&operation)
+                        .map_err(|error| invalid_operation(error.to_string()))?;
+                    self.prepare_face_effect(frame, operation)
+                }
                 ResolvedOperation::Mode {
                     mode,
                     scope,
@@ -907,6 +935,50 @@ impl<F: Frontend> App<F> {
         let QueuedOperation { request, origin } = queued;
         match request {
             OperationRequest::App(operation) => Ok(ResolvedOperation::App(operation)),
+            OperationRequest::Face(operation) => {
+                let owner = origin.mode.map_or(FaceRemapOwner::User, FaceRemapOwner::Mode);
+                let resolve_scope = |target| match target {
+                    FaceRemapTarget::Session => {
+                        Ok(vell_protocol::content_query::FaceRemapScope::Session)
+                    }
+                    FaceRemapTarget::CurrentContent => self
+                        .resolve_content_target(ContentTarget::Current, origin)
+                        .map(vell_protocol::content_query::FaceRemapScope::Content),
+                    FaceRemapTarget::CurrentView => self
+                        .resolve_view_target(ViewTarget::Current, origin)
+                        .map(|(view, _)| {
+                            vell_protocol::content_query::FaceRemapScope::View(view)
+                        }),
+                };
+                let operation = match operation {
+                    FaceOperation::SetBase {
+                        target,
+                        face,
+                        expressions,
+                    } => ResolvedFaceOperation::SetBase {
+                        scope: resolve_scope(target)?,
+                        face,
+                        expressions,
+                        owner,
+                    },
+                    FaceOperation::AddRelative {
+                        target,
+                        face,
+                        token,
+                        expressions,
+                    } => ResolvedFaceOperation::AddRelative {
+                        scope: resolve_scope(target)?,
+                        face,
+                        token,
+                        expressions,
+                        owner,
+                    },
+                    FaceOperation::RemoveRelative { token } => {
+                        ResolvedFaceOperation::RemoveRelative { token, owner }
+                    }
+                };
+                Ok(ResolvedOperation::Face(operation))
+            }
             OperationRequest::Content { target, operation } => {
                 let content = self.resolve_content_target(target, origin)?;
                 Ok(ResolvedOperation::Content { content, operation })

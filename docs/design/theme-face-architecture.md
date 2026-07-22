@@ -531,11 +531,15 @@ Mode callback 不得借用或直接修改 `FaceEnvironment`。运行时修改必
 typed operation，例如：
 
 ```text
-SetSessionFaceOverride
-SetContentFaceRemapBase
-AddViewRelativeFaceRemap
-RemoveFaceRemap
+FaceOperation::SetBase
+FaceOperation::AddRelative
+FaceOperation::RemoveRelative
 ```
+
+TypeScript v2 callback 通过 `ctx.faces.setBase`、`ctx.faces.addRelative` 和
+`ctx.faces.removeRelative` 产生这些 operation。scope 是 `session`、`content`
+或 `view`；`addRelative` 同步返回安全整数 token，但实际 remap 仍只在 frame
+成功后发布。
 
 目标结合 operation origin 在 app 中解析。operation 进入现有
 `ExecutionFrame`：

@@ -166,7 +166,7 @@ fn parse_mode_definition(
         .map_err(|_| ScriptError::new("editor.modes.define expects an object"))?;
     let name = required_string(scope, object, "name")?;
     let before = optional_string(scope, object, "before")?.map(ModeName::new);
-    let faces = parse_faces(scope, object)?;
+    let face_definitions = parse_face_definitions(scope, object)?;
     let (version, adapters) = match property(scope, object, "on") {
         Some(value) if !value.is_null_or_undefined() => (
             ScriptApiVersion::V2,
@@ -183,7 +183,7 @@ fn parse_mode_definition(
     Ok(ScriptModeDefinition {
         name: ModeName::new(name),
         version,
-        faces,
+        face_definitions,
         before,
         adapters,
     })
@@ -571,10 +571,10 @@ fn optional_section_callback(
     Ok(Some(v8::Global::new(scope, callback)))
 }
 
-fn parse_faces(
+fn parse_face_definitions(
     scope: &mut v8::PinScope,
     definition: v8::Local<v8::Object>,
-) -> Result<Vec<(FaceName, Face)>, ScriptError> {
+) -> Result<Vec<FaceDefinition>, ScriptError> {
     let Some(value) = property(scope, definition, "faces") else {
         return Ok(Vec::new());
     };
@@ -595,21 +595,75 @@ fn parse_faces(
             .get(scope, name)
             .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
             .ok_or_else(|| ScriptError::new("mode face must be an object"))?;
-        parsed.push((
-            FaceName::new(name.to_rust_string_lossy(scope)),
-            Face {
-                foreground: parse_color(scope, face, "foreground")?,
-                background: parse_color(scope, face, "background")?,
-                bold: optional_bool(scope, face, "bold")?,
-                italic: optional_bool(scope, face, "italic")?,
-                underline: optional_bool(scope, face, "underline")?,
-            },
-        ));
+        let name = FaceName::new(name.to_rust_string_lossy(scope));
+        let extended = property(scope, face, "inherits").is_some()
+            || property(scope, face, "fallback").is_some();
+        let (inherits, fallback) = if extended {
+            let inherits = parse_face_inherits(scope, face)?;
+            let fallback = match property(scope, face, "fallback") {
+                Some(value) if !value.is_null_or_undefined() => {
+                    let fallback = v8::Local::<v8::Object>::try_from(value)
+                        .map_err(|_| ScriptError::new("face fallback must be an object"))?;
+                    parse_face_patch(scope, fallback)?
+                }
+                _ => FacePatch::default(),
+            };
+            (inherits, fallback)
+        } else {
+            (Vec::new(), FacePatch::from(&parse_legacy_face(scope, face)?))
+        };
+        parsed.push(FaceDefinition {
+            name,
+            inherits,
+            fallback,
+        });
     }
     Ok(parsed)
 }
 
-fn parse_face_patch(
+fn parse_legacy_face(
+    scope: &mut v8::PinScope,
+    face: v8::Local<v8::Object>,
+) -> Result<Face, ScriptError> {
+    Ok(Face {
+        foreground: parse_color(scope, face, "foreground")?,
+        background: parse_color(scope, face, "background")?,
+        bold: optional_bool(scope, face, "bold")?,
+        italic: optional_bool(scope, face, "italic")?,
+        underline: optional_bool(scope, face, "underline")?,
+    })
+}
+
+fn parse_face_inherits(
+    scope: &mut v8::PinScope,
+    face: v8::Local<v8::Object>,
+) -> Result<Vec<FaceName>, ScriptError> {
+    let Some(value) = property(scope, face, "inherits") else {
+        return Ok(Vec::new());
+    };
+    if value.is_null_or_undefined() {
+        return Ok(Vec::new());
+    }
+    let values = v8::Local::<v8::Array>::try_from(value)
+        .map_err(|_| ScriptError::new("face inherits must be an array"))?;
+    let mut inherits = Vec::with_capacity(values.length() as usize);
+    for index in 0..values.length() {
+        let value = values
+            .get_index(scope, index)
+            .ok_or_else(|| ScriptError::new("failed to read inherited face"))?;
+        if !value.is_string() {
+            return Err(ScriptError::new("inherited face names must be strings"));
+        }
+        let name = value.to_rust_string_lossy(scope);
+        if name.is_empty() {
+            return Err(ScriptError::new("inherited face name must not be empty"));
+        }
+        inherits.push(FaceName::new(name));
+    }
+    Ok(inherits)
+}
+
+pub(super) fn parse_face_patch(
     scope: &mut v8::PinScope,
     face: v8::Local<v8::Object>,
 ) -> Result<FacePatch, ScriptError> {

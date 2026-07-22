@@ -5,6 +5,7 @@ use crate::action::TransactionIntent;
 use crate::command::{ContentCommand, ModeInputCommand, TransactionCommand};
 use crate::dispatcher::DispatchCommand;
 use crate::mode::ModeId;
+use crate::theme::ResolvedFaceOperation;
 use vell_protocol::ids::{ContentId, ViewId};
 
 pub(crate) use vell_mode::operation::*;
@@ -51,6 +52,7 @@ pub enum ResolvedOperation {
         content: ContentId,
         input: ModeInputCommand,
     },
+    Face(ResolvedFaceOperation),
     App(AppOperation),
 }
 

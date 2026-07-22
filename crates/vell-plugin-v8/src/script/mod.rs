@@ -18,8 +18,8 @@ use vell_mode::{
     Mode, ModeContentContext, ModeError, ModeJobRequest, ModeResult, ModeState, ModeViewContext,
 };
 use vell_protocol::content_query::{
-    Color, Face, FaceName, FaceOverride, FacePatch, FaceValue, NamedTextDecoration, RowRange,
-    ThemeName,
+    Color, Face, FaceDefinition, FaceName, FaceOverride, FacePatch, FaceValue,
+    NamedTextDecoration, RowRange, ThemeName,
 };
 use vell_protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
 
@@ -187,7 +187,7 @@ struct ScriptAdapterDefinitions {
 struct ScriptModeDefinition {
     name: ModeName,
     version: ScriptApiVersion,
-    faces: Vec<(FaceName, Face)>,
+    face_definitions: Vec<FaceDefinition>,
     before: Option<ModeName>,
     adapters: ScriptAdapterDefinitions,
 }
@@ -1397,6 +1397,12 @@ editor.modes.define({
             r#"
 editor.modes.define({
   name: "pairs",
+  faces: {
+    "plugin.pairs.match": {
+      inherits: ["syntax.string"],
+      fallback: { bold: true },
+    },
+  },
   on: {
     buffer: {
       state: () => ({ enabled: true, calls: 0 }),
@@ -1415,6 +1421,13 @@ editor.modes.define({
         moveWords(ctx) {
           ctx.cursor.moveWordForward(2);
         },
+        emphasize(ctx) {
+          ctx.faces.addRelative(
+            "plugin.pairs.match",
+            ["syntax.string", { underline: true }],
+            "view",
+          );
+        },
       },
       keys: { "\"": "quote" },
     },
@@ -1430,6 +1443,10 @@ editor.modes.define({
         let mode = ScriptHost::script_modes(&host).pop().unwrap();
         assert!(mode.adapters().contains(ContentKind::Buffer));
         assert!(!mode.adapters().contains(ContentKind::StatusBar));
+        let definitions = mode.face_definitions();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].name.as_str(), "plugin.pairs.match");
+        assert_eq!(definitions[0].inherits, vec![FaceName::new("syntax.string")]);
 
         let content_id = ContentId(0);
         let mut contents = ContentStore::default();
@@ -1502,6 +1519,28 @@ editor.modes.define({
                 ),
                 ..
             }]
+        ));
+
+        let emphasize = mode
+            .execute_view_with_arguments(
+                content_state.as_mut(),
+                view_state.as_mut(),
+                &context,
+                &ModeActionName::new("emphasize"),
+                &ModeValue::Null,
+            )
+            .unwrap();
+        let (_, operations) = emphasize.into_parts();
+        assert!(matches!(
+            operations.as_slice(),
+            [vell_mode::operation::OperationRequest::Face(
+                vell_mode::operation::FaceOperation::AddRelative {
+                    target: vell_mode::operation::FaceRemapTarget::CurrentView,
+                    face,
+                    token: vell_protocol::content_query::FaceRemapToken(1),
+                    expressions,
+                }
+            )] if face.as_str() == "plugin.pairs.match" && expressions.len() == 2
         ));
     }
 

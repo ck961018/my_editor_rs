@@ -57,6 +57,13 @@ interface EditorFacePatch {
   underline?: boolean | EditorFaceReset;
 }
 
+interface EditorFaceDefinition {
+  inherits?: string[];
+  fallback?: EditorFacePatch;
+}
+
+type EditorModeFace = EditorFace | EditorFaceDefinition;
+
 interface EditorKeyEvent {
   code:
     | "character"
@@ -200,6 +207,23 @@ interface CommandPrimitives {
   invoke(command: `${string}.${string}`, arguments?: ScriptData): void;
 }
 
+type FaceRemapScope = "session" | "content" | "view";
+type EditorFaceExpression = string | EditorFacePatch;
+
+interface FacePrimitives {
+  setBase(
+    face: string,
+    expressions: readonly EditorFaceExpression[] | null,
+    scope?: FaceRemapScope,
+  ): void;
+  addRelative(
+    face: string,
+    expressions: readonly EditorFaceExpression[],
+    scope?: FaceRemapScope,
+  ): number;
+  removeRelative(token: number): void;
+}
+
 interface AppPrimitives {
   save(): void;
   quit(): void;
@@ -240,6 +264,7 @@ interface BufferCommandContext<ContentState, ViewState, Arguments = ScriptData>
   readonly history: HistoryPrimitives;
   readonly viewport: ViewportPrimitives;
   readonly commands: CommandPrimitives;
+  readonly faces: FacePrimitives;
   readonly app: AppPrimitives;
   state: ContentState;
   viewState: ViewState;
@@ -265,6 +290,7 @@ interface StatusBarCommandContext<
   };
   readonly arguments: Arguments;
   readonly commands: CommandPrimitives;
+  readonly faces: FacePrimitives;
   state: ContentState;
   viewState: ViewState;
   pass(): Pass;
@@ -375,7 +401,7 @@ interface ModeDefinitionV2<
 > {
   name: string;
   before?: string;
-  faces?: Record<string, EditorFace>;
+  faces?: Record<string, EditorModeFace>;
   on: {
     buffer?: BufferAdapterDefinition<
       BufferState,
@@ -445,7 +471,7 @@ interface ModeDefinition<
   name: string;
   before?: string;
   worker?: string;
-  faces?: Record<string, EditorFace>;
+  faces?: Record<string, EditorModeFace>;
   content?: {
     create(
       context: Omit<ContentContext<never>, "contentState" | "arguments">,

@@ -2,6 +2,12 @@
 
 editor.modes.define({
   name: "pairs",
+  faces: {
+    "plugin.pairs.match": {
+      inherits: ["syntax.string"],
+      fallback: { bold: true },
+    },
+  },
   on: {
     buffer: {
       state: () => ({ enabled: true }),
@@ -13,6 +19,13 @@ editor.modes.define({
           void ctx.targetContentId;
           ctx.edit.insert('""');
           ctx.cursor.moveLeft();
+          const token = ctx.faces.addRelative(
+            "plugin.pairs.match",
+            ["syntax.string", { underline: true }],
+            "view",
+          );
+          ctx.faces.removeRelative(token);
+          ctx.faces.setBase("plugin.pairs.match", null, "content");
           ctx.viewState.insertedPairs++;
         },
       },
@@ -37,6 +50,7 @@ editor.modes.define({
           void ctx.dirty;
           void ctx.saveState;
           void ctx.textMetrics;
+          ctx.faces.addRelative("ui.status-bar", [{ bold: true }], "view");
           // @ts-expect-error StatusBar adapters cannot edit Buffer text.
           ctx.edit.insert("forbidden");
           // @ts-expect-error StatusBar adapters do not expose a cursor.

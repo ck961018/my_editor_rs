@@ -13,7 +13,9 @@ use crate::{
 use vell_core::content::ContentChange;
 use vell_core::input::{InputDecision, InputStatus};
 use vell_core::keymap::Keymap;
-use vell_protocol::content_query::{Face, FaceName, NamedTextDecoration, RowRange};
+use vell_protocol::content_query::{
+    Face, FaceDefinition, FaceName, FacePatch, NamedTextDecoration, RowRange,
+};
 use vell_protocol::key_event::KeyEvent;
 
 static EMPTY_TYPED_KEYMAP: LazyLock<Keymap<Command>> = LazyLock::new(Keymap::new);
@@ -87,6 +89,17 @@ pub trait TypedMode: 'static {
 
     fn faces(&self) -> Vec<(FaceName, Face)> {
         Vec::new()
+    }
+
+    fn face_definitions(&self) -> Vec<FaceDefinition> {
+        self.faces()
+            .into_iter()
+            .map(|(name, face)| FaceDefinition {
+                name,
+                inherits: Vec::new(),
+                fallback: FacePatch::from(&face),
+            })
+            .collect()
     }
 
     fn action_scope(&self, _action: &ModeActionName) -> ModeActionScope {
@@ -368,6 +381,10 @@ impl<M: TypedMode> Mode for ErasedMode<M> {
 
     fn faces(&self) -> Vec<(FaceName, Face)> {
         self.mode.faces()
+    }
+
+    fn face_definitions(&self) -> Vec<FaceDefinition> {
+        self.mode.face_definitions()
     }
 
     fn action_scope(&self, action: &ModeActionName) -> ModeActionScope {

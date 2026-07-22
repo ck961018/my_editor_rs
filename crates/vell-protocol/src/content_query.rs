@@ -20,9 +20,15 @@ impl FaceName {
 }
 
 pub fn is_host_face_name(name: &FaceName) -> bool {
-    ["ui.", "syntax.", "diagnostic.", "diff."]
+    ["ui", "syntax", "diagnostic", "diff"]
         .iter()
-        .any(|prefix| name.as_str().starts_with(prefix))
+        .any(|namespace| {
+            name.as_str() == *namespace
+                || name
+                    .as_str()
+                    .strip_prefix(namespace)
+                    .is_some_and(|suffix| suffix.starts_with('.'))
+        })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -191,6 +197,22 @@ pub struct FaceOverride {
     pub theme: Option<ThemeName>,
     pub patch: FacePatch,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FaceExpr {
+    Named(FaceName),
+    Patch(FacePatch),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FaceRemapScope {
+    Session,
+    Content(ContentId),
+    View(ViewId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FaceRemapToken(pub u64);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NamedTextDecoration {
@@ -448,5 +470,13 @@ mod tests {
         assert_eq!(painted.italic, root.italic);
         assert_eq!(painted.background, Some(Color::Ansi(4)));
         assert!(painted.bold);
+    }
+
+    #[test]
+    fn host_face_names_include_namespace_roots_but_not_similar_prefixes() {
+        assert!(is_host_face_name(&FaceName::new("ui")));
+        assert!(is_host_face_name(&FaceName::new("syntax.keyword")));
+        assert!(!is_host_face_name(&FaceName::new("ui-plugin.face")));
+        assert!(!is_host_face_name(&FaceName::new("plugin.example.ui")));
     }
 }

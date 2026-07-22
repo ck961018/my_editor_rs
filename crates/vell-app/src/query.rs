@@ -60,15 +60,25 @@ impl RenderQuery for AppQuery<'_> {
                     .presentation
                     .policy(id, content_revision, view.revision());
                 ViewPresentation::Text(TextPresentation {
-                    base_face: self.faces.resolve_root(&FaceName::new("ui.editor")),
+                    base_face: self.faces.resolve_root_for(
+                        &FaceName::new("ui.editor"),
+                        content,
+                        id,
+                    ),
                     selections: state.selections().clone(),
                     cursor_style: policy.cursor_style.unwrap_or(CursorStyle::Default),
                     selection_shape: policy.selection_shape.unwrap_or(SelectionShape::Character),
                     selection_face: policy
                         .selection_face
                         .as_ref()
-                        .map(|face| self.faces.resolve(face))
-                        .unwrap_or_else(|| self.faces.resolve(&FaceName::new("ui.selection"))),
+                        .map(|face| self.faces.resolve_for(face, content, id))
+                        .unwrap_or_else(|| {
+                            self.faces.resolve_for(
+                                &FaceName::new("ui.selection"),
+                                content,
+                                id,
+                            )
+                        }),
                 })
             }
             (ContentKind::StatusBar, ContentViewState::StatusBar(state)) => {
@@ -93,13 +103,32 @@ impl RenderQuery for AppQuery<'_> {
                             self.contents,
                             self.views,
                             self.faces,
+                            content,
+                            id,
                         )
                     },
                     |presentation| StatusBarPresentation {
-                        base_face: self.faces.resolve_status_bar_root(target_view),
-                        left: resolve_status_segments(&presentation.left, self.faces),
-                        center: resolve_status_segments(&presentation.center, self.faces),
-                        right: resolve_status_segments(&presentation.right, self.faces),
+                        base_face: self
+                            .faces
+                            .resolve_status_bar_root(target_view, content, id),
+                        left: resolve_status_segments(
+                            &presentation.left,
+                            self.faces,
+                            content,
+                            id,
+                        ),
+                        center: resolve_status_segments(
+                            &presentation.center,
+                            self.faces,
+                            content,
+                            id,
+                        ),
+                        right: resolve_status_segments(
+                            &presentation.right,
+                            self.faces,
+                            content,
+                            id,
+                        ),
                     },
                 );
                 ViewPresentation::StatusBar(presentation)
@@ -161,7 +190,7 @@ impl RenderQuery for AppQuery<'_> {
             .map(|decoration| TextDecoration {
                 start: decoration.start,
                 end: decoration.end,
-                face: self.faces.resolve(&decoration.face),
+                face: self.faces.resolve_for(&decoration.face, content, id),
             })
             .collect())
     }
@@ -170,6 +199,8 @@ impl RenderQuery for AppQuery<'_> {
 fn resolve_status_segments(
     segments: &[crate::mode::NamedStatusBarSegment],
     faces: &SessionFaces,
+    content: ContentId,
+    view: ViewId,
 ) -> Vec<StatusBarSegment> {
     segments
         .iter()
@@ -178,7 +209,7 @@ fn resolve_status_segments(
             face: segment
                 .face
                 .as_ref()
-                .map(|face| faces.resolve(face))
+                .map(|face| faces.resolve_for(face, content, view))
                 .unwrap_or_default(),
         })
         .collect()
@@ -190,6 +221,8 @@ fn default_status_bar_presentation(
     contents: &ContentStore,
     views: &HashMap<ViewId, View>,
     faces: &SessionFaces,
+    status_content: ContentId,
+    status_view: ViewId,
 ) -> StatusBarPresentation {
     let name = match contents.query(target, ContentQuery::ResourceName) {
         ContentData::ResourceName(name) => name.unwrap_or_else(|| "[No Name]".to_owned()),
@@ -253,7 +286,7 @@ fn default_status_bar_presentation(
     };
 
     StatusBarPresentation {
-        base_face: faces.resolve_status_bar_root(target_view),
+        base_face: faces.resolve_status_bar_root(target_view, status_content, status_view),
         left,
         center,
         right,

@@ -95,6 +95,7 @@ pub(super) enum EffectBehavior {
     Focus {
         target: SpaceId,
     },
+    Face,
     Quit,
 }
 

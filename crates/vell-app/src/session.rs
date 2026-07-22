@@ -390,6 +390,10 @@ impl ClientSession {
         &self.faces
     }
 
+    pub(super) fn faces_mut(&mut self) -> &mut SessionFaces {
+        &mut self.faces
+    }
+
     pub(super) fn presentation(&self) -> &PresentationLayerStore {
         &self.presentation
     }
@@ -1209,13 +1213,23 @@ impl ClientSession {
     }
 
     fn remove_view(&mut self, view: ViewId, mode_contents: &mut ModeContentStore) {
+        self.faces.remove_view_remaps(view);
         let content = self
             .views
             .remove(&view)
             .expect("removed view exists")
             .content();
-        for mode in self.view_modes.remove(view) {
-            mode_contents.detach_view(content, mode);
+        let removed_modes = self.view_modes.remove(view);
+        for mode in &removed_modes {
+            mode_contents.detach_view(content, *mode);
+        }
+        if !self.views.values().any(|view| view.content() == content) {
+            self.faces.remove_content_remaps(content);
+        }
+        for mode in removed_modes {
+            if !self.view_modes.contains_mode(mode) {
+                self.faces.remove_mode_remaps(mode);
+            }
         }
     }
 
