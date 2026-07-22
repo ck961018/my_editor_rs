@@ -41,7 +41,33 @@ let modes = loaded.modes;
 
 结果只暴露通用 `Mode` 对象和结构化诊断；V8 类型不会跨越 crate 边界。
 `PLUGIN_API_VERSION` 标识当前 schema 版本。根二进制通过
-`load_user_modes()` 合并内嵌插件与可选用户配置，然后再构建 App。
+`load_user_configuration()` 原子取得 Mode、Theme 和 Face override，再构建
+App。`load_user_modes()` 继续作为只需要 Mode 的兼容入口。
+
+## 选择 Theme 与覆盖 Face
+
+用户配置可以选择内建 Theme，并按属性覆盖 named Face：
+
+```ts
+editor.theme.use("catppuccin-mocha");
+
+editor.faces.override("syntax.comment", {
+  italic: false,
+});
+
+editor.faces.override(
+  "ui.editor",
+  { foreground: { reset: true } },
+  { theme: "catppuccin-latte" },
+);
+```
+
+不带 `theme` option 的覆盖作用于所有 Theme；带 option 的覆盖只在对应 Theme
+活动时生效。覆盖按属性合成，`false` 是显式值，`{ reset: true }` 恢复当前
+presentation root 的对应属性。命令行 `--theme` 优先于 config 选择。
+
+Theme 选择、Face override 和 Mode 定义属于同一个启动 draft。模块执行失败
+时三者一起回滚，不会发布部分配置。
 
 ## 定义 Mode
 

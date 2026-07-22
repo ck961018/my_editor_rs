@@ -12,7 +12,7 @@ use crate::session::ClientSession;
 use vell_core::buffer::Buffer;
 use vell_frontend::Frontend;
 use vell_protocol::ids::ContentId;
-use vell_protocol::content_query::ThemeName;
+use vell_protocol::content_query::{FaceOverride, ThemeName};
 
 pub struct App<F: Frontend> {
     pub(super) kernel: Kernel,
@@ -26,7 +26,7 @@ pub struct App<F: Frontend> {
 impl<F: Frontend> App<F> {
     #[allow(dead_code, reason = "unconfigured application constructor")]
     pub fn new(path: Option<&str>, width: usize, height: usize, frontend: F) -> io::Result<Self> {
-        Self::build(path, width, height, frontend, Vec::new(), None)
+        Self::build(path, width, height, frontend, Vec::new(), None, Vec::new())
     }
 
     pub fn with_modes(
@@ -36,7 +36,7 @@ impl<F: Frontend> App<F> {
         frontend: F,
         modes: Vec<Box<dyn Mode>>,
     ) -> io::Result<Self> {
-        Self::build(path, width, height, frontend, modes, None)
+        Self::build(path, width, height, frontend, modes, None, Vec::new())
     }
 
     pub fn with_modes_and_theme(
@@ -48,7 +48,35 @@ impl<F: Frontend> App<F> {
         theme: impl Into<String>,
     ) -> io::Result<Self> {
         let theme = ThemeName::new(theme);
-        Self::build(path, width, height, frontend, modes, Some(&theme))
+        Self::build(
+            path,
+            width,
+            height,
+            frontend,
+            modes,
+            Some(&theme),
+            Vec::new(),
+        )
+    }
+
+    pub fn with_modes_and_visuals(
+        path: Option<&str>,
+        width: usize,
+        height: usize,
+        frontend: F,
+        modes: Vec<Box<dyn Mode>>,
+        theme: Option<ThemeName>,
+        face_overrides: Vec<FaceOverride>,
+    ) -> io::Result<Self> {
+        Self::build(
+            path,
+            width,
+            height,
+            frontend,
+            modes,
+            theme.as_ref(),
+            face_overrides,
+        )
     }
 
     fn build(
@@ -58,6 +86,7 @@ impl<F: Frontend> App<F> {
         frontend: F,
         modes: Vec<Box<dyn Mode>>,
         theme: Option<&ThemeName>,
+        face_overrides: Vec<FaceOverride>,
     ) -> io::Result<Self> {
         let mut buffer = Buffer::new();
         if let Some(p) = path {
@@ -65,9 +94,24 @@ impl<F: Frontend> App<F> {
         }
         let bootstrap = match theme {
             Some(theme) => {
-                bootstrap_editor_with_theme(buffer, width, height, modes, Some(theme))?
+                bootstrap_editor_with_theme(
+                    buffer,
+                    width,
+                    height,
+                    modes,
+                    Some(theme),
+                    face_overrides,
+                )?
             }
-            None => bootstrap_editor(buffer, width, height, modes)?,
+            None if face_overrides.is_empty() => bootstrap_editor(buffer, width, height, modes)?,
+            None => bootstrap_editor_with_theme(
+                buffer,
+                width,
+                height,
+                modes,
+                None,
+                face_overrides,
+            )?,
         };
         Ok(Self {
             kernel: bootstrap.kernel,

@@ -45,6 +45,18 @@ interface EditorFace {
   underline?: boolean;
 }
 
+interface EditorFaceReset {
+  readonly reset: true;
+}
+
+interface EditorFacePatch {
+  foreground?: number | `#${string}` | EditorFaceReset;
+  background?: number | `#${string}` | EditorFaceReset;
+  bold?: boolean | EditorFaceReset;
+  italic?: boolean | EditorFaceReset;
+  underline?: boolean | EditorFaceReset;
+}
+
 interface EditorKeyEvent {
   code:
     | "character"
@@ -461,6 +473,16 @@ interface ModeDefinition<
 }
 
 declare const editor: {
+  readonly theme: {
+    use(name: string): void;
+  };
+  readonly faces: {
+    override(
+      name: string,
+      patch: EditorFacePatch,
+      options?: { readonly theme?: string },
+    ): void;
+  };
   readonly modes: {
     define<
       BufferState = ScriptData,

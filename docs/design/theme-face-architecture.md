@@ -707,14 +707,14 @@ vell --theme catppuccin-mocha file.rs
 editor.theme.use("catppuccin-mocha");
 ```
 
-`load_user_modes()` 届时改为返回更完整的启动结果：
+`load_user_configuration()` 返回完整的启动结果；`load_user_modes()` 保留为
+只需要 Mode 的兼容入口：
 
 ```rust
 pub struct LoadedEditorConfiguration {
     pub modes: Vec<Box<dyn Mode>>,
     pub theme: Option<ThemeName>,
-    pub face_definitions: Vec<FaceDefinition>,
-    pub face_overrides: Vec<(FaceName, FacePatch)>,
+    pub face_overrides: Vec<FaceOverride>,
 }
 ```
 

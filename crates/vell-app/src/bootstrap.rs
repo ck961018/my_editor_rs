@@ -13,7 +13,7 @@ use vell_core::content::{Content, ContentKind};
 use vell_core::content_store::ContentStore;
 use vell_core::status_bar::StatusBar;
 use vell_protocol::ids::{ContentId, ViewId};
-use vell_protocol::content_query::ThemeName;
+use vell_protocol::content_query::{FaceOverride, ThemeName};
 
 pub(super) struct EditorBootstrap {
     pub kernel: Kernel,
@@ -70,7 +70,7 @@ pub(super) fn bootstrap_editor(
     height: usize,
     configured_modes: Vec<Box<dyn Mode>>,
 ) -> io::Result<EditorBootstrap> {
-    bootstrap_editor_with_theme(buffer, width, height, configured_modes, None)
+    bootstrap_editor_with_theme(buffer, width, height, configured_modes, None, Vec::new())
 }
 
 pub(super) fn bootstrap_editor_with_theme(
@@ -79,6 +79,7 @@ pub(super) fn bootstrap_editor_with_theme(
     height: usize,
     configured_modes: Vec<Box<dyn Mode>>,
     theme: Option<&ThemeName>,
+    face_overrides: Vec<FaceOverride>,
 ) -> io::Result<EditorBootstrap> {
     let mut ids = BootstrapIds::default();
     let editor_content = ids.content();
@@ -133,7 +134,8 @@ pub(super) fn bootstrap_editor_with_theme(
         .collect();
     let mut kernel = Kernel::new(contents, modes);
     let (contents, modes, mode_contents) = kernel.mode_attachment_parts();
-    let face_environment = FaceEnvironment::new(theme).map_err(io::Error::other)?;
+    let face_environment = FaceEnvironment::with_overrides(theme, face_overrides)
+        .map_err(io::Error::other)?;
     let session = ClientSession::editor(
         contents,
         modes,

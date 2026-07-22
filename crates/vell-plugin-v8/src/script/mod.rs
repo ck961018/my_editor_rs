@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
-use crate::api::{LoadedScriptModes, ScriptDiagnostic};
+use crate::api::{LoadedEditorConfiguration, LoadedScriptModes, ScriptDiagnostic};
 use vell_core::content::ContentKind;
 use vell_mode::command::ModeValue;
 use vell_mode::mode_name::{ModeActionName, ModeName};
@@ -17,7 +17,10 @@ use vell_mode::operation::MAX_MODE_CALLBACK_OPERATIONS;
 use vell_mode::{
     Mode, ModeContentContext, ModeError, ModeJobRequest, ModeResult, ModeState, ModeViewContext,
 };
-use vell_protocol::content_query::{Color, Face, FaceName, NamedTextDecoration, RowRange};
+use vell_protocol::content_query::{
+    Color, Face, FaceName, FaceOverride, FacePatch, FaceValue, NamedTextDecoration, RowRange,
+    ThemeName,
+};
 use vell_protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
 
 mod bridge;
@@ -142,6 +145,12 @@ enum ScriptApiVersion {
 struct ScriptDiagnostics {
     messages: Vec<ScriptDiagnostic>,
     v1_deprecation_reported: bool,
+}
+
+#[derive(Clone, Default)]
+struct ScriptConfigurationDraft {
+    theme: Option<ThemeName>,
+    face_overrides: Vec<FaceOverride>,
 }
 
 impl ScriptApiVersion {
@@ -595,11 +604,25 @@ pub fn load_default_modes() -> Result<Vec<Box<dyn Mode>>, ScriptError> {
 }
 
 pub fn load_user_modes() -> Result<Vec<Box<dyn Mode>>, ScriptError> {
+    Ok(load_user_configuration()?.modes)
+}
+
+pub fn load_user_configuration() -> Result<LoadedEditorConfiguration, ScriptError> {
     let host = load_user_config()?;
-    Ok(ScriptHost::script_modes(&host)
+    let modes = ScriptHost::script_modes(&host)
         .into_iter()
         .map(|mode| Box::new(mode) as Box<dyn Mode>)
-        .collect())
+        .collect();
+    let configuration = {
+        let host = host.borrow();
+        let configuration = host.configuration.borrow().clone();
+        configuration
+    };
+    Ok(LoadedEditorConfiguration {
+        modes,
+        theme: configuration.theme,
+        face_overrides: configuration.face_overrides,
+    })
 }
 
 pub fn load_typescript_modes(
@@ -899,6 +922,73 @@ mod tests {
     }
 
     #[test]
+    fn editor_visual_configuration_is_typed_and_atomic() {
+        let mut host = ScriptHost::new();
+        host.execute_typescript(
+            "file:///visuals.ts",
+            r##"
+editor.theme.use("catppuccin-mocha");
+editor.faces.override("syntax.comment", {
+  foreground: "#010203",
+  italic: false,
+});
+editor.faces.override(
+  "ui.editor",
+  { background: { reset: true } },
+  { theme: "catppuccin-latte" },
+);
+"##,
+        )
+        .unwrap();
+        let before = host.configuration.borrow().clone();
+
+        let error = host
+            .execute_typescript(
+                "file:///invalid-color.ts",
+                r#"editor.faces.override("syntax.keyword", { foreground: 1.5 });"#,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("integer from 0 to 255"));
+        assert_eq!(
+            host.configuration.borrow().face_overrides,
+            before.face_overrides
+        );
+
+        let error = host
+            .execute_typescript(
+                "file:///invalid-visuals.ts",
+                r#"
+editor.theme.use("catppuccin-latte");
+editor.faces.override("syntax.keyword", { bold: true });
+throw new Error("rollback");
+"#,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("rollback"));
+        let configuration = host.configuration.borrow();
+        assert_eq!(configuration.theme, before.theme);
+        assert_eq!(configuration.face_overrides, before.face_overrides);
+        assert_eq!(
+            configuration.theme,
+            Some(ThemeName::new("catppuccin-mocha"))
+        );
+        assert_eq!(configuration.face_overrides.len(), 2);
+        assert_eq!(
+            configuration.face_overrides[0].patch.foreground,
+            FaceValue::Value(Color::Rgb {
+                red: 1,
+                green: 2,
+                blue: 3,
+            })
+        );
+        assert_eq!(
+            configuration.face_overrides[1].patch.background,
+            FaceValue::Reset
+        );
+    }
+
+    #[test]
     fn invalid_optional_config_keeps_existing_modes_and_host_usable() {
         let mut host = ScriptHost::new();
         host.execute_typescript(
@@ -908,18 +998,32 @@ editor.modes.define({
   name: "default-mode",
   on: { buffer: {} },
 });
+editor.theme.use("terminal-default");
 "#,
         )
         .unwrap();
         let host = Rc::new(RefCell::new(host));
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.ts");
-        fs::write(&config, "throw new Error('invalid user config');").unwrap();
+        fs::write(
+            &config,
+            r#"
+editor.theme.use("catppuccin-latte");
+editor.faces.override("syntax.comment", { italic: false });
+throw new Error("invalid user config");
+"#,
+        )
+        .unwrap();
 
         let error = load_optional_user_config(&host, &config).unwrap_err();
 
         assert!(error.to_string().contains("invalid user config"));
         assert_eq!(ScriptHost::script_modes(&host).len(), 1);
+        assert_eq!(
+            host.borrow().configuration.borrow().theme.clone(),
+            Some(ThemeName::new("terminal-default"))
+        );
+        assert!(host.borrow().configuration.borrow().face_overrides.is_empty());
         assert_eq!(
             host.borrow_mut()
                 .evaluate_typescript("file:///probe.ts", "40 + 2")

@@ -137,3 +137,10 @@ editor.modes.define({
     },
   },
 });
+editor.theme.use("catppuccin-mocha");
+editor.faces.override("syntax.comment", { italic: false });
+editor.faces.override(
+  "ui.editor",
+  { foreground: { reset: true } },
+  { theme: "catppuccin-latte" },
+);

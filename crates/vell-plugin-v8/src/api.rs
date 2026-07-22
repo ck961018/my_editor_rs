@@ -1,4 +1,5 @@
 use vell_mode::Mode;
+use vell_protocol::content_query::{FaceOverride, ThemeName};
 
 pub const PLUGIN_API_VERSION: u32 = 2;
 pub const V1_REMOVAL_VERSION: &str = "0.3.0";
@@ -31,4 +32,10 @@ impl ScriptDiagnostic {
 pub struct LoadedScriptModes {
     pub modes: Vec<Box<dyn Mode>>,
     pub diagnostics: Vec<ScriptDiagnostic>,
+}
+
+pub struct LoadedEditorConfiguration {
+    pub modes: Vec<Box<dyn Mode>>,
+    pub theme: Option<ThemeName>,
+    pub face_overrides: Vec<FaceOverride>,
 }

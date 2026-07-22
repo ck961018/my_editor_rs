@@ -186,6 +186,13 @@ pub struct FaceDefinition {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FaceOverride {
+    pub face: FaceName,
+    pub theme: Option<ThemeName>,
+    pub patch: FacePatch,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NamedTextDecoration {
     pub start: TextOffset,
     pub end: TextOffset,

@@ -22,4 +22,5 @@ rust-version = "1.88"
 tokio = { version = "1", features = ["full"] }
 vell-app = { path = "crates/vell-app" }
 vell-plugin-v8 = { path = "crates/vell-plugin-v8" }
+vell-protocol = { path = "crates/vell-protocol" }
 vell-tui = { path = "crates/vell-tui" }

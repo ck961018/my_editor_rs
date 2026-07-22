@@ -10,8 +10,105 @@ pub(super) fn install_editor_api(scope: &mut v8::PinScope<'_, '_>) {
         .get_function(scope)
         .unwrap();
     modes.set(scope, define_name.into(), define.into());
+    let theme = v8::Object::new(scope);
+    let use_name = v8::String::new(scope, "use").unwrap();
+    let use_theme = v8::FunctionTemplate::new(scope, select_theme)
+        .get_function(scope)
+        .unwrap();
+    theme.set(scope, use_name.into(), use_theme.into());
+    let faces = v8::Object::new(scope);
+    let override_name = v8::String::new(scope, "override").unwrap();
+    let override_face = v8::FunctionTemplate::new(scope, define_face_override)
+        .get_function(scope)
+        .unwrap();
+    faces.set(scope, override_name.into(), override_face.into());
     set_object(scope, editor, "modes", modes);
+    set_object(scope, editor, "theme", theme);
+    set_object(scope, editor, "faces", faces);
     set_object(scope, global, "editor", editor);
+}
+
+fn select_theme(
+    scope: &mut v8::PinScope,
+    arguments: v8::FunctionCallbackArguments,
+    mut return_value: v8::ReturnValue,
+) {
+    let value = arguments.get(0);
+    if !value.is_string() {
+        throw_script_error(scope, "editor.theme.use expects a theme name");
+        return;
+    }
+    let name = value.to_rust_string_lossy(scope);
+    if name.is_empty() {
+        throw_script_error(scope, "editor.theme.use expects a non-empty theme name");
+        return;
+    }
+    let Some(configuration) = scope
+        .get_slot::<Rc<RefCell<ScriptConfigurationDraft>>>()
+        .cloned()
+    else {
+        throw_script_error(scope, "script configuration draft is unavailable");
+        return;
+    };
+    configuration.borrow_mut().theme = Some(ThemeName::new(name));
+    return_value.set_undefined();
+}
+
+fn define_face_override(
+    scope: &mut v8::PinScope,
+    arguments: v8::FunctionCallbackArguments,
+    mut return_value: v8::ReturnValue,
+) {
+    let name = arguments.get(0);
+    if !name.is_string() {
+        throw_script_error(scope, "editor.faces.override expects a face name");
+        return;
+    }
+    let name = name.to_rust_string_lossy(scope);
+    if name.is_empty() {
+        throw_script_error(scope, "editor.faces.override expects a non-empty face name");
+        return;
+    }
+    let patch = match v8::Local::<v8::Object>::try_from(arguments.get(1)) {
+        Ok(object) => match parse_face_patch(scope, object) {
+            Ok(patch) => patch,
+            Err(error) => {
+                throw_script_error(scope, &error.to_string());
+                return;
+            }
+        },
+        Err(_) => {
+            throw_script_error(scope, "editor.faces.override expects a face object");
+            return;
+        }
+    };
+    let theme = match v8::Local::<v8::Object>::try_from(arguments.get(2)) {
+        Ok(options) => match optional_string(scope, options, "theme") {
+            Ok(theme) => theme.map(ThemeName::new),
+            Err(error) => {
+                throw_script_error(scope, &error.to_string());
+                return;
+            }
+        },
+        Err(_) if arguments.get(2).is_null_or_undefined() => None,
+        Err(_) => {
+            throw_script_error(scope, "face override options must be an object");
+            return;
+        }
+    };
+    let Some(configuration) = scope
+        .get_slot::<Rc<RefCell<ScriptConfigurationDraft>>>()
+        .cloned()
+    else {
+        throw_script_error(scope, "script configuration draft is unavailable");
+        return;
+    };
+    configuration.borrow_mut().face_overrides.push(FaceOverride {
+        face: FaceName::new(name),
+        theme,
+        patch,
+    });
+    return_value.set_undefined();
 }
 
 fn define_mode(
@@ -512,6 +609,77 @@ fn parse_faces(
     Ok(parsed)
 }
 
+fn parse_face_patch(
+    scope: &mut v8::PinScope,
+    face: v8::Local<v8::Object>,
+) -> Result<FacePatch, ScriptError> {
+    Ok(FacePatch {
+        foreground: parse_patch_color(scope, face, "foreground")?,
+        background: parse_patch_color(scope, face, "background")?,
+        bold: parse_patch_bool(scope, face, "bold")?,
+        italic: parse_patch_bool(scope, face, "italic")?,
+        underline: parse_patch_bool(scope, face, "underline")?,
+    })
+}
+
+fn parse_patch_color(
+    scope: &mut v8::PinScope,
+    face: v8::Local<v8::Object>,
+    name: &str,
+) -> Result<FaceValue<Color>, ScriptError> {
+    let Some(value) = property(scope, face, name) else {
+        return Ok(FaceValue::Unspecified);
+    };
+    if value.is_null_or_undefined() {
+        return Ok(FaceValue::Unspecified);
+    }
+    if is_reset_value(scope, value)? {
+        return Ok(FaceValue::Reset);
+    }
+    Ok(match parse_color(scope, face, name)? {
+        Some(color) => FaceValue::Value(color),
+        None => FaceValue::Unspecified,
+    })
+}
+
+fn parse_patch_bool(
+    scope: &mut v8::PinScope,
+    face: v8::Local<v8::Object>,
+    name: &str,
+) -> Result<FaceValue<bool>, ScriptError> {
+    let Some(value) = property(scope, face, name) else {
+        return Ok(FaceValue::Unspecified);
+    };
+    if value.is_null_or_undefined() {
+        return Ok(FaceValue::Unspecified);
+    }
+    if is_reset_value(scope, value)? {
+        return Ok(FaceValue::Reset);
+    }
+    if !value.is_boolean() {
+        return Err(ScriptError::new(format!(
+            "face {name} must be a boolean or reset"
+        )));
+    }
+    Ok(FaceValue::Value(value.boolean_value(scope)))
+}
+
+fn is_reset_value(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<bool, ScriptError> {
+    let Ok(object) = v8::Local::<v8::Object>::try_from(value) else {
+        return Ok(false);
+    };
+    let Some(reset) = property(scope, object, "reset") else {
+        return Err(ScriptError::new("face reset must be { reset: true }"));
+    };
+    if !reset.is_boolean() || !reset.boolean_value(scope) {
+        return Err(ScriptError::new("face reset must be { reset: true }"));
+    }
+    Ok(true)
+}
+
 fn parse_color(
     scope: &mut v8::PinScope,
     face: v8::Local<v8::Object>,
@@ -523,11 +691,17 @@ fn parse_color(
     if value.is_null_or_undefined() {
         return Ok(None);
     }
-    if let Some(ansi) = value
-        .integer_value(scope)
-        .and_then(|value| u8::try_from(value).ok())
-    {
-        return Ok(Some(Color::Ansi(ansi)));
+    if value.is_number() {
+        let ansi = value
+            .number_value(scope)
+            .filter(|value| value.is_finite() && value.fract() == 0.0)
+            .filter(|value| (0.0..=u8::MAX as f64).contains(value))
+            .map(|value| value as u8);
+        return ansi.map(Color::Ansi).map(Some).ok_or_else(|| {
+            ScriptError::new(format!(
+                "face {name} ANSI index must be an integer from 0 to 255"
+            ))
+        });
     }
     if value.is_string() {
         let value = value.to_rust_string_lossy(scope);
