@@ -19,6 +19,12 @@ impl FaceName {
     }
 }
 
+pub fn is_host_face_name(name: &FaceName) -> bool {
+    ["ui.", "syntax.", "diagnostic.", "diff."]
+        .iter()
+        .any(|prefix| name.as_str().starts_with(prefix))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ThemeName(String);
 

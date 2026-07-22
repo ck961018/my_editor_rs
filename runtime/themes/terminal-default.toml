@@ -10,6 +10,7 @@ appearance = "dark"
 "syntax.attribute" = { foreground = 173 }
 "syntax.comment" = { foreground = 244, italic = true }
 "syntax.constant" = { foreground = 141 }
+"syntax.constructor" = { foreground = 109 }
 "syntax.function" = { foreground = 75 }
 "syntax.keyword" = { foreground = 170, bold = true }
 "syntax.label" = { foreground = 179 }

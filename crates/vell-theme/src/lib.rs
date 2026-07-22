@@ -564,6 +564,21 @@ mod tests {
     }
 
     #[test]
+    fn terminal_theme_keeps_non_hierarchical_capture_aliases() {
+        let registry = ThemeRegistry::with_builtins().unwrap();
+        let theme = registry
+            .resolve(&ThemeName::new("terminal-default"))
+            .unwrap();
+        assert_eq!(
+            theme
+                .face(&FaceName::new("syntax.constructor"))
+                .unwrap()
+                .foreground,
+            FaceValue::Value(Color::Ansi(109))
+        );
+    }
+
+    #[test]
     fn inheritance_cycles_report_the_full_path() {
         let mut registry = ThemeRegistry::default();
         for source in [

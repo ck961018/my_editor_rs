@@ -21,7 +21,7 @@ use vell_core::input::{InputDecision, InputStatus};
 use vell_core::keymap::Keymap;
 use vell_protocol::content_query::{
     BufferBackingState, ContentData, ContentQuery, CursorStyle, DirtyState, Face, FaceName,
-    NamedTextDecoration, RowRange, SaveState, SelectionShape, TextMetrics,
+    NamedTextDecoration, RowRange, SaveState, SelectionShape, TextMetrics, is_host_face_name,
 };
 use vell_protocol::ids::{ContentId, ViewId};
 use vell_protocol::key_event::KeyEvent;
@@ -521,6 +521,7 @@ impl ModeDraftJournal {
 pub struct FaceRegistry {
     faces: HashMap<FaceName, RegisteredFace>,
     conflicts: Vec<FaceConflict>,
+    registration_errors: Vec<FaceRegistrationError>,
 }
 
 struct RegisteredFace {
@@ -535,10 +536,34 @@ pub struct FaceConflict {
     pub rejected_provider: ModeName,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FaceRegistrationError {
+    pub face: FaceName,
+    pub rejected_provider: ModeName,
+    pub reason: FaceRegistrationErrorReason,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaceRegistrationErrorReason {
+    HostNamespace,
+}
+
 impl FaceRegistry {
     fn register_defaults(&mut self, mode: &dyn Mode) {
         for (name, face) in mode.faces() {
             let provider = mode.name().clone();
+            if is_host_face_name(&name) {
+                if !self.registration_errors.iter().any(|error| {
+                    error.face == name && error.rejected_provider == provider
+                }) {
+                    self.registration_errors.push(FaceRegistrationError {
+                        face: name,
+                        rejected_provider: provider,
+                        reason: FaceRegistrationErrorReason::HostNamespace,
+                    });
+                }
+                continue;
+            }
             if let Some(existing) = self.faces.get(&name) {
                 if existing.provider.as_ref() != Some(&provider)
                     && !self.conflicts.iter().any(|conflict| {
@@ -576,6 +601,10 @@ impl FaceRegistry {
 
     pub fn conflicts(&self) -> &[FaceConflict] {
         &self.conflicts
+    }
+
+    pub fn registration_errors(&self) -> &[FaceRegistrationError] {
+        &self.registration_errors
     }
 
     #[allow(dead_code, reason = "theme and script adapters override named faces")]
@@ -2678,6 +2707,8 @@ mod tests {
 
     struct NoAdapterMode(ModeName);
 
+    struct StandardFaceMode(ModeName);
+
     impl Mode for NoAdapterMode {
         fn name(&self) -> &ModeName {
             &self.0
@@ -2689,6 +2720,30 @@ mod tests {
 
         fn adapters(&self) -> ModeAdapters {
             ModeAdapters::default()
+        }
+    }
+
+    impl Mode for StandardFaceMode {
+        fn name(&self) -> &ModeName {
+            &self.0
+        }
+
+        fn actions(&self) -> &[ModeActionName] {
+            &[]
+        }
+
+        fn adapters(&self) -> ModeAdapters {
+            ModeAdapters::buffer()
+        }
+
+        fn faces(&self) -> Vec<(FaceName, Face)> {
+            vec![(
+                FaceName::new("syntax.keyword"),
+                Face {
+                    bold: Some(true),
+                    ..Face::default()
+                },
+            )]
         }
     }
 
@@ -2802,6 +2857,24 @@ mod tests {
         assert_eq!(
             registry.register(NoAdapterMode(name.clone())),
             Err(ModeRegistrationError::MissingAdapter(name))
+        );
+    }
+
+    #[test]
+    fn face_registry_rejects_mode_owned_host_namespaces() {
+        let mode = StandardFaceMode(ModeName::new("standard-face"));
+        let mut registry = FaceRegistry::default();
+
+        registry.register_defaults(&mode);
+
+        assert_eq!(registry.resolve(&FaceName::new("syntax.keyword")), Face::default());
+        assert_eq!(
+            registry.registration_errors(),
+            &[FaceRegistrationError {
+                face: FaceName::new("syntax.keyword"),
+                rejected_provider: ModeName::new("standard-face"),
+                reason: FaceRegistrationErrorReason::HostNamespace,
+            }]
         );
     }
 

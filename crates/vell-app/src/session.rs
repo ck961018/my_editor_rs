@@ -385,6 +385,8 @@ impl ClientSession {
     }
 
     pub(super) fn faces(&self) -> &SessionFaces {
+        self.faces
+            .set_active_view(view_for_space(&self.scene, self.focused));
         &self.faces
     }
 

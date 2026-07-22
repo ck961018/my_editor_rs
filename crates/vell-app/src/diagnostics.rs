@@ -1,5 +1,5 @@
 use crate::application::App;
-use crate::mode::{FaceConflict, ModeFault, ModeViewPolicy};
+use crate::mode::{FaceConflict, FaceRegistrationError, ModeFault, ModeViewPolicy};
 use crate::mode_name::ModeName;
 use crate::presentation::PolicySources;
 use vell_frontend::Frontend;
@@ -105,6 +105,10 @@ impl<F: Frontend> App<F> {
 
     pub fn face_conflicts(&self) -> &[FaceConflict] {
         self.session.faces().conflicts()
+    }
+
+    pub fn face_registration_errors(&self) -> &[FaceRegistrationError] {
+        self.session.faces().registration_errors()
     }
 
     pub fn runtime_diagnostics(&self) -> &[RuntimeDiagnostic] {

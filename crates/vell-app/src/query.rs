@@ -96,9 +96,7 @@ impl RenderQuery for AppQuery<'_> {
                         )
                     },
                     |presentation| StatusBarPresentation {
-                        base_face: self
-                            .faces
-                            .resolve_root(&FaceName::new("ui.status-bar")),
+                        base_face: self.faces.resolve_status_bar_root(target_view),
                         left: resolve_status_segments(&presentation.left, self.faces),
                         center: resolve_status_segments(&presentation.center, self.faces),
                         right: resolve_status_segments(&presentation.right, self.faces),
@@ -255,7 +253,7 @@ fn default_status_bar_presentation(
     };
 
     StatusBarPresentation {
-        base_face: faces.resolve_root(&FaceName::new("ui.status-bar")),
+        base_face: faces.resolve_status_bar_root(target_view),
         left,
         center,
         right,

@@ -1,12 +1,14 @@
+use std::cell::Cell;
 use std::sync::Arc;
 
 use vell_protocol::content_query::{
     Face, FaceName, FacePatch, PaintFace, ThemeName,
 };
 use vell_protocol::revision::Revision;
+use vell_protocol::ids::ViewId;
 use vell_theme::{ResolvedTheme, ThemeError, ThemeRegistry};
 
-use crate::mode::{FaceConflict, FaceRegistry};
+use crate::mode::{FaceConflict, FaceRegistrationError, FaceRegistry};
 
 pub(super) struct FaceEnvironment {
     fallback_theme: Arc<ResolvedTheme>,
@@ -60,6 +62,7 @@ impl FaceEnvironment {
 pub(super) struct SessionFaces {
     registry: FaceRegistry,
     environment: FaceEnvironment,
+    active_view: Cell<Option<ViewId>>,
 }
 
 impl Default for SessionFaces {
@@ -76,6 +79,7 @@ impl SessionFaces {
         Self {
             registry,
             environment,
+            active_view: Cell::new(None),
         }
     }
 
@@ -88,6 +92,19 @@ impl SessionFaces {
             .resolve_root(name, &self.registry.resolve(name))
     }
 
+    pub(super) fn set_active_view(&self, view: Option<ViewId>) {
+        self.active_view.set(view);
+    }
+
+    pub(super) fn resolve_status_bar_root(&self, target: ViewId) -> PaintFace {
+        let name = if self.active_view.get() == Some(target) {
+            "ui.status-bar"
+        } else {
+            "ui.status-bar.inactive"
+        };
+        self.resolve_root(&FaceName::new(name))
+    }
+
     pub(super) fn provider(
         &self,
         name: &FaceName,
@@ -97,6 +114,10 @@ impl SessionFaces {
 
     pub(super) fn conflicts(&self) -> &[FaceConflict] {
         self.registry.conflicts()
+    }
+
+    pub(super) fn registration_errors(&self) -> &[FaceRegistrationError] {
+        self.registry.registration_errors()
     }
 
     pub(super) fn registry_mut(&mut self) -> &mut FaceRegistry {
@@ -121,6 +142,34 @@ mod tests {
                 red: 0x93,
                 green: 0x99,
                 blue: 0xb2,
+            })
+        );
+    }
+
+    #[test]
+    fn status_bar_uses_inactive_face_for_non_focused_target() {
+        let environment =
+            FaceEnvironment::new(Some(&ThemeName::new("catppuccin-mocha"))).unwrap();
+        let faces = SessionFaces::new(FaceRegistry::default(), environment);
+        faces.set_active_view(Some(ViewId(1)));
+
+        let active = faces.resolve_status_bar_root(ViewId(1));
+        let inactive = faces.resolve_status_bar_root(ViewId(2));
+
+        assert_eq!(
+            active.background,
+            Some(Color::Rgb {
+                red: 0x18,
+                green: 0x18,
+                blue: 0x25,
+            })
+        );
+        assert_eq!(
+            inactive.background,
+            Some(Color::Rgb {
+                red: 0x31,
+                green: 0x32,
+                blue: 0x44,
             })
         );
     }

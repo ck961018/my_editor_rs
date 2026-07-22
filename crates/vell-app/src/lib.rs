@@ -34,6 +34,7 @@ pub use application::App;
 pub use diagnostics::{
     ModeDecorationDiagnostics, NamedPolicySources, RuntimeDiagnostic, ViewModeDiagnostics,
 };
+pub use vell_mode::{FaceRegistrationError, FaceRegistrationErrorReason};
 pub use layout::{StatusBarHandle, StatusBarPlacement};
 
 #[cfg(test)]
