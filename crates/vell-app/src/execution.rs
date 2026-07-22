@@ -175,17 +175,15 @@ impl Default for ExecutionBudget {
 
 impl ExecutionBudget {
     fn consume_operation(&mut self) -> Result<(), OperationError> {
-        consume(
-            &mut self.operations,
-            || format!("command chain exceeded the limit of {MAX_OPERATIONS_PER_FRAME} commands"),
-        )
+        consume(&mut self.operations, || {
+            format!("command chain exceeded the limit of {MAX_OPERATIONS_PER_FRAME} commands")
+        })
     }
 
     fn consume_nested_mode_call(&mut self) -> Result<(), OperationError> {
-        consume(
-            &mut self.nested_mode_calls,
-            || "nested mode calls exceeded the limit of 256 calls".to_owned(),
-        )
+        consume(&mut self.nested_mode_calls, || {
+            "nested mode calls exceeded the limit of 256 calls".to_owned()
+        })
     }
 
     fn consume_replayed_inputs(&mut self, count: usize) -> Result<(), OperationError> {
@@ -199,10 +197,7 @@ impl ExecutionBudget {
     }
 }
 
-fn consume(
-    remaining: &mut usize,
-    message: impl FnOnce() -> String,
-) -> Result<(), OperationError> {
+fn consume(remaining: &mut usize, message: impl FnOnce() -> String) -> Result<(), OperationError> {
     let Some(next) = remaining.checked_sub(1) else {
         return Err(OperationError::new(message()));
     };

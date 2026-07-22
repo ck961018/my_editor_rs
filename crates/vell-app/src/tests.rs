@@ -2285,11 +2285,12 @@ fn content_query_reads_buffer_and_view() {
         faces: app.session.faces(),
     };
     assert_eq!(
-        query.content(
-            editor_cid(),
-            ContentQuery::TextRows(RowRange { start: 0, end: 5 })
-        )
-        .unwrap(),
+        query
+            .content(
+                editor_cid(),
+                ContentQuery::TextRows(RowRange { start: 0, end: 5 })
+            )
+            .unwrap(),
         ContentData::TextRows(vec!["hi".to_string()])
     );
     let view = query.view(focused_view).unwrap();

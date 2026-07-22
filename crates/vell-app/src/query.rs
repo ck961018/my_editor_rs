@@ -99,22 +99,20 @@ impl RenderQuery for AppQuery<'_> {
             (ContentKind::Buffer, ContentViewState::Buffer(_)) => {}
             (ContentKind::Buffer, ContentViewState::StatusBar(_))
             | (ContentKind::StatusBar, ContentViewState::Buffer(_)) => {
-                return Err(RenderQueryError::IncompatibleContentViewState {
-                    view: id,
-                    content,
-                });
+                return Err(RenderQueryError::IncompatibleContentViewState { view: id, content });
             }
         }
         let content_revision = self
             .contents
             .revision(content)
             .ok_or(RenderQueryError::MissingContent(content))?;
-        let snapshot = self.contents.text_snapshot(content).ok_or(
-            RenderQueryError::InvalidContentData {
-                content,
-                query: ContentQueryKind::TextRows,
-            },
-        )?;
+        let snapshot =
+            self.contents
+                .text_snapshot(content)
+                .ok_or(RenderQueryError::InvalidContentData {
+                    content,
+                    query: ContentQueryKind::TextRows,
+                })?;
         Ok(self
             .presentation
             .decorations(

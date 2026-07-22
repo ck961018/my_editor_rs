@@ -38,7 +38,8 @@ use bridge::{
 pub use host::ScriptHost;
 use invocation::{
     HeapLimitState, InvocationWatchdog, ScriptExecutionBudget, ScriptInvocationKind,
-    call_script_callback, install_heap_limit, perform_microtask_checkpoint, recover_heap_limit,
+    WatchdogOutcome, call_script_callback, install_heap_limit, perform_microtask_checkpoint,
+    recover_heap_limit,
 };
 use mode_adapter::ScriptMode;
 use module::{

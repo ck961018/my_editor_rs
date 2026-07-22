@@ -13,13 +13,13 @@ use vell_protocol::content_query::{Face, FaceName, NamedTextDecoration, RowRange
 use vell_protocol::key_event::KeyEvent;
 
 use super::bridge::view_policy_from_json;
+use super::worker::ScriptWorker;
 use super::{
     ScriptActionDefinition, ScriptAdapterDefinition, ScriptAnalysisDefinition, ScriptApiVersion,
     ScriptHost, ScriptJob, ScriptJobOutput, ScriptModeDefinition, ScriptModeState,
     disabled_script_job, failed_script_job, key_event_arguments, map_decoration_set,
     script_job_request, script_state, script_state_mut,
 };
-use super::worker::ScriptWorker;
 
 pub(super) struct ScriptMode {
     host: Rc<RefCell<ScriptHost>>,
@@ -87,10 +87,7 @@ impl ScriptAdapter {
 }
 
 impl ScriptMode {
-    pub(super) fn new(
-        host: Rc<RefCell<ScriptHost>>,
-        definition: ScriptModeDefinition,
-    ) -> Self {
+    pub(super) fn new(host: Rc<RefCell<ScriptHost>>, definition: ScriptModeDefinition) -> Self {
         let mut actions = Vec::new();
         for adapter in [
             definition.adapters.buffer.as_ref(),

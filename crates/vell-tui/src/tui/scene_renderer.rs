@@ -271,7 +271,10 @@ fn status_bar_data(
         .map_err(io::Error::other)?
     {
         ContentData::StatusBarData(data) => Ok(data),
-        _ => Err(invalid_content_data(content, ContentQueryKind::StatusBarData)),
+        _ => Err(invalid_content_data(
+            content,
+            ContentQueryKind::StatusBarData,
+        )),
     }
 }
 

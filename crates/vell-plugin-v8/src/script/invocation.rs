@@ -201,12 +201,8 @@ impl InvocationWatchdog {
                 let Ok(started) = armed.recv() else {
                     return;
                 };
-                let outcome = wait_for_watchdog(
-                    &receiver,
-                    started,
-                    timeout,
-                    watcher_cancellation.as_ref(),
-                );
+                let outcome =
+                    wait_for_watchdog(&receiver, started, timeout, watcher_cancellation.as_ref());
                 if outcome != WatchdogOutcome::Completed {
                     watcher_outcome.store(outcome as u8, Ordering::Release);
                     watcher_handle.terminate_execution();
@@ -218,9 +214,7 @@ impl InvocationWatchdog {
         let started = Instant::now();
         if arm.send(started).is_err() {
             let _ = thread.join();
-            return Err(ScriptError::new(format!(
-                "failed to arm {watchdog_name}"
-            )));
+            return Err(ScriptError::new(format!("failed to arm {watchdog_name}")));
         }
         Ok(Self {
             kind,
@@ -343,12 +337,7 @@ mod tests {
         let (stop, receiver) = mpsc::channel();
         stop.send(()).unwrap();
         assert_eq!(
-            wait_for_watchdog(
-                &receiver,
-                Instant::now(),
-                Duration::from_secs(1),
-                None,
-            ),
+            wait_for_watchdog(&receiver, Instant::now(), Duration::from_secs(1), None,),
             WatchdogOutcome::Completed
         );
 

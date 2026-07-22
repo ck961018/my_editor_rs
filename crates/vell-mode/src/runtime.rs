@@ -376,11 +376,10 @@ impl ModeDraftJournal {
         content: ContentId,
         persistent: &'a ModeContentInstance,
     ) -> (&'a dyn ModeState, bool) {
-        self.content
-            .get(&(mode, content))
-            .map_or((persistent.state.as_ref(), persistent.fault.is_some()), |draft| {
-                (draft.state.as_ref(), draft.fault.is_some())
-            })
+        self.content.get(&(mode, content)).map_or(
+            (persistent.state.as_ref(), persistent.fault.is_some()),
+            |draft| (draft.state.as_ref(), draft.fault.is_some()),
+        )
     }
 
     fn content_mut<'a>(
@@ -404,11 +403,10 @@ impl ModeDraftJournal {
         view: ViewId,
         persistent: &'a ModeViewInstance,
     ) -> (&'a dyn ModeState, bool) {
-        self.views
-            .get(&(mode, view))
-            .map_or((persistent.state.as_ref(), persistent.fault.is_some()), |draft| {
-                (draft.state.as_ref(), draft.fault.is_some())
-            })
+        self.views.get(&(mode, view)).map_or(
+            (persistent.state.as_ref(), persistent.fault.is_some()),
+            |draft| (draft.state.as_ref(), draft.fault.is_some()),
+        )
     }
 
     fn content_and_view_mut<'a>(
@@ -1793,9 +1791,10 @@ impl ModeContentStore {
             }
             let checkpoint = draft.state.clone_box();
             let context = ModeContentContext::new(content, contents);
-            if let Err(error) = instance
-                .adapter()
-                .on_content_changed(draft.state.as_mut(), &context, change)
+            if let Err(error) =
+                instance
+                    .adapter()
+                    .on_content_changed(draft.state.as_mut(), &context, change)
             {
                 draft.state = checkpoint;
                 draft.fault = Some(ModeFault::from_error(
@@ -2081,15 +2080,12 @@ impl ModeViewStore {
                 }
                 let content_checkpoint = content_draft.state.clone_box();
                 let view_checkpoint = view_draft.state.clone_box();
-                if let Err(error) = view_instance
-                    .adapter()
-                    .on_view_content_changed(
-                        content_draft.state.as_mut(),
-                        view_draft.state.as_mut(),
-                        &context,
-                        change,
-                    )
-                {
+                if let Err(error) = view_instance.adapter().on_view_content_changed(
+                    content_draft.state.as_mut(),
+                    view_draft.state.as_mut(),
+                    &context,
+                    change,
+                ) {
                     content_draft.state = content_checkpoint;
                     view_draft.state = view_checkpoint;
                     view_draft.fault = Some(ModeFault::from_error(
@@ -2674,7 +2670,10 @@ mod tests {
         assert_eq!(fault.phase, ModeFaultPhase::BackgroundJob);
         assert_eq!(fault.category, ModeFaultCategory::Callback);
         assert_eq!(fault.callback, "parse");
-        assert_eq!(fault.message, "mode 'failing-job' callback failed: job apply failed");
+        assert_eq!(
+            fault.message,
+            "mode 'failing-job' callback failed: job apply failed"
+        );
     }
 
     #[test]

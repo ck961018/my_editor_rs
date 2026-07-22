@@ -10,8 +10,8 @@ use crate::application::App;
 #[cfg(test)]
 use crate::behavior::EffectBehavior;
 use crate::command::AppCommand;
-use crate::dispatcher::{DispatchCommand, DispatchInput, DispatchOutcome};
 use crate::diagnostics::RuntimeDiagnostic;
+use crate::dispatcher::{DispatchCommand, DispatchInput, DispatchOutcome};
 use crate::execution::{ExecutionFrame, InputCheckpoint, PreparedEffect, StateRollback};
 use crate::mode::{CursorDomain, InputFlow};
 use crate::operation::{
@@ -677,9 +677,7 @@ impl<F: Frontend> App<F> {
                     invocation,
                 } => {
                     if invocation.nested {
-                        frame
-                            .consume_nested_mode_call()
-                            .map_err(operation_error)?;
+                        frame.consume_nested_mode_call().map_err(operation_error)?;
                     }
                     match scope {
                         ResolvedModeScope::Content {
@@ -1307,9 +1305,7 @@ impl<F: Frontend> App<F> {
         self.session
             .apply_view_action(view, action, self.kernel.contents())
             .map(|_| ())
-            .ok_or_else(|| {
-                recoverable_message(io::ErrorKind::InvalidData, "invalid view action")
-            })
+            .ok_or_else(|| recoverable_message(io::ErrorKind::InvalidData, "invalid view action"))
     }
 
     pub(super) fn render(&mut self) -> io::Result<()> {

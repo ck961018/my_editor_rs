@@ -562,11 +562,7 @@ mod tests {
         buf.insert_at_selections(&mut single_sel(TextOffset::origin()), "one two three");
         let mut selections = single_sel(TextOffset::origin());
 
-        apply_edit(
-            EditCommand::MoveWordForwardBy(2),
-            &mut buf,
-            &mut selections,
-        );
+        apply_edit(EditCommand::MoveWordForwardBy(2), &mut buf, &mut selections);
 
         assert_eq!(selections.primary().head().char_index, 8);
         assert_eq!(selections.primary().anchor, selections.primary().head());

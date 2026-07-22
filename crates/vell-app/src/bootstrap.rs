@@ -219,9 +219,7 @@ fn stable_mode_order(
         let blocked = indegree
             .iter()
             .enumerate()
-            .filter_map(|(local, &degree)| {
-                (degree > 0).then(|| modes[members[local]].name.clone())
-            })
+            .filter_map(|(local, &degree)| (degree > 0).then(|| modes[members[local]].name.clone()))
             .collect();
         return Err(ModeOrderError::Cycle { kind, blocked });
     }
@@ -380,11 +378,7 @@ mod tests {
                     None,
                     crate::mode::ModeAdapters::status_bar(),
                 ),
-                ordered_mode(
-                    "overlay",
-                    Some("base"),
-                    crate::mode::ModeAdapters::buffer(),
-                ),
+                ordered_mode("overlay", Some("base"), crate::mode::ModeAdapters::buffer()),
                 ordered_mode(
                     "status-late",
                     Some("base"),
@@ -419,7 +413,11 @@ mod tests {
         .err()
         .unwrap();
         assert_eq!(duplicate.kind(), io::ErrorKind::InvalidInput);
-        assert!(duplicate.to_string().contains("'same' is already registered"));
+        assert!(
+            duplicate
+                .to_string()
+                .contains("'same' is already registered")
+        );
 
         let unknown = bootstrap_editor(
             Buffer::new(),
@@ -434,29 +432,29 @@ mod tests {
         .err()
         .unwrap();
         assert_eq!(unknown.kind(), io::ErrorKind::InvalidInput);
-        assert!(unknown.to_string().contains("unknown before target 'missing'"));
+        assert!(
+            unknown
+                .to_string()
+                .contains("unknown before target 'missing'")
+        );
 
         let cycle = bootstrap_editor(
             Buffer::new(),
             40,
             5,
             vec![
-                ordered_mode(
-                    "first",
-                    Some("second"),
-                    crate::mode::ModeAdapters::buffer(),
-                ),
-                ordered_mode(
-                    "second",
-                    Some("first"),
-                    crate::mode::ModeAdapters::buffer(),
-                ),
+                ordered_mode("first", Some("second"), crate::mode::ModeAdapters::buffer()),
+                ordered_mode("second", Some("first"), crate::mode::ModeAdapters::buffer()),
             ],
         )
         .err()
         .unwrap();
         assert_eq!(cycle.kind(), io::ErrorKind::InvalidInput);
-        assert!(cycle.to_string().contains("Buffer mode ordering contains a cycle"));
+        assert!(
+            cycle
+                .to_string()
+                .contains("Buffer mode ordering contains a cycle")
+        );
         assert!(cycle.to_string().contains("'first', 'second'"));
     }
 }

@@ -165,7 +165,10 @@ pub enum RenderQueryError {
         content: ContentId,
         query: ContentQueryKind,
     },
-    IncompatibleContentViewState { view: ViewId, content: ContentId },
+    IncompatibleContentViewState {
+        view: ViewId,
+        content: ContentId,
+    },
 }
 
 impl fmt::Display for RenderQueryError {
@@ -176,7 +179,11 @@ impl fmt::Display for RenderQueryError {
                 write!(formatter, "content {} does not exist", content.0)
             }
             Self::UnsupportedContentQuery { content, query } => {
-                write!(formatter, "content {} does not support {query:?}", content.0)
+                write!(
+                    formatter,
+                    "content {} does not support {query:?}",
+                    content.0
+                )
             }
             Self::InvalidContentData { content, query } => write!(
                 formatter,
