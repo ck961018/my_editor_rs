@@ -99,9 +99,13 @@ StatusBar view context 还提供
 `viewPolicy.statusBar` 中定义带可选 Face 的 `left`、`center` 和 `right`
 分段。
 
-`context.app` 除保存和退出外，还提供 `splitHorizontal()`、
-`splitVertical()` 与四个 `focus*()` 原语。split 和 focus 与 viewport 一样，
-只在整个 execution frame 成功后发布。
+`context.app` 除保存和退出外，还提供 `closePane()`、
+`splitHorizontal()`、`splitVertical()` 与四个 `focus*()` 原语。pane close、
+split 和 focus 与 viewport 一样，只在整个 execution frame 成功后发布。
+`closePane()` 关闭当前 pane；关闭最后一个可聚焦 pane 时退出应用。
+每个 execution frame 最多产生一个 split、close 或 focus；topology 原语
+不能与 viewport 原语在同一 frame 中混用。nested command 和 callback 也
+属于调用方的 frame；违反约束时整个 frame 回滚。
 
 原语调用会把类型化 Rust operation 追加到当前 callback。只有 callback
 及其返回状态通过验证后，App 才会按顺序执行这些 operation。如果 callback

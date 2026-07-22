@@ -1003,17 +1003,16 @@ impl ClientSession {
         content_modes: &mut ModeContentStore,
         contents: &ContentStore,
     ) -> Result<CloseResult, LayoutError> {
-        self.reject_status_bar_space(target)?;
-        if view_space_focusable(&self.scene, target) == Some(true)
-            && focusable_view_count(&self.scene) == 1
-        {
-            return Err(LayoutError::WouldRemoveLastFocusable(target));
-        }
-
+        self.validate_close_space(target)?;
+        let previous_focus = self.focused;
+        let previous_content = self
+            .view_for_space(previous_focus)
+            .and_then(|view| self.views.get(&view))
+            .map(View::content)
+            .expect("focused space hosts a view");
         let removed_view = self
             .view_for_space(target)
-            .ok_or(SceneError::ExpectedContentLeaf(target))?;
-        let input_source_changed = target == self.focused;
+            .expect("validated close target hosts a view");
         if self.status_placement == StatusBarPlacement::PerPane
             && let Some(status) = self.status_by_editor.remove(&removed_view)
         {
@@ -1034,13 +1033,29 @@ impl ClientSession {
             contents,
         );
         self.remove_view(removed_view, content_modes);
-        self.reconcile_layout(result.surviving_neighbor);
+        self.reconcile_layout(if target == previous_focus {
+            result.surviving_neighbor
+        } else {
+            Some(previous_focus)
+        });
         self.sync_global_status_target();
-        if input_source_changed {
-            self.sync_changed_input_source(content, content_modes, contents);
+        if self.focused != previous_focus {
+            self.sync_changed_input_source(previous_content, content_modes, contents);
         }
         self.scene_revision.next();
         Ok(result)
+    }
+
+    pub(super) fn validate_close_space(&self, target: SpaceId) -> Result<(), LayoutError> {
+        self.reject_status_bar_space(target)?;
+        if view_space_focusable(&self.scene, target) == Some(true)
+            && focusable_view_count(&self.scene) == 1
+        {
+            return Err(LayoutError::WouldRemoveLastFocusable(target));
+        }
+        self.view_for_space(target)
+            .ok_or(SceneError::ExpectedContentLeaf(target))?;
+        Ok(())
     }
 
     pub(super) fn replace_space_content(

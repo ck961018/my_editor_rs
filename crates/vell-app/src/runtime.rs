@@ -13,6 +13,7 @@ use crate::command::AppCommand;
 use crate::diagnostics::RuntimeDiagnostic;
 use crate::dispatcher::{DispatchCommand, DispatchInput, DispatchOutcome};
 use crate::execution::{ExecutionFrame, InputCheckpoint, PreparedEffect, StateRollback};
+use crate::layout::LayoutError;
 use crate::mode::{CursorDomain, InputFlow};
 use crate::operation::{
     AppOperation, ContentOperation, ContentTarget, ModeFlowPropagation, ModeTarget, OperationError,
@@ -59,6 +60,7 @@ impl PreparedEffect {
                 content: *content,
                 direction: *direction,
             },
+            Self::Close { target } => EffectBehavior::Close { target: *target },
             Self::Focus { target } => EffectBehavior::Focus { target: *target },
             Self::Quit => EffectBehavior::Quit,
         }
@@ -135,6 +137,32 @@ impl<F: Frontend> App<F> {
         #[cfg(test)]
         self.behavior.record_prepared(effect.behavior());
         frame.prepare(effect);
+    }
+
+    fn prepare_topology_effect(
+        &mut self,
+        frame: &mut ExecutionFrame,
+        effect: PreparedEffect,
+    ) -> io::Result<()> {
+        #[cfg(test)]
+        let behavior = effect.behavior();
+        frame.prepare_topology(effect).map_err(operation_error)?;
+        #[cfg(test)]
+        self.behavior.record_prepared(behavior);
+        Ok(())
+    }
+
+    fn prepare_viewport_effect(
+        &mut self,
+        frame: &mut ExecutionFrame,
+        effect: PreparedEffect,
+    ) -> io::Result<()> {
+        #[cfg(test)]
+        let behavior = effect.behavior();
+        frame.prepare_viewport(effect).map_err(operation_error)?;
+        #[cfg(test)]
+        self.behavior.record_prepared(behavior);
+        Ok(())
     }
 
     pub async fn run(&mut self) -> io::Result<()> {
@@ -430,6 +458,10 @@ impl<F: Frontend> App<F> {
                     self.split_space(target, content, true, direction, true)
                         .expect("validated split remains valid until frame commit");
                 }
+                PreparedEffect::Close { target } => {
+                    self.close_space(target)
+                        .expect("validated close remains valid until frame commit");
+                }
                 PreparedEffect::Focus { target } => {
                     let (contents, content_modes) = self.kernel.mode_runtime_parts();
                     self.session
@@ -579,6 +611,24 @@ impl<F: Frontend> App<F> {
                 ResolvedOperation::App(AppOperation::Command(command)) => {
                     match command {
                         AppCommand::Quit => self.prepare_effect(frame, PreparedEffect::Quit),
+                        AppCommand::Close => {
+                            let target = self.session.focused();
+                            match self.session.validate_close_space(target) {
+                                Ok(()) => self.prepare_topology_effect(
+                                    frame,
+                                    PreparedEffect::Close { target },
+                                )?,
+                                Err(LayoutError::WouldRemoveLastFocusable(_)) => {
+                                    self.prepare_topology_effect(frame, PreparedEffect::Quit)?
+                                }
+                                Err(error) => {
+                                    return Err(recoverable_execution_error(
+                                        io::ErrorKind::InvalidInput,
+                                        error,
+                                    ));
+                                }
+                            }
+                        }
                         AppCommand::FocusNext | AppCommand::FocusPrev => {}
                         AppCommand::Split(direction) => {
                             let target = self.session.focused();
@@ -591,14 +641,14 @@ impl<F: Frontend> App<F> {
                                 .view(view)
                                 .ok_or_else(|| invalid_operation("focused view does not exist"))?
                                 .content();
-                            self.prepare_effect(
+                            self.prepare_topology_effect(
                                 frame,
                                 PreparedEffect::Split {
                                     target,
                                     content,
                                     direction,
                                 },
-                            );
+                            )?;
                         }
                         AppCommand::Focus(direction) => {
                             let target = self.frontend.resolve_focus_direction(
@@ -613,7 +663,10 @@ impl<F: Frontend> App<F> {
                                         "frontend returned an invalid focus target",
                                     ));
                                 }
-                                self.prepare_effect(frame, PreparedEffect::Focus { target });
+                                self.prepare_topology_effect(
+                                    frame,
+                                    PreparedEffect::Focus { target },
+                                )?;
                             }
                         }
                     }
@@ -705,13 +758,13 @@ impl<F: Frontend> App<F> {
                         let has_effect =
                             !matches!(resolved, ResolvedViewportCommand::Scroll { lines: 0, .. });
                         if has_effect {
-                            self.prepare_effect(
+                            self.prepare_viewport_effect(
                                 frame,
                                 PreparedEffect::Viewport {
                                     view,
                                     command: resolved,
                                 },
-                            );
+                            )?;
                             if let Some(edit) = viewport_cursor_edit(command, resolved) {
                                 prepend_operations(
                                     &mut queue,

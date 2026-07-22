@@ -79,6 +79,23 @@ fn is_tree_valid(scene: &MutableScene) -> bool {
     visited.len() == scene.nodes.len()
 }
 
+fn subtree_contains_focusable(scene: &MutableScene, root: SpaceId) -> bool {
+    let mut stack = vec![root];
+    while let Some(space) = stack.pop() {
+        let Some(node) = scene.nodes.get(&space) else {
+            return false;
+        };
+        match &node.space.kind {
+            SpaceKind::Content {
+                focusable: true, ..
+            } => return true,
+            SpaceKind::Content { .. } => {}
+            SpaceKind::Container { .. } => stack.extend(node.children.iter().copied()),
+        }
+    }
+    false
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SceneError {
     UnknownSpace(SpaceId),
@@ -535,10 +552,21 @@ impl SceneBuilder {
                 .iter()
                 .position(|child| *child == target)
                 .ok_or(SceneError::InvalidTree)?;
-            let neighbor = parent_node
-                .children
-                .get(index + 1)
-                .copied()
+            let neighbor = (1..parent_node.children.len())
+                .find_map(|distance| {
+                    parent_node
+                        .children
+                        .get(index + distance)
+                        .copied()
+                        .filter(|candidate| subtree_contains_focusable(scene, *candidate))
+                        .or_else(|| {
+                            index
+                                .checked_sub(distance)
+                                .and_then(|previous| parent_node.children.get(previous).copied())
+                                .filter(|candidate| subtree_contains_focusable(scene, *candidate))
+                        })
+                })
+                .or_else(|| parent_node.children.get(index + 1).copied())
                 .or_else(|| {
                     index
                         .checked_sub(1)

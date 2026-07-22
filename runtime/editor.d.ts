@@ -191,6 +191,7 @@ interface CommandPrimitives {
 interface AppPrimitives {
   save(): void;
   quit(): void;
+  closePane(): void;
   splitHorizontal(): void;
   splitVertical(): void;
   focusLeft(): void;

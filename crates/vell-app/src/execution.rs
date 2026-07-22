@@ -22,6 +22,8 @@ pub(super) struct ExecutionFrame {
     mode_drafts: ModeDraftJournal,
     view_touches: HashMap<ViewId, Revision>,
     prepared_effects: Vec<PreparedEffect>,
+    topology_effect_prepared: bool,
+    viewport_effect_prepared: bool,
     budget: ExecutionBudget,
 }
 
@@ -60,6 +62,9 @@ pub(super) enum PreparedEffect {
         content: ContentId,
         direction: SplitDirection,
     },
+    Close {
+        target: SpaceId,
+    },
     Focus {
         target: SpaceId,
     },
@@ -85,12 +90,42 @@ impl ExecutionFrame {
             mode_drafts: ModeDraftJournal::default(),
             view_touches: HashMap::new(),
             prepared_effects: Vec::new(),
+            topology_effect_prepared: false,
+            viewport_effect_prepared: false,
             budget: ExecutionBudget::default(),
         }
     }
 
     pub(super) fn prepare(&mut self, effect: PreparedEffect) {
         self.prepared_effects.push(effect);
+    }
+
+    pub(super) fn prepare_topology(
+        &mut self,
+        effect: PreparedEffect,
+    ) -> Result<(), OperationError> {
+        if self.topology_effect_prepared || self.viewport_effect_prepared {
+            return Err(OperationError::new(
+                "an execution frame accepts only one topology effect and cannot combine it with viewport effects",
+            ));
+        }
+        self.topology_effect_prepared = true;
+        self.prepared_effects.push(effect);
+        Ok(())
+    }
+
+    pub(super) fn prepare_viewport(
+        &mut self,
+        effect: PreparedEffect,
+    ) -> Result<(), OperationError> {
+        if self.topology_effect_prepared {
+            return Err(OperationError::new(
+                "viewport effects cannot share an execution frame with a topology effect",
+            ));
+        }
+        self.viewport_effect_prepared = true;
+        self.prepared_effects.push(effect);
+        Ok(())
     }
 
     pub(super) fn record_state_rollback(&mut self, rollback: StateRollback) {

@@ -89,6 +89,9 @@ pub(super) enum EffectBehavior {
         content: ContentId,
         direction: SplitDirection,
     },
+    Close {
+        target: SpaceId,
+    },
     Focus {
         target: SpaceId,
     },

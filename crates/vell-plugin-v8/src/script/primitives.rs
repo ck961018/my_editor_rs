@@ -130,6 +130,7 @@ primitives! {
     InvokeCommand => ("commands", "invoke"),
     Save => ("app", "save"),
     Quit => ("app", "quit"),
+    ClosePane => ("app", "closePane"),
     SplitHorizontal => ("app", "splitHorizontal"),
     SplitVertical => ("app", "splitVertical"),
     FocusLeft => ("app", "focusLeft"),
@@ -629,6 +630,9 @@ fn primitive_effects(
         }),
         Quit => nested(OperationRequest::App(AppOperation::Command(
             AppCommand::Quit,
+        ))),
+        ClosePane => nested(OperationRequest::App(AppOperation::Command(
+            AppCommand::Close,
         ))),
         SplitHorizontal => nested(OperationRequest::App(AppOperation::Command(
             AppCommand::Split(SplitDirection::Down),

@@ -154,6 +154,7 @@ function handlePending(state: VimViewState, key: KeyInput): Effect[] | null {
     const effects: Record<string, Effect> = {
       s: (context) => context.app.splitHorizontal(),
       v: (context) => context.app.splitVertical(),
+      q: (context) => context.app.closePane(),
       h: (context) => context.app.focusLeft(),
       j: (context) => context.app.focusDown(),
       k: (context) => context.app.focusUp(),

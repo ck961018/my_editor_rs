@@ -2631,6 +2631,100 @@ fn failed_ordered_result_does_not_apply_an_earlier_split() {
 }
 
 #[test]
+fn failed_ordered_result_does_not_apply_an_earlier_close() {
+    let mut app = make_app(vec![], None);
+    let left = app.session.focused();
+    let right = app
+        .split_space(left, editor_cid(), true, SplitDirection::Right, true)
+        .unwrap()
+        .new_space;
+    let view = view_id(&app, right);
+    app.behavior.reset();
+
+    let error = app
+        .execute_command(DispatchCommand::ModeOperations {
+            operations: vec![
+                app_command(AppCommand::Close),
+                nested_mode(ModeCommand {
+                    mode: ModeName::new("missing"),
+                    action: ModeActionName::new("missing"),
+                    arguments: Default::default(),
+                }),
+            ],
+            view,
+            content: editor_cid(),
+        })
+        .unwrap_err();
+    let snapshot = BehaviorSnapshot::capture(
+        &app,
+        ExecutionOutcome::from_result(&Err::<(), _>(error)),
+        vec![],
+    );
+
+    assert!(matches!(
+        snapshot.prepared_effects.as_slice(),
+        [EffectBehavior::Close { target }] if *target == right
+    ));
+    assert!(snapshot.published_effects.is_empty());
+    assert_eq!(focusable_view_count(app.session.scene()), 2);
+    assert_eq!(app.session.focused(), right);
+    assert!(app.session.views().contains_key(&view));
+}
+
+#[test]
+fn conflicting_topology_effects_fail_without_publishing_layout() {
+    for operations in [
+        vec![
+            app_command(AppCommand::Close),
+            app_command(AppCommand::Close),
+        ],
+        vec![
+            app_command(AppCommand::Close),
+            app_command(AppCommand::Split(SplitDirection::Right)),
+        ],
+    ] {
+        let mut app = make_app(vec![], None);
+        let left = app.session.focused();
+        let right = app
+            .split_space(left, editor_cid(), true, SplitDirection::Right, true)
+            .unwrap()
+            .new_space;
+        let view = view_id(&app, right);
+
+        let error = app
+            .execute_command(DispatchCommand::ModeOperations {
+                operations,
+                view,
+                content: editor_cid(),
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("only one topology effect"));
+        assert_eq!(focusable_view_count(app.session.scene()), 2);
+        assert_eq!(app.session.focused(), right);
+    }
+
+    let mut app = make_app(vec![], None);
+    let focused = app.session.focused();
+    let view = view_id(&app, focused);
+    let error = app
+        .execute_command(DispatchCommand::ModeOperations {
+            operations: vec![
+                app_command(AppCommand::Split(SplitDirection::Right)),
+                app_command(AppCommand::Close),
+            ],
+            view,
+            content: editor_cid(),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("only one topology effect"));
+    assert_eq!(focusable_view_count(app.session.scene()), 1);
+    assert_eq!(app.session.focused(), focused);
+    assert!(!app.kernel.is_cancelled());
+}
+
+#[test]
 fn failed_history_branch_restores_records_truncated_after_undo() {
     let mut app = make_app(vec![], None);
     let view = view_id(&app, app.session.focused());
@@ -4278,6 +4372,75 @@ fn close_focused_space_prefers_surviving_neighbor_and_drops_its_view() {
 }
 
 #[test]
+fn closing_an_unfocused_space_preserves_focus() {
+    let mut app = make_app(vec![], None);
+    let left = app.session.focused();
+    let middle = app
+        .split_space(left, editor_cid(), true, SplitDirection::Right, false)
+        .unwrap()
+        .new_space;
+    let right = app
+        .split_space(middle, editor_cid(), true, SplitDirection::Right, false)
+        .unwrap()
+        .new_space;
+    assert_eq!(app.session.focused(), left);
+
+    app.close_space(right).unwrap();
+
+    assert_eq!(app.session.focused(), left);
+    assert_eq!(focusable_view_count(app.session.scene()), 2);
+}
+
+#[test]
+fn closing_a_focused_space_prefers_a_focusable_descendant_of_its_neighbor() {
+    for placement in [StatusBarPlacement::Global, StatusBarPlacement::PerPane] {
+        let mut app = make_app(vec![], None);
+        app.set_status_bar_placement(placement).unwrap();
+        let first = app.session.focused();
+        let closing = app
+            .split_space(first, editor_cid(), true, SplitDirection::Right, true)
+            .unwrap()
+            .new_space;
+        let neighbor = app
+            .split_space(closing, editor_cid(), true, SplitDirection::Right, true)
+            .unwrap()
+            .new_space;
+        app.split_space(neighbor, editor_cid(), true, SplitDirection::Down, false)
+            .unwrap();
+        app.frontend.focus_targets.push_back(Some(closing));
+        app.execute_command(DispatchCommand::App(AppCommand::Focus(
+            SplitDirection::Left,
+        )))
+        .unwrap();
+        assert_eq!(app.session.focused(), closing);
+
+        app.close_space(closing).unwrap();
+
+        assert_eq!(app.session.focused(), neighbor);
+        assert_eq!(focusable_view_count(app.session.scene()), 3);
+    }
+}
+
+#[test]
+fn global_status_does_not_hide_the_previous_focusable_close_neighbor() {
+    let mut app = make_app(vec![], None);
+    let first = app.session.focused();
+    let previous = app
+        .split_space(first, editor_cid(), true, SplitDirection::Down, true)
+        .unwrap()
+        .new_space;
+    let closing = app
+        .split_space(previous, editor_cid(), true, SplitDirection::Down, true)
+        .unwrap()
+        .new_space;
+
+    app.close_space(closing).unwrap();
+
+    assert_eq!(app.session.focused(), previous);
+    assert_eq!(focusable_view_count(app.session.scene()), 2);
+}
+
+#[test]
 fn missing_content_is_rejected_before_scene_mutation() {
     let mut app = make_app(vec![], None);
     let root = app.session.scene().root();
@@ -4525,6 +4688,55 @@ async fn vim_ctrl_w_hjkl_request_directional_focus_from_the_frontend() {
             SplitDirection::Right,
         ]
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_ctrl_w_q_closes_the_focused_pane_and_its_status_bar() {
+    let mut app = make_app(vec![], None);
+    app.set_status_bar_placement(StatusBarPlacement::PerPane)
+        .unwrap();
+    let original = app.session.focused();
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::ctrl('w')))
+        .await
+        .unwrap();
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('v')))
+        .await
+        .unwrap();
+    let closing = app.session.focused();
+    let closing_view = view_id(&app, closing);
+    assert_ne!(closing, original);
+    assert_eq!(app.status_bars_for_content(editor_cid()).len(), 2);
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::ctrl('w')))
+        .await
+        .unwrap();
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('q')))
+        .await
+        .unwrap();
+
+    assert_eq!(focusable_view_count(app.session.scene()), 1);
+    assert_eq!(app.session.focused(), original);
+    assert!(!app.session.views().contains_key(&closing_view));
+    assert_eq!(app.status_bars_for_content(editor_cid()).len(), 1);
+    assert!(!app.kernel.is_cancelled());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_ctrl_w_q_quits_from_the_last_pane() {
+    let mut app = make_app(vec![], None);
+    let focused = app.session.focused();
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::ctrl('w')))
+        .await
+        .unwrap();
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('q')))
+        .await
+        .unwrap();
+
+    assert!(app.kernel.is_cancelled());
+    assert_eq!(focusable_view_count(app.session.scene()), 1);
+    assert_eq!(app.session.focused(), focused);
 }
 
 #[tokio::test(flavor = "multi_thread")]

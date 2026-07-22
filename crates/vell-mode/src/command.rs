@@ -84,6 +84,7 @@ impl ModeCommand {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppCommand {
     Quit,
+    Close,
     FocusNext,
     FocusPrev,
     Split(SplitDirection),

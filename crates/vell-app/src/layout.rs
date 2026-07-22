@@ -96,13 +96,6 @@ impl<F: Frontend> App<F> {
         Ok(result)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "layout mutation is exposed as an application backend operation"
-        )
-    )]
     pub(super) fn close_space(&mut self, target: SpaceId) -> Result<CloseResult, LayoutError> {
         let removed = self
             .session
@@ -300,7 +293,7 @@ pub(super) fn resolve_focus(
     preferred: Option<SpaceId>,
 ) -> Option<SpaceId> {
     preferred
-        .filter(|space| view_space_focusable(scene, *space) == Some(true))
+        .and_then(|space| first_focusable_at_or_below(scene, space))
         .or_else(|| (view_space_focusable(scene, previous) == Some(true)).then_some(previous))
         .or_else(|| {
             scene_views(scene)
@@ -308,4 +301,19 @@ pub(super) fn resolve_focus(
                 .map(|(space, _)| space)
                 .find(|space| view_space_focusable(scene, *space) == Some(true))
         })
+}
+
+fn first_focusable_at_or_below(scene: &Scene, space: SpaceId) -> Option<SpaceId> {
+    if !scene.contains(space) {
+        return None;
+    }
+    if view_space_focusable(scene, space) == Some(true) {
+        return Some(space);
+    }
+    let mut views = Vec::new();
+    collect_view_spaces(scene, space, &mut views);
+    views
+        .into_iter()
+        .map(|(space, _)| space)
+        .find(|space| view_space_focusable(scene, *space) == Some(true))
 }
