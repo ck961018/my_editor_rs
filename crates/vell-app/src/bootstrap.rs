@@ -306,6 +306,7 @@ pub(super) fn create_editor_session(
             },
             next_view_id: ids.next_view,
         },
+        FaceEnvironment::new(None).expect("built-in themes must be valid"),
     )
 }
 

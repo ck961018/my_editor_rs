@@ -88,11 +88,12 @@ impl<F: Frontend> App<F> {
         theme: Option<&ThemeName>,
         face_overrides: Vec<FaceOverride>,
     ) -> io::Result<Self> {
+        let display_profile = frontend.display_profile();
         let mut buffer = Buffer::new();
         if let Some(p) = path {
             buffer.open_path(p)?;
         }
-        let bootstrap = match theme {
+        let mut bootstrap = match theme {
             Some(theme) => {
                 bootstrap_editor_with_theme(
                     buffer,
@@ -113,6 +114,10 @@ impl<F: Frontend> App<F> {
                 face_overrides,
             )?,
         };
+        bootstrap
+            .session
+            .faces_mut()
+            .set_display_profile(display_profile);
         Ok(Self {
             kernel: bootstrap.kernel,
             session: bootstrap.session,

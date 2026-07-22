@@ -1,6 +1,6 @@
 # Theme 与可扩展 Face 架构
 
-**状态：** 已确认方向，待分阶段实现
+**状态：** 核心阶段 A-E 已实现；多 authored display spec 与 cache 后续实现
 
 **更新日期：** 2026-07-22
 
@@ -232,16 +232,22 @@ pub struct FacePatch {
     pub foreground: FaceValue<Color>,
     pub background: FaceValue<Color>,
     pub bold: FaceValue<bool>,
+    pub dim: FaceValue<bool>,
     pub italic: FaceValue<bool>,
     pub underline: FaceValue<bool>,
+    pub underline_style: FaceValue<UnderlineStyle>,
+    pub strikethrough: FaceValue<bool>,
 }
 
 pub struct PaintFace {
     pub foreground: Option<Color>,
     pub background: Option<Color>,
     pub bold: bool,
+    pub dim: bool,
     pub italic: bool,
     pub underline: bool,
+    pub underline_style: UnderlineStyle,
+    pub strikethrough: bool,
 }
 ```
 
@@ -729,24 +735,29 @@ protocol DTO；`FaceOverrideSet` 是 app/theme 内部索引，不进入 V8 crate
 
 ## 20. 显示能力扩展点
 
-当前 `Color` 支持 ANSI 与 RGB，但一个属性只保存其中一种。第一阶段可以明确
-要求 Catppuccin 使用 true-color terminal。
-
-后续若支持类似 Emacs 的 display-dependent spec，应扩展解析上下文，而不是让
-Mode 判断终端：
+`Frontend` 报告 `DisplayProfile`，Mode 不判断终端。当前模型为：
 
 ```rust
 pub struct DisplayProfile {
     pub color_depth: ColorDepth,
     pub appearance: Option<Appearance>,
     pub supports_italic: bool,
+    pub supports_underline: bool,
+    pub supports_extended_underline: bool,
     pub supports_undercurl: bool,
+    pub supports_strikethrough: bool,
+    pub supports_dim: bool,
 }
 ```
 
-ThemeDefinition 可以增加按 profile 匹配的 spec 列表。Frontend 报告
-capability，Theme resolver 选择匹配项。该扩展不改变 FaceName、override、
-remap 或 presentation contract。
+首版使用一个 authored Theme spec，并在所有 visual layer 与局部 remap 合成后
+执行确定性降级：true-color、ANSI256、ANSI16 或 monochrome。ANSI16 使用独立
+颜色变体，确保 TUI 发出标准 16 色序列，而不是伪装成 `38;5;n`。不支持的
+italic、underline style、strikethrough 和 dim 会移除或降级为直线 underline。
+
+后续 `ThemeDefinition` 可以增加按 profile 匹配的 authored spec 列表，由 Theme
+resolver 在合成前选择。该扩展不改变 FaceName、override、remap 或
+presentation contract。
 
 ## 21. Revision、cache 与切换
 
@@ -885,7 +896,7 @@ InvalidFaceRemapOwner
 - Frontend `DisplayProfile`；
 - true-color、ANSI256、ANSI16 或 mono spec；
 - underline style、strikethrough、dim 等扩展属性；
-- 必要时引入内部 FaceId cache。
+- 必要时引入内部 FaceId cache（profiling 后再实现）。
 
 ## 25. 测试要求
 

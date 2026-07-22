@@ -5,7 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use vell_protocol::content_query::{
-    Appearance, Color, FaceName, FacePatch, FaceValue, ThemeName,
+    Appearance, Color, FaceName, FacePatch, FaceValue, ThemeName, UnderlineStyle,
 };
 
 const BUILTIN_THEMES: &[&str] = &[
@@ -28,8 +28,11 @@ struct FacePatchDefinition {
     foreground: FaceValue<ColorDefinition>,
     background: FaceValue<ColorDefinition>,
     bold: FaceValue<bool>,
+    dim: FaceValue<bool>,
     italic: FaceValue<bool>,
     underline: FaceValue<bool>,
+    underline_style: FaceValue<UnderlineStyle>,
+    strikethrough: FaceValue<bool>,
 }
 
 impl FacePatchDefinition {
@@ -37,8 +40,16 @@ impl FacePatchDefinition {
         self.foreground.overlay(&patch.foreground);
         self.background.overlay(&patch.background);
         self.bold.overlay(&patch.bold);
+        self.dim.overlay(&patch.dim);
         self.italic.overlay(&patch.italic);
         self.underline.overlay(&patch.underline);
+        self.underline_style.overlay(&patch.underline_style);
+        if matches!(patch.underline_style, FaceValue::Value(_))
+            && matches!(patch.underline, FaceValue::Unspecified)
+        {
+            self.underline = FaceValue::Value(true);
+        }
+        self.strikethrough.overlay(&patch.strikethrough);
     }
 
     fn resolve(
@@ -49,8 +60,11 @@ impl FacePatchDefinition {
             foreground: resolve_color_value(&self.foreground, palette)?,
             background: resolve_color_value(&self.background, palette)?,
             bold: self.bold,
+            dim: self.dim,
             italic: self.italic,
             underline: self.underline,
+            underline_style: self.underline_style,
+            strikethrough: self.strikethrough,
         })
     }
 }
@@ -356,12 +370,40 @@ fn parse_face(value: &str, line: usize) -> Result<FacePatchDefinition, ThemeErro
             "foreground" => face.foreground = parse_color_definition(value, line)?,
             "background" => face.background = parse_color_definition(value, line)?,
             "bold" => face.bold = parse_face_bool(value, line)?,
+            "dim" => face.dim = parse_face_bool(value, line)?,
             "italic" => face.italic = parse_face_bool(value, line)?,
             "underline" => face.underline = parse_face_bool(value, line)?,
+            "underline-style" => {
+                face.underline_style = parse_underline_style(value, line)?
+            }
+            "strikethrough" => face.strikethrough = parse_face_bool(value, line)?,
             _ => return syntax(line, "unknown face attribute"),
         }
     }
+    if matches!(face.underline_style, FaceValue::Value(_))
+        && matches!(face.underline, FaceValue::Unspecified)
+    {
+        face.underline = FaceValue::Value(true);
+    }
     Ok(face)
+}
+
+fn parse_underline_style(
+    value: &str,
+    line: usize,
+) -> Result<FaceValue<UnderlineStyle>, ThemeError> {
+    if is_reset(value) {
+        return Ok(FaceValue::Reset);
+    }
+    let style = match parse_string(value, line)?.as_str() {
+        "line" => UnderlineStyle::Line,
+        "double" => UnderlineStyle::Double,
+        "curl" => UnderlineStyle::Curl,
+        "dotted" => UnderlineStyle::Dotted,
+        "dashed" => UnderlineStyle::Dashed,
+        _ => return syntax(line, "invalid underline style"),
+    };
+    Ok(FaceValue::Value(style))
 }
 
 fn parse_color_definition(
@@ -595,5 +637,33 @@ mod tests {
                 "a".to_owned(),
             ])
         );
+    }
+
+    #[test]
+    fn theme_schema_parses_extended_text_attributes() {
+        let mut registry = ThemeRegistry::default();
+        registry
+            .register_toml(
+                r#"
+schema = 1
+name = "extended"
+appearance = "dark"
+selectable = false
+
+[faces]
+"plugin.test" = { dim = true, underline-style = "curl", strikethrough = true }
+"#,
+            )
+            .unwrap();
+        let theme = registry.resolve(&ThemeName::new("extended")).unwrap();
+        let face = theme.face(&FaceName::new("plugin.test")).unwrap();
+
+        assert_eq!(face.dim, FaceValue::Value(true));
+        assert_eq!(face.underline, FaceValue::Value(true));
+        assert_eq!(
+            face.underline_style,
+            FaceValue::Value(UnderlineStyle::Curl)
+        );
+        assert_eq!(face.strikethrough, FaceValue::Value(true));
     }
 }

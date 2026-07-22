@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use vell_protocol::ids::ViewId;
 use vell_protocol::content_query::{
-    FaceExpr, FaceName, FaceOverride, FacePatch, FaceRemapScope, FaceRemapToken, PaintFace,
-    ThemeName,
+    DisplayProfile, FaceExpr, FaceName, FaceOverride, FacePatch, FaceRemapScope, FaceRemapToken,
+    PaintFace, ThemeName,
 };
 use vell_protocol::revision::Revision;
 use vell_theme::{ResolvedTheme, ThemeError, ThemeRegistry};
@@ -56,6 +56,7 @@ pub(super) struct FaceEnvironment {
     active_theme: Arc<ResolvedTheme>,
     global_overrides: HashMap<FaceName, FacePatch>,
     theme_overrides: HashMap<ThemeName, HashMap<FaceName, FacePatch>>,
+    display_profile: DisplayProfile,
     revision: Revision,
 }
 
@@ -97,6 +98,7 @@ impl FaceEnvironment {
             active_theme,
             global_overrides,
             theme_overrides,
+            display_profile: DisplayProfile::default(),
             revision: Revision(0),
         })
     }
@@ -133,7 +135,19 @@ impl FaceEnvironment {
         {
             resolved.overlay(patch);
         }
+        self.display_profile.adapt_patch(&mut resolved);
         resolved
+    }
+
+    fn set_display_profile(&mut self, profile: DisplayProfile) {
+        if self.display_profile != profile {
+            self.display_profile = profile;
+            self.bump_revision();
+        }
+    }
+
+    fn adapt_to_display(&self, patch: &mut FacePatch) {
+        self.display_profile.adapt_patch(patch);
     }
 }
 
@@ -204,13 +218,15 @@ impl SessionFaces {
         view: ViewId,
     ) -> FacePatch {
         let global = self.resolve(name);
-        self.remaps.resolve(
+        let mut resolved = self.remaps.resolve(
             name,
             content,
             view,
             global,
             |named| self.resolve(named),
-        )
+        );
+        self.environment.adapt_to_display(&mut resolved);
+        resolved
     }
 
     pub(super) fn resolve_root_for(
@@ -225,6 +241,10 @@ impl SessionFaces {
 
     pub(super) fn set_active_view(&self, view: Option<ViewId>) {
         self.active_view.set(view);
+    }
+
+    pub(super) fn set_display_profile(&mut self, profile: DisplayProfile) {
+        self.environment.set_display_profile(profile);
     }
 
     pub(super) fn resolve_status_bar_root(
@@ -517,7 +537,7 @@ fn resolve_expressions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vell_protocol::content_query::{Color, FaceValue};
+    use vell_protocol::content_query::{Color, ColorDepth, FaceValue};
 
     #[test]
     fn active_theme_overlays_terminal_fallback_by_attribute() {
@@ -536,6 +556,61 @@ mod tests {
                 blue: 0xb2,
             })
         );
+    }
+
+    #[test]
+    fn display_profile_is_applied_after_all_visual_layers() {
+        let environment =
+            FaceEnvironment::new(Some(&ThemeName::new("catppuccin-mocha"))).unwrap();
+        let mut faces = SessionFaces::new(FaceRegistry::default(), environment);
+        faces.set_display_profile(DisplayProfile {
+            color_depth: ColorDepth::Ansi16,
+            appearance: None,
+            supports_italic: false,
+            supports_underline: true,
+            supports_extended_underline: false,
+            supports_undercurl: false,
+            supports_strikethrough: false,
+            supports_dim: true,
+        });
+
+        let comment = faces.resolve(&FaceName::new("syntax.comment"));
+        let diagnostic = faces.resolve(&FaceName::new("diagnostic.error"));
+        faces
+            .apply_operation(ResolvedFaceOperation::AddRelative {
+                scope: FaceRemapScope::View(ViewId(9)),
+                face: FaceName::new("syntax.comment"),
+                token: FaceRemapToken(90),
+                expressions: vec![FaceExpr::Patch(FacePatch {
+                    background: FaceValue::Value(Color::Rgb {
+                        red: 255,
+                        green: 0,
+                        blue: 0,
+                    }),
+                    ..FacePatch::default()
+                })],
+                owner: FaceRemapOwner::User,
+            })
+            .unwrap();
+        let local = faces.resolve_for(
+            &FaceName::new("syntax.comment"),
+            vell_protocol::ids::ContentId(9),
+            ViewId(9),
+        );
+
+        assert!(matches!(
+            comment.foreground,
+            FaceValue::Value(Color::Ansi16(0..=15))
+        ));
+        assert_eq!(comment.italic, FaceValue::Unspecified);
+        assert_eq!(
+            diagnostic.underline_style,
+            FaceValue::Value(vell_protocol::content_query::UnderlineStyle::Line)
+        );
+        assert!(matches!(
+            local.background,
+            FaceValue::Value(Color::Ansi16(0..=15))
+        ));
     }
 
     #[test]

@@ -169,9 +169,37 @@ context.edit.applyEdits([{
 
 ## Face 与 decoration
 
-Mode 可以定义具名 `faces`，并发布 `contentDecorations` 或
-`viewDecorations`。每个 decoration snapshot 都携带 Content revision 和
-UTF-16 range。渲染只读取缓存的 Rust snapshot，不会调用 V8。
+Mode 可以定义插件私有 `faces`，包括显式继承与无 Theme 时的 fallback：
+
+```ts
+faces: {
+  "plugin.todo.warning": {
+    inherits: ["diagnostic.warning"],
+    fallback: { bold: true, underlineStyle: "curl" },
+  },
+},
+```
+
+command callback 可以产生 Session、Content 或 View scope 的局部 remap：
+
+```ts
+const token = context.faces.addRelative(
+  "plugin.todo.warning",
+  ["diagnostic.warning", { dim: true }],
+  "view",
+);
+context.viewState.warningFaceToken = token;
+
+// 后续 callback：
+context.faces.removeRelative(context.viewState.warningFaceToken);
+```
+
+`addRelative` 返回的 token 只允许所属 Mode 删除。callback 或 execution
+frame 失败时 remap 不会发布；View 关闭或 Mode detach 时宿主自动清理。
+
+Mode 通过 `contentDecorations` 或 `viewDecorations` 发布 FaceName。每个
+decoration snapshot 都携带 Content revision 和 UTF-16 range。渲染只读取
+缓存的 Rust snapshot，不会调用 V8。
 
 文本变化时，缓存的 Content decoration 会先随该 change 映射，直到新的异步
 snapshot 到达。这样既能避免高亮短暂消失，也能保持 revision 安全。

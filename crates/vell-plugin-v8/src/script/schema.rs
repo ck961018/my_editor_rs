@@ -629,8 +629,11 @@ fn parse_legacy_face(
         foreground: parse_color(scope, face, "foreground")?,
         background: parse_color(scope, face, "background")?,
         bold: optional_bool(scope, face, "bold")?,
+        dim: optional_bool(scope, face, "dim")?,
         italic: optional_bool(scope, face, "italic")?,
         underline: optional_bool(scope, face, "underline")?,
+        underline_style: optional_underline_style(scope, face)?,
+        strikethrough: optional_bool(scope, face, "strikethrough")?,
     })
 }
 
@@ -671,9 +674,60 @@ pub(super) fn parse_face_patch(
         foreground: parse_patch_color(scope, face, "foreground")?,
         background: parse_patch_color(scope, face, "background")?,
         bold: parse_patch_bool(scope, face, "bold")?,
+        dim: parse_patch_bool(scope, face, "dim")?,
         italic: parse_patch_bool(scope, face, "italic")?,
         underline: parse_patch_bool(scope, face, "underline")?,
+        underline_style: parse_patch_underline_style(scope, face)?,
+        strikethrough: parse_patch_bool(scope, face, "strikethrough")?,
     })
+}
+
+fn optional_underline_style(
+    scope: &mut v8::PinScope,
+    face: v8::Local<v8::Object>,
+) -> Result<Option<UnderlineStyle>, ScriptError> {
+    let Some(value) = property(scope, face, "underlineStyle") else {
+        return Ok(None);
+    };
+    if value.is_null_or_undefined() {
+        return Ok(None);
+    }
+    parse_underline_style(scope, value).map(Some)
+}
+
+fn parse_patch_underline_style(
+    scope: &mut v8::PinScope,
+    face: v8::Local<v8::Object>,
+) -> Result<FaceValue<UnderlineStyle>, ScriptError> {
+    let Some(value) = property(scope, face, "underlineStyle") else {
+        return Ok(FaceValue::Unspecified);
+    };
+    if value.is_null_or_undefined() {
+        return Ok(FaceValue::Unspecified);
+    }
+    if is_reset_value(scope, value)? {
+        return Ok(FaceValue::Reset);
+    }
+    parse_underline_style(scope, value).map(FaceValue::Value)
+}
+
+fn parse_underline_style(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<UnderlineStyle, ScriptError> {
+    if !value.is_string() {
+        return Err(ScriptError::new("face underlineStyle must be a string"));
+    }
+    match value.to_rust_string_lossy(scope).as_str() {
+        "line" => Ok(UnderlineStyle::Line),
+        "double" => Ok(UnderlineStyle::Double),
+        "curl" => Ok(UnderlineStyle::Curl),
+        "dotted" => Ok(UnderlineStyle::Dotted),
+        "dashed" => Ok(UnderlineStyle::Dashed),
+        _ => Err(ScriptError::new(
+            "face underlineStyle must be line, double, curl, dotted, or dashed",
+        )),
+    }
 }
 
 fn parse_patch_color(

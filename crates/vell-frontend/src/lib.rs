@@ -7,7 +7,7 @@
 
 use std::io;
 
-use vell_protocol::content_query::RenderQuery;
+use vell_protocol::content_query::{DisplayProfile, RenderQuery};
 use vell_protocol::frontend_event::FrontendEvent;
 use vell_protocol::ids::{SpaceId, ViewId};
 use vell_protocol::revision::Revision;
@@ -16,6 +16,10 @@ use vell_protocol::space::SplitDirection;
 use vell_protocol::viewport::{ResolvedViewportCommand, ViewportCommand};
 
 pub trait Frontend {
+    fn display_profile(&self) -> DisplayProfile {
+        DisplayProfile::default()
+    }
+
     async fn next_event(&mut self) -> io::Result<Option<FrontendEvent>>;
 
     fn render(

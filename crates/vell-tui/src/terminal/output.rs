@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use crate::protocol::content_query::{Color, CursorStyle, PaintFace};
+use crate::protocol::content_query::{Color, CursorStyle, PaintFace, UnderlineStyle};
 use crossterm::style::{
     Attribute, Color as TerminalColor, ResetColor, SetAttribute, SetBackgroundColor,
     SetForegroundColor,
@@ -97,12 +97,23 @@ impl<W: Write> Output<W> {
         }
         for (enabled, attribute) in [
             (face.bold, Attribute::Bold),
+            (face.dim, Attribute::Dim),
             (face.italic, Attribute::Italic),
-            (face.underline, Attribute::Underlined),
+            (face.strikethrough, Attribute::CrossedOut),
         ] {
             if enabled {
                 queue!(self.out, SetAttribute(attribute))?;
             }
+        }
+        if face.underline {
+            let attribute = match face.underline_style {
+                UnderlineStyle::Line => Attribute::Underlined,
+                UnderlineStyle::Double => Attribute::DoubleUnderlined,
+                UnderlineStyle::Curl => Attribute::Undercurled,
+                UnderlineStyle::Dotted => Attribute::Underdotted,
+                UnderlineStyle::Dashed => Attribute::Underdashed,
+            };
+            queue!(self.out, SetAttribute(attribute))?;
         }
         Ok(())
     }
@@ -130,6 +141,25 @@ impl<W: Write> Output<W> {
 fn terminal_color(color: Color) -> TerminalColor {
     match color {
         Color::Ansi(value) => TerminalColor::AnsiValue(value),
+        Color::Ansi16(value) => match value.min(15) {
+            0 => TerminalColor::Black,
+            1 => TerminalColor::DarkRed,
+            2 => TerminalColor::DarkGreen,
+            3 => TerminalColor::DarkYellow,
+            4 => TerminalColor::DarkBlue,
+            5 => TerminalColor::DarkMagenta,
+            6 => TerminalColor::DarkCyan,
+            7 => TerminalColor::Grey,
+            8 => TerminalColor::DarkGrey,
+            9 => TerminalColor::Red,
+            10 => TerminalColor::Green,
+            11 => TerminalColor::Yellow,
+            12 => TerminalColor::Blue,
+            13 => TerminalColor::Magenta,
+            14 => TerminalColor::Cyan,
+            15 => TerminalColor::White,
+            _ => unreachable!("ANSI16 index is clamped"),
+        },
         Color::Rgb { red, green, blue } => TerminalColor::Rgb {
             r: red,
             g: green,
@@ -206,6 +236,37 @@ mod tests {
         let s = String::from_utf8(out.into_inner()).unwrap();
         assert!(s.contains("\x1b[7m"), "on: {s}");
         assert!(s.contains("\x1b[27m"), "off: {s}");
+    }
+
+    #[test]
+    fn set_face_emits_extended_text_attributes() {
+        let mut out = Output::new(Vec::new());
+        out.set_face(&PaintFace {
+            dim: true,
+            underline: true,
+            underline_style: UnderlineStyle::Curl,
+            strikethrough: true,
+            ..PaintFace::default()
+        })
+        .unwrap();
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert!(output.contains("\x1b[2m"), "dim: {output}");
+        assert!(output.contains("\x1b[4:3m"), "undercurl: {output}");
+        assert!(output.contains("\x1b[9m"), "strikethrough: {output}");
+    }
+
+    #[test]
+    fn ansi16_face_uses_standard_color_escape() {
+        let mut out = Output::new(Vec::new());
+        out.set_face(&PaintFace {
+            foreground: Some(Color::Ansi16(1)),
+            ..PaintFace::default()
+        })
+        .unwrap();
+        let output = String::from_utf8(out.into_inner()).unwrap();
+
+        assert!(output.contains("\x1b[31m"), "ANSI16 escape: {output}");
+        assert!(!output.contains("\x1b[38;5;1m"), "ANSI256 escape: {output}");
     }
 
     #[test]

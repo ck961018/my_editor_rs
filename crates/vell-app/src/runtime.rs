@@ -1499,6 +1499,10 @@ impl<F: Frontend> App<F> {
     }
 
     pub(super) fn render(&mut self) -> io::Result<()> {
+        let display_profile = self.frontend.display_profile();
+        self.session
+            .faces_mut()
+            .set_display_profile(display_profile);
         let query = AppQuery {
             contents: self.kernel.contents(),
             views: self.session.views(),

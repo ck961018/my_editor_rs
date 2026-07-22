@@ -5,7 +5,12 @@ editor.modes.define({
   faces: {
     "plugin.pairs.match": {
       inherits: ["syntax.string"],
-      fallback: { bold: true },
+      fallback: {
+        bold: true,
+        dim: false,
+        underlineStyle: "curl",
+        strikethrough: false,
+      },
     },
   },
   on: {
@@ -24,7 +29,7 @@ editor.modes.define({
             ["syntax.string", { underline: true }],
             "view",
           );
-          ctx.faces.removeRelative(token);
+          void token;
           ctx.faces.setBase("plugin.pairs.match", null, "content");
           ctx.viewState.insertedPairs++;
         },
@@ -153,6 +158,10 @@ editor.modes.define({
 });
 editor.theme.use("catppuccin-mocha");
 editor.faces.override("syntax.comment", { italic: false });
+editor.faces.override("diagnostic.error", {
+  underlineStyle: "curl",
+  strikethrough: true,
+});
 editor.faces.override(
   "ui.editor",
   { foreground: { reset: true } },

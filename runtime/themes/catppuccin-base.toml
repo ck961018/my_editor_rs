@@ -39,10 +39,10 @@ selectable = false
 "syntax.variable" = { foreground = "text" }
 "syntax.variable.builtin" = { foreground = "red" }
 "syntax.variable.parameter" = { foreground = "maroon", italic = true }
-"diagnostic.error" = { foreground = "red", underline = true }
-"diagnostic.warning" = { foreground = "yellow", underline = true }
-"diagnostic.info" = { foreground = "sky", underline = true }
-"diagnostic.hint" = { foreground = "teal", underline = true }
+"diagnostic.error" = { foreground = "red", underline-style = "curl" }
+"diagnostic.warning" = { foreground = "yellow", underline-style = "curl" }
+"diagnostic.info" = { foreground = "sky", underline-style = "curl" }
+"diagnostic.hint" = { foreground = "teal", underline-style = "curl" }
 "diff.plus" = { foreground = "green" }
 "diff.minus" = { foreground = "red" }
 "diff.delta" = { foreground = "blue" }

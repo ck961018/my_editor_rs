@@ -19,7 +19,7 @@ use vell_mode::{
 };
 use vell_protocol::content_query::{
     Color, Face, FaceDefinition, FaceName, FaceOverride, FacePatch, FaceValue,
-    NamedTextDecoration, RowRange, ThemeName,
+    NamedTextDecoration, RowRange, ThemeName, UnderlineStyle,
 };
 use vell_protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
 
@@ -930,7 +930,10 @@ mod tests {
 editor.theme.use("catppuccin-mocha");
 editor.faces.override("syntax.comment", {
   foreground: "#010203",
+  dim: true,
   italic: false,
+  underlineStyle: "double",
+  strikethrough: true,
 });
 editor.faces.override(
   "ui.editor",
@@ -981,6 +984,14 @@ throw new Error("rollback");
                 green: 2,
                 blue: 3,
             })
+        );
+        assert_eq!(
+            configuration.face_overrides[0].patch.underline_style,
+            FaceValue::Value(UnderlineStyle::Double)
+        );
+        assert_eq!(
+            configuration.face_overrides[0].patch.strikethrough,
+            FaceValue::Value(true)
         );
         assert_eq!(
             configuration.face_overrides[1].patch.background,

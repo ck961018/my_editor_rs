@@ -41,8 +41,11 @@ interface EditorFace {
   foreground?: number | `#${string}`;
   background?: number | `#${string}`;
   bold?: boolean;
+  dim?: boolean;
   italic?: boolean;
   underline?: boolean;
+  underlineStyle?: "line" | "double" | "curl" | "dotted" | "dashed";
+  strikethrough?: boolean;
 }
 
 interface EditorFaceReset {
@@ -53,8 +56,17 @@ interface EditorFacePatch {
   foreground?: number | `#${string}` | EditorFaceReset;
   background?: number | `#${string}` | EditorFaceReset;
   bold?: boolean | EditorFaceReset;
+  dim?: boolean | EditorFaceReset;
   italic?: boolean | EditorFaceReset;
   underline?: boolean | EditorFaceReset;
+  underlineStyle?:
+    | "line"
+    | "double"
+    | "curl"
+    | "dotted"
+    | "dashed"
+    | EditorFaceReset;
+  strikethrough?: boolean | EditorFaceReset;
 }
 
 interface EditorFaceDefinition {
