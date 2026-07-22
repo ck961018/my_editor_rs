@@ -92,8 +92,11 @@ editor.modes.define({
 });
 ```
 
-Buffer 与 StatusBar adapter 获得不同的静态 context。StatusBar 不暴露
-cursor、text edit 或 background analysis。
+Buffer 与 StatusBar adapter 获得不同的静态 context。Buffer context 暴露
+资源名、路径、载体状态、脏状态、保存结果和文本统计；StatusBar view
+context 还暴露
+目标 View 与 Content ID，并可通过 `viewPolicy.statusBar` 定制左、中、右分段
+及 Face。StatusBar 不暴露 cursor、text edit 或 background analysis。
 
 v1 `content/view/actions/keys` schema 只作为兼容 parser 存在。每个 host 最多
 产生一条结构化弃用诊断；`V1_REMOVAL_VERSION` 为 `0.3.0`。兼容层不会改变

@@ -13,8 +13,8 @@ use crate::core::transaction::{
     Affinity, TextChangeSet, TextEdit, TextStateId, TextTransactionData, TextTransactionError,
     TransactionDirection,
 };
+use crate::protocol::content_query::{BufferBackingState, SaveState};
 use crate::protocol::selection::{Selection, Selections, TextOffset, TextPoint};
-use crate::protocol::status::StatusMessage;
 
 mod navigation;
 mod ranges;
@@ -34,7 +34,8 @@ pub struct Buffer {
     saved_state: TextStateId,
     next_state: u64,
     last_change: Option<TextChangeSet>,
-    status: StatusMessage,
+    backing_state: BufferBackingState,
+    save_state: SaveState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,7 +53,8 @@ impl Buffer {
             saved_state: TextStateId(0),
             next_state: 1,
             last_change: None,
-            status: StatusMessage::None,
+            backing_state: BufferBackingState::Untitled,
+            save_state: SaveState::Idle,
         }
     }
 
@@ -65,7 +67,8 @@ impl Buffer {
             saved_state: self.saved_state,
             next_state: self.next_state,
             last_change: None,
-            status: self.status.clone(),
+            backing_state: self.backing_state,
+            save_state: self.save_state,
         };
         let mut selections = selections.clone();
         crate::core::edit::apply_edit(command, &mut scratch, &mut selections);
@@ -82,38 +85,24 @@ impl Buffer {
                 self.rope = Rope::from_str(&text);
                 self.advance_revision();
                 self.reset_to_saved_state();
+                self.backing_state = BufferBackingState::Materialized;
+                self.save_state = SaveState::Idle;
                 Ok(())
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 self.rope = Rope::new();
                 self.advance_revision();
                 self.reset_to_saved_state();
+                self.backing_state = BufferBackingState::Unmaterialized;
+                self.save_state = SaveState::Idle;
                 Ok(())
             }
             Err(e) => Err(e),
         }
     }
 
-    /// 打开文件语义：NotFound→NewFile、非 UTF-8→OpenFailed、正常→None。
     pub fn open_path(&mut self, path: &str) -> io::Result<()> {
-        let result = self.load_from_file(path);
-        match &result {
-            Ok(()) => {
-                let is_new = !std::path::Path::new(path).exists();
-                self.status = if is_new {
-                    StatusMessage::NewFile
-                } else {
-                    StatusMessage::None
-                };
-            }
-            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
-                self.status = StatusMessage::OpenFailed;
-            }
-            Err(_) => {
-                self.status = StatusMessage::OpenFailed;
-            }
-        }
-        result
+        self.load_from_file(path)
     }
 
     pub fn revision(&self) -> u64 {
@@ -126,6 +115,7 @@ impl Buffer {
 
     pub fn mark_saved(&mut self, state: TextStateId) -> bool {
         self.saved_state = state;
+        self.backing_state = BufferBackingState::Materialized;
         self.current_state == state
     }
 
@@ -291,12 +281,16 @@ impl Buffer {
         Ok(())
     }
 
-    pub fn set_status(&mut self, msg: StatusMessage) {
-        self.status = msg;
+    pub fn backing_state(&self) -> BufferBackingState {
+        self.backing_state
     }
 
-    pub fn status(&self) -> StatusMessage {
-        self.status.clone()
+    pub fn save_state(&self) -> SaveState {
+        self.save_state
+    }
+
+    pub(crate) fn set_save_state(&mut self, state: SaveState) {
+        self.save_state = state;
     }
 
     #[cfg(test)]
@@ -339,12 +333,12 @@ impl Buffer {
         self.path.as_ref()
     }
 
-    /// 取第 idx 行（含尾部换行），供 ContentQuery::lines 用。
+    /// 取第 idx 行（含尾部换行），供文本行查询使用。
     pub fn line(&self, idx: usize) -> Cow<'_, str> {
         Cow::Owned(self.slice().line(idx).to_string())
     }
 
-    /// 文件名（path 末段），供 StatusBar::status_bar_data 用。
+    /// 文件名（path 末段），供资源名查询使用。
     pub fn file_name(&self) -> Option<&str> {
         self.path()
             .and_then(|p| p.file_name())
@@ -1336,7 +1330,8 @@ mod tests {
         assert_eq!(b.len_lines(), 1);
         assert!(!b.modified());
         assert!(b.path().is_none());
-        assert_eq!(b.status(), StatusMessage::None);
+        assert_eq!(b.backing_state(), BufferBackingState::Untitled);
+        assert_eq!(b.save_state(), SaveState::Idle);
     }
 
     #[test]
@@ -1352,13 +1347,6 @@ mod tests {
             buffer.text_point(TextOffset { char_index: 999 }),
             TextPoint { row: 1, col: 2 }
         );
-    }
-
-    #[test]
-    fn set_status_changes_message() {
-        let mut b = Buffer::new();
-        b.set_status(StatusMessage::Saved);
-        assert_eq!(b.status(), StatusMessage::Saved);
     }
 
     #[test]
@@ -2109,7 +2097,7 @@ mod tests {
         let path = dir.path().join("nope.txt");
         let mut b = Buffer::new();
         b.open_path(path.to_str().unwrap()).unwrap();
-        assert_eq!(b.status(), StatusMessage::NewFile);
+        assert_eq!(b.backing_state(), BufferBackingState::Unmaterialized);
     }
 
     #[test]
@@ -2118,18 +2106,17 @@ mod tests {
         let path = dir.path().join("bin.dat");
         std::fs::write(&path, [0xFF, 0xFE, 0xC0]).unwrap();
         let mut b = Buffer::new();
-        let _ = b.open_path(path.to_str().unwrap());
-        assert_eq!(b.status(), StatusMessage::OpenFailed);
+        assert!(b.open_path(path.to_str().unwrap()).is_err());
     }
 
     #[test]
-    fn open_existing_sets_none_status() {
+    fn open_existing_is_materialized() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "hi").unwrap();
         let mut b = Buffer::new();
         b.open_path(path.to_str().unwrap()).unwrap();
-        assert_eq!(b.status(), StatusMessage::None);
+        assert_eq!(b.backing_state(), BufferBackingState::Materialized);
         assert_eq!(b.slice().to_string(), "hi");
     }
 

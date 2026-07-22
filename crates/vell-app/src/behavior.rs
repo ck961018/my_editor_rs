@@ -1,10 +1,14 @@
 use crate::application::App;
 use vell_core::transaction::TextStateId;
 use vell_frontend::Frontend;
-use vell_protocol::content_query::{ContentData, ContentQuery, DocumentStatus};
+use vell_protocol::content_query::{
+    BufferBackingState, ContentData, ContentQuery, DirtyState, SaveState, TextMetrics,
+};
+use vell_protocol::ids::SpaceId;
 use vell_protocol::ids::{ContentId, ViewId};
 use vell_protocol::revision::Revision;
 use vell_protocol::selection::Selections;
+use vell_protocol::space::SplitDirection;
 use vell_protocol::viewport::ResolvedViewportCommand;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,7 +28,11 @@ pub(super) struct ContentBehavior {
     pub content: ContentId,
     pub revision: Revision,
     pub text: Option<String>,
-    pub document_status: Option<DocumentStatus>,
+    pub resource_name: Option<String>,
+    pub backing_state: Option<BufferBackingState>,
+    pub dirty_state: Option<DirtyState>,
+    pub save_state: Option<SaveState>,
+    pub text_metrics: Option<TextMetrics>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +83,14 @@ pub(super) enum EffectBehavior {
     Viewport {
         view: ViewId,
         command: ResolvedViewportCommand,
+    },
+    Split {
+        target: SpaceId,
+        content: ContentId,
+        direction: SplitDirection,
+    },
+    Focus {
+        target: SpaceId,
     },
     Quit,
 }
@@ -145,12 +161,44 @@ impl BehaviorSnapshot {
                     .contents()
                     .text_snapshot(content)
                     .map(|snapshot| snapshot.to_owned_string());
-                let document_status = match app
+                let resource_name = match app
                     .kernel
                     .contents()
-                    .query(content, ContentQuery::DocumentStatus)
+                    .query(content, ContentQuery::ResourceName)
                 {
-                    ContentData::DocumentStatus(status) => Some(status),
+                    ContentData::ResourceName(name) => name,
+                    _ => None,
+                };
+                let backing_state = match app
+                    .kernel
+                    .contents()
+                    .query(content, ContentQuery::BackingState)
+                {
+                    ContentData::BackingState(state) => Some(state),
+                    _ => None,
+                };
+                let dirty_state = match app
+                    .kernel
+                    .contents()
+                    .query(content, ContentQuery::DirtyState)
+                {
+                    ContentData::DirtyState(state) => Some(state),
+                    _ => None,
+                };
+                let save_state = match app
+                    .kernel
+                    .contents()
+                    .query(content, ContentQuery::SaveState)
+                {
+                    ContentData::SaveState(state) => Some(state),
+                    _ => None,
+                };
+                let text_metrics = match app
+                    .kernel
+                    .contents()
+                    .query(content, ContentQuery::TextMetrics)
+                {
+                    ContentData::TextMetrics(metrics) => Some(metrics),
                     _ => None,
                 };
                 ContentBehavior {
@@ -161,7 +209,11 @@ impl BehaviorSnapshot {
                         .revision(content)
                         .expect("captured content exists"),
                     text,
-                    document_status,
+                    resource_name,
+                    backing_state,
+                    dirty_state,
+                    save_state,
+                    text_metrics,
                 }
             })
             .collect();

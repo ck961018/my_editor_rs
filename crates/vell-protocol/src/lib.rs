@@ -8,5 +8,4 @@ pub mod revision;
 pub mod scene;
 pub mod selection;
 pub mod space;
-pub mod status;
 pub mod viewport;

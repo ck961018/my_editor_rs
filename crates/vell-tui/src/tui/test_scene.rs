@@ -89,6 +89,63 @@ pub(crate) fn split_editor_scene(
     )
 }
 
+pub(crate) fn nested_focus_scene(
+    width: i32,
+    height: i32,
+) -> (Scene, SpaceId, SpaceId, SpaceId, SpaceId) {
+    let left = SpaceId(0);
+    let adjacent_top = SpaceId(1);
+    let adjacent_bottom = SpaceId(2);
+    let adjacent_column = SpaceId(3);
+    let far_right = SpaceId(4);
+    let root = SpaceId(5);
+    let nodes = [
+        (
+            left,
+            content_node(Some(root), ViewId(0), true, Sizing::Grow(1)),
+        ),
+        (
+            adjacent_top,
+            content_node(Some(adjacent_column), ViewId(1), true, Sizing::Grow(1)),
+        ),
+        (
+            adjacent_bottom,
+            content_node(Some(adjacent_column), ViewId(2), true, Sizing::Grow(1)),
+        ),
+        (
+            adjacent_column,
+            container_node(
+                Some(root),
+                Axis::Vertical,
+                vec![adjacent_top, adjacent_bottom],
+                Sizing::Grow(1),
+            ),
+        ),
+        (
+            far_right,
+            content_node(Some(root), ViewId(3), true, Sizing::Grow(1)),
+        ),
+        (
+            root,
+            container_node(
+                None,
+                Axis::Horizontal,
+                vec![left, adjacent_column, far_right],
+                Sizing::Grow(1),
+            ),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    (
+        Scene::from_parts(root, Size { width, height }, nodes),
+        left,
+        adjacent_top,
+        adjacent_bottom,
+        far_right,
+    )
+}
+
 fn content_node(
     parent: Option<SpaceId>,
     view: ViewId,

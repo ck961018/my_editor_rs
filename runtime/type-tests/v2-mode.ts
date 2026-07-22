@@ -9,8 +9,8 @@ editor.modes.define({
       commands: {
         quote(ctx) {
           if (!ctx.state.enabled) return ctx.pass();
-          // @ts-expect-error Buffer adapters do not expose StatusBar data.
-          void ctx.status;
+          // @ts-expect-error Buffer adapters do not expose StatusBar targets.
+          void ctx.targetContentId;
           ctx.edit.insert('""');
           ctx.cursor.moveLeft();
           ctx.viewState.insertedPairs++;
@@ -30,6 +30,13 @@ editor.modes.define({
       commands: {
         update(ctx) {
           ctx.state.updates++;
+          void ctx.targetContentId;
+          void ctx.resourceName;
+          void ctx.resourcePath;
+          void ctx.backingState;
+          void ctx.dirty;
+          void ctx.saveState;
+          void ctx.textMetrics;
           // @ts-expect-error StatusBar adapters cannot edit Buffer text.
           ctx.edit.insert("forbidden");
           // @ts-expect-error StatusBar adapters do not expose a cursor.

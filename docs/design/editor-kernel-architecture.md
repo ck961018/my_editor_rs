@@ -118,9 +118,9 @@ enum ContentKind {
 所有静态分派位置。
 
 `ContentStore` 是唯一 Content 表，每个 entry 保存 Content 与 Revision。
-Content 自己分派具体变体的 presentation、view state、snapshot、query 和
-dependency 规则；Store 只负责 ID、entry revision、生命周期和跨 Content
-查询协调。app 不借出或识别 `Buffer`、`StatusBar`。Content 接收
+Content 自己分派具体变体的 view state、snapshot 和 query；Store 只负责
+ID、entry revision 与生命周期。app 不借出或识别 `Buffer`、`StatusBar`。
+Content 接收
 `ContentAction`、保存请求和后台 `ContentEvent`，不接收顶层 `Command`、
 原始按键或可变 View state。
 
@@ -130,10 +130,11 @@ change 映射到绑定同一 Content 的全部 View。
 
 渲染只读数据通过 `ContentStore::query` 返回有界的 owned `ContentData`。
 文本渲染只查询行范围或指定 offset；Mode 后台分析通过 `TextSnapshot`
-读取稳定快照，不经过同步全文查询。`StatusBar` 显式声明目标 Content 的
-`DocumentStatus` 依赖，Store 负责协调查询和有效 revision。Content 还声明
-`ContentKind`；`AppQuery` 穷尽匹配 `(ContentKind, ContentViewState)` 组装
-`ViewPresentation`。`RenderQuery` 的 content、view 和
+读取稳定快照，不经过同步全文查询。Buffer 的资源名、资源路径、载体状态、
+脏状态、保存结果和文本统计分别通过独立 query 暴露，不存在聚合状态结构。
+Content 还声明 `ContentKind`；`AppQuery` 穷尽匹配
+`(ContentKind, ContentViewState)` 组装 `ViewPresentation`。
+`RenderQuery` 的 content、view 和
 decoration 查询都返回 `Result`；缺失 ID、不支持的查询、错误的
 数据变体和种类错配统一返回 `RenderQueryError`。渲染路径不
 通过 selection 是否存在猜测 Content 类型，也不因查询契约错误
@@ -149,11 +150,18 @@ View
 ```
 
 `ContentViewState` 是与封闭 Content 对齐的显式枚举：Buffer View 持有
-`BufferViewState { selections }`，StatusBar View 持有
-`StatusBarViewState`。因此 Buffer View 始终具有 selections，StatusBar View
+`BufferViewState { selections }`，StatusBar View 持有目标 `ViewId` 和
+`ContentId`。因此 Buffer View 始终具有 selections，StatusBar View
 不能误用文本状态。Content 与 View state 种类不匹配时返回结构化错误，不在
 生产路径 panic。View 不保存 Mode instance、presentation layer 或 history。
 Mode chain、输入状态和呈现缓存由 `ClientSession` 中的集中 store 管理。
+
+`ClientSession` 共享一个 StatusBar Content，并支持两种布局策略：全局策略
+只有一个 StatusBar View，其目标随焦点变化；per-pane 策略为每个 Buffer
+View 创建独立 StatusBar View。状态栏可通过把对应 Space 高度设为零独立
+隐藏。app 可按 View 查询单个状态栏，也可按 Content 查询全部对应状态栏。
+状态栏最终呈现是带 Face 的左、中、右分段；Mode 的
+`viewPolicy.statusBar` 可以替换默认呈现，TUI 只负责布局与绘制。
 
 ## 6. Mode 模型
 
@@ -181,8 +189,9 @@ Mode definition 的 adapter。第一版的各 slot 共用同一个 definition，
 ContentKind 时，该约束不影响这条 ModeChain。
 
 `ModeContentContext` 和 `ModeViewContext` 都是按 `ContentKind` 封闭的
-enum。Buffer variant 仅提供强类型文本查询、snapshot 和 selections；
-StatusBar variant 只提供状态栏数据。一个多 adapter native Mode 可以按
+enum。Buffer variant 仅提供强类型文本查询、细粒度资源事实、snapshot 和
+selections；StatusBar view variant 提供目标 ID 和目标 Content 的细粒度
+事实。一个多 adapter native Mode 可以按
 当前 variant 创建不同 state，不支持的能力不会出现在对应的强类型
 context 上。Context 不借出 `&mut Content`、`&mut View` 或宿主对象。
 第一版保留一个 Rust `Mode` trait 和 closed adapter table，不复制两套
@@ -251,8 +260,9 @@ Content、selections 和 input 在第一次变更前 lazy checkpoint。Mode stat
 写入 draft。history 继续由 `TransactionManager` 拥有，Kernel 只为本 frame
 第一次 history 写入保存目标 flow checkpoint。
 
-Save、Quit 和 frontend viewport mutation 在有序执行点捕获完整 payload，
-但只在 frame 成功后发布。Save 携带当时的 `SaveSnapshot`，viewport 携带
+Save、Quit、split、focus 和 frontend viewport mutation 在有序执行点捕获
+完整 payload，但只在 frame 成功后发布。Save 携带当时的 `SaveSnapshot`，
+viewport 携带
 Frontend 根据实际 pane 布局解析的 `ResolvedViewportCommand`。滚动结果保存
 方向和行数；`zz`、`zt`、`zb` 等对齐结果保存目标 `top_row`，不移动 cursor。
 后续 operation 失败会丢弃全部 prepared effects。

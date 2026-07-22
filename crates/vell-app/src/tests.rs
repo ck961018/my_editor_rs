@@ -10,7 +10,10 @@ use super::behavior::{
 use super::bootstrap::{bootstrap_editor, create_editor_session};
 use super::command_resolver::default_global_keymap;
 use super::dispatcher::{DispatchCommand, Dispatcher};
-use super::layout::{LayoutError, NewView, resolve_focus, view_for_space};
+use super::layout::{
+    LayoutError, NewView, StatusBarPlacement, focusable_view_count, resolve_focus, space_for_view,
+    view_for_space,
+};
 use super::message::AppMessage;
 use super::query::AppQuery;
 use super::view::View;
@@ -21,7 +24,7 @@ use crate::command::{
 use crate::mode::{
     Mode, ModeActionScope, ModeAdapters, ModeAttachmentError, ModeContentContext, ModeContextError,
     ModeError, ModeFaultPhase, ModeResult, ModeState, ModeViewContext, ModeViewInstance,
-    ModeViewPolicy,
+    ModeViewPolicy, NamedStatusBarPresentation, NamedStatusBarSegment,
 };
 use crate::mode_name::{ModeActionName, ModeName};
 use crate::operation::{
@@ -39,9 +42,9 @@ use vell_core::transaction::{TextChangeSet, TextEdit};
 use vell_frontend::Frontend;
 use vell_plugin_v8::ScriptHost;
 use vell_protocol::content_query::{
-    Color, ContentData, ContentQuery, ContentQueryKind, CursorStyle, DocumentStatus, Face,
-    FaceName, NamedTextDecoration, RenderQuery, RenderQueryError, RowRange, TextPresentation,
-    ViewData, ViewPresentation,
+    BufferBackingState, Color, ContentData, ContentQuery, ContentQueryKind, CursorStyle,
+    DirtyState, Face, FaceName, NamedTextDecoration, RenderQuery, RenderQueryError, RowRange,
+    SaveState, StatusBarPresentation, TextPresentation, ViewData, ViewPresentation,
 };
 use vell_protocol::frontend_event::{FrontendEvent, ResizeEvent};
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
@@ -50,7 +53,6 @@ use vell_protocol::revision::Revision;
 use vell_protocol::scene::Scene;
 use vell_protocol::selection::{Selection, Selections, TextOffset, TextPoint};
 use vell_protocol::space::{Sizing, SpaceKind, SplitDirection};
-use vell_protocol::status::StatusMessage;
 use vell_protocol::viewport::{
     ResolvedViewportCommand, ViewportCommand, ViewportCursorBehavior, ViewportMoveAmount,
     ViewportMoveDirection,
@@ -67,6 +69,8 @@ struct ScriptedFrontend {
     fail_viewport: bool,
     viewport_height: usize,
     viewport_commands: Vec<(ViewId, ResolvedViewportCommand)>,
+    focus_targets: VecDeque<Option<SpaceId>>,
+    focus_directions: Vec<SplitDirection>,
 }
 
 struct LoopMode {
@@ -211,6 +215,10 @@ struct FactoryFaultMode {
 struct ArgumentProbeMode {
     name: ModeName,
     actions: Vec<ModeActionName>,
+}
+
+struct SaveStatusMode {
+    name: ModeName,
 }
 
 impl Mode for HighlightMode {
@@ -723,9 +731,7 @@ impl Mode for AdapterProbeMode {
     ) -> Result<Box<dyn ModeState>, ModeError> {
         match context.content_kind() {
             ContentKind::Buffer => assert!(context.buffer().is_some()),
-            ContentKind::StatusBar => {
-                assert!(context.status_bar().unwrap().status_bar_data().is_some())
-            }
+            ContentKind::StatusBar => assert!(context.status_bar().is_some()),
         }
         Ok(Box::new(AdapterProbeState {
             kind: context.content_kind(),
@@ -745,12 +751,55 @@ impl Mode for AdapterProbeMode {
                 )
             }
             ContentKind::StatusBar => {
-                assert!(context.status_bar().unwrap().status_bar_data().is_some())
+                let status = context.status_bar().unwrap();
+                assert_eq!(status.target_content_id(), editor_cid());
+                assert_eq!(status.dirty_state(), Some(DirtyState::Clean));
+                assert_eq!(status.save_state(), Some(SaveState::Idle));
             }
         }
         Ok(Box::new(AdapterProbeState {
             kind: context.content_kind(),
         }))
+    }
+}
+
+impl Mode for SaveStatusMode {
+    fn name(&self) -> &ModeName {
+        &self.name
+    }
+
+    fn actions(&self) -> &[ModeActionName] {
+        &[]
+    }
+
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::status_bar()
+    }
+
+    fn view_policy(
+        &self,
+        _content_state: &dyn ModeState,
+        _view_state: &dyn ModeState,
+        context: &ModeViewContext<'_>,
+    ) -> ModeViewPolicy {
+        let save_state = context
+            .status_bar()
+            .and_then(|status| status.save_state())
+            .expect("save status mode targets a buffer");
+        let backing_state = context
+            .status_bar()
+            .and_then(|status| status.backing_state())
+            .expect("save status mode targets a buffer");
+        ModeViewPolicy {
+            status_bar: Some(NamedStatusBarPresentation {
+                center: vec![NamedStatusBarSegment {
+                    text: format!("{backing_state:?}/{save_state:?}"),
+                    face: None,
+                }],
+                ..NamedStatusBarPresentation::default()
+            }),
+            ..ModeViewPolicy::default()
+        }
     }
 }
 
@@ -1187,7 +1236,11 @@ impl Mode for LoopMode {
         let _ = context.view_id();
         let buffer = context.buffer().expect("loop mode has a Buffer adapter");
         let _ = buffer.selections();
-        let _ = buffer.document_status();
+        let _ = buffer.resource_name();
+        let _ = buffer.backing_state();
+        let _ = buffer.dirty_state();
+        let _ = buffer.save_state();
+        let _ = buffer.text_metrics();
         let rows = buffer
             .text_rows(RowRange { start: 0, end: 1 })
             .expect("loop mode is bound to text content");
@@ -1216,6 +1269,8 @@ impl ScriptedFrontend {
             fail_viewport: false,
             viewport_height: 4,
             viewport_commands: Vec::new(),
+            focus_targets: VecDeque::new(),
+            focus_directions: Vec::new(),
         }
     }
 }
@@ -1278,6 +1333,17 @@ impl Frontend for ScriptedFrontend {
 
     fn apply_viewport_command(&mut self, view: ViewId, command: ResolvedViewportCommand) {
         self.viewport_commands.push((view, command));
+    }
+
+    fn resolve_focus_direction(
+        &mut self,
+        _scene: &Scene,
+        _scene_revision: Revision,
+        _focused: SpaceId,
+        direction: SplitDirection,
+    ) -> io::Result<Option<SpaceId>> {
+        self.focus_directions.push(direction);
+        Ok(self.focus_targets.pop_front().flatten())
     }
 }
 
@@ -1856,7 +1922,7 @@ fn replace_view_mode_for_test(
 fn text_presentation(view: &ViewData) -> &TextPresentation {
     match &view.presentation {
         ViewPresentation::Text(text) => text,
-        ViewPresentation::StatusBar => panic!("expected text presentation"),
+        ViewPresentation::StatusBar(_) => panic!("expected text presentation"),
     }
 }
 
@@ -1957,7 +2023,8 @@ fn production_content_paths_use_closed_static_dispatch() {
 fn edit_rejects_mismatched_content_view_state_without_mutating_content() {
     let mut app = make_app(vec![], None);
     let view = view_id(&app, app.session.focused());
-    *app.session.view_mut(view).unwrap().state_mut() = ContentViewState::status_bar();
+    *app.session.view_mut(view).unwrap().state_mut() =
+        ContentViewState::status_bar(view, editor_cid());
 
     let error = app
         .execute_command(DispatchCommand::ContentWithView {
@@ -1985,7 +2052,8 @@ fn edit_rolls_back_when_another_view_has_mismatched_state() {
         .unwrap()
         .new_space;
     let incompatible = view_id(&app, right);
-    *app.session.view_mut(incompatible).unwrap().state_mut() = ContentViewState::status_bar();
+    *app.session.view_mut(incompatible).unwrap().state_mut() =
+        ContentViewState::status_bar(source, editor_cid());
     let content_revision = app.kernel.contents().revision(editor_cid());
     let source_revision = app.session.views()[&source].revision();
     let source_selections = app.session.views()[&source].selections().unwrap().clone();
@@ -2023,7 +2091,8 @@ fn render_query_rejects_mismatched_content_view_state() {
         .iter()
         .find_map(|(id, view)| (view.content() == ContentId(1)).then_some(*id))
         .unwrap();
-    *app.session.view_mut(view).unwrap().state_mut() = ContentViewState::status_bar();
+    *app.session.view_mut(view).unwrap().state_mut() =
+        ContentViewState::status_bar(view, editor_cid());
     let query = AppQuery {
         contents: app.kernel.contents(),
         views: app.session.views(),
@@ -2080,14 +2149,36 @@ fn text_point(
     }
 }
 
-fn document_status(app: &App<ScriptedFrontend>, content: ContentId) -> DocumentStatus {
+fn dirty_state(app: &App<ScriptedFrontend>, content: ContentId) -> DirtyState {
     match app
         .kernel
         .contents()
-        .query(content, ContentQuery::DocumentStatus)
+        .query(content, ContentQuery::DirtyState)
     {
-        ContentData::DocumentStatus(status) => status,
-        data => panic!("expected document status, got {data:?}"),
+        ContentData::DirtyState(state) => state,
+        data => panic!("expected dirty state, got {data:?}"),
+    }
+}
+
+fn backing_state(app: &App<ScriptedFrontend>, content: ContentId) -> BufferBackingState {
+    match app
+        .kernel
+        .contents()
+        .query(content, ContentQuery::BackingState)
+    {
+        ContentData::BackingState(state) => state,
+        data => panic!("expected backing state, got {data:?}"),
+    }
+}
+
+fn save_state(app: &App<ScriptedFrontend>, content: ContentId) -> SaveState {
+    match app
+        .kernel
+        .contents()
+        .query(content, ContentQuery::SaveState)
+    {
+        ContentData::SaveState(state) => state,
+        data => panic!("expected save state, got {data:?}"),
     }
 }
 
@@ -2298,10 +2389,30 @@ fn content_query_reads_buffer_and_view() {
     assert_eq!(text.selections.primary().head().char_index, 2);
     assert_eq!(text.cursor_style, CursorStyle::Block);
     assert_eq!(
-        query.content(editor_cid(), ContentQuery::StatusBarData),
+        query.content(editor_cid(), ContentQuery::TextMetrics),
+        Ok(ContentData::TextMetrics(
+            vell_protocol::content_query::TextMetrics {
+                line_count: 1,
+                char_count: 2,
+            }
+        ))
+    );
+    assert_eq!(
+        query.content(editor_cid(), ContentQuery::ResourceName),
+        Ok(ContentData::ResourceName(None))
+    );
+    assert_eq!(
+        query.content(
+            editor_cid(),
+            ContentQuery::TextRows(RowRange { start: 0, end: 1 })
+        ),
+        Ok(ContentData::TextRows(vec!["hi".to_string()]))
+    );
+    assert_eq!(
+        query.content(ContentId(1), ContentQuery::DirtyState),
         Err(RenderQueryError::UnsupportedContentQuery {
-            content: editor_cid(),
-            query: ContentQueryKind::StatusBarData,
+            content: ContentId(1),
+            query: ContentQueryKind::DirtyState,
         })
     );
     assert_eq!(
@@ -2491,6 +2602,32 @@ fn failed_ordered_result_does_not_apply_an_earlier_viewport_move() {
 
     assert!(error.to_string().contains("unknown mode 'missing'"));
     assert!(app.frontend.viewport_commands.is_empty());
+}
+
+#[test]
+fn failed_ordered_result_does_not_apply_an_earlier_split() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    let next_view = app.session.next_view_id_for_test();
+
+    let error = app
+        .execute_command(DispatchCommand::ModeOperations {
+            operations: vec![
+                app_command(AppCommand::Split(SplitDirection::Right)),
+                nested_mode(ModeCommand {
+                    mode: ModeName::new("missing"),
+                    action: ModeActionName::new("missing"),
+                    arguments: Default::default(),
+                }),
+            ],
+            view,
+            content: editor_cid(),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("unknown mode 'missing'"));
+    assert_eq!(focusable_view_count(app.session.scene()), 1);
+    assert_eq!(app.session.next_view_id_for_test(), next_view);
 }
 
 #[test]
@@ -2698,7 +2835,355 @@ fn status_bar_view_data_has_no_text_selection_or_mode_cursor() {
     };
 
     let view = query.view(status_view).unwrap();
-    assert_eq!(view.presentation, ViewPresentation::StatusBar);
+    assert!(matches!(view.presentation, ViewPresentation::StatusBar(_)));
+}
+
+#[test]
+fn status_bar_is_globally_shared_by_default_and_can_be_hidden() {
+    let mut app = make_app(vec![], None);
+    let editor = view_id(&app, app.session.focused());
+    let status = app
+        .status_bar_for_view(editor)
+        .expect("default editor has a status bar");
+
+    assert_eq!(app.status_bar_placement(), StatusBarPlacement::Global);
+    assert_eq!(app.status_bars_for_content(editor_cid()), vec![status]);
+    assert_eq!(app.status_bar_for_view(status.view), None);
+    assert_eq!(app.status_bar_for_view(ViewId(99)), None);
+
+    app.set_status_bar_visible(None, false).unwrap();
+
+    let status_space = space_for_view(app.session.scene(), status.view).unwrap();
+    assert!(matches!(
+        app.session.scene().node(status_space).space.sizing,
+        Sizing::Fixed(0)
+    ));
+}
+
+#[test]
+fn global_status_bar_retargets_after_close_and_replace() {
+    let mut app = make_app(vec![], None);
+    let left_space = app.session.focused();
+    let left_view = view_id(&app, left_space);
+    let other = ContentId(9);
+    app.kernel
+        .contents_mut()
+        .insert(other, Content::Buffer(Buffer::new()))
+        .unwrap();
+    let right_space = app
+        .split_space(left_space, other, true, SplitDirection::Right, true)
+        .unwrap()
+        .new_space;
+
+    app.close_space(right_space).unwrap();
+
+    let status = app.status_bar_for_view(left_view).unwrap();
+    assert_eq!(
+        app.session.views()[&status.view]
+            .state()
+            .status_bar_state()
+            .unwrap()
+            .target(),
+        Some((left_view, editor_cid()))
+    );
+
+    app.replace_space_content(left_space, other, true).unwrap();
+    let replacement = view_id(&app, left_space);
+    assert_eq!(
+        app.session.views()[&status.view]
+            .state()
+            .status_bar_state()
+            .unwrap()
+            .target(),
+        Some((replacement, other))
+    );
+}
+
+#[test]
+fn managed_status_bar_spaces_reject_layout_mutations() {
+    for placement in [StatusBarPlacement::Global, StatusBarPlacement::PerPane] {
+        let mut app = make_app(vec![], None);
+        app.set_status_bar_placement(placement).unwrap();
+        let editor_space = app.session.focused();
+        let editor = view_id(&app, editor_space);
+        let status = app.status_bar_for_view(editor).unwrap();
+        let status_space = space_for_view(app.session.scene(), status.view).unwrap();
+        let revision = app.session.scene_revision();
+        let next_view = app.session.next_view_id_for_test();
+
+        assert!(matches!(
+            app.close_space(status_space),
+            Err(LayoutError::StatusBarSpace(space)) if space == status_space
+        ));
+        assert!(matches!(
+            app.split_space(
+                status_space,
+                editor_cid(),
+                true,
+                SplitDirection::Right,
+                true,
+            ),
+            Err(LayoutError::StatusBarSpace(space)) if space == status_space
+        ));
+        assert!(matches!(
+            app.replace_space_content(status_space, editor_cid(), true),
+            Err(LayoutError::StatusBarSpace(space)) if space == status_space
+        ));
+        assert!(matches!(
+            app.set_space_sizing(status_space, Sizing::Grow(1)),
+            Err(LayoutError::StatusBarSpace(space)) if space == status_space
+        ));
+        assert_eq!(app.session.scene_revision(), revision);
+        assert_eq!(app.session.next_view_id_for_test(), next_view);
+        assert!(matches!(
+            app.session.scene().node(status_space).space.sizing,
+            Sizing::Fixed(1)
+        ));
+        assert_eq!(app.status_bar_for_view(editor), Some(status));
+    }
+}
+
+#[test]
+fn per_pane_status_bars_cover_inert_buffer_views_in_both_creation_orders() {
+    let mut before = make_app(vec![], None);
+    let inert_space = before
+        .split_space(
+            before.session.focused(),
+            editor_cid(),
+            false,
+            SplitDirection::Right,
+            false,
+        )
+        .unwrap()
+        .new_space;
+    let inert_view = view_id(&before, inert_space);
+    let nested_space = before
+        .split_space(
+            inert_space,
+            editor_cid(),
+            true,
+            SplitDirection::Right,
+            false,
+        )
+        .unwrap()
+        .new_space;
+    let nested_view = view_id(&before, nested_space);
+    before
+        .set_status_bar_placement(StatusBarPlacement::PerPane)
+        .unwrap();
+    assert!(before.status_bar_for_view(inert_view).is_some());
+    assert!(before.status_bar_for_view(nested_view).is_some());
+
+    let mut after = make_app(vec![], None);
+    after
+        .set_status_bar_placement(StatusBarPlacement::PerPane)
+        .unwrap();
+    let inert_space = after
+        .split_space(
+            after.session.focused(),
+            editor_cid(),
+            false,
+            SplitDirection::Right,
+            false,
+        )
+        .unwrap()
+        .new_space;
+    let inert_view = view_id(&after, inert_space);
+    assert!(matches!(
+        after.session.scene().node(inert_space).space.kind,
+        SpaceKind::Content {
+            focusable: false,
+            ..
+        }
+    ));
+    assert!(after.status_bar_for_view(inert_view).is_some());
+    let nested_space = after
+        .split_space(
+            inert_space,
+            editor_cid(),
+            true,
+            SplitDirection::Right,
+            false,
+        )
+        .unwrap()
+        .new_space;
+    let nested_view = view_id(&after, nested_space);
+    assert!(after.status_bar_for_view(inert_view).is_some());
+    assert!(after.status_bar_for_view(nested_view).is_some());
+}
+
+#[test]
+fn unbound_status_bar_content_is_rejected_before_layout_mutation() {
+    let mut app = make_app(vec![], None);
+    let focused = app.session.focused();
+    let revision = app.session.scene_revision();
+    let next_view = app.session.next_view_id_for_test();
+
+    assert!(matches!(
+        app.split_space(focused, ContentId(1), true, SplitDirection::Right, true,),
+        Err(LayoutError::UnboundStatusBarView(ContentId(1)))
+    ));
+    assert!(matches!(
+        app.replace_space_content(focused, ContentId(1), true),
+        Err(LayoutError::UnboundStatusBarView(ContentId(1)))
+    ));
+    assert_eq!(app.session.scene_revision(), revision);
+    assert_eq!(app.session.next_view_id_for_test(), next_view);
+}
+
+#[test]
+fn per_pane_status_bars_are_distinct_and_independently_hidden() {
+    let mut app = make_app(vec![], None);
+    let left_space = app.session.focused();
+    let right_space = app
+        .split_space(left_space, editor_cid(), true, SplitDirection::Right, false)
+        .unwrap()
+        .new_space;
+    let left = view_id(&app, left_space);
+    let right = view_id(&app, right_space);
+
+    app.set_status_bar_placement(StatusBarPlacement::PerPane)
+        .unwrap();
+
+    let left_status = app.status_bar_for_view(left).unwrap();
+    let right_status = app.status_bar_for_view(right).unwrap();
+    assert_ne!(left_status, right_status);
+    assert_eq!(
+        app.status_bars_for_content(editor_cid()),
+        vec![left_status, right_status]
+    );
+
+    let queried_left_status = app
+        .status_bars_for_content(editor_cid())
+        .into_iter()
+        .find(|bar| bar.target_view == left)
+        .unwrap();
+    app.set_status_bar_visible(Some(queried_left_status.target_view), false)
+        .unwrap();
+    let left_status_space = space_for_view(app.session.scene(), left_status.view).unwrap();
+    let right_status_space = space_for_view(app.session.scene(), right_status.view).unwrap();
+    assert!(matches!(
+        app.session.scene().node(left_status_space).space.sizing,
+        Sizing::Fixed(0)
+    ));
+    assert!(matches!(
+        app.session.scene().node(right_status_space).space.sizing,
+        Sizing::Fixed(1)
+    ));
+
+    app.close_space(right_space).unwrap();
+    assert_eq!(app.status_bars_for_content(editor_cid()), vec![left_status]);
+}
+
+#[test]
+fn status_bar_mode_can_replace_the_default_presentation() {
+    let app = make_script_app(
+        r#"
+editor.modes.define({
+  name: "custom-status",
+  on: {
+    statusBar: {
+      viewState: () => ({
+        viewPolicy: {
+          statusBar: {
+            left: [{ text: "left" }],
+            center: [{ text: "center" }],
+            right: [{ text: "right" }],
+          },
+        },
+      }),
+      commands: {},
+    },
+  },
+});
+editor.modes.define({
+  name: "shadowed-status",
+  on: {
+    statusBar: {
+      viewState: () => ({
+        viewPolicy: {
+          statusBar: {
+            center: [{ text: "shadowed" }],
+          },
+        },
+      }),
+      commands: {},
+    },
+  },
+});
+"#,
+    );
+    let editor = view_id(&app, app.session.focused());
+    let status = app.status_bar_for_view(editor).unwrap();
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+
+    let presentation = match query.view(status.view).unwrap().presentation {
+        ViewPresentation::StatusBar(presentation) => presentation,
+        ViewPresentation::Text(_) => panic!("expected status-bar presentation"),
+    };
+    assert_eq!(
+        status_region_texts(&presentation),
+        (
+            vec!["left".to_owned()],
+            vec!["center".to_owned()],
+            vec!["right".to_owned()]
+        )
+    );
+    let diagnostics = app
+        .mode_diagnostics()
+        .into_iter()
+        .find(|entry| entry.view == status.view)
+        .unwrap();
+    assert_eq!(
+        diagnostics.policy_sources.status_bar,
+        Some(ModeName::new("custom-status"))
+    );
+}
+
+fn status_region_texts(
+    presentation: &StatusBarPresentation,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let texts = |segments: &[vell_protocol::content_query::StatusBarSegment]| {
+        segments
+            .iter()
+            .map(|segment| segment.text.clone())
+            .collect()
+    };
+    (
+        texts(&presentation.left),
+        texts(&presentation.center),
+        texts(&presentation.right),
+    )
+}
+
+fn attach_save_status_mode(app: &mut App<ScriptedFrontend>) {
+    let name = ModeName::new("save-status");
+    app.kernel
+        .modes_mut()
+        .register(SaveStatusMode { name: name.clone() })
+        .unwrap();
+    app.attach_mode_to_content(ContentId(1), &name).unwrap();
+}
+
+fn custom_status_center(app: &App<ScriptedFrontend>) -> String {
+    let editor = view_id(app, app.session.focused());
+    let status = app.status_bar_for_view(editor).unwrap();
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+    let ViewPresentation::StatusBar(presentation) = query.view(status.view).unwrap().presentation
+    else {
+        panic!("expected status-bar presentation");
+    };
+    presentation.center[0].text.clone()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2756,7 +3241,7 @@ async fn two_views_of_one_buffer_keep_independent_mode_instances() {
         app.session.views()[&right_id].selections()
     );
     assert_eq!(left_text.selections.primary().head().char_index, 1);
-    assert_eq!(right_text.selections.primary().head(), TextOffset::origin());
+    assert_eq!(right_text.selections.primary().head().char_index, 1);
 }
 
 #[test]
@@ -3957,6 +4442,111 @@ async fn default_vim_ctrl_w_deletes_previous_word() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn vim_ctrl_w_s_and_v_split_the_focused_buffer() {
+    for (key, expected_axis) in [
+        ('s', vell_protocol::space::Axis::Vertical),
+        ('v', vell_protocol::space::Axis::Horizontal),
+    ] {
+        let mut app = make_app(vec![], None);
+        let original = app.session.focused();
+        for input in [
+            KeyEvent::char('i'),
+            KeyEvent::char('a'),
+            KeyEvent::char('b'),
+            KeyEvent::char('c'),
+            KeyEvent::plain(KeyCode::Escape),
+        ] {
+            app.handle_event(FrontendEvent::Key(input)).await.unwrap();
+        }
+        let original_head = view_at(&app, original)
+            .selections()
+            .unwrap()
+            .primary()
+            .head();
+
+        app.handle_event(FrontendEvent::Key(KeyEvent::ctrl('w')))
+            .await
+            .unwrap();
+        app.handle_event(FrontendEvent::Key(KeyEvent::char(key)))
+            .await
+            .unwrap();
+
+        assert_eq!(focusable_view_count(app.session.scene()), 2);
+        assert_ne!(app.session.focused(), original);
+        assert_eq!(view_at(&app, app.session.focused()).content(), editor_cid());
+        assert_eq!(
+            view_at(&app, app.session.focused())
+                .selections()
+                .unwrap()
+                .primary()
+                .head(),
+            original_head
+        );
+        let parent = app
+            .session
+            .scene()
+            .node(app.session.focused())
+            .parent
+            .unwrap();
+        assert!(matches!(
+            app.session.scene().node(parent).space.kind,
+            SpaceKind::Container {
+                arrangement: vell_protocol::space::Arrangement::Flex {
+                    direction,
+                    ..
+                }
+            } if direction == expected_axis
+        ));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_ctrl_w_hjkl_request_directional_focus_from_the_frontend() {
+    let mut app = make_app(vec![], None);
+    let focused = app.session.focused();
+    app.frontend.focus_targets =
+        VecDeque::from([Some(focused), Some(focused), Some(focused), Some(focused)]);
+
+    for key in ['h', 'j', 'k', 'l'] {
+        app.handle_event(FrontendEvent::Key(KeyEvent::ctrl('w')))
+            .await
+            .unwrap();
+        app.handle_event(FrontendEvent::Key(KeyEvent::char(key)))
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        app.frontend.focus_directions,
+        vec![
+            SplitDirection::Left,
+            SplitDirection::Down,
+            SplitDirection::Up,
+            SplitDirection::Right,
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_ctrl_w_split_adds_an_independent_per_pane_status_bar() {
+    let mut app = make_app(vec![], None);
+    app.set_status_bar_placement(StatusBarPlacement::PerPane)
+        .unwrap();
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::ctrl('w')))
+        .await
+        .unwrap();
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('v')))
+        .await
+        .unwrap();
+
+    let bars = app.status_bars_for_content(editor_cid());
+    assert_eq!(bars.len(), 2);
+    assert_ne!(bars[0], bars[1]);
+    assert_eq!(focusable_view_count(app.session.scene()), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn vim_normal_w_moves_to_next_word() {
     let mut app = make_app(
         vec![
@@ -4566,16 +5156,25 @@ async fn ctrl_s_saves_file_and_marks_saved() {
     );
     app.run().await.unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "Xhi");
-    assert!(matches!(
-        app.kernel
-            .contents()
-            .query(editor_cid(), ContentQuery::DocumentStatus),
-        ContentData::DocumentStatus(DocumentStatus {
-            modified: false,
-            message: StatusMessage::Saved,
-            ..
-        }),
-    ));
+    assert_eq!(dirty_state(&app, editor_cid()), DirtyState::Clean);
+    assert_eq!(save_state(&app, editor_cid()), SaveState::Saved);
+    assert_eq!(
+        backing_state(&app, editor_cid()),
+        BufferBackingState::Materialized
+    );
+    let editor = view_id(&app, app.session.focused());
+    let status = app.status_bar_for_view(editor).unwrap();
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+    let presentation = match query.view(status.view).unwrap().presentation {
+        ViewPresentation::StatusBar(presentation) => presentation,
+        ViewPresentation::Text(_) => panic!("expected status-bar presentation"),
+    };
+    assert_eq!(presentation.center[0].text, "Saved");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -4753,22 +5352,22 @@ async fn prefix_key_sequence_saves() {
     app.session
         .replace_dispatcher_for_test(Dispatcher::new(global));
     app.run().await.unwrap();
-    assert_eq!(
-        document_status(&app, editor_cid()).message,
-        StatusMessage::Saved
-    );
+    assert_eq!(dirty_state(&app, editor_cid()), DirtyState::Clean);
+    assert_eq!(save_state(&app, editor_cid()), SaveState::Saved);
 }
 
 #[test]
 fn save_completed_ok_marks_buffer_saved() {
     let mut app = make_app(vec![], None);
+    attach_save_status_mode(&mut app);
+    assert_eq!(custom_status_center(&app), "Untitled/Idle");
     app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("x".to_string())),
         view: view_id(&app, app.session.focused()),
         content: editor_cid(),
     })
     .unwrap();
-    assert!(document_status(&app, editor_cid()).modified);
+    assert_eq!(dirty_state(&app, editor_cid()), DirtyState::Modified);
     app.kernel.track_pending_save_for_test(
         editor_cid(),
         1,
@@ -4785,14 +5384,20 @@ fn save_completed_ok_marks_buffer_saved() {
     .unwrap();
 
     assert!(!app.kernel.has_pending_save(editor_cid()));
-    let status = document_status(&app, editor_cid());
-    assert!(!status.modified);
-    assert_eq!(status.message, StatusMessage::Saved);
+    assert_eq!(dirty_state(&app, editor_cid()), DirtyState::Clean);
+    assert_eq!(save_state(&app, editor_cid()), SaveState::Saved);
+    assert_eq!(
+        backing_state(&app, editor_cid()),
+        BufferBackingState::Materialized
+    );
+    assert_eq!(custom_status_center(&app), "Materialized/Saved");
 }
 
 #[test]
 fn save_completed_err_marks_buffer_save_failed() {
     let mut app = make_app(vec![], None);
+    attach_save_status_mode(&mut app);
+    assert_eq!(custom_status_center(&app), "Untitled/Idle");
     app.kernel.track_pending_save_for_test(
         editor_cid(),
         0,
@@ -4809,10 +5414,29 @@ fn save_completed_err_marks_buffer_save_failed() {
     .unwrap();
 
     assert!(!app.kernel.has_pending_save(editor_cid()));
+    assert_eq!(dirty_state(&app, editor_cid()), DirtyState::Clean);
+    assert_eq!(save_state(&app, editor_cid()), SaveState::Failed);
     assert_eq!(
-        document_status(&app, editor_cid()).message,
-        StatusMessage::SaveFailed
+        backing_state(&app, editor_cid()),
+        BufferBackingState::Untitled
     );
+    assert_eq!(custom_status_center(&app), "Untitled/Failed");
+}
+
+#[test]
+fn save_without_a_path_invalidates_custom_status_policy() {
+    let mut app = make_app(vec![], None);
+    attach_save_status_mode(&mut app);
+    assert_eq!(custom_status_center(&app), "Untitled/Idle");
+
+    app.execute_command(DispatchCommand::Content {
+        command: ContentCommand::Save,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert_eq!(save_state(&app, editor_cid()), SaveState::Failed);
+    assert_eq!(custom_status_center(&app), "Untitled/Failed");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -4838,7 +5462,47 @@ async fn stale_save_completion_keeps_newer_edits_modified() {
     app.shutdown_tasks().await.unwrap();
 
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
-    assert!(document_status(&app, editor_cid()).modified);
+    assert_eq!(dirty_state(&app, editor_cid()), DirtyState::Modified);
+    assert_eq!(save_state(&app, editor_cid()), SaveState::Idle);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_new_file_save_invalidates_backing_state_presentation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("new-stale-save.txt");
+    let path_str = path.to_str().unwrap().to_owned();
+    let mut app = make_app(vec![], Some(&path_str));
+    attach_save_status_mode(&mut app);
+    assert_eq!(custom_status_center(&app), "Unmaterialized/Idle");
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("A".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    app.execute_command(DispatchCommand::Content {
+        command: ContentCommand::Save,
+        content: editor_cid(),
+    })
+    .unwrap();
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("B".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    app.shutdown_tasks().await.unwrap();
+
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "A");
+    assert_eq!(dirty_state(&app, editor_cid()), DirtyState::Modified);
+    assert_eq!(save_state(&app, editor_cid()), SaveState::Idle);
+    assert_eq!(
+        backing_state(&app, editor_cid()),
+        BufferBackingState::Materialized
+    );
+    assert_eq!(custom_status_center(&app), "Materialized/Idle");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -4877,9 +5541,12 @@ async fn save_during_pending_write_queues_latest_snapshot() {
 
     assert!(!app.kernel.has_pending_save(editor_cid()));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "ABhello");
-    let status = document_status(&app, editor_cid());
-    assert!(!status.modified);
-    assert_eq!(status.message, StatusMessage::Saved);
+    assert_eq!(dirty_state(&app, editor_cid()), DirtyState::Clean);
+    assert_eq!(save_state(&app, editor_cid()), SaveState::Saved);
+    assert_eq!(
+        backing_state(&app, editor_cid()),
+        BufferBackingState::Materialized
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -4941,10 +5608,8 @@ async fn run_waits_for_pending_save_before_returning() {
 
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "Xhi");
     assert!(!app.kernel.has_pending_save(editor_cid()));
-    assert_eq!(
-        document_status(&app, editor_cid()).message,
-        StatusMessage::Saved
-    );
+    assert_eq!(dirty_state(&app, editor_cid()), DirtyState::Clean);
+    assert_eq!(save_state(&app, editor_cid()), SaveState::Saved);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -6446,6 +7111,37 @@ fn failed_layout_mutations_do_not_consume_view_ids() {
             .is_err()
     );
     assert_eq!(app.session.next_view_id_for_test(), next);
+
+    app.set_status_bar_placement(StatusBarPlacement::PerPane)
+        .unwrap();
+    let next = app.session.next_view_id_for_test();
+    assert!(
+        app.split_space(
+            SpaceId(999),
+            editor_cid(),
+            true,
+            SplitDirection::Right,
+            false,
+        )
+        .is_err()
+    );
+    assert_eq!(app.session.next_view_id_for_test(), next);
+}
+
+#[test]
+fn frontend_cannot_publish_an_invalid_focus_target() {
+    let mut app = make_app(vec![], None);
+    let focused = app.session.focused();
+    app.frontend.focus_targets.push_back(Some(SpaceId(999)));
+
+    let error = app
+        .execute_command(DispatchCommand::App(AppCommand::Focus(
+            SplitDirection::Right,
+        )))
+        .unwrap_err();
+
+    assert!(error.to_string().contains("invalid focus target"));
+    assert_eq!(app.session.focused(), focused);
 }
 
 #[test]

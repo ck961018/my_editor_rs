@@ -1,6 +1,11 @@
 use vell_mode::command::ModeValue;
-use vell_mode::{CursorDomain, ModeContentContext, ModeViewPolicy};
-use vell_protocol::content_query::{CursorStyle, FaceName, SelectionShape};
+use vell_mode::{
+    CursorDomain, ModeContentContext, ModeViewPolicy, NamedStatusBarPresentation,
+    NamedStatusBarSegment,
+};
+use vell_protocol::content_query::{
+    BufferBackingState, CursorStyle, DirtyState, FaceName, SaveState, SelectionShape, TextMetrics,
+};
 
 use super::{MAX_SCRIPT_INPUT_BYTES, MAX_SCRIPT_JSON_BYTES, ScriptError, ensure_size};
 
@@ -154,7 +159,68 @@ pub(super) fn view_policy_from_json(
         cursor_domain,
         selection_shape,
         selection_face: string("selectionFace")?.map(FaceName::new),
+        status_bar: parse_status_bar_presentation(object)?,
     })
+}
+
+fn parse_status_bar_presentation(
+    policy: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<NamedStatusBarPresentation>, ScriptError> {
+    let Some(value) = policy.get("statusBar") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| ScriptError::new("viewState.viewPolicy.statusBar must be an object"))?;
+    let parse_region = |name: &str| -> Result<Vec<NamedStatusBarSegment>, ScriptError> {
+        let Some(value) = object.get(name) else {
+            return Ok(Vec::new());
+        };
+        let values = value.as_array().ok_or_else(|| {
+            ScriptError::new(format!(
+                "viewState.viewPolicy.statusBar.{name} must be an array"
+            ))
+        })?;
+        values
+            .iter()
+            .map(|value| {
+                let segment = value.as_object().ok_or_else(|| {
+                    ScriptError::new(format!(
+                        "viewState.viewPolicy.statusBar.{name} segments must be objects"
+                    ))
+                })?;
+                let text = segment.get("text").and_then(serde_json::Value::as_str).ok_or_else(
+                    || {
+                        ScriptError::new(format!(
+                            "viewState.viewPolicy.statusBar.{name} segment text must be a string"
+                        ))
+                    },
+                )?;
+                let face = segment
+                    .get("face")
+                    .map(|value| {
+                        value.as_str().map(FaceName::new).ok_or_else(|| {
+                            ScriptError::new(format!(
+                                "viewState.viewPolicy.statusBar.{name} segment face must be a string"
+                            ))
+                        })
+                    })
+                    .transpose()?;
+                Ok(NamedStatusBarSegment {
+                    text: text.to_owned(),
+                    face,
+                })
+            })
+            .collect()
+    };
+    Ok(Some(NamedStatusBarPresentation {
+        left: parse_region("left")?,
+        center: parse_region("center")?,
+        right: parse_region("right")?,
+    }))
 }
 
 pub(super) fn json_to_v8<'scope>(
@@ -208,6 +274,7 @@ pub(super) fn content_context_object<'scope>(
     scope: &mut v8::PinScope<'scope, '_>,
     context: &ModeContentContext<'_>,
     include_text: bool,
+    include_legacy_document: bool,
 ) -> Result<v8::Local<'scope, v8::Object>, ScriptError> {
     let argument = v8::Object::new(scope);
     set_number(scope, argument, "contentId", context.content_id().0 as f64);
@@ -218,32 +285,94 @@ pub(super) fn content_context_object<'scope>(
         if include_text && let Some(snapshot) = buffer.text_snapshot() {
             set_string(scope, argument, "text", &snapshot.to_owned_string());
         }
-        if let Some(status) = buffer.document_status() {
-            set_document_context(scope, argument, "document", status);
+        if include_legacy_document {
+            set_legacy_document_context(
+                scope,
+                argument,
+                buffer.resource_name(),
+                buffer.dirty_state(),
+            );
         }
-    } else if let Some(status) = context
-        .status_bar()
-        .and_then(|context| context.status_bar_data())
-    {
-        set_document_context(scope, argument, "status", status);
+        set_resource_facts(
+            scope,
+            argument,
+            buffer.resource_name(),
+            buffer.resource_path(),
+            buffer.backing_state(),
+            buffer.dirty_state(),
+            buffer.text_metrics(),
+        );
+        set_save_state(scope, argument, buffer.save_state());
     }
     Ok(argument)
 }
 
-pub(super) fn set_document_context(
+fn set_legacy_document_context(
     scope: &mut v8::PinScope,
     argument: v8::Local<v8::Object>,
-    name: &str,
-    status: vell_protocol::content_query::DocumentStatus,
+    resource_name: Option<String>,
+    dirty_state: Option<DirtyState>,
 ) {
     let document = v8::Object::new(scope);
-    if let Some(file_name) = status.file_name {
-        set_string(scope, document, "fileName", &file_name);
+    if let Some(name) = resource_name {
+        set_string(scope, document, "fileName", &name);
     }
     let key = v8::String::new(scope, "modified").unwrap();
-    let modified = v8::Boolean::new(scope, status.modified);
+    let modified = v8::Boolean::new(scope, dirty_state == Some(DirtyState::Modified));
     document.set(scope, key.into(), modified.into());
-    set_object(scope, argument, name, document);
+    set_object(scope, argument, "document", document);
+}
+
+pub(super) fn set_resource_facts(
+    scope: &mut v8::PinScope,
+    argument: v8::Local<v8::Object>,
+    resource_name: Option<String>,
+    resource_path: Option<String>,
+    backing_state: Option<BufferBackingState>,
+    dirty_state: Option<DirtyState>,
+    text_metrics: Option<TextMetrics>,
+) {
+    if let Some(name) = resource_name {
+        set_string(scope, argument, "resourceName", &name);
+    }
+    if let Some(path) = resource_path {
+        set_string(scope, argument, "resourcePath", &path);
+    }
+    if let Some(state) = backing_state {
+        let state = match state {
+            BufferBackingState::Untitled => "untitled",
+            BufferBackingState::Unmaterialized => "unmaterialized",
+            BufferBackingState::Materialized => "materialized",
+        };
+        set_string(scope, argument, "backingState", state);
+    }
+    if let Some(state) = dirty_state {
+        let key = v8::String::new(scope, "dirty").unwrap();
+        let dirty = v8::Boolean::new(scope, state == DirtyState::Modified);
+        argument.set(scope, key.into(), dirty.into());
+    }
+    if let Some(metrics) = text_metrics {
+        let value = v8::Object::new(scope);
+        set_number(scope, value, "lineCount", metrics.line_count as f64);
+        set_number(scope, value, "characterCount", metrics.char_count as f64);
+        set_object(scope, argument, "textMetrics", value);
+    }
+}
+
+pub(super) fn set_save_state(
+    scope: &mut v8::PinScope,
+    argument: v8::Local<v8::Object>,
+    state: Option<SaveState>,
+) {
+    let Some(state) = state else {
+        return;
+    };
+    let state = match state {
+        SaveState::Idle => "idle",
+        SaveState::Saved => "saved",
+        SaveState::Failed => "failed",
+    };
+    set_string(scope, argument, "saveState", state);
 }
 
 pub(super) fn content_change_to_v8<'scope>(

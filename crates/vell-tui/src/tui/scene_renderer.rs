@@ -6,18 +6,19 @@ use std::io;
 
 use crate::protocol::content_query::{
     ContentData, ContentQuery, ContentQueryKind, Face, RenderQuery, RenderQueryError, RowRange,
-    SelectionShape, StatusBarData, TextPresentation, ViewData, ViewPresentation,
+    SelectionShape, StatusBarPresentation, StatusBarSegment, TextPresentation, ViewData,
+    ViewPresentation,
 };
 use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::revision::Revision;
 use crate::protocol::scene::Scene;
 use crate::protocol::selection::{TextOffset, TextPoint};
+use crate::protocol::space::{SpaceKind, SplitDirection};
 use crate::protocol::viewport::{
     ResolvedViewportCommand, Viewport, ViewportCommand, ViewportMoveAmount, ViewportMoveDirection,
 };
 use crate::terminal::output::Canvas;
 use crate::tui::resolved::{RenderItem, ResolvedScene};
-use crate::tui::status_line::status_line;
 use crate::tui::taffy_engine::TaffyEngine;
 use crate::tui::text_cells::{
     display_width_before_col, line_content, sanitize_terminal_text, take_display_width,
@@ -80,7 +81,7 @@ impl SceneRenderer {
             .expect("focused view has render data");
         let focused_text = match &focused_view.presentation {
             ViewPresentation::Text(text) => Some(text),
-            ViewPresentation::StatusBar => None,
+            ViewPresentation::StatusBar(_) => None,
         };
         let focused_head = focused_text
             .map(|text| {
@@ -198,6 +199,97 @@ impl SceneRenderer {
             ResolvedViewportCommand::SetTopRow { top_row } => viewport.set_top_row(top_row),
         }
     }
+
+    pub fn resolve_focus_direction(
+        &mut self,
+        scene: &Scene,
+        scene_revision: Revision,
+        focused: SpaceId,
+        direction: SplitDirection,
+    ) -> Option<SpaceId> {
+        let resolved = self.engine.layout(scene, scene_revision);
+        let current = resolved
+            .items
+            .iter()
+            .find(|item| item.space_id == focused)?;
+        let current_center = (
+            current.rect.x * 2 + current.rect.width,
+            current.rect.y * 2 + current.rect.height,
+        );
+        resolved
+            .items
+            .iter()
+            .filter(|candidate| candidate.space_id != focused)
+            .filter(|candidate| {
+                matches!(
+                    scene.node(candidate.space_id).space.kind,
+                    SpaceKind::Content {
+                        focusable: true,
+                        ..
+                    }
+                )
+            })
+            .filter_map(|candidate| {
+                let center = (
+                    candidate.rect.x * 2 + candidate.rect.width,
+                    candidate.rect.y * 2 + candidate.rect.height,
+                );
+                let current_right = current.rect.x + current.rect.width;
+                let current_bottom = current.rect.y + current.rect.height;
+                let candidate_right = candidate.rect.x + candidate.rect.width;
+                let candidate_bottom = candidate.rect.y + candidate.rect.height;
+                let primary = match direction {
+                    SplitDirection::Left if candidate_right <= current.rect.x => {
+                        current.rect.x - candidate_right
+                    }
+                    SplitDirection::Right if candidate.rect.x >= current_right => {
+                        candidate.rect.x - current_right
+                    }
+                    SplitDirection::Up if candidate_bottom <= current.rect.y => {
+                        current.rect.y - candidate_bottom
+                    }
+                    SplitDirection::Down if candidate.rect.y >= current_bottom => {
+                        candidate.rect.y - current_bottom
+                    }
+                    _ => return None,
+                };
+                let orthogonal = match direction {
+                    SplitDirection::Left | SplitDirection::Right => interval_gap(
+                        current.rect.y,
+                        current_bottom,
+                        candidate.rect.y,
+                        candidate_bottom,
+                    ),
+                    SplitDirection::Up | SplitDirection::Down => interval_gap(
+                        current.rect.x,
+                        current_right,
+                        candidate.rect.x,
+                        candidate_right,
+                    ),
+                };
+                let center_gap = match direction {
+                    SplitDirection::Left | SplitDirection::Right => {
+                        center.1.abs_diff(current_center.1)
+                    }
+                    SplitDirection::Up | SplitDirection::Down => {
+                        center.0.abs_diff(current_center.0)
+                    }
+                };
+                Some(((primary, orthogonal, center_gap), candidate.space_id))
+            })
+            .min_by_key(|(score, _)| *score)
+            .map(|(_, space)| space)
+    }
+}
+
+fn interval_gap(first_start: i32, first_end: i32, second_start: i32, second_end: i32) -> i32 {
+    if first_end <= second_start {
+        second_start - first_end
+    } else if second_end <= first_start {
+        first_start - second_end
+    } else {
+        0
+    }
 }
 
 fn text_row(
@@ -262,22 +354,6 @@ fn text_points(
     }
 }
 
-fn status_bar_data(
-    query: &dyn RenderQuery,
-    content: crate::protocol::ids::ContentId,
-) -> io::Result<StatusBarData> {
-    match query
-        .content(content, ContentQuery::StatusBarData)
-        .map_err(io::Error::other)?
-    {
-        ContentData::StatusBarData(data) => Ok(data),
-        _ => Err(invalid_content_data(
-            content,
-            ContentQueryKind::StatusBarData,
-        )),
-    }
-}
-
 fn invalid_content_data(
     content: crate::protocol::ids::ContentId,
     query: ContentQueryKind,
@@ -324,7 +400,7 @@ fn paint_item(
         ViewPresentation::Text(text) => {
             paint_text_item(item, query, view.content, text, viewports, canvas)
         }
-        ViewPresentation::StatusBar => paint_status_bar(item, query, view.content, canvas),
+        ViewPresentation::StatusBar(presentation) => paint_status_bar(item, presentation, canvas),
     }
 }
 
@@ -492,19 +568,79 @@ fn paint_text_item(
 
 fn paint_status_bar(
     item: &RenderItem,
-    query: &dyn RenderQuery,
-    content: crate::protocol::ids::ContentId,
+    presentation: &StatusBarPresentation,
     canvas: &mut dyn Canvas,
 ) -> io::Result<()> {
-    let data = status_bar_data(query, content)?;
+    if item.rect.height <= 0 || item.rect.width <= 0 {
+        return Ok(());
+    }
     let width = item.rect.width.max(0) as usize;
-    clear_item_row(canvas, item.rect.y as usize, item.rect.x as usize, width)?;
-    let line = sanitize_terminal_text(&status_line(
-        data.file_name.as_deref(),
-        data.modified,
-        &data.message,
-    ));
-    canvas.write_str(&take_display_width(&line, width))
+    let row = item.rect.y as usize;
+    let col = item.rect.x as usize;
+    clear_item_row(canvas, row, col, width)?;
+
+    let right_width = status_segments_width(&presentation.right).min(width);
+    let right_start = width - right_width;
+    let center_width = status_segments_width(&presentation.center).min(right_start);
+    let ideal_center = width.saturating_sub(center_width) / 2;
+    let center_start = if center_width == 0 {
+        right_start
+    } else {
+        ideal_center.min(right_start.saturating_sub(center_width))
+    };
+    let left_width = center_start.min(right_start);
+
+    paint_status_segments(canvas, row, col, left_width, &presentation.left)?;
+    paint_status_segments(
+        canvas,
+        row,
+        col + center_start,
+        center_width,
+        &presentation.center,
+    )?;
+    paint_status_segments(
+        canvas,
+        row,
+        col + right_start,
+        right_width,
+        &presentation.right,
+    )?;
+    canvas.set_face(&Face::default())
+}
+
+fn status_segments_width(segments: &[StatusBarSegment]) -> usize {
+    segments
+        .iter()
+        .map(|segment| {
+            let text = sanitize_terminal_text(&segment.text);
+            display_width_before_col(&text, text.chars().count())
+        })
+        .sum()
+}
+
+fn paint_status_segments(
+    canvas: &mut dyn Canvas,
+    row: usize,
+    col: usize,
+    width: usize,
+    segments: &[StatusBarSegment],
+) -> io::Result<()> {
+    let mut written = 0;
+    for segment in segments {
+        if written >= width {
+            break;
+        }
+        let text = sanitize_terminal_text(&segment.text);
+        let clipped = take_display_width(&text, width - written);
+        if clipped.is_empty() {
+            continue;
+        }
+        canvas.move_cursor(row, col + written)?;
+        canvas.set_face(&segment.face)?;
+        canvas.write_str(&clipped)?;
+        written += display_width_before_col(&clipped, clipped.chars().count());
+    }
+    Ok(())
 }
 
 fn clear_item_row(canvas: &mut dyn Canvas, row: usize, col: usize, width: usize) -> io::Result<()> {
@@ -653,15 +789,15 @@ fn paint_line_with_highlight(
 mod tests {
     use super::*;
     use crate::protocol::content_query::{
-        ContentData, ContentQuery, CursorStyle, RenderQuery, StatusBarData, TextPresentation,
+        BufferBackingState, ContentData, ContentQuery, CursorStyle, DirtyState, RenderQuery,
+        SaveState, StatusBarPresentation, StatusBarSegment, TextMetrics, TextPresentation,
         ViewData, ViewPresentation,
     };
     use crate::protocol::ids::{ContentId, ViewId};
     use crate::protocol::selection::{Selection, Selections, TextOffset};
-    use crate::protocol::status::StatusMessage;
     use crate::protocol::viewport::ViewportAlignment;
     use crate::terminal::output::Output;
-    use crate::tui::test_scene::{editor_scene, split_editor_scene};
+    use crate::tui::test_scene::{editor_scene, nested_focus_scene, split_editor_scene};
     use std::collections::HashMap;
 
     fn points_for_lines(lines: &[String], offsets: Vec<TextOffset>) -> Vec<TextPoint> {
@@ -716,7 +852,14 @@ mod tests {
     fn status_view(content: ContentId) -> ViewData {
         ViewData {
             content,
-            presentation: ViewPresentation::StatusBar,
+            presentation: ViewPresentation::StatusBar(StatusBarPresentation {
+                left: vec![StatusBarSegment {
+                    text: "f.txt".to_owned(),
+                    face: Face::default(),
+                }],
+                center: Vec::new(),
+                right: Vec::new(),
+            }),
         }
     }
 
@@ -731,11 +874,6 @@ mod tests {
             cid: ContentId,
             query: ContentQuery,
         ) -> Result<ContentData, RenderQueryError> {
-            let status = StatusBarData {
-                file_name: Some("f.txt".to_string()),
-                modified: false,
-                message: StatusMessage::None,
-            };
             Ok(match query {
                 ContentQuery::TextRows(range) => {
                     assert_eq!(cid, self.editor_cid, "only editor content has lines");
@@ -752,15 +890,17 @@ mod tests {
                     assert_eq!(cid, self.editor_cid, "only text content maps offsets");
                     ContentData::TextPoints(points_for_lines(&self.lines, offsets))
                 }
-                ContentQuery::DocumentStatus => ContentData::DocumentStatus(status),
-                ContentQuery::StatusBarData => {
-                    assert_eq!(
-                        cid,
-                        ContentId(1),
-                        "only status presentation asks status data"
-                    );
-                    ContentData::StatusBarData(status)
+                ContentQuery::ResourceName => ContentData::ResourceName(Some("f.txt".to_owned())),
+                ContentQuery::ResourcePath => ContentData::ResourcePath(None),
+                ContentQuery::BackingState => {
+                    ContentData::BackingState(BufferBackingState::Materialized)
                 }
+                ContentQuery::DirtyState => ContentData::DirtyState(DirtyState::Clean),
+                ContentQuery::SaveState => ContentData::SaveState(SaveState::Idle),
+                ContentQuery::TextMetrics => ContentData::TextMetrics(TextMetrics {
+                    line_count: self.lines.len(),
+                    char_count: self.lines.iter().map(|line| line.chars().count()).sum(),
+                }),
             })
         }
         fn view(&self, view: ViewId) -> Result<ViewData, RenderQueryError> {
@@ -807,11 +947,6 @@ mod tests {
             cid: ContentId,
             query: ContentQuery,
         ) -> Result<ContentData, RenderQueryError> {
-            let status = StatusBarData {
-                file_name: None,
-                modified: false,
-                message: StatusMessage::None,
-            };
             Ok(match query {
                 ContentQuery::TextRows(range) => {
                     assert_eq!(cid, ContentId(0));
@@ -828,15 +963,17 @@ mod tests {
                     assert_eq!(cid, ContentId(0), "only text content maps offsets");
                     ContentData::TextPoints(points_for_lines(&self.lines, offsets))
                 }
-                ContentQuery::DocumentStatus => ContentData::DocumentStatus(status),
-                ContentQuery::StatusBarData => {
-                    assert_eq!(
-                        cid,
-                        ContentId(1),
-                        "only status presentation asks status data"
-                    );
-                    ContentData::StatusBarData(status)
+                ContentQuery::ResourceName => ContentData::ResourceName(None),
+                ContentQuery::ResourcePath => ContentData::ResourcePath(None),
+                ContentQuery::BackingState => {
+                    ContentData::BackingState(BufferBackingState::Untitled)
                 }
+                ContentQuery::DirtyState => ContentData::DirtyState(DirtyState::Clean),
+                ContentQuery::SaveState => ContentData::SaveState(SaveState::Idle),
+                ContentQuery::TextMetrics => ContentData::TextMetrics(TextMetrics {
+                    line_count: self.lines.len(),
+                    char_count: self.lines.iter().map(|line| line.chars().count()).sum(),
+                }),
             })
         }
 
@@ -923,6 +1060,40 @@ mod tests {
         assert!(
             !output.contains("\x1b[2K"),
             "pane painting must not clear the full terminal row: {output}"
+        );
+    }
+
+    #[test]
+    fn directional_focus_uses_resolved_pane_geometry() {
+        let (scene, left, right) = split_editor_scene(20, 4, ViewId(0), ViewId(1), ViewId(2));
+        let mut renderer = SceneRenderer::new();
+
+        assert_eq!(
+            renderer.resolve_focus_direction(&scene, Revision(0), left, SplitDirection::Right,),
+            Some(right)
+        );
+        assert_eq!(
+            renderer.resolve_focus_direction(&scene, Revision(0), right, SplitDirection::Left,),
+            Some(left)
+        );
+        assert_eq!(
+            renderer.resolve_focus_direction(&scene, Revision(0), left, SplitDirection::Up,),
+            None
+        );
+    }
+
+    #[test]
+    fn directional_focus_does_not_skip_an_adjacent_split_column() {
+        let (scene, left, adjacent_top, _adjacent_bottom, far_right) = nested_focus_scene(30, 9);
+        let mut renderer = SceneRenderer::new();
+
+        assert_eq!(
+            renderer.resolve_focus_direction(&scene, Revision(0), left, SplitDirection::Right,),
+            Some(adjacent_top)
+        );
+        assert_ne!(
+            renderer.resolve_focus_direction(&scene, Revision(0), left, SplitDirection::Right,),
+            Some(far_right)
         );
     }
 
@@ -1655,11 +1826,6 @@ mod tests {
 
     #[test]
     fn status_bar_output_is_clipped_to_its_rect_width() {
-        let query = StubQuery {
-            editor_cid: ContentId(0),
-            lines: vec![String::new()],
-            selections: Selections::single(Selection::collapsed(TextOffset::origin())),
-        };
         let item = RenderItem {
             space_id: SpaceId(1),
             view_id: ViewId(1),
@@ -1676,10 +1842,18 @@ mod tests {
         };
         let mut out = Output::new(Vec::new());
 
-        paint_status_bar(&item, &query, ContentId(1), &mut out).unwrap();
+        let presentation = StatusBarPresentation {
+            left: vec![StatusBarSegment {
+                text: "f.txt".to_owned(),
+                face: Face::default(),
+            }],
+            center: Vec::new(),
+            right: Vec::new(),
+        };
+        paint_status_bar(&item, &presentation, &mut out).unwrap();
 
         let output = String::from_utf8(out.into_inner()).unwrap();
-        assert!(output.ends_with("f.t"), "output: {output}");
+        assert!(output.contains("f.t"), "output: {output}");
         assert!(!output.contains("f.txt"), "output: {output}");
     }
 }

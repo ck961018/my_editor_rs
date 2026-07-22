@@ -3,6 +3,7 @@ use std::fmt;
 
 use crate::mode_name::{ModeActionName, ModeName};
 use vell_core::command::EditCommand;
+use vell_protocol::space::SplitDirection;
 use vell_protocol::viewport::ViewportCommand;
 
 #[allow(
@@ -85,6 +86,8 @@ pub enum AppCommand {
     Quit,
     FocusNext,
     FocusPrev,
+    Split(SplitDirection),
+    Focus(SplitDirection),
 }
 
 #[allow(

@@ -1,7 +1,6 @@
 mod frontend;
 mod resolved;
 mod scene_renderer;
-mod status_line;
 mod taffy_engine;
 mod text_cells;
 

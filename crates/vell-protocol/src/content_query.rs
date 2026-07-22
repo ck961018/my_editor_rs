@@ -4,7 +4,6 @@ use std::fmt;
 
 use crate::ids::{ContentId, ViewId};
 use crate::selection::{Selections, TextOffset, TextPoint};
-use crate::status::StatusMessage;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FaceName(String);
@@ -73,15 +72,44 @@ pub struct RowRange {
     pub end: usize,
 }
 
-/// 文档状态显示数据（owned）。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DocumentStatus {
-    pub file_name: Option<String>,
-    pub modified: bool,
-    pub message: StatusMessage,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferBackingState {
+    Untitled,
+    Unmaterialized,
+    Materialized,
 }
 
-pub type StatusBarData = DocumentStatus;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirtyState {
+    Clean,
+    Modified,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveState {
+    Idle,
+    Saved,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextMetrics {
+    pub line_count: usize,
+    pub char_count: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StatusBarSegment {
+    pub text: String,
+    pub face: Face,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StatusBarPresentation {
+    pub left: Vec<StatusBarSegment>,
+    pub center: Vec<StatusBarSegment>,
+    pub right: Vec<StatusBarSegment>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorStyle {
@@ -108,7 +136,7 @@ pub struct TextPresentation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ViewPresentation {
     Text(TextPresentation),
-    StatusBar,
+    StatusBar(StatusBarPresentation),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,16 +149,24 @@ pub struct ViewData {
 pub enum ContentQuery {
     TextRows(RowRange),
     TextPoints(Vec<TextOffset>),
-    DocumentStatus,
-    StatusBarData,
+    ResourceName,
+    ResourcePath,
+    BackingState,
+    DirtyState,
+    SaveState,
+    TextMetrics,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContentQueryKind {
     TextRows,
     TextPoints,
-    DocumentStatus,
-    StatusBarData,
+    ResourceName,
+    ResourcePath,
+    BackingState,
+    DirtyState,
+    SaveState,
+    TextMetrics,
 }
 
 impl ContentQuery {
@@ -138,8 +174,12 @@ impl ContentQuery {
         match self {
             Self::TextRows(_) => ContentQueryKind::TextRows,
             Self::TextPoints(_) => ContentQueryKind::TextPoints,
-            Self::DocumentStatus => ContentQueryKind::DocumentStatus,
-            Self::StatusBarData => ContentQueryKind::StatusBarData,
+            Self::ResourceName => ContentQueryKind::ResourceName,
+            Self::ResourcePath => ContentQueryKind::ResourcePath,
+            Self::BackingState => ContentQueryKind::BackingState,
+            Self::DirtyState => ContentQueryKind::DirtyState,
+            Self::SaveState => ContentQueryKind::SaveState,
+            Self::TextMetrics => ContentQueryKind::TextMetrics,
         }
     }
 }
@@ -148,8 +188,12 @@ impl ContentQuery {
 pub enum ContentData {
     TextRows(Vec<String>),
     TextPoints(Vec<TextPoint>),
-    DocumentStatus(DocumentStatus),
-    StatusBarData(StatusBarData),
+    ResourceName(Option<String>),
+    ResourcePath(Option<String>),
+    BackingState(BufferBackingState),
+    DirtyState(DirtyState),
+    SaveState(SaveState),
+    TextMetrics(TextMetrics),
     Unsupported,
 }
 

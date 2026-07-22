@@ -46,7 +46,7 @@ editor.modes.define<HighlightState, null, HighlightResult>({
     buffer: {
       state(context) {
         return {
-          language: languageFor(context.document?.fileName),
+          language: languageFor(context.resourceName),
         };
       },
       analysis: {

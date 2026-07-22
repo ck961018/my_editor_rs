@@ -72,6 +72,7 @@ mod tests {
     use vell_core::buffer::Buffer;
     use vell_core::content::Content;
     use vell_core::content_store::ContentStore;
+    use vell_core::status_bar::StatusBar;
     use vell_protocol::content_query::{ContentData, ContentQuery, RowRange, ViewPresentation};
     use vell_protocol::ids::{ContentId, ViewId};
     use vell_protocol::remote::RequestId;
@@ -90,6 +91,9 @@ mod tests {
             let mut contents = ContentStore::default();
             contents
                 .insert(content, Content::Buffer(Buffer::new()))
+                .unwrap();
+            contents
+                .insert(ContentId(1), Content::StatusBar(StatusBar::new()))
                 .unwrap();
             let view = View::new(content, contents.create_view_state(content).unwrap());
             Self {
@@ -174,8 +178,8 @@ mod tests {
             Request {
                 id: RequestId(2),
                 data: RequestData::Content {
-                    content: ContentId(0),
-                    query: ContentQuery::StatusBarData,
+                    content: ContentId(1),
+                    query: ContentQuery::TextRows(RowRange { start: 0, end: 1 }),
                 },
             },
         );

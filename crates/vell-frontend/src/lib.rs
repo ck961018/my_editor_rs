@@ -12,6 +12,7 @@ use vell_protocol::frontend_event::FrontendEvent;
 use vell_protocol::ids::{SpaceId, ViewId};
 use vell_protocol::revision::Revision;
 use vell_protocol::scene::Scene;
+use vell_protocol::space::SplitDirection;
 use vell_protocol::viewport::{ResolvedViewportCommand, ViewportCommand};
 
 pub trait Frontend {
@@ -37,4 +38,14 @@ pub trait Frontend {
 
     /// 在 app 提交整个有序结果后应用已解析的视口变化。
     fn apply_viewport_command(&mut self, view: ViewId, command: ResolvedViewportCommand);
+
+    fn resolve_focus_direction(
+        &mut self,
+        _scene: &Scene,
+        _scene_revision: Revision,
+        _focused: SpaceId,
+        _direction: SplitDirection,
+    ) -> io::Result<Option<SpaceId>> {
+        Ok(None)
+    }
 }

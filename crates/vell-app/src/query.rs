@@ -7,8 +7,9 @@ use vell_core::content::ContentKind;
 use vell_core::content_store::ContentStore;
 use vell_core::content_view_state::ContentViewState;
 use vell_protocol::content_query::{
-    ContentData, ContentQuery, ContentQueryKind, CursorStyle, RenderQuery, RenderQueryError,
-    RowRange, SelectionShape, TextDecoration, TextPresentation, ViewData, ViewPresentation,
+    BufferBackingState, ContentData, ContentQuery, ContentQueryKind, CursorStyle, DirtyState, Face,
+    RenderQuery, RenderQueryError, RowRange, SaveState, SelectionShape, StatusBarPresentation,
+    StatusBarSegment, TextDecoration, TextPresentation, ViewData, ViewPresentation,
 };
 use vell_protocol::ids::{ContentId, ViewId};
 
@@ -68,7 +69,37 @@ impl RenderQuery for AppQuery<'_> {
                         .unwrap_or_default(),
                 })
             }
-            (ContentKind::StatusBar, ContentViewState::StatusBar(_)) => ViewPresentation::StatusBar,
+            (ContentKind::StatusBar, ContentViewState::StatusBar(state)) => {
+                let Some((target_view, target_content)) = state.target() else {
+                    return Err(RenderQueryError::IncompatibleContentViewState {
+                        view: id,
+                        content,
+                    });
+                };
+                let content_revision = self
+                    .contents
+                    .revision(content)
+                    .ok_or(RenderQueryError::MissingContent(content))?;
+                let policy = self
+                    .presentation
+                    .policy(id, content_revision, view.revision());
+                let presentation = policy.status_bar.as_ref().map_or_else(
+                    || {
+                        default_status_bar_presentation(
+                            target_view,
+                            target_content,
+                            self.contents,
+                            self.views,
+                        )
+                    },
+                    |presentation| StatusBarPresentation {
+                        left: resolve_status_segments(&presentation.left, self.faces),
+                        center: resolve_status_segments(&presentation.center, self.faces),
+                        right: resolve_status_segments(&presentation.right, self.faces),
+                    },
+                );
+                ViewPresentation::StatusBar(presentation)
+            }
             (ContentKind::Buffer, ContentViewState::StatusBar(_))
             | (ContentKind::StatusBar, ContentViewState::Buffer(_)) => {
                 return Err(RenderQueryError::IncompatibleContentViewState { view: id, content });
@@ -129,5 +160,96 @@ impl RenderQuery for AppQuery<'_> {
                 face: self.faces.resolve(&decoration.face),
             })
             .collect())
+    }
+}
+
+fn resolve_status_segments(
+    segments: &[crate::mode::NamedStatusBarSegment],
+    faces: &FaceRegistry,
+) -> Vec<StatusBarSegment> {
+    segments
+        .iter()
+        .map(|segment| StatusBarSegment {
+            text: segment.text.clone(),
+            face: segment
+                .face
+                .as_ref()
+                .map(|face| faces.resolve(face))
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+fn default_status_bar_presentation(
+    target_view: ViewId,
+    target: ContentId,
+    contents: &ContentStore,
+    views: &HashMap<ViewId, View>,
+) -> StatusBarPresentation {
+    let name = match contents.query(target, ContentQuery::ResourceName) {
+        ContentData::ResourceName(name) => name.unwrap_or_else(|| "[No Name]".to_owned()),
+        _ => "[No Name]".to_owned(),
+    };
+    let dirty = matches!(
+        contents.query(target, ContentQuery::DirtyState),
+        ContentData::DirtyState(DirtyState::Modified)
+    );
+    let unmaterialized = matches!(
+        contents.query(target, ContentQuery::BackingState),
+        ContentData::BackingState(BufferBackingState::Unmaterialized)
+    );
+    let mut left = vec![StatusBarSegment {
+        text: name,
+        face: Face::default(),
+    }];
+    if dirty {
+        left.push(StatusBarSegment {
+            text: " [+]".to_owned(),
+            face: Face::default(),
+        });
+    }
+    if unmaterialized {
+        left.push(StatusBarSegment {
+            text: " [New]".to_owned(),
+            face: Face::default(),
+        });
+    }
+
+    let right = views
+        .get(&target_view)
+        .and_then(|view| view.state().selections())
+        .and_then(|selections| {
+            match contents.query(
+                target,
+                ContentQuery::TextPoints(vec![selections.primary().head()]),
+            ) {
+                ContentData::TextPoints(points) => points.first().copied(),
+                _ => None,
+            }
+        })
+        .map(|point| {
+            vec![StatusBarSegment {
+                text: format!("{}:{}", point.row + 1, point.col + 1),
+                face: Face::default(),
+            }]
+        })
+        .unwrap_or_default();
+
+    let center = match contents.query(target, ContentQuery::SaveState) {
+        ContentData::SaveState(SaveState::Saved) => vec![StatusBarSegment {
+            text: "Saved".to_owned(),
+            face: Face::default(),
+        }],
+        ContentData::SaveState(SaveState::Failed) => vec![StatusBarSegment {
+            text: "Save failed".to_owned(),
+            face: Face::default(),
+        }],
+        _ => Vec::new(),
+    };
+
+    StatusBarPresentation {
+        left,
+        center,
+        right,
     }
 }

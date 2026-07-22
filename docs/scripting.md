@@ -92,6 +92,17 @@ Viewport 原语包括按 pane 大小滚动和 cursor 对齐。`alignTop()`、
 `alignCenter()` 和 `alignBottom()` 会变成延迟执行的 viewport effect；
 它们不会移动文本 cursor。
 
+Buffer context 通过 `resourceName`、`resourcePath`、`backingState`、
+`dirty`、`saveState` 和 `textMetrics` 暴露彼此独立的只读事实。
+StatusBar view context 还提供
+`targetViewId` 和 `targetContentId`。状态栏 Mode 可以在
+`viewPolicy.statusBar` 中定义带可选 Face 的 `left`、`center` 和 `right`
+分段。
+
+`context.app` 除保存和退出外，还提供 `splitHorizontal()`、
+`splitVertical()` 与四个 `focus*()` 原语。split 和 focus 与 viewport 一样，
+只在整个 execution frame 成功后发布。
+
 原语调用会把类型化 Rust operation 追加到当前 callback。只有 callback
 及其返回状态通过验证后，App 才会按顺序执行这些 operation。如果 callback
 失败，已暂存的 operation 都不会执行。callback 结束后，之前保留的 context

@@ -156,12 +156,7 @@ impl ContentStore {
 
     pub fn revision(&self, id: ContentId) -> Option<Revision> {
         let entry = self.entries.get(&id)?;
-        let dependency = entry
-            .content
-            .revision_dependency()
-            .and_then(|id| self.entries.get(&id))
-            .map(|entry| entry.revision);
-        Some(entry.content.effective_revision(entry.revision, dependency))
+        Some(entry.revision)
     }
 
     pub fn text_snapshot(&self, id: ContentId) -> Option<crate::core::text_snapshot::TextSnapshot> {
@@ -172,11 +167,7 @@ impl ContentStore {
         let Some(entry) = self.entries.get(&id) else {
             return ContentData::Unsupported;
         };
-        let dependency = entry
-            .content
-            .dependency_query(&query)
-            .map(|dependency| self.query(dependency.id, dependency.query));
-        entry.content.query(query, dependency)
+        entry.content.query(query)
     }
 }
 
@@ -197,9 +188,10 @@ mod tests {
     use crate::core::content::{Content, ContentKind};
     use crate::core::status_bar::StatusBar;
     use crate::core::transaction::{TextChangeSet, TextEdit};
-    use crate::protocol::content_query::{ContentData, ContentQuery, RowRange, StatusBarData};
-    use crate::protocol::ids::ContentId;
-    use crate::protocol::status::StatusMessage;
+    use crate::protocol::content_query::{
+        BufferBackingState, ContentData, ContentQuery, DirtyState, RowRange, SaveState, TextMetrics,
+    };
+    use crate::protocol::ids::{ContentId, ViewId};
 
     fn apply_planned_edit(store: &mut ContentStore, id: ContentId, command: EditCommand) {
         let selections = store
@@ -292,61 +284,30 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_queries_document_status_without_a_type_probe() {
+    fn buffer_exposes_granular_status_facts() {
         let buffer_id = ContentId(0);
-        let status_bar_id = ContentId(1);
         let mut store = ContentStore::default();
         store
             .insert(buffer_id, Content::Buffer(Buffer::new()))
             .unwrap();
-        store
-            .insert(status_bar_id, Content::StatusBar(StatusBar::new(buffer_id)))
-            .unwrap();
-
-        assert!(matches!(
-            store.query(status_bar_id, ContentQuery::StatusBarData),
-            ContentData::StatusBarData(_)
-        ));
-    }
-
-    #[test]
-    fn status_bar_uses_default_data_when_its_target_is_missing() {
-        let status_bar_id = ContentId(1);
-        let missing = ContentId(99);
-        let mut store = ContentStore::default();
-        store
-            .insert(status_bar_id, Content::StatusBar(StatusBar::new(missing)))
-            .unwrap();
 
         assert_eq!(
-            store.query(status_bar_id, ContentQuery::StatusBarData),
-            ContentData::StatusBarData(StatusBarData {
-                file_name: None,
-                modified: false,
-                message: StatusMessage::None,
-            })
+            store.query(buffer_id, ContentQuery::BackingState),
+            ContentData::BackingState(BufferBackingState::Untitled)
         );
-        assert_eq!(store.revision(status_bar_id), Some(Revision(0)));
-    }
-
-    #[test]
-    fn status_bar_uses_default_data_for_a_non_document_target() {
-        let target = ContentId(1);
-        let status_bar_id = ContentId(2);
-        let mut store = ContentStore::default();
-        store
-            .insert(target, Content::StatusBar(StatusBar::new(ContentId(0))))
-            .unwrap();
-        store
-            .insert(status_bar_id, Content::StatusBar(StatusBar::new(target)))
-            .unwrap();
-
         assert_eq!(
-            store.query(status_bar_id, ContentQuery::StatusBarData),
-            ContentData::StatusBarData(StatusBarData {
-                file_name: None,
-                modified: false,
-                message: StatusMessage::None,
+            store.query(buffer_id, ContentQuery::DirtyState),
+            ContentData::DirtyState(DirtyState::Clean)
+        );
+        assert_eq!(
+            store.query(buffer_id, ContentQuery::SaveState),
+            ContentData::SaveState(SaveState::Idle)
+        );
+        assert_eq!(
+            store.query(buffer_id, ContentQuery::TextMetrics),
+            ContentData::TextMetrics(TextMetrics {
+                line_count: 1,
+                char_count: 0,
             })
         );
     }
@@ -371,7 +332,7 @@ mod tests {
             .insert(buffer_id, Content::Buffer(Buffer::new()))
             .unwrap();
         store
-            .insert(status_bar_id, Content::StatusBar(StatusBar::new(buffer_id)))
+            .insert(status_bar_id, Content::StatusBar(StatusBar::new()))
             .unwrap();
 
         assert_eq!(store.kind(buffer_id), Some(ContentKind::Buffer));
@@ -389,13 +350,13 @@ mod tests {
             .insert(buffer, Content::Buffer(Buffer::new()))
             .unwrap();
         store
-            .insert(status_bar, Content::StatusBar(StatusBar::new(buffer)))
+            .insert(status_bar, Content::StatusBar(StatusBar::new()))
             .unwrap();
         let change = ContentChange::Text(
             TextChangeSet::from_edits(0, vec![TextEdit::new(0..0, "x")]).unwrap(),
         );
         let mut buffer_state = ContentViewState::buffer();
-        let mut status_bar_state = ContentViewState::status_bar();
+        let mut status_bar_state = ContentViewState::status_bar(ViewId(7), buffer);
 
         assert_eq!(
             store.transform_view_state(missing, &mut buffer_state, &change),
@@ -425,7 +386,7 @@ mod tests {
         apply_planned_edit(&mut store, id, EditCommand::InsertText("x".to_string()));
 
         assert_eq!(
-            store.insert(id, Content::StatusBar(StatusBar::new(id))),
+            store.insert(id, Content::StatusBar(StatusBar::new())),
             Err(DuplicateContentId { id })
         );
         assert_eq!(
@@ -482,22 +443,6 @@ mod tests {
         apply_planned_edit(&mut store, id, EditCommand::InsertText("x".to_string()));
 
         assert_eq!(store.revision(id), Some(Revision(1)));
-    }
-
-    #[test]
-    fn status_bar_revision_tracks_its_target_document() {
-        let buffer = ContentId(0);
-        let status = ContentId(1);
-        let mut store = ContentStore::default();
-        store
-            .insert(buffer, Content::Buffer(Buffer::new()))
-            .unwrap();
-        store
-            .insert(status, Content::StatusBar(StatusBar::new(buffer)))
-            .unwrap();
-        apply_planned_edit(&mut store, buffer, EditCommand::InsertText("x".to_string()));
-
-        assert_eq!(store.revision(status), Some(Revision(1)));
     }
 
     #[test]

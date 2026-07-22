@@ -31,8 +31,8 @@ mod worker;
 
 use bridge::{
     content_change_to_v8, content_context_object, json_to_mode_value, json_to_v8, optional_string,
-    parse_position, property, required_object, required_string, required_usize,
-    set_document_context, set_number, set_object, set_value, throw_script_error, v8_to_json,
+    parse_position, property, required_object, required_string, required_usize, set_number,
+    set_object, set_resource_facts, set_save_state, set_value, throw_script_error, v8_to_json,
     view_policy_from_json,
 };
 pub use host::ScriptHost;
@@ -844,6 +844,7 @@ mod tests {
     use vell_core::command::EditCommand;
     use vell_core::content::{Content, ContentKind};
     use vell_core::content_store::ContentStore;
+    use vell_core::content_view_state::ContentViewState;
     use vell_core::status_bar::StatusBar;
     use vell_mode::{InputFlow, ModeJobSlot, ModeRegistry};
     use vell_protocol::ids::{ContentId, ViewId};
@@ -1507,13 +1508,17 @@ editor.modes.define({
   name: "status-probe",
   on: {
     statusBar: {
-      state: (ctx) => ({ modified: ctx.status?.modified ?? false, calls: 0 }),
+      state: () => ({ calls: 0 }),
       viewState: () => ({ ready: true }),
       commands: {
         touch(ctx) {
           if ("edit" in ctx || "cursor" in ctx) {
             throw new Error("buffer capability leaked");
           }
+          void ctx.targetContentId;
+          void ctx.resourceName;
+          void ctx.dirty;
+          void ctx.saveState;
           ctx.state.calls++;
         },
       },
@@ -1538,9 +1543,14 @@ editor.modes.define({
             .insert(buffer, Content::Buffer(Buffer::new()))
             .unwrap();
         contents
-            .insert(status, Content::StatusBar(StatusBar::new(buffer)))
+            .insert(status, Content::StatusBar(StatusBar::new()))
             .unwrap();
-        let view_state = contents.create_view_state(status).unwrap();
+        let unbound = contents.create_view_state(status).unwrap();
+        assert!(matches!(
+            ModeViewContext::new(ViewId(1), status, &unbound, &contents),
+            Err(vell_mode::ModeContextError::UnboundStatusBar { .. })
+        ));
+        let view_state = ContentViewState::status_bar(ViewId(1), buffer);
         let context = ModeViewContext::new(ViewId(1), status, &view_state, &contents).unwrap();
         let content_context = ModeContentContext::new(status, &contents);
         let mut content_state = mode.create_content_state(&content_context).unwrap();
@@ -1562,7 +1572,7 @@ editor.modes.define({
             script_state(content_state.as_ref(), mode.name())
                 .unwrap()
                 .data,
-            serde_json::json!({ "modified": false, "calls": 1 })
+            serde_json::json!({ "calls": 1 })
         );
     }
 
@@ -2045,6 +2055,43 @@ editor.modes.define({ name: "legacy-two", actions: {} });
         )
         .unwrap();
         assert!(host.take_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn v1_content_context_keeps_the_legacy_document_view() {
+        let loaded = load_typescript_modes(
+            "file:///legacy-document.ts",
+            r#"
+editor.modes.define({
+  name: "legacy-document",
+  content: {
+    create(context) {
+      return {
+        hasDocument: context.document !== undefined,
+        modified: context.document?.modified ?? true,
+      };
+    },
+  },
+  actions: {},
+});
+"#,
+        )
+        .unwrap();
+        let mode = loaded.modes.into_iter().next().unwrap();
+        let content = ContentId(0);
+        let mut contents = ContentStore::default();
+        contents
+            .insert(content, Content::Buffer(Buffer::new()))
+            .unwrap();
+
+        let state = mode
+            .create_content_state(&ModeContentContext::new(content, &contents))
+            .unwrap();
+
+        assert_eq!(
+            script_state(state.as_ref(), mode.name()).unwrap().data,
+            serde_json::json!({ "hasDocument": true, "modified": false })
+        );
     }
 
     #[test]

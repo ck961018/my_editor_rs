@@ -976,7 +976,7 @@ mod tests {
             .insert(editor, Content::Buffer(Buffer::new()))
             .unwrap();
         contents
-            .insert(status, Content::StatusBar(StatusBar::new(editor)))
+            .insert(status, Content::StatusBar(StatusBar::new()))
             .unwrap();
         let mut modes = ModeRegistry::new();
         modes.register(DispatcherTestMode::new()).unwrap();

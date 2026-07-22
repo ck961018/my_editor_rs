@@ -33,6 +33,7 @@ pub use application::App;
 pub use diagnostics::{
     ModeDecorationDiagnostics, NamedPolicySources, RuntimeDiagnostic, ViewModeDiagnostics,
 };
+pub use layout::{StatusBarHandle, StatusBarPlacement};
 
 #[cfg(test)]
 mod tests;

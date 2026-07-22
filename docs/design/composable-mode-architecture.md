@@ -73,9 +73,9 @@ TypeScript 的 `ScriptMode` 是这一 contract 的 adapter，不是第二套 Mod
 - 可选后台分析。
 
 `ModeContentContext` 和 `ModeViewContext` 也是封闭 enum。Buffer context
-可以读取文本快照和文档状态，Buffer view context 还能读取 selections；
-StatusBar context 只包含状态栏数据。Context 不借出可变 Content、View、
-ContentStore 或 App。
+可以读取文本快照和细粒度资源事实，Buffer view context 还能读取
+selections；StatusBar view context 包含目标 View、目标 Content 及其资源
+事实。Context 不借出可变 Content、View、ContentStore 或 App。
 
 ## 5. Chain 与 profile
 

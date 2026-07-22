@@ -27,6 +27,7 @@ pub struct PolicySources {
     pub cursor_domain: Option<ModeId>,
     pub selection_shape: Option<ModeId>,
     pub selection_face: Option<ModeId>,
+    pub status_bar: Option<ModeId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,6 +211,9 @@ impl PresentationLayerStore {
                 if policy_sources.selection_face.is_none() && layer.policy.selection_face.is_some()
                 {
                     policy_sources.selection_face = Some(*mode);
+                }
+                if policy_sources.status_bar.is_none() && layer.policy.status_bar.is_some() {
+                    policy_sources.status_bar = Some(*mode);
                 }
                 policy.merge_missing(layer.policy.clone());
             }

@@ -14,6 +14,7 @@ use vell_mode::operation::{
     AppOperation, ContentOperation, ContentTarget, ModeFlowPropagation, ModeInvocation, ModeTarget,
     OperationRequest, ViewOperation, ViewTarget,
 };
+use vell_protocol::space::SplitDirection;
 use vell_protocol::viewport::{
     ViewportAlignment, ViewportCommand, ViewportCursorBehavior, ViewportMoveAmount,
     ViewportMoveDirection,
@@ -129,6 +130,12 @@ primitives! {
     InvokeCommand => ("commands", "invoke"),
     Save => ("app", "save"),
     Quit => ("app", "quit"),
+    SplitHorizontal => ("app", "splitHorizontal"),
+    SplitVertical => ("app", "splitVertical"),
+    FocusLeft => ("app", "focusLeft"),
+    FocusDown => ("app", "focusDown"),
+    FocusUp => ("app", "focusUp"),
+    FocusRight => ("app", "focusRight"),
 }
 
 struct PrimitiveInvocation {
@@ -622,6 +629,24 @@ fn primitive_effects(
         }),
         Quit => nested(OperationRequest::App(AppOperation::Command(
             AppCommand::Quit,
+        ))),
+        SplitHorizontal => nested(OperationRequest::App(AppOperation::Command(
+            AppCommand::Split(SplitDirection::Down),
+        ))),
+        SplitVertical => nested(OperationRequest::App(AppOperation::Command(
+            AppCommand::Split(SplitDirection::Right),
+        ))),
+        FocusLeft => nested(OperationRequest::App(AppOperation::Command(
+            AppCommand::Focus(SplitDirection::Left),
+        ))),
+        FocusDown => nested(OperationRequest::App(AppOperation::Command(
+            AppCommand::Focus(SplitDirection::Down),
+        ))),
+        FocusUp => nested(OperationRequest::App(AppOperation::Command(
+            AppCommand::Focus(SplitDirection::Up),
+        ))),
+        FocusRight => nested(OperationRequest::App(AppOperation::Command(
+            AppCommand::Focus(SplitDirection::Right),
         ))),
     })
 }

@@ -8,12 +8,9 @@ use crate::core::status_bar::StatusBar;
 use crate::core::text_snapshot::TextSnapshot;
 use crate::core::transaction::{TextChangeSet, TextStateId, TextTransactionError};
 use crate::protocol::content_query::{
-    ContentData, ContentQuery, DocumentStatus, RowRange, StatusBarData,
+    ContentData, ContentQuery, DirtyState, RowRange, SaveState, TextMetrics,
 };
-use crate::protocol::ids::ContentId;
-use crate::protocol::revision::Revision;
 use crate::protocol::selection::Selections;
-use crate::protocol::status::StatusMessage;
 
 pub enum ContentInput {
     Save,
@@ -127,11 +124,6 @@ pub enum ContentKind {
     StatusBar,
 }
 
-pub(crate) struct ContentDependencyQuery {
-    pub id: ContentId,
-    pub query: ContentQuery,
-}
-
 impl Content {
     pub fn kind(&self) -> ContentKind {
         match self {
@@ -147,41 +139,7 @@ impl Content {
         }
     }
 
-    pub(crate) fn revision_dependency(&self) -> Option<ContentId> {
-        match self {
-            Self::Buffer(_) => None,
-            Self::StatusBar(status_bar) => Some(status_bar.target_content_id()),
-        }
-    }
-
-    pub(crate) fn effective_revision(
-        &self,
-        own: Revision,
-        dependency: Option<Revision>,
-    ) -> Revision {
-        match self {
-            Self::Buffer(_) => own,
-            Self::StatusBar(_) => dependency.map_or(own, |revision| own.max(revision)),
-        }
-    }
-
-    pub(crate) fn dependency_query(&self, query: &ContentQuery) -> Option<ContentDependencyQuery> {
-        match (self, query) {
-            (Self::StatusBar(status_bar), ContentQuery::StatusBarData) => {
-                Some(ContentDependencyQuery {
-                    id: status_bar.target_content_id(),
-                    query: ContentQuery::DocumentStatus,
-                })
-            }
-            _ => None,
-        }
-    }
-
-    pub(crate) fn query(
-        &self,
-        query: ContentQuery,
-        dependency: Option<ContentData>,
-    ) -> ContentData {
+    pub(crate) fn query(&self, query: ContentQuery) -> ContentData {
         match (self, query) {
             (Self::Buffer(buffer), ContentQuery::TextRows(range)) => {
                 ContentData::TextRows(text_rows(buffer, range))
@@ -192,13 +150,31 @@ impl Content {
                     .map(|offset| buffer.text_point(offset))
                     .collect(),
             ),
-            (Self::Buffer(buffer), ContentQuery::DocumentStatus) => {
-                ContentData::DocumentStatus(document_status(buffer))
+            (Self::Buffer(buffer), ContentQuery::ResourceName) => {
+                ContentData::ResourceName(buffer.file_name().map(str::to_owned))
             }
-            (Self::StatusBar(_), ContentQuery::StatusBarData) => {
-                ContentData::StatusBarData(match dependency {
-                    Some(ContentData::DocumentStatus(status)) => status,
-                    _ => default_status_bar_data(),
+            (Self::Buffer(buffer), ContentQuery::ResourcePath) => ContentData::ResourcePath(
+                buffer
+                    .path()
+                    .map(|path| path.to_string_lossy().into_owned()),
+            ),
+            (Self::Buffer(buffer), ContentQuery::BackingState) => {
+                ContentData::BackingState(buffer.backing_state())
+            }
+            (Self::Buffer(buffer), ContentQuery::DirtyState) => {
+                ContentData::DirtyState(if buffer.modified() {
+                    DirtyState::Modified
+                } else {
+                    DirtyState::Clean
+                })
+            }
+            (Self::Buffer(buffer), ContentQuery::SaveState) => {
+                ContentData::SaveState(buffer.save_state())
+            }
+            (Self::Buffer(buffer), ContentQuery::TextMetrics) => {
+                ContentData::TextMetrics(TextMetrics {
+                    line_count: buffer.len_lines(),
+                    char_count: buffer.slice().len_chars(),
                 })
             }
             _ => ContentData::Unsupported,
@@ -239,7 +215,7 @@ impl Content {
     pub fn create_view_state(&self) -> ContentViewState {
         match self {
             Self::Buffer(_) => ContentViewState::buffer(),
-            Self::StatusBar(_) => ContentViewState::status_bar(),
+            Self::StatusBar(_) => ContentViewState::unbound_status_bar(),
         }
     }
 
@@ -305,8 +281,8 @@ impl Content {
                     .into(),
                 ),
                 None => {
-                    let changed = buffer.status() != StatusMessage::SaveFailed;
-                    buffer.set_status(StatusMessage::SaveFailed);
+                    let changed = buffer.save_state() != SaveState::Failed;
+                    buffer.set_save_state(SaveState::Failed);
                     ContentResult::Handled(ContentOutcome::new(ContentEffect::None, changed, false))
                 }
             },
@@ -315,18 +291,19 @@ impl Content {
                 ContentInput::Event(ContentEvent::SaveFinished { state, result }),
             ) => {
                 let before_modified = buffer.modified();
-                let before_status = buffer.status();
-                match result {
-                    Ok(()) => {
-                        if buffer.mark_saved(state) {
-                            buffer.set_status(StatusMessage::Saved);
-                        }
-                    }
-                    Err(_) => buffer.set_status(StatusMessage::SaveFailed),
-                }
+                let before_save_state = buffer.save_state();
+                let before_backing_state = buffer.backing_state();
+                let save_state = match result {
+                    Ok(()) if buffer.mark_saved(state) => SaveState::Saved,
+                    Ok(()) => SaveState::Idle,
+                    Err(_) => SaveState::Failed,
+                };
+                buffer.set_save_state(save_state);
                 ContentResult::Handled(ContentOutcome::new(
                     ContentEffect::None,
-                    buffer.modified() != before_modified || buffer.status() != before_status,
+                    buffer.modified() != before_modified
+                        || buffer.save_state() != before_save_state
+                        || buffer.backing_state() != before_backing_state,
                     false,
                 ))
             }
@@ -350,22 +327,6 @@ fn text_rows(buffer: &Buffer, range: RowRange) -> Vec<String> {
         .collect()
 }
 
-fn document_status(buffer: &Buffer) -> DocumentStatus {
-    DocumentStatus {
-        file_name: buffer.file_name().map(str::to_string),
-        modified: buffer.modified(),
-        message: buffer.status(),
-    }
-}
-
-fn default_status_bar_data() -> StatusBarData {
-    StatusBarData {
-        file_name: None,
-        modified: false,
-        message: StatusMessage::None,
-    }
-}
-
 impl From<ContentEffect> for ContentOutcome {
     fn from(effect: ContentEffect) -> Self {
         Self::new(effect, false, false)
@@ -375,7 +336,6 @@ impl From<ContentEffect> for ContentOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::ids::ContentId;
 
     #[test]
     fn buffer_creates_text_view_state() {
@@ -388,13 +348,13 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_creates_stateless_view() {
-        let content = Content::StatusBar(StatusBar::new(ContentId(0)));
+    fn status_bar_creates_an_explicitly_unbound_view() {
+        let content = Content::StatusBar(StatusBar::new());
         assert_eq!(content.kind(), ContentKind::StatusBar);
-        assert!(matches!(
-            content.create_view_state(),
-            ContentViewState::StatusBar(_)
-        ));
+        let ContentViewState::StatusBar(state) = content.create_view_state() else {
+            panic!("status-bar content must create status-bar view state");
+        };
+        assert_eq!(state.target(), None);
     }
 
     #[test]
@@ -405,7 +365,7 @@ mod tests {
             ContentResult::Handled(_)
         ));
 
-        let mut status = Content::StatusBar(StatusBar::new(ContentId(0)));
+        let mut status = Content::StatusBar(StatusBar::new());
         assert_eq!(
             status.execute(ContentInput::Save),
             ContentResult::NotHandled

@@ -6,8 +6,8 @@ use crate::command::ModeCommand;
 use crate::command_resolver::default_global_keymap;
 use crate::dispatcher::{DispatchInput, DispatchOutcome, Dispatcher, DispatcherInputSnapshot};
 use crate::layout::{
-    LayoutError, NewView, create_view, focusable_view_count, resolve_focus, scene_views,
-    view_for_space, view_space_focusable,
+    LayoutError, NewView, StatusBarHandle, StatusBarPlacement, create_view, focusable_view_count,
+    resolve_focus, scene_views, space_for_view, view_for_space, view_space_focusable,
 };
 use crate::mode::{
     CursorDomain, FaceRegistry, ModeAttachmentError, ModeContentContext, ModeContentStore,
@@ -18,7 +18,7 @@ use crate::scene_model::{CloseResult, SceneBuilder, SceneError, SplitResult, bui
 use crate::view::View;
 use vell_core::content::ContentChange;
 use vell_core::content_store::ContentStore;
-use vell_core::content_view_state::ContentViewStateError;
+use vell_core::content_view_state::{ContentViewState, ContentViewStateError};
 use vell_protocol::content_query::RowRange;
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 use vell_protocol::revision::Revision;
@@ -37,6 +37,10 @@ pub(super) struct ClientSession {
     next_view_id: u64,
     focused: SpaceId,
     dispatcher: Dispatcher,
+    status_content: ContentId,
+    status_placement: StatusBarPlacement,
+    global_status_view: Option<ViewId>,
+    status_by_editor: HashMap<ViewId, ViewId>,
 }
 
 pub(super) struct InitialView {
@@ -62,8 +66,12 @@ impl ClientSession {
     ) -> Self {
         let editor = create_view(init.editor.content, contents, &init.editor.modes)
             .expect("editor content exists");
-        let status = create_view(init.status.content, contents, &init.status.modes)
+        let mut status = create_view(init.status.content, contents, &init.status.modes)
             .expect("status content exists");
+        *status.view.state_mut() = vell_core::content_view_state::ContentViewState::status_bar(
+            init.editor.view,
+            init.editor.content,
+        );
         let mode_profiles = HashMap::from([
             (init.editor.content, init.editor.modes),
             (init.status.content, init.status.modes),
@@ -148,6 +156,10 @@ impl ClientSession {
             next_view_id: init.next_view_id,
             focused,
             dispatcher: Dispatcher::new(default_global_keymap()),
+            status_content: init.status.content,
+            status_placement: StatusBarPlacement::Global,
+            global_status_view: Some(init.status.view),
+            status_by_editor: HashMap::new(),
         };
         session.refresh_presentation(contents, mode_contents);
         session
@@ -167,6 +179,173 @@ impl ClientSession {
 
     pub(super) fn views(&self) -> &HashMap<ViewId, View> {
         &self.views
+    }
+
+    pub(super) fn status_bar_placement(&self) -> StatusBarPlacement {
+        self.status_placement
+    }
+
+    pub(super) fn status_bar_for_view(&self, editor: ViewId) -> Option<StatusBarHandle> {
+        let editor_view = self.views.get(&editor)?;
+        if editor_view.state().status_bar_state().is_some() {
+            return None;
+        }
+        let view = match self.status_placement {
+            StatusBarPlacement::Global => self.global_status_view?,
+            StatusBarPlacement::PerPane => *self.status_by_editor.get(&editor)?,
+        };
+        let target_view = self
+            .views
+            .get(&view)?
+            .state()
+            .status_bar_state()?
+            .target()?
+            .0;
+        Some(StatusBarHandle {
+            view,
+            content: self.status_content,
+            target_view,
+        })
+    }
+
+    pub(super) fn status_bars_for_content(&self, content: ContentId) -> Vec<StatusBarHandle> {
+        let mut bars = self
+            .views
+            .iter()
+            .filter_map(|(view, data)| {
+                (data.content() == content && data.state().status_bar_state().is_none())
+                    .then(|| self.status_bar_for_view(*view))
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        bars.sort_by_key(|bar| bar.view.0);
+        bars.dedup_by_key(|bar| bar.view);
+        bars
+    }
+
+    fn status_view_for_target(
+        &self,
+        target_view: ViewId,
+        target_content: ContentId,
+        contents: &ContentStore,
+    ) -> NewView {
+        let modes = self.mode_chain_for_new_view(self.status_content);
+        let mut view =
+            create_view(self.status_content, contents, &modes).expect("status-bar content exists");
+        *view.view.state_mut() = ContentViewState::status_bar(target_view, target_content);
+        view
+    }
+
+    fn retarget_status_view(&mut self, status: ViewId, editor: ViewId) {
+        let target_content = self.views[&editor].content();
+        let view = self.views.get_mut(&status).expect("status view exists");
+        let changed = view
+            .state_mut()
+            .status_bar_state_mut()
+            .expect("status view has status state")
+            .set_target(editor, target_content);
+        if changed {
+            view.touch();
+        }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "placement conversion coordinates session-owned scene and mode stores"
+    )]
+    pub(super) fn set_status_bar_placement(
+        &mut self,
+        placement: StatusBarPlacement,
+        registry: &ModeRegistry,
+        content_modes: &mut ModeContentStore,
+        contents: &ContentStore,
+    ) -> Result<(), LayoutError> {
+        if placement == self.status_placement {
+            return Ok(());
+        }
+        match placement {
+            StatusBarPlacement::PerPane => {
+                let global = self.global_status_view.expect("global status view exists");
+                let global_space = space_for_view(&self.scene, global)
+                    .expect("global status view belongs to scene");
+                self.scene_builder.close(&mut self.scene, global_space)?;
+                let editors = scene_views(&self.scene)
+                    .into_iter()
+                    .filter(|(_, view)| self.views[view].state().status_bar_state().is_none())
+                    .collect::<Vec<_>>();
+                self.status_by_editor.clear();
+                for (index, (editor_space, editor_view)) in editors.into_iter().enumerate() {
+                    let status_view = if index == 0 {
+                        global
+                    } else {
+                        let target_content = self.views[&editor_view].content();
+                        let status =
+                            self.status_view_for_target(editor_view, target_content, contents);
+                        self.insert_view(status, registry, content_modes, contents)?
+                    };
+                    self.retarget_status_view(status_view, editor_view);
+                    self.scene_builder.wrap_with_status(
+                        &mut self.scene,
+                        editor_space,
+                        status_view,
+                    )?;
+                    self.status_by_editor.insert(editor_view, status_view);
+                }
+                self.global_status_view = None;
+            }
+            StatusBarPlacement::Global => {
+                let focused_editor = self
+                    .view_for_space(self.focused)
+                    .expect("focused space hosts editor view");
+                let chosen = self.status_by_editor[&focused_editor];
+                let bars = self.status_by_editor.values().copied().collect::<Vec<_>>();
+                for status in &bars {
+                    let space = space_for_view(&self.scene, *status)
+                        .expect("per-pane status view belongs to scene");
+                    self.scene_builder.close(&mut self.scene, space)?;
+                }
+                for status in bars {
+                    if status != chosen {
+                        self.remove_view(status, content_modes);
+                    }
+                }
+                self.status_by_editor.clear();
+                self.retarget_status_view(chosen, focused_editor);
+                self.scene_builder
+                    .attach_global_status(&mut self.scene, chosen)?;
+                self.global_status_view = Some(chosen);
+            }
+        }
+        self.status_placement = placement;
+        self.reconcile_layout(Some(self.focused));
+        self.scene_revision.next();
+        Ok(())
+    }
+
+    pub(super) fn set_status_bar_visible(
+        &mut self,
+        editor: Option<ViewId>,
+        visible: bool,
+    ) -> Result<(), LayoutError> {
+        let status = match self.status_placement {
+            StatusBarPlacement::Global => self.global_status_view,
+            StatusBarPlacement::PerPane => {
+                editor.and_then(|editor| self.status_by_editor.get(&editor).copied())
+            }
+        }
+        .ok_or(LayoutError::NoStatusBar)?;
+        let space = space_for_view(&self.scene, status).ok_or(LayoutError::NoStatusBar)?;
+        self.scene_builder.set_sizing(
+            &mut self.scene,
+            space,
+            if visible {
+                Sizing::Fixed(1)
+            } else {
+                Sizing::Fixed(0)
+            },
+        )?;
+        self.scene_revision.next();
+        Ok(())
     }
 
     pub(super) fn view_modes(&self) -> &ModeViewStore {
@@ -324,10 +503,19 @@ impl ClientSession {
 
     pub(super) fn touch_content_views(&mut self, content: ContentId) {
         for view in self.views.values_mut() {
-            if view.content() == content {
+            if view_targets_content(view, content) {
                 view.touch();
             }
         }
+    }
+
+    pub(super) fn content_view_revisions(&self, content: ContentId) -> Vec<(ViewId, Revision)> {
+        self.views
+            .iter()
+            .filter_map(|(id, view)| {
+                view_targets_content(view, content).then_some((*id, view.revision()))
+            })
+            .collect()
     }
 
     pub(super) fn cursor_domain_in_draft(
@@ -469,6 +657,48 @@ impl ClientSession {
         self.scene_revision.next();
     }
 
+    pub(super) fn focus_space(
+        &mut self,
+        target: SpaceId,
+        content_modes: &mut ModeContentStore,
+        contents: &ContentStore,
+    ) -> Result<(), LayoutError> {
+        if view_space_focusable(&self.scene, target) != Some(true) {
+            return Err(LayoutError::NoFocusableSpace);
+        }
+        if target == self.focused {
+            return Ok(());
+        }
+        let previous_view = self
+            .view_for_space(self.focused)
+            .expect("focused space hosts a view");
+        let previous_content = self.views[&previous_view].content();
+        let previous_data = &self.views[&previous_view];
+        let presentation_changed = self.dispatcher.invalidate_view(
+            previous_view,
+            previous_data,
+            previous_content,
+            &mut self.view_modes,
+            content_modes,
+            contents,
+        );
+        if presentation_changed {
+            self.views
+                .get_mut(&previous_view)
+                .expect("previous view exists")
+                .touch();
+        }
+        self.focused = target;
+        self.sync_global_status_target();
+        self.sync_changed_input_source(previous_content, content_modes, contents);
+        self.scene_revision.next();
+        Ok(())
+    }
+
+    pub(super) fn is_focusable_space(&self, target: SpaceId) -> bool {
+        view_space_focusable(&self.scene, target) == Some(true)
+    }
+
     pub(super) fn next_input_deadline(
         &self,
         content_modes: &ModeContentStore,
@@ -573,6 +803,16 @@ impl ClientSession {
                 view.touch();
             }
         }
+        for view in self.views.values_mut() {
+            if view
+                .state()
+                .status_bar_state()
+                .and_then(|state| state.target())
+                .is_some_and(|(_, target_content)| target_content == content)
+            {
+                view.touch();
+            }
+        }
         Ok(())
     }
 
@@ -667,24 +907,66 @@ impl ClientSession {
         content_modes: &mut ModeContentStore,
         contents: &ContentStore,
     ) -> Result<SplitResult, LayoutError> {
+        self.reject_status_bar_space(target)?;
         let previous = self.focused;
         let previous_view = self
             .view_for_space(previous)
             .expect("focused space hosts a view");
         let previous_content = self.views[&previous_view].content();
-        let view = self.insert_view(view, registry, content_modes, contents);
-        let result =
-            match self
-                .scene_builder
-                .split(&mut self.scene, target, view, focusable, direction)
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    self.remove_view(view, content_modes);
-                    self.next_view_id = view.0;
-                    return Err(error.into());
+        let target_pane = match self.status_placement {
+            StatusBarPlacement::Global => None,
+            StatusBarPlacement::PerPane => {
+                if view_space_focusable(&self.scene, target).is_none() {
+                    return Err(SceneError::ExpectedContentLeaf(target).into());
                 }
-            };
+                Some(
+                    self.scene
+                        .node(target)
+                        .parent
+                        .ok_or(SceneError::InvalidTree)?,
+                )
+            }
+        };
+        let next_view_id = self.next_view_id;
+        let view = self.insert_view(view, registry, content_modes, contents)?;
+        let result = match self.status_placement {
+            StatusBarPlacement::Global => {
+                self.scene_builder
+                    .split(&mut self.scene, target, view, focusable, direction)
+            }
+            StatusBarPlacement::PerPane => {
+                let status =
+                    self.status_view_for_target(view, self.views[&view].content(), contents);
+                let status = self.insert_view(status, registry, content_modes, contents)?;
+                match self.scene_builder.split_pane(
+                    &mut self.scene,
+                    target_pane.expect("per-pane split prevalidates its target pane"),
+                    view,
+                    status,
+                    focusable,
+                    direction,
+                ) {
+                    Ok(pane) => {
+                        self.status_by_editor.insert(view, status);
+                        Ok(SplitResult {
+                            new_space: pane.editor_space,
+                        })
+                    }
+                    Err(error) => {
+                        self.remove_view(status, content_modes);
+                        Err(error)
+                    }
+                }
+            }
+        };
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                self.remove_view(view, content_modes);
+                self.next_view_id = next_view_id;
+                return Err(error.into());
+            }
+        };
         if focus_new {
             let view_data = &self.views[&previous_view];
             let presentation_changed = self.dispatcher.invalidate_view(
@@ -707,6 +989,7 @@ impl ClientSession {
         } else {
             Some(previous)
         });
+        self.sync_global_status_target();
         if focus_new {
             self.sync_changed_input_source(previous_content, content_modes, contents);
         }
@@ -720,6 +1003,7 @@ impl ClientSession {
         content_modes: &mut ModeContentStore,
         contents: &ContentStore,
     ) -> Result<CloseResult, LayoutError> {
+        self.reject_status_bar_space(target)?;
         if view_space_focusable(&self.scene, target) == Some(true)
             && focusable_view_count(&self.scene) == 1
         {
@@ -730,6 +1014,14 @@ impl ClientSession {
             .view_for_space(target)
             .ok_or(SceneError::ExpectedContentLeaf(target))?;
         let input_source_changed = target == self.focused;
+        if self.status_placement == StatusBarPlacement::PerPane
+            && let Some(status) = self.status_by_editor.remove(&removed_view)
+        {
+            let status_space =
+                space_for_view(&self.scene, status).expect("per-pane status view belongs to scene");
+            self.scene_builder.close(&mut self.scene, status_space)?;
+            self.remove_view(status, content_modes);
+        }
         let result = self.scene_builder.close(&mut self.scene, target)?;
         let content = self.views[&removed_view].content();
         let view_data = &self.views[&removed_view];
@@ -743,6 +1035,7 @@ impl ClientSession {
         );
         self.remove_view(removed_view, content_modes);
         self.reconcile_layout(result.surviving_neighbor);
+        self.sync_global_status_target();
         if input_source_changed {
             self.sync_changed_input_source(content, content_modes, contents);
         }
@@ -759,6 +1052,7 @@ impl ClientSession {
         content_modes: &mut ModeContentStore,
         contents: &ContentStore,
     ) -> Result<(), LayoutError> {
+        self.reject_status_bar_space(target)?;
         if view_space_focusable(&self.scene, target) == Some(true)
             && !focusable
             && focusable_view_count(&self.scene) == 1
@@ -770,7 +1064,7 @@ impl ClientSession {
             .view_for_space(target)
             .ok_or(SceneError::ExpectedContentLeaf(target))?;
         let input_source_changed = target == self.focused;
-        let new_view = self.insert_view(view, registry, content_modes, contents);
+        let new_view = self.insert_view(view, registry, content_modes, contents)?;
         if let Err(error) =
             self.scene_builder
                 .replace_view(&mut self.scene, target, new_view, focusable)
@@ -778,6 +1072,12 @@ impl ClientSession {
             self.remove_view(new_view, content_modes);
             self.next_view_id = new_view.0;
             return Err(error.into());
+        }
+        if self.status_placement == StatusBarPlacement::PerPane
+            && let Some(status) = self.status_by_editor.remove(&old_view)
+        {
+            self.status_by_editor.insert(new_view, status);
+            self.retarget_status_view(status, new_view);
         }
         let content = self.views[&old_view].content();
         let view_data = &self.views[&old_view];
@@ -791,6 +1091,7 @@ impl ClientSession {
         );
         self.remove_view(old_view, content_modes);
         self.reconcile_layout(Some(target));
+        self.sync_global_status_target();
         if input_source_changed {
             self.sync_changed_input_source(content, content_modes, contents);
         }
@@ -803,6 +1104,7 @@ impl ClientSession {
         target: SpaceId,
         sizing: Sizing,
     ) -> Result<(), LayoutError> {
+        self.reject_status_bar_space(target)?;
         self.scene_builder
             .set_sizing(&mut self.scene, target, sizing)?;
         self.scene_revision.next();
@@ -819,13 +1121,44 @@ impl ClientSession {
         self.sync_focused_input(Instant::now(), content_modes, contents);
     }
 
+    fn sync_global_status_target(&mut self) {
+        if self.status_placement != StatusBarPlacement::Global {
+            return;
+        }
+        let Some(status) = self.global_status_view else {
+            return;
+        };
+        let Some(editor) = self.view_for_space(self.focused) else {
+            return;
+        };
+        self.retarget_status_view(status, editor);
+    }
+
+    fn reject_status_bar_space(&self, target: SpaceId) -> Result<(), LayoutError> {
+        let view = self
+            .view_for_space(target)
+            .ok_or(SceneError::ExpectedContentLeaf(target))?;
+        if self.views[&view].state().status_bar_state().is_some() {
+            return Err(LayoutError::StatusBarSpace(target));
+        }
+        Ok(())
+    }
+
     fn insert_view(
         &mut self,
         view: NewView,
         registry: &ModeRegistry,
         mode_contents: &mut ModeContentStore,
         contents: &ContentStore,
-    ) -> ViewId {
+    ) -> Result<ViewId, LayoutError> {
+        if view
+            .view
+            .state()
+            .status_bar_state()
+            .is_some_and(|state| state.target().is_none())
+        {
+            return Err(LayoutError::UnboundStatusBarView(view.view.content()));
+        }
         let id = ViewId(self.next_view_id);
         self.next_view_id = self.next_view_id.checked_add(1).expect("view id overflow");
         let content = view.view.content();
@@ -853,7 +1186,7 @@ impl ClientSession {
             mode.register_faces(&mut self.faces);
             self.view_modes.insert(id, mode);
         }
-        id
+        Ok(id)
     }
 
     fn remove_view(&mut self, view: ViewId, mode_contents: &mut ModeContentStore) {
@@ -887,4 +1220,13 @@ impl ClientSession {
     pub(super) fn next_view_id_for_test(&self) -> u64 {
         self.next_view_id
     }
+}
+
+fn view_targets_content(view: &View, content: ContentId) -> bool {
+    view.content() == content
+        || view
+            .state()
+            .status_bar_state()
+            .and_then(|state| state.target())
+            .is_some_and(|(_, target_content)| target_content == content)
 }

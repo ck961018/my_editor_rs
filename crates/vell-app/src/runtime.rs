@@ -50,6 +50,16 @@ impl PreparedEffect {
                 view: *view,
                 command: *command,
             },
+            Self::Split {
+                target,
+                content,
+                direction,
+            } => EffectBehavior::Split {
+                target: *target,
+                content: *content,
+                direction: *direction,
+            },
+            Self::Focus { target } => EffectBehavior::Focus { target: *target },
             Self::Quit => EffectBehavior::Quit,
         }
     }
@@ -412,6 +422,20 @@ impl<F: Frontend> App<F> {
                 PreparedEffect::Viewport { view, command } => {
                     self.frontend.apply_viewport_command(view, command);
                 }
+                PreparedEffect::Split {
+                    target,
+                    content,
+                    direction,
+                } => {
+                    self.split_space(target, content, true, direction, true)
+                        .expect("validated split remains valid until frame commit");
+                }
+                PreparedEffect::Focus { target } => {
+                    let (contents, content_modes) = self.kernel.mode_runtime_parts();
+                    self.session
+                        .focus_space(target, content_modes, contents)
+                        .expect("validated focus target remains valid until frame commit");
+                }
                 PreparedEffect::Quit => self.kernel.cancel(),
             }
         }
@@ -556,6 +580,42 @@ impl<F: Frontend> App<F> {
                     match command {
                         AppCommand::Quit => self.prepare_effect(frame, PreparedEffect::Quit),
                         AppCommand::FocusNext | AppCommand::FocusPrev => {}
+                        AppCommand::Split(direction) => {
+                            let target = self.session.focused();
+                            let view = self
+                                .session
+                                .view_for_space(target)
+                                .ok_or_else(|| invalid_operation("focused space has no view"))?;
+                            let content = self
+                                .session
+                                .view(view)
+                                .ok_or_else(|| invalid_operation("focused view does not exist"))?
+                                .content();
+                            self.prepare_effect(
+                                frame,
+                                PreparedEffect::Split {
+                                    target,
+                                    content,
+                                    direction,
+                                },
+                            );
+                        }
+                        AppCommand::Focus(direction) => {
+                            let target = self.frontend.resolve_focus_direction(
+                                self.session.scene(),
+                                self.session.scene_revision(),
+                                self.session.focused(),
+                                direction,
+                            )?;
+                            if let Some(target) = target {
+                                if !self.session.is_focusable_space(target) {
+                                    return Err(invalid_operation(
+                                        "frontend returned an invalid focus target",
+                                    ));
+                                }
+                                self.prepare_effect(frame, PreparedEffect::Focus { target });
+                            }
+                        }
                     }
                     Ok(())
                 }
@@ -973,10 +1033,15 @@ impl<F: Frontend> App<F> {
         }
         self.checkpoint_target(frame, content);
         let result = self.kernel.execute(content, ContentInput::Save);
-        if let ContentResult::Handled(outcome) = result
-            && let ContentEffect::Save(snapshot) = outcome.effect
-        {
-            self.prepare_effect(frame, PreparedEffect::Save { content, snapshot });
+        if let ContentResult::Handled(outcome) = result {
+            if outcome.content_changed {
+                for (view, revision) in self.session.content_view_revisions(content) {
+                    frame.record_view_touch(view, revision);
+                }
+            }
+            if let ContentEffect::Save(snapshot) = outcome.effect {
+                self.prepare_effect(frame, PreparedEffect::Save { content, snapshot });
+            }
         }
         if let Some(owner) = active_owner {
             self.kernel.begin_transaction(content, owner);

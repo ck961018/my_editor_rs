@@ -7,6 +7,7 @@ type VimPending =
   | { kind: "find"; direction: "forward" | "backward"; count: number }
   | { kind: "goto"; count: number }
   | { kind: "viewport"; line?: number }
+  | { kind: "window" }
   | {
     kind: "operator";
     operator: "delete" | "change";
@@ -145,6 +146,21 @@ function handlePending(state: VimViewState, key: KeyInput): Effect[] | null {
       else context.viewport.alignBottom();
     });
     return effects;
+  }
+
+  if (pending.kind === "window") {
+    state.pending = null;
+    if (key.code !== "character" || !isPlain(key) || !key.character) return [];
+    const effects: Record<string, Effect> = {
+      s: (context) => context.app.splitHorizontal(),
+      v: (context) => context.app.splitVertical(),
+      h: (context) => context.app.focusLeft(),
+      j: (context) => context.app.focusDown(),
+      k: (context) => context.app.focusUp(),
+      l: (context) => context.app.focusRight(),
+    };
+    const effect = effects[key.character];
+    return effect ? [effect] : [];
   }
 
   if (pending.kind === "operator") {
@@ -403,6 +419,10 @@ function handleVisual(state: VimViewState, key: KeyInput): Effect[] | null {
 
 function handleNormal(state: VimViewState, key: KeyInput): Effect[] | null {
   if (key.code === "escape" && isPlain(key)) return [];
+  if (isCtrl(key, "w")) {
+    state.pending = { kind: "window" };
+    return [];
+  }
   if (isCtrl(key, "r")) return [(context) => context.history.redo()];
   if (isCtrl(key, "u")) return [(context) => context.viewport.halfPageUp()];
   if (isCtrl(key, "d")) return [(context) => context.viewport.halfPageDown()];

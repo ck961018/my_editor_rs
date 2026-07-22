@@ -1,19 +1,11 @@
-use crate::protocol::ids::ContentId;
-
-/// Status-bar content stores only its target. ContentStore derives its display data by
-/// querying the target document status.
-#[derive(Clone)]
-pub struct StatusBar {
-    target_content_id: ContentId,
-}
+/// Status-bar content owns its shared mode/configuration scope. Its target belongs to each
+/// status-bar view, so one content can back both a global bar and per-pane bars.
+#[derive(Clone, Default)]
+pub struct StatusBar;
 
 impl StatusBar {
-    pub fn new(target_content_id: ContentId) -> Self {
-        Self { target_content_id }
-    }
-
-    pub fn target_content_id(&self) -> ContentId {
-        self.target_content_id
+    pub fn new() -> Self {
+        Self
     }
 }
 
@@ -22,8 +14,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn target_content_id_stored() {
-        let sb = StatusBar::new(ContentId(7));
-        assert_eq!(sb.target_content_id(), ContentId(7));
+    fn status_bar_has_no_view_target() {
+        let _ = StatusBar::new();
     }
 }

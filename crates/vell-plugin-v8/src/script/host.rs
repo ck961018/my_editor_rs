@@ -237,16 +237,40 @@ impl ScriptHost {
                     set_number(scope, argument, "revision", revision.0 as f64);
                 }
                 if version == ScriptApiVersion::V2 {
-                    if let Some(status) = context
-                        .buffer()
-                        .and_then(|context| context.document_status())
-                    {
-                        set_document_context(scope, argument, "document", status);
-                    } else if let Some(status) = context
-                        .status_bar()
-                        .and_then(|context| context.status_bar_data())
-                    {
-                        set_document_context(scope, argument, "status", status);
+                    if let Some(buffer) = context.buffer() {
+                        set_resource_facts(
+                            scope,
+                            argument,
+                            buffer.resource_name(),
+                            buffer.resource_path(),
+                            buffer.backing_state(),
+                            buffer.dirty_state(),
+                            buffer.text_metrics(),
+                        );
+                        set_save_state(scope, argument, buffer.save_state());
+                    } else if let Some(status) = context.status_bar() {
+                        set_number(
+                            scope,
+                            argument,
+                            "targetViewId",
+                            status.target_view_id().0 as f64,
+                        );
+                        set_number(
+                            scope,
+                            argument,
+                            "targetContentId",
+                            status.target_content_id().0 as f64,
+                        );
+                        set_resource_facts(
+                            scope,
+                            argument,
+                            status.resource_name(),
+                            status.resource_path(),
+                            status.backing_state(),
+                            status.dirty_state(),
+                            status.text_metrics(),
+                        );
+                        set_save_state(scope, argument, status.save_state());
                     }
                 }
                 let arguments = json_to_v8(scope, &mode_value_to_json(arguments))?;
@@ -372,7 +396,8 @@ impl ScriptHost {
         self.invoke(ScriptInvocationKind::StateFactory, |isolate| {
             v8::scope_with_context!(scope, isolate, v8_context);
             v8::tc_scope!(let scope, scope);
-            let argument = content_context_object(scope, context, version == ScriptApiVersion::V1)?;
+            let legacy = version == ScriptApiVersion::V1;
+            let argument = content_context_object(scope, context, legacy, legacy)?;
             let callback = v8::Local::new(scope, callback);
             let receiver = v8::undefined(scope).into();
             let value = call_script_callback(scope, callback, receiver, &[argument.into()])
@@ -400,7 +425,8 @@ impl ScriptHost {
         let next = self.invoke(ScriptInvocationKind::ContentChanged, |isolate| {
             v8::scope_with_context!(scope, isolate, v8_context);
             v8::tc_scope!(let scope, scope);
-            let argument = content_context_object(scope, context, false)?;
+            let argument =
+                content_context_object(scope, context, false, version == ScriptApiVersion::V1)?;
             let content_state = json_to_v8(scope, &current)?;
             set_value(scope, argument, content_state_name, content_state);
             let change_value = content_change_to_v8(scope, change)?;
@@ -434,7 +460,8 @@ impl ScriptHost {
         let (next, job) = self.invoke(ScriptInvocationKind::ContentJob, |isolate| {
             v8::scope_with_context!(scope, isolate, v8_context);
             v8::tc_scope!(let scope, scope);
-            let argument = content_context_object(scope, context, false)?;
+            let argument =
+                content_context_object(scope, context, false, api_version == ScriptApiVersion::V1)?;
             let content_state = json_to_v8(scope, &current)?;
             set_value(scope, argument, content_state_name, content_state);
             let callback = v8::Local::new(scope, callback);
@@ -482,7 +509,7 @@ impl ScriptHost {
         let message = self.invoke(ScriptInvocationKind::AnalysisInput, |isolate| {
             v8::scope_with_context!(scope, isolate, v8_context);
             v8::tc_scope!(let scope, scope);
-            let argument = content_context_object(scope, context, false)?;
+            let argument = content_context_object(scope, context, false, false)?;
             let content_state = json_to_v8(scope, &current)?;
             set_value(scope, argument, "state", content_state);
             let callback = v8::Local::new(scope, callback);
@@ -543,7 +570,8 @@ impl ScriptHost {
         let (next, decorations) = self.invoke(ScriptInvocationKind::ContentJob, |isolate| {
             v8::scope_with_context!(scope, isolate, v8_context);
             v8::tc_scope!(let scope, scope);
-            let argument = content_context_object(scope, context, false)?;
+            let argument =
+                content_context_object(scope, context, false, api_version == ScriptApiVersion::V1)?;
             let content_state = json_to_v8(scope, &current)?;
             set_value(scope, argument, content_state_name, content_state);
             set_number(scope, argument, "jobVersion", version as f64);
@@ -588,7 +616,7 @@ impl ScriptHost {
         let (next, decorations) = self.invoke(ScriptInvocationKind::AnalysisApply, |isolate| {
             v8::scope_with_context!(scope, isolate, v8_context);
             v8::tc_scope!(let scope, scope);
-            let argument = content_context_object(scope, context, false)?;
+            let argument = content_context_object(scope, context, false, false)?;
             let content_state = json_to_v8(scope, &current)?;
             set_value(scope, argument, "state", content_state);
             let result_value = json_to_v8(scope, result)?;

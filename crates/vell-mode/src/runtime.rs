@@ -16,12 +16,12 @@ use crate::operation::OperationRequest;
 use crate::presentation::{ContentPresentationLayer, ViewPresentationLayer};
 use vell_core::content::{ContentChange, ContentKind};
 use vell_core::content_store::ContentStore;
-use vell_core::content_view_state::{BufferViewState, ContentViewState};
+use vell_core::content_view_state::{BufferViewState, ContentViewState, StatusBarViewState};
 use vell_core::input::{InputDecision, InputStatus};
 use vell_core::keymap::Keymap;
 use vell_protocol::content_query::{
-    ContentData, ContentQuery, CursorStyle, DocumentStatus, Face, FaceName, NamedTextDecoration,
-    RowRange, SelectionShape, StatusBarData,
+    BufferBackingState, ContentData, ContentQuery, CursorStyle, DirtyState, Face, FaceName,
+    NamedTextDecoration, RowRange, SaveState, SelectionShape, TextMetrics,
 };
 use vell_protocol::ids::{ContentId, ViewId};
 use vell_protocol::key_event::KeyEvent;
@@ -200,6 +200,10 @@ pub enum ModeContextError {
         content_kind: ContentKind,
         state_kind: ContentKind,
     },
+    UnboundStatusBar {
+        view: ViewId,
+        content: ContentId,
+    },
 }
 
 impl fmt::Display for ModeContextError {
@@ -218,6 +222,11 @@ impl fmt::Display for ModeContextError {
             } => write!(
                 formatter,
                 "view {} for content {} has {state_kind:?} state, expected {content_kind:?}",
+                view.0, content.0
+            ),
+            Self::UnboundStatusBar { view, content } => write!(
+                formatter,
+                "status-bar view {} for content {} has no target",
                 view.0, content.0
             ),
         }
@@ -686,12 +695,62 @@ impl BufferModeContentContext<'_> {
         }
     }
 
-    pub fn document_status(&self) -> Option<DocumentStatus> {
+    pub fn resource_name(&self) -> Option<String> {
         match self
             .contents
-            .query(self.content_id, ContentQuery::DocumentStatus)
+            .query(self.content_id, ContentQuery::ResourceName)
         {
-            ContentData::DocumentStatus(status) => Some(status),
+            ContentData::ResourceName(name) => name,
+            _ => None,
+        }
+    }
+
+    pub fn resource_path(&self) -> Option<String> {
+        match self
+            .contents
+            .query(self.content_id, ContentQuery::ResourcePath)
+        {
+            ContentData::ResourcePath(path) => path,
+            _ => None,
+        }
+    }
+
+    pub fn backing_state(&self) -> Option<BufferBackingState> {
+        match self
+            .contents
+            .query(self.content_id, ContentQuery::BackingState)
+        {
+            ContentData::BackingState(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn dirty_state(&self) -> Option<DirtyState> {
+        match self
+            .contents
+            .query(self.content_id, ContentQuery::DirtyState)
+        {
+            ContentData::DirtyState(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn save_state(&self) -> Option<SaveState> {
+        match self
+            .contents
+            .query(self.content_id, ContentQuery::SaveState)
+        {
+            ContentData::SaveState(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn text_metrics(&self) -> Option<TextMetrics> {
+        match self
+            .contents
+            .query(self.content_id, ContentQuery::TextMetrics)
+        {
+            ContentData::TextMetrics(metrics) => Some(metrics),
             _ => None,
         }
     }
@@ -702,17 +761,7 @@ impl BufferModeContentContext<'_> {
 }
 
 #[allow(dead_code, reason = "native Mode adapter capability surface")]
-impl StatusBarModeContentContext<'_> {
-    pub fn status_bar_data(&self) -> Option<StatusBarData> {
-        match self
-            .contents
-            .query(self.content_id, ContentQuery::StatusBarData)
-        {
-            ContentData::StatusBarData(data) => Some(data),
-            _ => None,
-        }
-    }
-}
+impl StatusBarModeContentContext<'_> {}
 
 #[allow(dead_code, reason = "reserved for generic Mode extensions")]
 pub enum ModeViewContext<'a> {
@@ -732,6 +781,7 @@ pub struct BufferModeViewContext<'a> {
 pub struct StatusBarModeViewContext<'a> {
     view_id: ViewId,
     content_id: ContentId,
+    state: &'a StatusBarViewState,
     contents: &'a ContentStore,
 }
 
@@ -758,10 +808,17 @@ impl<'a> ModeViewContext<'a> {
                     contents,
                 }))
             }
-            (ContentKind::StatusBar, ContentViewState::StatusBar(_)) => {
+            (ContentKind::StatusBar, ContentViewState::StatusBar(state)) => {
+                if state.target().is_none() {
+                    return Err(ModeContextError::UnboundStatusBar {
+                        view: view_id,
+                        content: content_id,
+                    });
+                }
                 Ok(Self::StatusBar(StatusBarModeViewContext {
                     view_id,
                     content_id,
+                    state,
                     contents,
                 }))
             }
@@ -843,12 +900,62 @@ impl BufferModeViewContext<'_> {
         }
     }
 
-    pub fn document_status(&self) -> Option<DocumentStatus> {
+    pub fn resource_name(&self) -> Option<String> {
         match self
             .contents
-            .query(self.content_id, ContentQuery::DocumentStatus)
+            .query(self.content_id, ContentQuery::ResourceName)
         {
-            ContentData::DocumentStatus(status) => Some(status),
+            ContentData::ResourceName(name) => name,
+            _ => None,
+        }
+    }
+
+    pub fn resource_path(&self) -> Option<String> {
+        match self
+            .contents
+            .query(self.content_id, ContentQuery::ResourcePath)
+        {
+            ContentData::ResourcePath(path) => path,
+            _ => None,
+        }
+    }
+
+    pub fn backing_state(&self) -> Option<BufferBackingState> {
+        match self
+            .contents
+            .query(self.content_id, ContentQuery::BackingState)
+        {
+            ContentData::BackingState(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn dirty_state(&self) -> Option<DirtyState> {
+        match self
+            .contents
+            .query(self.content_id, ContentQuery::DirtyState)
+        {
+            ContentData::DirtyState(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn save_state(&self) -> Option<SaveState> {
+        match self
+            .contents
+            .query(self.content_id, ContentQuery::SaveState)
+        {
+            ContentData::SaveState(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn text_metrics(&self) -> Option<TextMetrics> {
+        match self
+            .contents
+            .query(self.content_id, ContentQuery::TextMetrics)
+        {
+            ContentData::TextMetrics(metrics) => Some(metrics),
             _ => None,
         }
     }
@@ -860,12 +967,76 @@ impl BufferModeViewContext<'_> {
 
 #[allow(dead_code, reason = "native Mode adapter capability surface")]
 impl StatusBarModeViewContext<'_> {
-    pub fn status_bar_data(&self) -> Option<StatusBarData> {
+    fn target(&self) -> (ViewId, ContentId) {
+        self.state
+            .target()
+            .expect("status-bar mode context validates its target")
+    }
+
+    pub fn target_view_id(&self) -> ViewId {
+        self.target().0
+    }
+
+    pub fn target_content_id(&self) -> ContentId {
+        self.target().1
+    }
+
+    pub fn resource_name(&self) -> Option<String> {
         match self
             .contents
-            .query(self.content_id, ContentQuery::StatusBarData)
+            .query(self.target().1, ContentQuery::ResourceName)
         {
-            ContentData::StatusBarData(data) => Some(data),
+            ContentData::ResourceName(name) => name,
+            _ => None,
+        }
+    }
+
+    pub fn resource_path(&self) -> Option<String> {
+        match self
+            .contents
+            .query(self.target().1, ContentQuery::ResourcePath)
+        {
+            ContentData::ResourcePath(path) => path,
+            _ => None,
+        }
+    }
+
+    pub fn backing_state(&self) -> Option<BufferBackingState> {
+        match self
+            .contents
+            .query(self.target().1, ContentQuery::BackingState)
+        {
+            ContentData::BackingState(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn dirty_state(&self) -> Option<DirtyState> {
+        match self
+            .contents
+            .query(self.target().1, ContentQuery::DirtyState)
+        {
+            ContentData::DirtyState(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn save_state(&self) -> Option<SaveState> {
+        match self
+            .contents
+            .query(self.target().1, ContentQuery::SaveState)
+        {
+            ContentData::SaveState(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn text_metrics(&self) -> Option<TextMetrics> {
+        match self
+            .contents
+            .query(self.target().1, ContentQuery::TextMetrics)
+        {
+            ContentData::TextMetrics(metrics) => Some(metrics),
             _ => None,
         }
     }
@@ -932,6 +1103,20 @@ pub struct ModeViewPolicy {
     pub cursor_domain: Option<CursorDomain>,
     pub selection_shape: Option<SelectionShape>,
     pub selection_face: Option<FaceName>,
+    pub status_bar: Option<NamedStatusBarPresentation>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NamedStatusBarSegment {
+    pub text: String,
+    pub face: Option<FaceName>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NamedStatusBarPresentation {
+    pub left: Vec<NamedStatusBarSegment>,
+    pub center: Vec<NamedStatusBarSegment>,
+    pub right: Vec<NamedStatusBarSegment>,
 }
 
 impl ModeViewPolicy {
@@ -940,6 +1125,7 @@ impl ModeViewPolicy {
         self.cursor_domain = self.cursor_domain.or(next.cursor_domain);
         self.selection_shape = self.selection_shape.or(next.selection_shape);
         self.selection_face = self.selection_face.take().or(next.selection_face);
+        self.status_bar = self.status_bar.take().or(next.status_bar);
     }
 }
 

@@ -62,17 +62,24 @@ impl View {
 mod tests {
     use super::*;
     use vell_core::content_view_state::ContentViewState;
+    use vell_protocol::ids::ViewId;
 
     #[test]
     fn status_bar_view_has_no_selections() {
-        let v = View::new(ContentId(0), ContentViewState::status_bar());
+        let v = View::new(
+            ContentId(0),
+            ContentViewState::status_bar(ViewId(1), ContentId(1)),
+        );
         assert_eq!(v.content(), ContentId(0));
         assert!(v.selections().is_none());
     }
 
     #[test]
     fn touch_advances_view_revision() {
-        let mut view = View::new(ContentId(0), ContentViewState::status_bar());
+        let mut view = View::new(
+            ContentId(0),
+            ContentViewState::status_bar(ViewId(1), ContentId(1)),
+        );
 
         view.touch();
 

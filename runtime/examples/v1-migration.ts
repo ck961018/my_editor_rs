@@ -3,7 +3,11 @@
 editor.modes.define<{ count: number }, Record<string, never>>({
   name: "migration-v1",
   content: {
-    create: () => ({ count: 0 }),
+    create: (context) => {
+      void context.document?.fileName;
+      void context.document?.modified;
+      return { count: 0 };
+    },
   },
   view: {
     create: () => ({}),

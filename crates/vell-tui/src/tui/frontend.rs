@@ -8,6 +8,7 @@ use crate::protocol::frontend_event::FrontendEvent;
 use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::revision::Revision;
 use crate::protocol::scene::Scene;
+use crate::protocol::space::SplitDirection;
 use crate::protocol::viewport::{ResolvedViewportCommand, ViewportCommand};
 use crate::terminal::input::Input;
 use crate::terminal::output::{Canvas, Output};
@@ -64,5 +65,17 @@ impl<W: io::Write> Frontend for TuiFrontend<W> {
 
     fn apply_viewport_command(&mut self, view: ViewId, command: ResolvedViewportCommand) {
         self.renderer.apply_viewport_command(view, command);
+    }
+
+    fn resolve_focus_direction(
+        &mut self,
+        scene: &Scene,
+        scene_revision: Revision,
+        focused: SpaceId,
+        direction: SplitDirection,
+    ) -> io::Result<Option<SpaceId>> {
+        Ok(self
+            .renderer
+            .resolve_focus_direction(scene, scene_revision, focused, direction))
     }
 }

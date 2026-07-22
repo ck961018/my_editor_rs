@@ -88,10 +88,7 @@ pub(super) fn bootstrap_editor(
         .insert(editor_content, Content::Buffer(buffer))
         .expect("bootstrap allocates unique content ids");
     contents
-        .insert(
-            status_content,
-            Content::StatusBar(StatusBar::new(editor_content)),
-        )
+        .insert(status_content, Content::StatusBar(StatusBar::new()))
         .expect("bootstrap allocates unique content ids");
     let mut modes = ModeRegistry::new();
     let mut registered = Vec::with_capacity(configured_modes.len());
@@ -219,7 +216,8 @@ fn stable_mode_order(
         let blocked = indegree
             .iter()
             .enumerate()
-            .filter_map(|(local, &degree)| (degree > 0).then(|| modes[members[local]].name.clone()))
+            .filter(|(_, degree)| **degree > 0)
+            .map(|(local, _)| modes[members[local]].name.clone())
             .collect();
         return Err(ModeOrderError::Cycle { kind, blocked });
     }
@@ -344,7 +342,7 @@ mod tests {
             .insert(editor, Content::Buffer(Buffer::new()))
             .unwrap();
         contents
-            .insert(status, Content::StatusBar(StatusBar::new(editor)))
+            .insert(status, Content::StatusBar(StatusBar::new()))
             .unwrap();
         let modes = ModeRegistry::new();
         let mut mode_contents = crate::mode::ModeContentStore::default();

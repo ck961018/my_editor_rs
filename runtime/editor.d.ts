@@ -69,6 +69,18 @@ interface ViewPolicy {
   cursorDomain?: "insertion-point" | "character";
   selectionShape?: "character" | "character-inclusive" | "line";
   selectionFace?: string;
+  statusBar?: StatusBarPresentation;
+}
+
+interface StatusBarSegment {
+  text: string;
+  face?: string;
+}
+
+interface StatusBarPresentation {
+  left?: StatusBarSegment[];
+  center?: StatusBarSegment[];
+  right?: StatusBarSegment[];
 }
 
 interface ModeActionResult {
@@ -179,23 +191,31 @@ interface CommandPrimitives {
 interface AppPrimitives {
   save(): void;
   quit(): void;
-}
-
-interface DocumentContext {
-  readonly fileName?: string;
-  readonly modified: boolean;
+  splitHorizontal(): void;
+  splitVertical(): void;
+  focusLeft(): void;
+  focusDown(): void;
+  focusUp(): void;
+  focusRight(): void;
 }
 
 interface BufferContentContext {
   readonly contentId: number;
   readonly revision?: number;
-  readonly document?: DocumentContext;
+  readonly resourceName?: string;
+  readonly resourcePath?: string;
+  readonly backingState?: "untitled" | "unmaterialized" | "materialized";
+  readonly dirty?: boolean;
+  readonly saveState?: "idle" | "saved" | "failed";
+  readonly textMetrics?: {
+    readonly lineCount: number;
+    readonly characterCount: number;
+  };
 }
 
 interface StatusBarContentContext {
   readonly contentId: number;
   readonly revision?: number;
-  readonly status?: DocumentContext;
 }
 
 interface BufferCommandContext<ContentState, ViewState, Arguments = ScriptData>
@@ -219,6 +239,17 @@ interface StatusBarCommandContext<
   Arguments = ScriptData,
 > extends StatusBarContentContext {
   readonly viewId: number;
+  readonly targetViewId: number;
+  readonly targetContentId: number;
+  readonly resourceName?: string;
+  readonly resourcePath?: string;
+  readonly backingState?: "untitled" | "unmaterialized" | "materialized";
+  readonly dirty?: boolean;
+  readonly saveState?: "idle" | "saved" | "failed";
+  readonly textMetrics?: {
+    readonly lineCount: number;
+    readonly characterCount: number;
+  };
   readonly arguments: Arguments;
   readonly commands: CommandPrimitives;
   state: ContentState;
@@ -351,10 +382,17 @@ interface ContentChange {
   readonly text: string;
 }
 
+/** @deprecated Removed in Vell 0.3.0 with the v1 Mode API. */
+interface DocumentContext {
+  readonly fileName?: string;
+  readonly modified: boolean;
+}
+
 interface ContentContext<ContentState, Arguments = ScriptData> {
   readonly contentId: number;
   readonly revision?: number;
   readonly text?: string;
+  /** @deprecated Use resourceName and dirty on v2 Buffer contexts. */
   readonly document?: DocumentContext;
   readonly change?: ContentChange[];
   readonly jobVersion?: number;

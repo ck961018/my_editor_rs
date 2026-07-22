@@ -17,7 +17,14 @@ impl<F: Frontend> App<F> {
             } => {
                 let completion = self.kernel.complete_save(content, revision, state, result);
                 let (result, queued) = completion.into_parts();
+                let content_changed = matches!(
+                    &result,
+                    ContentResult::Handled(outcome) if outcome.content_changed
+                );
                 self.handle_content_result(content, result);
+                if content_changed {
+                    self.session.touch_content_views(content);
+                }
                 if let Some(snapshot) = queued {
                     self.kernel.queue_save(content, snapshot);
                 }

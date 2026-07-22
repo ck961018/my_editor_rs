@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::core::content::ContentKind;
-use crate::protocol::ids::ContentId;
+use crate::protocol::ids::{ContentId, ViewId};
 use crate::protocol::selection::{Selection, Selections, TextOffset};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,8 +31,33 @@ impl BufferViewState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct StatusBarViewState;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StatusBarViewState {
+    target: Option<(ViewId, ContentId)>,
+}
+
+impl StatusBarViewState {
+    pub fn unbound() -> Self {
+        Self { target: None }
+    }
+
+    pub fn new(target_view: ViewId, target_content: ContentId) -> Self {
+        Self {
+            target: Some((target_view, target_content)),
+        }
+    }
+
+    pub fn target(&self) -> Option<(ViewId, ContentId)> {
+        self.target
+    }
+
+    pub fn set_target(&mut self, target_view: ViewId, target_content: ContentId) -> bool {
+        let target = Some((target_view, target_content));
+        let changed = self.target != target;
+        self.target = target;
+        changed
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContentViewState {
@@ -45,8 +70,26 @@ impl ContentViewState {
         Self::Buffer(BufferViewState::new())
     }
 
-    pub fn status_bar() -> Self {
-        Self::StatusBar(StatusBarViewState)
+    pub fn status_bar(target_view: ViewId, target_content: ContentId) -> Self {
+        Self::StatusBar(StatusBarViewState::new(target_view, target_content))
+    }
+
+    pub fn unbound_status_bar() -> Self {
+        Self::StatusBar(StatusBarViewState::unbound())
+    }
+
+    pub fn status_bar_state(&self) -> Option<&StatusBarViewState> {
+        match self {
+            Self::StatusBar(state) => Some(state),
+            Self::Buffer(_) => None,
+        }
+    }
+
+    pub fn status_bar_state_mut(&mut self) -> Option<&mut StatusBarViewState> {
+        match self {
+            Self::StatusBar(state) => Some(state),
+            Self::Buffer(_) => None,
+        }
     }
 
     pub fn kind(&self) -> ContentKind {
@@ -121,7 +164,7 @@ mod tests {
 
     #[test]
     fn status_bar_state_cannot_accept_selections() {
-        let mut state = ContentViewState::status_bar();
+        let mut state = ContentViewState::status_bar(ViewId(4), ContentId(3));
 
         assert_eq!(state.kind(), ContentKind::StatusBar);
         assert!(state.selections().is_none());
