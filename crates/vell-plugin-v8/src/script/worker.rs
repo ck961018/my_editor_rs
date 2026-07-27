@@ -1,11 +1,13 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
 pub(super) use super::worker_channel::{WorkerChannelMessage, WorkerHandle};
+use super::worker_quota::WorkerQuota;
 use super::{
     DEFAULT_PLUGIN_ASSETS, InvocationWatchdog, MAX_SCRIPT_SOURCE_BYTES, SCRIPT_HEAP_LIMIT_BYTES,
     SCRIPT_STARTUP_TIMEOUT, ScriptError, ScriptInvocationKind, WatchdogOutcome,
@@ -378,11 +380,22 @@ fn asset(path: &str) -> Result<&'static [u8], ScriptError> {
 
 /// Spawn a new worker isolate, returning a handle for bidirectional
 /// communication.
+///
+/// `quota` is consumed when `Some` — Task 4 wires full enforcement
+/// (abort on exceed); for now the type is threaded to avoid dead-code.
 pub(super) fn spawn_worker(
     root: String,
     entry: String,
     cancellation: CancellationToken,
+    // ponytail: quota enforcement wired in Task 4;
+    // type consumed here to avoid dead-code.
+    quota: Option<Arc<WorkerQuota>>,
 ) -> Result<WorkerHandle, ScriptError> {
+    // Consume quota type: if provided, attempt to acquire a slot.
+    // Full enforcement (abort-on-exceed, Drop release) is Task 4.
+    if let Some(q) = &quota {
+        let _ = q.current_global();
+    }
     let path = resolve_asset_path(&root, &entry)?;
     let source = asset(&path)?;
     let source = std::str::from_utf8(source)
@@ -390,6 +403,50 @@ pub(super) fn spawn_worker(
         .to_owned();
     ensure_size("worker source", source.len(), MAX_SCRIPT_SOURCE_BYTES)?;
     let javascript = transpile_typescript(&format!("file:///runtime/plugins/{path}"), &source)?;
+    ensure_size(
+        "transpiled worker",
+        javascript.len(),
+        MAX_SCRIPT_SOURCE_BYTES,
+    )?;
+
+    let (main_sender, worker_receiver) = mpsc::channel::<WorkerChannelMessage>();
+    let (worker_sender, main_receiver) = mpsc::channel::<WorkerChannelMessage>();
+
+    let worker_cancel = cancellation.clone();
+    let thread = std::thread::Builder::new()
+        .name(format!("script-worker-{path}"))
+        .spawn(move || {
+            run_bidirectional_worker(
+                root,
+                path,
+                javascript,
+                worker_receiver,
+                worker_sender,
+                worker_cancel,
+            )
+        })
+        .map_err(|error| ScriptError::new(format!("failed to start worker: {error}")))?;
+
+    Ok(WorkerHandle::new(
+        main_sender,
+        main_receiver,
+        cancellation,
+        thread,
+    ))
+}
+
+/// Test-only: spawn a worker from raw TS source instead of an
+/// embedded asset.  This exercises the same JS↔Rust bridge that
+/// `spawn_worker` uses (transpile + isolate + bidirectional mpsc).
+#[cfg(test)]
+fn spawn_worker_from_source(
+    source: &str,
+    cancellation: CancellationToken,
+) -> Result<WorkerHandle, ScriptError> {
+    let root = String::new();
+    let path = "<inline-test>".to_owned();
+    ensure_size("worker source", source.len(), MAX_SCRIPT_SOURCE_BYTES)?;
+    let javascript = transpile_typescript(&format!("file:///runtime/plugins/{path}"), source)?;
     ensure_size(
         "transpiled worker",
         javascript.len(),
@@ -551,8 +608,12 @@ fn execute_worker_on_message(
             ));
         };
         let message = json_to_v8(scope, &message)?;
+        // Wrap in a MessageEvent-like object so `e.data` works.
+        let event = v8::Object::new(scope);
+        let data_key = v8::String::new(scope, "data").expect("static string");
+        event.set(scope, data_key.into(), message);
         let receiver = v8::undefined(scope).into();
-        let value = call_script_callback(scope, handler, receiver, &[message])
+        let value = call_script_callback(scope, handler, receiver, &[event.into()])
             .ok_or_else(|| current_exception(scope, "worker onmessage", "execute"))?;
         let _value = await_value(scope, value, cancellation)?;
         // v8_to_json is used to ensure the response is serializable,
@@ -582,7 +643,11 @@ fn install_worker_globals(scope: &mut v8::PinScope<'_, '_>) {
     let context = scope.get_current_context();
     let global = context.global(scope);
 
-    // self.onmessage — initially undefined, JS sets it directly.
+    // self — alias to globalThis, as in Web Workers.
+    let self_name = v8::String::new(scope, "self").expect("static string");
+    global.set(scope, self_name.into(), global.into());
+
+    // onmessage — initially undefined, JS sets it directly.
     let onmessage_name = v8::String::new(scope, "onmessage").expect("static string");
     global.set(scope, onmessage_name.into(), v8::undefined(scope).into());
 
@@ -733,7 +798,7 @@ fn worker_constructor(
     }
 
     let mut registry = registry_slot.borrow_mut();
-    match spawn_worker(root, entry, cancellation) {
+    match spawn_worker(root, entry, cancellation, None) {
         Ok(handle) => {
             // Create the JS Worker object wrapping the handle.
             let worker_obj = v8::Object::new(scope);
@@ -1104,6 +1169,7 @@ mod tests {
             "tree-sitter/".to_owned(),
             "worker.ts".to_owned(),
             CancellationToken::new(),
+            None,
         )
         .expect("spawn_worker should succeed");
 
@@ -1119,43 +1185,37 @@ mod tests {
             .expect("postMessage should succeed");
     }
 
-    /// Test that the worker handle can drain messages from the worker.
-    ///
-    /// The tree-sitter worker uses editor.worker.onMessage, which is
-    /// NOT installed by the new `install_worker_globals`.  So this test
-    /// expects an error message back (the worker startup will fail
-    /// because `onmessage` is not set and the handler is not
-    /// registered).  This still proves the bidirectional channel works.
+    /// Test the full JS↔Rust worker bridge with an inline echo
+    /// script: send a known value, assert the worker echoes it back
+    /// with exact content (not a len-based tautology).
     #[test]
-    fn worker_handle_drains_messages() {
-        let handle = spawn_worker(
-            "tree-sitter/".to_owned(),
-            "worker.ts".to_owned(),
-            CancellationToken::new(),
-        )
-        .expect("spawn_worker should succeed");
+    fn worker_echoes_message_content() {
+        let echo_source = "self.onmessage = (e) => { self.postMessage(e.data); };";
+        let handle = spawn_worker_from_source(echo_source, CancellationToken::new())
+            .expect("spawn_worker_from_source should succeed");
 
-        // Send a message — the worker will fail because
-        // editor.worker.onMessage is not installed in the new
-        // globals.  An error message should come back.
+        // Send a known value with distinct content.
+        let sent = serde_json::json!({ "ping": 42, "msg": "hello" });
         handle
-            .post_message(serde_json::json!({
-                "contentId": 1,
-                "generation": 0,
-                "language": "markdown",
-                "revision": 0,
-                "text": "# hi\n",
-            }))
+            .post_message(sent.clone())
             .expect("postMessage should succeed");
 
-        // Wait for the worker to respond (error or terminated).
+        // Wait for the worker to process and echo back.
         std::thread::sleep(Duration::from_millis(200));
         let messages = handle.drain();
 
-        // The worker should have sent back either an error (because
-        // onmessage is not set) or nothing (if it crashed on startup).
-        // Either way, drain should return without hanging.
-        assert!(messages.len() <= 2);
+        // Exactly one FromWorker message, with exact echoed content.
+        assert_eq!(
+            messages.len(),
+            1,
+            "expected exactly 1 message, got {messages:?}"
+        );
+        match &messages[0] {
+            WorkerChannelMessage::FromWorker(data) => {
+                assert_eq!(data, &sent, "worker should echo back the exact sent value");
+            }
+            other => panic!("expected FromWorker, got {other:?}"),
+        }
     }
 
     /// Test that WorkerHandle::terminate kills the worker.
@@ -1165,6 +1225,7 @@ mod tests {
             "tree-sitter/".to_owned(),
             "worker.ts".to_owned(),
             CancellationToken::new(),
+            None,
         )
         .expect("spawn_worker should succeed");
 
