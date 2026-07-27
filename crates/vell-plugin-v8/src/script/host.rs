@@ -146,8 +146,8 @@ impl ScriptHost {
                     worker::WorkerChannelMessage::FromWorker(data) => {
                         worker::dispatch_message_event(scope, &registry, index, data)?;
                     }
-                    worker::WorkerChannelMessage::Error(msg) => {
-                        worker::dispatch_error_event(scope, &registry, index, msg)?;
+                    worker::WorkerChannelMessage::Error { message, name } => {
+                        worker::dispatch_error_event(scope, &registry, index, message, name)?;
                     }
                     worker::WorkerChannelMessage::Terminated => {}
                     worker::WorkerChannelMessage::ToWorker(_) => {}

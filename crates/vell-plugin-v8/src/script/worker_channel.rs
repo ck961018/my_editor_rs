@@ -15,7 +15,7 @@ pub(super) enum WorkerChannelMessage {
     /// Worker to main: a `self.postMessage(data)` call.
     FromWorker(serde_json::Value),
     /// Worker to main: uncaught error.
-    Error(String),
+    Error { message: String, name: String },
     /// Worker to main: `self.close()` or isolate terminated.
     Terminated,
 }

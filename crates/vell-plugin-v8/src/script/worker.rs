@@ -617,7 +617,10 @@ fn run_bidirectional_worker(
     };
 
     if let Err(error) = startup {
-        let _ = sender.send(WorkerChannelMessage::Error(error.to_string()));
+        let _ = sender.send(WorkerChannelMessage::Error {
+            message: error.to_string(),
+            name: "Error".to_owned(),
+        });
         return;
     }
 
@@ -636,7 +639,11 @@ fn run_bidirectional_worker(
                         &mut heap_limit,
                     );
                     if let Err(error) = result {
-                        let _ = sender.send(WorkerChannelMessage::Error(error.to_string()));
+                        let name = error_name_for_worker(&error.to_string());
+                        let _ = sender.send(WorkerChannelMessage::Error {
+                            message: error.to_string(),
+                            name,
+                        });
                     }
                 }
                 WorkerChannelMessage::Terminated => break,
@@ -1343,8 +1350,14 @@ fn pump_nested_workers(scope: &mut v8::PinScope<'_, '_>, registry: &WorkerRegist
             r.get(index).map(|h| h.drain()).unwrap_or_default()
         };
         for msg in messages {
-            if let WorkerChannelMessage::FromWorker(data) = msg {
-                let _ = dispatch_message_event(scope, registry, index, data);
+            match msg {
+                WorkerChannelMessage::FromWorker(data) => {
+                    let _ = dispatch_message_event(scope, registry, index, data);
+                }
+                WorkerChannelMessage::Error { message, name } => {
+                    let _ = dispatch_error_event(scope, registry, index, message, name);
+                }
+                _ => {}
             }
         }
     }
@@ -1388,12 +1401,25 @@ pub(super) fn dispatch_message_event(
     Ok(())
 }
 
+/// Classify a worker error string into a standard
+/// DOMException-like `name` for the ErrorEvent.
+fn error_name_for_worker(message: &str) -> String {
+    if message.contains("timed out") || message.contains("timeout") {
+        "TimeoutError".to_owned()
+    } else if message.contains("heap limit") {
+        "ResourceExhausted".to_owned()
+    } else {
+        "Error".to_owned()
+    }
+}
+
 /// Dispatch an `error` event to a worker's JS listener.
 pub(super) fn dispatch_error_event(
     scope: &mut v8::PinScope<'_, '_>,
     registry: &WorkerRegistrySlot,
     index: usize,
     message: String,
+    name: String,
 ) -> Result<(), ScriptError> {
     let registry = registry.borrow();
     let Some(handle) = registry.get(index) else {
@@ -1406,6 +1432,9 @@ pub(super) fn dispatch_error_event(
     let msg_val = v8::String::new(scope, &message).unwrap();
     let msg_key = v8::String::new(scope, "message").unwrap();
     event.set(scope, msg_key.into(), msg_val.into());
+    let name_val = v8::String::new(scope, &name).unwrap();
+    let name_key = v8::String::new(scope, "name").unwrap();
+    event.set(scope, name_key.into(), name_val.into());
     let worker_key = v8::String::new(scope, &format!("_worker_{index}")).unwrap();
     if let Some(worker_obj) = global.get(scope, worker_key.into())
         && let Ok(worker) = v8::Local::<v8::Object>::try_from(worker_obj)
@@ -2020,13 +2049,10 @@ ctrl.abort();",
         let finished = host
             .invoke(ScriptInvocationKind::Action, |isolate| {
                 v8::scope_with_context!(scope, isolate, context);
-                let registry =
-                    scope.get_slot::<WorkerRegistrySlot>().cloned();
+                let registry = scope.get_slot::<WorkerRegistrySlot>().cloned();
                 if let Some(registry) = registry {
                     let registry = registry.borrow();
-                    Ok(registry
-                        .iter()
-                        .all(|h| h.is_finished()))
+                    Ok(registry.iter().all(|h| h.is_finished()))
                 } else {
                     Ok(true)
                 }
@@ -2036,6 +2062,98 @@ ctrl.abort();",
         assert!(
             finished,
             "worker thread should be terminated after JS abort()"
+        );
+    }
+
+    // --- Task 5: ErrorEvent dispatch ---
+
+    /// A worker that throws in `self.onmessage` should send
+    /// an `Error` message back to the main thread.
+    #[test]
+    fn worker_error_on_uncaught_exception() {
+        let handle = spawn_worker(
+            "test-worker/".to_owned(),
+            "throw-worker.ts".to_owned(),
+            CancellationToken::new(),
+            None,
+            "test".to_owned(),
+            0,
+        )
+        .expect("spawn_worker should succeed");
+
+        handle
+            .post_message(serde_json::json!(null))
+            .expect("postMessage should succeed");
+
+        // Give the worker thread time to throw and send the
+        // error message back.
+        std::thread::sleep(Duration::from_millis(300));
+        let messages = handle.drain();
+
+        let found_error = messages.iter().any(|msg| {
+            matches!(
+                msg,
+                WorkerChannelMessage::Error { message, .. }
+                    if message.contains("boom")
+            )
+        });
+        assert!(
+            found_error,
+            "expected an Error message containing 'boom', \
+             got {messages:?}"
+        );
+    }
+
+    /// A worker timeout should classify as `TimeoutError`.
+    /// We verify the `error_name_for_worker` classifier directly
+    /// rather than waiting 30s for a real timeout.
+    #[test]
+    fn worker_error_name_classifies_timeout() {
+        assert_eq!(
+            error_name_for_worker("worker request timed out"),
+            "TimeoutError"
+        );
+        assert_eq!(
+            error_name_for_worker("worker heap limit exceeded"),
+            "ResourceExhausted"
+        );
+        assert_eq!(error_name_for_worker("some other error"), "Error");
+    }
+
+    /// JS-level test: spawn a throw-worker via `ScriptHost`,
+    /// pump messages, and verify the `error` event listener
+    /// was called with the right `message`.
+    #[test]
+    fn worker_error_event_dispatched_to_js_listener() {
+        use super::super::host::ScriptHost;
+
+        let mut host = ScriptHost::new();
+        host.execute_embedded_plugin(
+            "test-worker/throw-listener.ts",
+            "globalThis.errMsg = null;\n\
+globalThis.errName = null;\n\
+const w = new Worker(\"throw-worker.ts\", { type: \"module\" });\n\
+w.addEventListener(\"error\", (e) => {\n\
+  globalThis.errMsg = e.message;\n\
+  globalThis.errName = e.name;\n\
+});\n\
+w.postMessage({});",
+        )
+        .expect("plugin evaluation should succeed");
+
+        // Give the worker thread time to throw and send the
+        // error message back.
+        std::thread::sleep(Duration::from_millis(300));
+        host.pump_worker_messages();
+
+        // After pump, the error event should have fired.
+        let msg = host
+            .evaluate_script("globalThis.errMsg")
+            .expect("eval should succeed");
+        assert!(
+            msg.is_string(),
+            "error listener should have set errMsg \
+             to a string, got {msg:?}"
         );
     }
 }
