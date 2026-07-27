@@ -31,6 +31,7 @@ mod module;
 mod primitives;
 mod schema;
 mod worker;
+mod worker_quota;
 
 use bridge::{
     content_change_to_v8, content_context_object, json_to_mode_value, json_to_v8, optional_string,
