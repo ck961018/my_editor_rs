@@ -1982,4 +1982,60 @@ mod tests {
             "expected QuotaExceededError for global, got {err}"
         );
     }
+
+    /// JS-level AbortSignal integration test: exercises the full
+    /// bridge — `new AbortController()` → `new Worker(url, {signal})`
+    /// → `controller.abort()` → worker terminates. This covers the
+    /// isolate-slot storage + `get_identity_hash` token extraction in
+    /// `worker_constructor`, which the Rust-level
+    /// `worker_aborts_on_signal` test bypasses.
+    #[test]
+    fn worker_aborts_on_signal_via_js() {
+        use super::super::host::ScriptHost;
+
+        let mut host = ScriptHost::new();
+
+        // Use execute_embedded_plugin so plugin_root is set to
+        // `test-worker/` during evaluation. The root is read by
+        // worker_constructor at spawn time; clearing it after is
+        // fine — the worker already has its root.
+        host.execute_embedded_plugin(
+            "test-worker/abort-inline.ts",
+            "const ctrl = new AbortController();\n\
+globalThis.w = new Worker(\n\
+  \"abort-fixture.ts\",\n\
+  { type: \"module\", signal: ctrl.signal },\n\
+);\n\
+ctrl.abort();",
+        )
+        .expect("plugin evaluation should succeed");
+
+        // Give the worker thread time to see the cancellation
+        // and exit its recv loop (50ms poll interval).
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Access the WorkerRegistrySlot from the isolate to
+        // check the worker thread has terminated.
+        let context = host.context.clone();
+        let finished = host
+            .invoke(ScriptInvocationKind::Action, |isolate| {
+                v8::scope_with_context!(scope, isolate, context);
+                let registry =
+                    scope.get_slot::<WorkerRegistrySlot>().cloned();
+                if let Some(registry) = registry {
+                    let registry = registry.borrow();
+                    Ok(registry
+                        .iter()
+                        .all(|h| h.is_finished()))
+                } else {
+                    Ok(true)
+                }
+            })
+            .expect("isolate access should succeed");
+
+        assert!(
+            finished,
+            "worker thread should be terminated after JS abort()"
+        );
+    }
 }
