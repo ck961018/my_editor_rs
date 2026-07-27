@@ -355,9 +355,12 @@ pub(super) fn host_import_module_dynamically<'a, 'i, 's>(
     let modules = scope.get_slot::<Rc<RefCell<ModuleMap>>>().cloned()?;
     let root = modules.borrow().root.clone();
 
-    // Resolve relative to the worker's plugin directory.
-    // The dynamic import callback doesn't receive the referrer
-    // module, so we use the ModuleMap root as the base.
+    // ponytail: dynamic import resolves relative to the ModuleMap root,
+    // not the importer's directory. V8 passes `_resource_name` (the
+    // referrer's resource name) which we ignore because workers are
+    // single-directory today. Ceiling: nested-subdirectory dynamic
+    // imports resolve to the wrong dir. Upgrade: parse _resource_name
+    // back to the importer's dir and resolve against that.
     let requested = Path::new(&specifier);
     let path = if requested.is_absolute() {
         resolve_path(&root, &specifier, &root)
