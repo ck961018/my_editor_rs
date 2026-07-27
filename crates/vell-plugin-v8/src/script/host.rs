@@ -59,7 +59,10 @@ impl ScriptHost {
         {
             v8::scope_with_context!(scope, &mut isolate, context.clone());
             install_editor_api(scope);
+            worker::install_global_worker_constructor(scope);
         }
+        let worker_registry: worker::WorkerRegistrySlot = Rc::new(RefCell::new(Vec::new()));
+        isolate.set_slot(worker_registry);
         let heap_limit = install_heap_limit(&mut isolate);
 
         Self {
@@ -108,6 +111,62 @@ impl ScriptHost {
             return Err(ScriptError::new("script heap limit exceeded"));
         }
         result
+    }
+
+    /// Drain all pending worker→main messages and dispatch them to
+    /// registered JS event listeners on each Worker object.
+    #[allow(dead_code)]
+    pub fn pump_worker_messages(&mut self) {
+        let context = self.context.clone();
+        self.invoke(ScriptInvocationKind::Action, |isolate| {
+            v8::scope_with_context!(scope, isolate, context);
+            let Some(registry) = scope.get_slot::<worker::WorkerRegistrySlot>().cloned() else {
+                return Ok(());
+            };
+            let messages: Vec<(usize, worker::WorkerChannelMessage)> = {
+                let registry = registry.borrow();
+                let mut all = Vec::new();
+                for (index, handle) in registry.iter().enumerate() {
+                    for message in handle.drain() {
+                        all.push((index, message));
+                    }
+                }
+                all
+            };
+            for (index, message) in messages {
+                match message {
+                    worker::WorkerChannelMessage::FromWorker(data) => {
+                        worker::dispatch_message_event(scope, &registry, index, data)?;
+                    }
+                    worker::WorkerChannelMessage::Error(msg) => {
+                        worker::dispatch_error_event(scope, &registry, index, msg)?;
+                    }
+                    worker::WorkerChannelMessage::Terminated => {}
+                    worker::WorkerChannelMessage::ToWorker(_) => {}
+                }
+            }
+            Ok(())
+        })
+        .ok();
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn evaluate_script(&mut self, source: &str) -> Result<serde_json::Value, ScriptError> {
+        let context = self.context.clone();
+        let source_owned = source.to_owned();
+        self.invoke(ScriptInvocationKind::Action, |isolate| {
+            v8::scope_with_context!(scope, isolate, context);
+            v8::tc_scope!(let scope, scope);
+            let javascript = transpile_typescript("file:///runtime/test-inline.ts", &source_owned)?;
+            let source = v8::String::new(scope, &javascript)
+                .ok_or_else(|| ScriptError::new("source too large for V8"))?;
+            let script = v8::Script::compile(scope, source, None)
+                .ok_or_else(|| current_exception(scope, "test-inline", "compile"))?;
+            let value = script
+                .run(scope)
+                .ok_or_else(|| current_exception(scope, "test-inline", "execute"))?;
+            v8_to_json(scope, value, "test-inline")
+        })
     }
 
     pub fn execute_typescript(&mut self, specifier: &str, source: &str) -> Result<(), ScriptError> {

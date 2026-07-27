@@ -31,6 +31,7 @@ mod module;
 mod primitives;
 mod schema;
 mod worker;
+mod worker_channel;
 mod worker_quota;
 
 use bridge::{
