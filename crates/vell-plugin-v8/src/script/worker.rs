@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -9,11 +10,12 @@ use tokio_util::sync::CancellationToken;
 pub(super) use super::worker_channel::{WorkerChannelMessage, WorkerHandle};
 use super::worker_quota::WorkerQuota;
 use super::{
-    DEFAULT_PLUGIN_ASSETS, InvocationWatchdog, MAX_SCRIPT_SOURCE_BYTES, SCRIPT_HEAP_LIMIT_BYTES,
-    SCRIPT_STARTUP_TIMEOUT, ScriptError, ScriptInvocationKind, WatchdogOutcome,
-    call_script_callback, current_exception, ensure_size, initialize_v8, install_heap_limit,
-    json_to_v8, recover_heap_limit, set_object, throw_script_error, transpile_typescript,
-    v8_to_json,
+    AssetSource, DEFAULT_PLUGIN_ASSETS, InvocationWatchdog, MAX_SCRIPT_SOURCE_BYTES, ModuleMap,
+    SCRIPT_HEAP_LIMIT_BYTES, SCRIPT_STARTUP_TIMEOUT, ScriptError, ScriptInvocationKind,
+    WatchdogOutcome, call_script_callback, current_exception, ensure_size,
+    host_import_module_dynamically, host_initialize_import_meta, initialize_v8, install_heap_limit,
+    json_to_v8, load_module_tree, recover_heap_limit, resolve_module, set_object,
+    throw_script_error, transpile_typescript, v8_to_json,
 };
 
 const RESPONSE_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -231,6 +233,44 @@ fn evaluate_worker(
     Ok(())
 }
 
+/// Evaluate a worker as an ES module using `load_module_tree`.
+/// This replaces `evaluate_worker` (single-file script) for workers
+/// that need `import`, `export`, `import.meta.url`, and dynamic
+/// `import()`.
+fn evaluate_worker_module(
+    scope: &mut v8::PinnedRef<'_, v8::TryCatch<'_, '_, v8::HandleScope<'_>>>,
+    path: &str,
+    modules: &Rc<RefCell<ModuleMap>>,
+) -> Result<(), ScriptError> {
+    let entry = PathBuf::from(path);
+    let module = load_module_tree(scope, &entry, modules)?;
+    match module.instantiate_module(scope, resolve_module) {
+        Some(true) => {}
+        _ => {
+            return Err(current_exception(scope, path, "link"));
+        }
+    }
+    if module.evaluate(scope).is_none() {
+        return Err(current_exception(scope, path, "execute"));
+    }
+    scope.perform_microtask_checkpoint();
+    match module.get_status() {
+        v8::ModuleStatus::Evaluated => {}
+        v8::ModuleStatus::Errored => {
+            let message = module.get_exception().to_rust_string_lossy(scope);
+            return Err(ScriptError::new(format!(
+                "failed to execute {path}: {message}"
+            )));
+        }
+        _ => {
+            return Err(ScriptError::new(format!(
+                "worker module did not evaluate: {path}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn execute_request(
     isolate: &mut v8::OwnedIsolate,
     context: v8::Global<v8::Context>,
@@ -397,17 +437,8 @@ pub(super) fn spawn_worker(
         let _ = q.current_global();
     }
     let path = resolve_asset_path(&root, &entry)?;
-    let source = asset(&path)?;
-    let source = std::str::from_utf8(source)
-        .map_err(|error| ScriptError::new(format!("invalid UTF-8 in {path}: {error}")))?
-        .to_owned();
-    ensure_size("worker source", source.len(), MAX_SCRIPT_SOURCE_BYTES)?;
-    let javascript = transpile_typescript(&format!("file:///runtime/plugins/{path}"), &source)?;
-    ensure_size(
-        "transpiled worker",
-        javascript.len(),
-        MAX_SCRIPT_SOURCE_BYTES,
-    )?;
+    // Verify the asset exists before spawning.
+    let _source = asset(&path)?;
 
     let (main_sender, worker_receiver) = mpsc::channel::<WorkerChannelMessage>();
     let (worker_sender, main_receiver) = mpsc::channel::<WorkerChannelMessage>();
@@ -419,7 +450,7 @@ pub(super) fn spawn_worker(
             run_bidirectional_worker(
                 root,
                 path,
-                javascript,
+                None,
                 worker_receiver,
                 worker_sender,
                 worker_cancel,
@@ -463,7 +494,7 @@ fn spawn_worker_from_source(
             run_bidirectional_worker(
                 root,
                 path,
-                javascript,
+                Some(javascript),
                 worker_receiver,
                 worker_sender,
                 worker_cancel,
@@ -482,7 +513,7 @@ fn spawn_worker_from_source(
 fn run_bidirectional_worker(
     root: String,
     path: String,
-    javascript: String,
+    inline_javascript: Option<String>,
     receiver: mpsc::Receiver<WorkerChannelMessage>,
     sender: mpsc::Sender<WorkerChannelMessage>,
     cancellation: CancellationToken,
@@ -492,6 +523,9 @@ fn run_bidirectional_worker(
     let mut isolate = v8::Isolate::new(params);
     isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
     isolate.set_capture_stack_trace_for_uncaught_exceptions(true, 10);
+    // Wire import.meta.url and dynamic import() support.
+    isolate.set_host_initialize_import_meta_object_callback(host_initialize_import_meta);
+    isolate.set_host_import_module_dynamically_callback(host_import_module_dynamically);
 
     let handler: WorkerHandler = Rc::new(RefCell::new(None));
     isolate.set_slot(handler.clone());
@@ -500,6 +534,14 @@ fn run_bidirectional_worker(
     isolate.set_slot::<mpsc::Sender<WorkerChannelMessage>>(sender.clone());
     // Store the cancellation for the watchdog.
     isolate.set_slot(cancellation.clone());
+    // Worker modules resolve from embedded assets, not the
+    // filesystem.
+    isolate.set_slot(AssetSource::Embedded);
+    // Set up a ModuleMap for ES module loading.
+    let module_root = PathBuf::from(path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or(""));
+    let modules = Rc::new(RefCell::new(ModuleMap::default()));
+    modules.borrow_mut().reset(module_root);
+    isolate.set_slot(modules.clone());
 
     let context = {
         v8::scope!(scope, &mut isolate);
@@ -520,7 +562,10 @@ fn run_bidirectional_worker(
                     v8::scope_with_context!(scope, &mut isolate, context.clone());
                     v8::tc_scope!(let scope, scope);
                     install_worker_globals(scope);
-                    evaluate_worker(scope, &path, &javascript)
+                    match &inline_javascript {
+                        Some(js) => evaluate_worker(scope, &path, js),
+                        None => evaluate_worker_module(scope, &path, &modules),
+                    }
                 };
                 watchdog.finish(startup)
             }
@@ -1234,5 +1279,118 @@ mod tests {
 
         // Post-message after terminate should fail.
         assert!(handle.post_message(serde_json::json!({})).is_err());
+    }
+
+    // --- Task 3: ES module workers with import.meta.url + import ---
+
+    /// Test that a worker can access import.meta.url and it
+    /// returns a file:// URL ending with the worker's filename.
+    #[test]
+    fn worker_import_meta_url_returns_file_url() {
+        let handle = spawn_worker(
+            "test-worker/".to_owned(),
+            "meta-worker.ts".to_owned(),
+            CancellationToken::new(),
+            None,
+        )
+        .expect("spawn_worker should succeed");
+
+        handle
+            .post_message(serde_json::json!(null))
+            .expect("postMessage should succeed");
+
+        std::thread::sleep(Duration::from_millis(300));
+        let messages = handle.drain();
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "expected exactly 1 message, got {messages:?}"
+        );
+        match &messages[0] {
+            WorkerChannelMessage::FromWorker(data) => {
+                let url = data.as_str().expect("import.meta.url should be a string");
+                assert!(
+                    url.starts_with("file:///"),
+                    "expected file:// URL, got {url}"
+                );
+                assert!(
+                    url.ends_with("/meta-worker.ts"),
+                    "expected URL ending with /meta-worker.ts, got {url}"
+                );
+            }
+            other => panic!("expected FromWorker, got {other:?}"),
+        }
+    }
+
+    /// Test that a worker can statically import a sibling module.
+    #[test]
+    fn worker_es_module_imports_sibling() {
+        let handle = spawn_worker(
+            "test-worker/".to_owned(),
+            "import-worker.ts".to_owned(),
+            CancellationToken::new(),
+            None,
+        )
+        .expect("spawn_worker should succeed");
+
+        handle
+            .post_message(serde_json::json!(null))
+            .expect("postMessage should succeed");
+
+        std::thread::sleep(Duration::from_millis(300));
+        let messages = handle.drain();
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "expected exactly 1 message, got {messages:?}"
+        );
+        match &messages[0] {
+            WorkerChannelMessage::FromWorker(data) => {
+                assert_eq!(
+                    data,
+                    &serde_json::json!(42),
+                    "worker should send back imported value 42"
+                );
+            }
+            other => panic!("expected FromWorker, got {other:?}"),
+        }
+    }
+
+    /// Test that a worker can use dynamic import() to load a module.
+    #[test]
+    fn worker_dynamic_import_resolves() {
+        let handle = spawn_worker(
+            "test-worker/".to_owned(),
+            "dynamic-import-worker.ts".to_owned(),
+            CancellationToken::new(),
+            None,
+        )
+        .expect("spawn_worker should succeed");
+
+        handle
+            .post_message(serde_json::json!(null))
+            .expect("postMessage should succeed");
+
+        // Dynamic import is async — give it more time.
+        std::thread::sleep(Duration::from_millis(500));
+        let messages = handle.drain();
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "expected exactly 1 message, got {messages:?}"
+        );
+        match &messages[0] {
+            WorkerChannelMessage::FromWorker(data) => {
+                assert_eq!(
+                    data,
+                    &serde_json::json!(42),
+                    "worker should send back dynamically imported value 42"
+                );
+            }
+            other => panic!("expected FromWorker, got {other:?}"),
+        }
     }
 }

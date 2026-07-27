@@ -13,6 +13,55 @@ use super::{
     MAX_MODULE_GRAPH_BYTES, MAX_SCRIPT_SOURCE_BYTES, ScriptError, ensure_file_size, ensure_size,
 };
 
+/// Controls how module source bytes are resolved.
+/// Stored as an isolate slot: `Filesystem` for the main isolate
+/// (reads from disk), `Embedded` for worker isolates (reads from
+/// `DEFAULT_PLUGIN_ASSETS`).
+///
+/// `Copy` + `Clone` so it can be stored in an isolate slot and
+/// retrieved by value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum AssetSource {
+    Filesystem,
+    Embedded,
+}
+
+/// Read source bytes for a path, dispatching on the isolate's
+/// `AssetSource` slot.  Falls back to `Filesystem` when no slot
+/// is set (main isolate behaviour).
+fn read_source(scope: &mut v8::PinScope<'_, '_>, path: &Path) -> Result<String, ScriptError> {
+    let source_kind = scope
+        .get_slot::<AssetSource>()
+        .copied()
+        .unwrap_or(AssetSource::Filesystem);
+    match source_kind {
+        AssetSource::Filesystem => {
+            ensure_file_size(path, "module source", MAX_SCRIPT_SOURCE_BYTES)?;
+            fs::read_to_string(path).map_err(|error| {
+                ScriptError::new(format!("failed to read {}: {error}", path.display()))
+            })
+        }
+        AssetSource::Embedded => {
+            let key = path_to_asset_key(path);
+            let bytes = super::DEFAULT_PLUGIN_ASSETS
+                .iter()
+                .find_map(|(candidate, bytes)| (*candidate == key).then_some(*bytes))
+                .ok_or_else(|| ScriptError::new(format!("embedded module not found: {key}")))?;
+            ensure_size("module source", bytes.len(), MAX_SCRIPT_SOURCE_BYTES)?;
+            std::str::from_utf8(bytes)
+                .map_err(|error| ScriptError::new(format!("invalid UTF-8 in {key}: {error}")))
+                .map(|s| s.to_owned())
+        }
+    }
+}
+
+/// Convert a `Path` to an asset key (forward-slash, relative to
+/// the plugin root).  For embedded workers the path is already
+/// relative (e.g. `test-worker/meta-worker.ts`).
+fn path_to_asset_key(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 pub(super) fn transpile_typescript(specifier: &str, source: &str) -> Result<String, ScriptError> {
     let specifier = ModuleSpecifier::parse(specifier)
         .map_err(|error| ScriptError::new(format!("invalid script specifier: {error}")))?;
@@ -48,8 +97,17 @@ fn transpile_module(path: &Path, source: &str) -> Result<String, ScriptError> {
         }
     }
 
-    let specifier = ModuleSpecifier::from_file_path(path)
-        .map_err(|_| ScriptError::new(format!("invalid script path: {}", path.display())))?;
+    // For embedded assets the path may be relative (e.g.
+    // "test-worker/meta-worker.ts").  ModuleSpecifier requires an
+    // absolute path, so prefix with a synthetic base for relative
+    // paths.
+    let specifier = if path.is_absolute() {
+        ModuleSpecifier::from_file_path(path)
+            .map_err(|_| ScriptError::new(format!("invalid script path: {}", path.display())))?
+    } else {
+        ModuleSpecifier::parse(&format!("file:///runtime/plugins/{}", path.display()))
+            .map_err(|_| ScriptError::new(format!("invalid script path: {}", path.display())))?
+    };
     let parsed = parse_module(ParseParams {
         specifier,
         text: source.into(),
@@ -116,9 +174,7 @@ pub(super) fn load_module_tree<'scope>(
         return Ok(v8::Local::new(scope, module));
     }
 
-    ensure_file_size(path, "module source", MAX_SCRIPT_SOURCE_BYTES)?;
-    let source = fs::read_to_string(path)
-        .map_err(|error| ScriptError::new(format!("failed to read {}: {error}", path.display())))?;
+    let source = read_source(scope, path)?;
     ensure_size("module source", source.len(), MAX_SCRIPT_SOURCE_BYTES)?;
     modules.borrow_mut().reserve_source(source.len())?;
     let source = transpile_module(path, &source)?;
@@ -162,15 +218,35 @@ fn resolve_path(referrer: &Path, specifier: &str, root: &Path) -> Result<PathBuf
     } else {
         referrer.parent().unwrap_or(root).join(requested)
     };
-    let candidate = candidate
-        .canonicalize()
-        .map_err(|error| ScriptError::new(format!("failed to resolve {specifier}: {error}")))?;
+    // For filesystem paths, canonicalize resolves symlinks and
+    // normalizes `..` segments.  For embedded assets (not on disk),
+    // skip canonicalize and normalize manually.
+    let candidate = match std::fs::canonicalize(&candidate) {
+        Ok(canonical) => canonical,
+        Err(_) => normalize_path(&candidate),
+    };
     if !candidate.starts_with(root) {
         return Err(ScriptError::new(format!(
             "script import escapes the config directory: {specifier}"
         )));
     }
     Ok(candidate)
+}
+
+/// Normalize a path without touching the filesystem — for embedded
+/// assets that don't exist on disk.
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                components.pop();
+            }
+            other => components.push(other.as_os_str()),
+        }
+    }
+    components.iter().collect()
 }
 
 fn module_origin<'scope>(
@@ -219,6 +295,117 @@ pub(super) fn resolve_module<'scope>(
         .get(&path)
         .cloned()
         .map(|module| v8::Local::new(scope, module))
+}
+
+/// `HostInitializeImportMetaObjectCallback` — injects `import.meta.url`
+/// the first time a module accesses `import.meta`.
+///
+/// Looks up the module's path in the `ModuleMap` slot and sets
+/// `meta.url` to a `file:///...` URL.
+pub(super) extern "C" fn host_initialize_import_meta(
+    context: v8::Local<v8::Context>,
+    module: v8::Local<v8::Module>,
+    meta: v8::Local<v8::Object>,
+) {
+    v8::callback_scope!(unsafe scope, context);
+    let Some(modules) = scope.get_slot::<Rc<RefCell<ModuleMap>>>().cloned() else {
+        return;
+    };
+    let map = modules.borrow();
+    let module_global = v8::Global::new(scope, module);
+    let Some(path) = map.path_for(module.get_identity_hash().get(), &module_global) else {
+        return;
+    };
+    // Build a file:// URL from the path.  For embedded assets,
+    // the path is relative (e.g. "test-worker/meta-worker.ts") —
+    // prepend "runtime/plugins/" to make a valid-looking URL.
+    let display = path.display().to_string();
+    let url = if path.is_absolute() {
+        ModuleSpecifier::from_file_path(path)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| display)
+    } else {
+        format!("file:///runtime/plugins/{display}")
+    };
+    let Some(key) = v8::String::new(scope, "url") else {
+        return;
+    };
+    let Some(val) = v8::String::new(scope, &url) else {
+        return;
+    };
+    meta.create_data_property(scope, key.into(), val.into());
+}
+
+/// `HostImportModuleDynamicallyCallback` — handles `import(specifier)`.
+///
+/// Resolves the specifier via the existing `resolve_path` +
+/// `load_module_tree`, then resolves the returned promise with the
+/// module's namespace object.
+pub(super) fn host_import_module_dynamically<'a, 'i, 's>(
+    scope: &'a mut v8::PinnedRef<'s, v8::HandleScope<'i>>,
+    _host_defined_options: v8::Local<'s, v8::Data>,
+    _resource_name: v8::Local<'s, v8::Value>,
+    specifier: v8::Local<'s, v8::String>,
+    _import_attributes: v8::Local<'s, v8::FixedArray>,
+) -> Option<v8::Local<'s, v8::Promise>> {
+    let specifier = specifier.to_rust_string_lossy(scope);
+    let resolver = v8::PromiseResolver::new(scope)?;
+    let promise = resolver.get_promise(scope);
+
+    let modules = scope.get_slot::<Rc<RefCell<ModuleMap>>>().cloned()?;
+    let root = modules.borrow().root.clone();
+
+    // Resolve relative to the worker's plugin directory.
+    // The dynamic import callback doesn't receive the referrer
+    // module, so we use the ModuleMap root as the base.
+    let requested = Path::new(&specifier);
+    let path = if requested.is_absolute() {
+        resolve_path(&root, &specifier, &root)
+    } else {
+        // Relative: join with the root directory.
+        let candidate = root.join(requested);
+        let normalized = normalize_path(&candidate);
+        if !normalized.starts_with(&root) {
+            return None;
+        }
+        Ok(normalized)
+    };
+    let path = match path {
+        Ok(p) => p,
+        Err(error) => {
+            let msg = v8::String::new(scope, &error.to_string())?;
+            let _ = resolver.reject(scope, msg.into());
+            scope.perform_microtask_checkpoint();
+            return Some(promise);
+        }
+    };
+
+    // Load, instantiate, and evaluate the module.
+    match load_module_tree(scope, &path, &modules) {
+        Ok(module) => {
+            if module.instantiate_module(scope, resolve_module).is_none() {
+                let msg =
+                    v8::String::new(scope, "failed to instantiate dynamically imported module")?;
+                scope.throw_exception(msg.into());
+                return None;
+            }
+            if module.evaluate(scope).is_none() {
+                let msg = v8::String::new(scope, "failed to evaluate dynamically imported module")?;
+                scope.throw_exception(msg.into());
+                return None;
+            }
+            let namespace = module.get_module_namespace();
+            let _ = resolver.resolve(scope, namespace);
+        }
+        Err(error) => {
+            let msg = v8::String::new(scope, &error.to_string())?;
+            let _ = resolver.reject(scope, msg.into());
+        }
+    }
+
+    // Pump microtasks so the promise resolves synchronously.
+    scope.perform_microtask_checkpoint();
+    Some(promise)
 }
 
 pub(super) fn current_exception(

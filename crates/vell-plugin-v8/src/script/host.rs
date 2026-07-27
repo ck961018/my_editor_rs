@@ -38,6 +38,9 @@ impl ScriptHost {
         let mut isolate = v8::Isolate::new(params);
         isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
         isolate.set_capture_stack_trace_for_uncaught_exceptions(true, 10);
+        // Wire import.meta.url and dynamic import() support.
+        isolate.set_host_initialize_import_meta_object_callback(host_initialize_import_meta);
+        isolate.set_host_import_module_dynamically_callback(host_import_module_dynamically);
         let modules = Rc::new(RefCell::new(ModuleMap::default()));
         let definitions = Rc::new(RefCell::new(Vec::new()));
         let diagnostics = Rc::new(RefCell::new(ScriptDiagnostics::default()));

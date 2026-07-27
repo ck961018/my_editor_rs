@@ -48,7 +48,8 @@ use invocation::{
 };
 use mode_adapter::ScriptMode;
 use module::{
-    ModuleMap, current_exception, load_module_tree, resolve_module, transpile_typescript,
+    AssetSource, ModuleMap, current_exception, host_import_module_dynamically,
+    host_initialize_import_meta, load_module_tree, resolve_module, transpile_typescript,
 };
 use primitives::PrimitiveRuntime;
 use schema::install_editor_api;
