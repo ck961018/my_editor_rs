@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 pub(super) use super::worker_channel::{WorkerChannelMessage, WorkerHandle};
-use super::worker_quota::WorkerQuota;
+pub(crate) use super::worker_quota::{QuotaError, QuotaHandle, WorkerQuota};
 use super::{
     AssetSource, DEFAULT_PLUGIN_ASSETS, InvocationWatchdog, MAX_SCRIPT_SOURCE_BYTES, ModuleMap,
     SCRIPT_HEAP_LIMIT_BYTES, SCRIPT_STARTUP_TIMEOUT, ScriptError, ScriptInvocationKind,
@@ -421,21 +421,32 @@ fn asset(path: &str) -> Result<&'static [u8], ScriptError> {
 /// Spawn a new worker isolate, returning a handle for bidirectional
 /// communication.
 ///
-/// `quota` is consumed when `Some` — Task 4 wires full enforcement
-/// (abort on exceed); for now the type is threaded to avoid dead-code.
+/// `quota` — when `Some`, enforces per-plugin/global/depth limits.
+/// The `QuotaHandle` is held for the worker's lifetime (Drop releases).
+/// `plugin_id` — identity for per-plugin quota tracking.
+/// `depth` — current nesting depth (0 = top-level).
 pub(super) fn spawn_worker(
     root: String,
     entry: String,
     cancellation: CancellationToken,
-    // ponytail: quota enforcement wired in Task 4;
-    // type consumed here to avoid dead-code.
     quota: Option<Arc<WorkerQuota>>,
+    plugin_id: String,
+    depth: usize,
 ) -> Result<WorkerHandle, ScriptError> {
-    // Consume quota type: if provided, attempt to acquire a slot.
-    // Full enforcement (abort-on-exceed, Drop release) is Task 4.
-    if let Some(q) = &quota {
-        let _ = q.current_global();
-    }
+    // Enforce quota before spawning.
+    let quota_handle: Option<QuotaHandle> = if let Some(q) = &quota {
+        Some(q.try_acquire(&plugin_id, depth).map_err(|e| {
+            let name = match e {
+                QuotaError::PerPluginExceeded => "QuotaExceededError",
+                QuotaError::GlobalExceeded => "QuotaExceededError",
+                QuotaError::DepthExceeded => "QuotaExceededError",
+            };
+            ScriptError::new(format!("{name}: worker quota exceeded"))
+        })?)
+    } else {
+        None
+    };
+
     let path = resolve_asset_path(&root, &entry)?;
     // Verify the asset exists before spawning.
     let _source = asset(&path)?;
@@ -443,6 +454,10 @@ pub(super) fn spawn_worker(
     let (main_sender, worker_receiver) = mpsc::channel::<WorkerChannelMessage>();
     let (worker_sender, main_receiver) = mpsc::channel::<WorkerChannelMessage>();
 
+    // Pass quota + plugin_id + depth to the worker thread so
+    // nested spawns can use the same quota.
+    let worker_quota = quota.clone();
+    let worker_plugin_id = plugin_id.clone();
     let worker_cancel = cancellation.clone();
     let thread = std::thread::Builder::new()
         .name(format!("script-worker-{path}"))
@@ -454,6 +469,9 @@ pub(super) fn spawn_worker(
                 worker_receiver,
                 worker_sender,
                 worker_cancel,
+                worker_quota,
+                worker_plugin_id,
+                depth,
             )
         })
         .map_err(|error| ScriptError::new(format!("failed to start worker: {error}")))?;
@@ -463,6 +481,7 @@ pub(super) fn spawn_worker(
         main_receiver,
         cancellation,
         thread,
+        quota_handle,
     ))
 }
 
@@ -498,6 +517,9 @@ fn spawn_worker_from_source(
                 worker_receiver,
                 worker_sender,
                 worker_cancel,
+                None,
+                "test".to_owned(),
+                0,
             )
         })
         .map_err(|error| ScriptError::new(format!("failed to start worker: {error}")))?;
@@ -507,9 +529,11 @@ fn spawn_worker_from_source(
         main_receiver,
         cancellation,
         thread,
+        None,
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_bidirectional_worker(
     root: String,
     path: String,
@@ -517,6 +541,9 @@ fn run_bidirectional_worker(
     receiver: mpsc::Receiver<WorkerChannelMessage>,
     sender: mpsc::Sender<WorkerChannelMessage>,
     cancellation: CancellationToken,
+    quota: Option<Arc<WorkerQuota>>,
+    plugin_id: String,
+    depth: usize,
 ) {
     initialize_v8();
     let params = v8::CreateParams::default().heap_limits(0, SCRIPT_HEAP_LIMIT_BYTES);
@@ -542,6 +569,14 @@ fn run_bidirectional_worker(
     let modules = Rc::new(RefCell::new(ModuleMap::default()));
     modules.borrow_mut().reset(module_root);
     isolate.set_slot(modules.clone());
+    // Store quota + plugin_id + depth so nested Worker
+    // constructor can enforce limits.
+    isolate.set_slot(quota);
+    isolate.set_slot::<String>(plugin_id);
+    isolate.set_slot(depth);
+    // Worker registry for nested spawns.
+    let worker_registry: WorkerRegistrySlot = Rc::new(RefCell::new(Vec::new()));
+    isolate.set_slot(worker_registry);
 
     let context = {
         v8::scope!(scope, &mut isolate);
@@ -587,31 +622,47 @@ fn run_bidirectional_worker(
     }
 
     // Main message loop: receive ToWorker, dispatch to self.onmessage.
-    while let Ok(message) = receiver.recv() {
-        if cancellation.is_cancelled() {
-            break;
-        }
-        match message {
-            WorkerChannelMessage::ToWorker(data) => {
-                let result = execute_worker_on_message(
-                    &mut isolate,
-                    context.clone(),
-                    handler.borrow().as_ref(),
-                    data,
-                    &cancellation,
-                    &mut heap_limit,
-                );
-                if let Err(error) = result {
-                    let _ = sender.send(WorkerChannelMessage::Error(error.to_string()));
+    // Use recv_timeout so we can periodically pump nested workers.
+    while !cancellation.is_cancelled() {
+        match receiver.recv_timeout(Duration::from_millis(50)) {
+            Ok(message) => match message {
+                WorkerChannelMessage::ToWorker(data) => {
+                    let result = execute_worker_on_message(
+                        &mut isolate,
+                        context.clone(),
+                        handler.borrow().as_ref(),
+                        data,
+                        &cancellation,
+                        &mut heap_limit,
+                    );
+                    if let Err(error) = result {
+                        let _ = sender.send(WorkerChannelMessage::Error(error.to_string()));
+                    }
                 }
-            }
-            WorkerChannelMessage::Terminated => break,
-            _ => {}
+                WorkerChannelMessage::Terminated => break,
+                _ => {}
+            },
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
-        // Flush any microtasks.
+        // Flush any microtasks and pump nested workers.
+        let registry_slot = isolate.get_slot::<WorkerRegistrySlot>().cloned();
         {
             v8::scope_with_context!(scope, &mut isolate, context.clone());
             scope.perform_microtask_checkpoint();
+            if let Some(registry) = &registry_slot {
+                pump_nested_workers(scope, registry);
+            }
+        }
+    }
+    // Final pump before exiting.
+    let final_registry = isolate.get_slot::<WorkerRegistrySlot>().cloned();
+    {
+        v8::scope_with_context!(scope, &mut isolate, context.clone());
+        scope.perform_microtask_checkpoint();
+        if let Some(registry) = &final_registry {
+            pump_nested_workers(scope, registry);
+            while v8::Platform::pump_message_loop(&v8::V8::get_current_platform(), scope, false) {}
         }
     }
 
@@ -710,6 +761,14 @@ fn install_worker_globals(scope: &mut v8::PinScope<'_, '_>) {
     let close_name = v8::String::new(scope, "close").expect("static string");
     global.set(scope, close_name.into(), close_fn.into());
 
+    // Worker constructor — allows nested spawn inside worker
+    // isolates.
+    install_global_worker_constructor(scope);
+
+    // AbortController — minimal standard global for signal-based
+    // cancellation.
+    install_abort_controller(scope);
+
     // editor.resources (kept from legacy)
     let editor = v8::Object::new(scope);
     let resources = v8::Object::new(scope);
@@ -775,6 +834,130 @@ fn worker_close(
     return_value.set_undefined();
 }
 
+/// Install a minimal `AbortController` global.
+///
+/// `new AbortController()` returns `{ signal, abort() }` where
+/// `signal` is an `AbortSignal` with `{ aborted: bool }`.
+/// Internally links `abort()` to a `CancellationToken` stored in
+/// the isolate slot, so worker spawn can check it.
+pub(super) fn install_abort_controller_global(scope: &mut v8::PinScope<'_, '_>) {
+    install_abort_controller(scope);
+}
+
+fn install_abort_controller(scope: &mut v8::PinScope<'_, '_>) {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    let tmpl = v8::FunctionTemplate::new(scope, abort_controller_constructor);
+    let name = v8::String::new(scope, "AbortController").expect("static string");
+    global.set(
+        scope,
+        name.into(),
+        tmpl.get_function(scope)
+            .expect("AbortController constructor")
+            .into(),
+    );
+}
+
+fn abort_controller_constructor(
+    scope: &mut v8::PinScope,
+    _arguments: v8::FunctionCallbackArguments,
+    mut return_value: v8::ReturnValue,
+) {
+    let controller = v8::Object::new(scope);
+    let token = CancellationToken::new();
+    // Store the token in the object's internal field via a
+    // hidden property.
+    let signal = v8::Object::new(scope);
+    let aborted_key = v8::String::new(scope, "aborted").unwrap();
+    signal.set(
+        scope,
+        aborted_key.into(),
+        v8::Boolean::new(scope, false).into(),
+    );
+    // Store the token on the signal object so abort() can
+    // access it.
+    // ponytail: we store the CancellationToken in an isolate slot
+    // keyed by the signal object's identity. A production impl
+    // would use External/internal fields, but this works for the
+    // single-controller-per-call pattern.
+    let token_slot: Rc<RefCell<Vec<(usize, CancellationToken)>>> = scope
+        .get_slot::<Rc<RefCell<Vec<(usize, CancellationToken)>>>>()
+        .cloned()
+        .unwrap_or_else(|| {
+            let s: Rc<RefCell<Vec<(usize, CancellationToken)>>> = Rc::new(RefCell::new(Vec::new()));
+            s
+        });
+    if scope
+        .get_slot::<Rc<RefCell<Vec<(usize, CancellationToken)>>>>()
+        .is_none()
+    {
+        scope.set_slot(token_slot.clone());
+    }
+    let signal_id = signal.get_identity_hash().get() as usize;
+    token_slot.borrow_mut().push((signal_id, token.clone()));
+
+    let signal_name = v8::String::new(scope, "signal").unwrap();
+    controller.set(scope, signal_name.into(), signal.into());
+
+    // abort() — sets aborted=true, cancels the token.
+    let abort_fn = v8::FunctionTemplate::new(scope, abort_signal_abort)
+        .get_function(scope)
+        .expect("abort function");
+    let abort_name = v8::String::new(scope, "abort").unwrap();
+    controller.set(scope, abort_name.into(), abort_fn.into());
+
+    // Store the signal_id on the controller for abort() to find.
+    let id_name = v8::String::new(scope, "_signalId").unwrap();
+    controller.set(
+        scope,
+        id_name.into(),
+        v8::Number::new(scope, signal_id as f64).into(),
+    );
+
+    return_value.set(controller.into());
+}
+
+fn abort_signal_abort(
+    scope: &mut v8::PinScope,
+    arguments: v8::FunctionCallbackArguments,
+    mut return_value: v8::ReturnValue,
+) {
+    let this = arguments.this();
+    let id_name = v8::String::new(scope, "_signalId").unwrap();
+    let Some(id_val) = this.get(scope, id_name.into()) else {
+        return_value.set_undefined();
+        return;
+    };
+    let signal_id = v8::Local::<v8::Number>::try_from(id_val)
+        .map(|n| n.value() as usize)
+        .unwrap_or(0);
+
+    // Set signal.aborted = true.
+    let signal_name = v8::String::new(scope, "signal").unwrap();
+    if let Some(signal) = this.get(scope, signal_name.into())
+        && let Ok(signal_obj) = v8::Local::<v8::Object>::try_from(signal)
+    {
+        let aborted_key = v8::String::new(scope, "aborted").unwrap();
+        signal_obj.set(
+            scope,
+            aborted_key.into(),
+            v8::Boolean::new(scope, true).into(),
+        );
+    }
+
+    // Cancel the token.
+    if let Some(token_slot) = scope.get_slot::<Rc<RefCell<Vec<(usize, CancellationToken)>>>>() {
+        let slot = token_slot.borrow();
+        for (id, token) in slot.iter() {
+            if *id == signal_id {
+                token.cancel();
+                break;
+            }
+        }
+    }
+    return_value.set_undefined();
+}
+
 /// Install the global `Worker` constructor on the **main** isolate.
 ///
 /// `new Worker(url, options)` resolves the path, spawns a worker
@@ -802,11 +985,29 @@ fn worker_constructor(
     mut return_value: v8::ReturnValue,
 ) {
     let url = arguments.get(0);
-    let Ok(url_string) = v8::Local::<v8::String>::try_from(url) else {
+    let entry = if let Ok(url_string) = v8::Local::<v8::String>::try_from(url) {
+        // Plain string path.
+        url_string.to_rust_string_lossy(scope)
+    } else if let Ok(url_obj) = v8::Local::<v8::Object>::try_from(url) {
+        // URL object: try .href, then toString().
+        let href_key = v8::String::new(scope, "href").unwrap();
+        if let Some(href) = url_obj.get(scope, href_key.into())
+            && let Ok(href_str) = v8::Local::<v8::String>::try_from(href)
+        {
+            href_str.to_rust_string_lossy(scope)
+        } else {
+            // Fallback to toString().
+            url.to_rust_string_lossy(scope)
+        }
+    } else {
         throw_script_error(scope, "Worker constructor expects a URL string");
         return;
     };
-    let entry = url_string.to_rust_string_lossy(scope);
+    // Strip file:// prefix if present.
+    let entry = entry
+        .strip_prefix("file:///runtime/plugins/")
+        .unwrap_or(&entry)
+        .to_owned();
 
     // Parse options for `type: 'module'` and `signal`.
     let cancellation = CancellationToken::new();
@@ -822,28 +1023,56 @@ fn worker_constructor(
                 throw_script_error(scope, "Worker signal already aborted");
                 return;
             }
+            // Register abort: when abort() fires, it cancels
+            // the token. We poll `aborted` in the worker
+            // message loop and on postMessage.
+            // ponytail: we check aborted at message dispatch
+            // time, not via a watcher. A tighter impl would
+            // register a JS callback, but polling at dispatch
+            // is sufficient for the TUI single-process model.
         }
     }
 
-    // Determine plugin root from the isolate slot.
-    let Some(plugin_root) = scope.get_slot::<Rc<RefCell<Option<String>>>>().cloned() else {
-        throw_script_error(scope, "plugin root is unavailable on the main isolate");
-        return;
+    // Determine plugin root: main isolate uses plugin_root slot,
+    // worker isolate uses WorkerResources slot.
+    let root = if let Some(plugin_root) = scope.get_slot::<Rc<RefCell<Option<String>>>>().cloned() {
+        plugin_root.borrow().clone().unwrap_or_default()
+    } else if let Some(resources) = scope.get_slot::<WorkerResources>() {
+        resources.root.clone()
+    } else {
+        // Fallback: no root (test-inline source).
+        String::new()
     };
-    let root = plugin_root.borrow().clone().unwrap_or_default();
 
-    // Acquire or create the WorkerRegistry slot.
+    // Determine plugin_id for quota tracking.
+    let plugin_id = if let Some(pid) = scope.get_slot::<String>() {
+        pid.clone()
+    } else {
+        root.clone()
+    };
+
+    // Get or create the WorkerRegistry slot.
     let registry_slot = scope
         .get_slot::<WorkerRegistrySlot>()
         .cloned()
         .unwrap_or_else(|| Rc::new(RefCell::new(Vec::new())));
-    // Ensure the slot is populated (first spawn creates it).
     if scope.get_slot::<WorkerRegistrySlot>().is_none() {
         scope.set_slot(registry_slot.clone());
     }
 
+    // Get quota from the isolate slot.
+    let quota = scope
+        .get_slot::<Option<Arc<WorkerQuota>>>()
+        .cloned()
+        .flatten();
+
+    // Get current depth for nested-spawn tracking.
+    // Nested workers increment depth.
+    let current_depth = scope.get_slot::<usize>().copied().unwrap_or(0);
+    let depth = current_depth + 1;
+
     let mut registry = registry_slot.borrow_mut();
-    match spawn_worker(root, entry, cancellation, None) {
+    match spawn_worker(root, entry, cancellation, quota, plugin_id, depth) {
         Ok(handle) => {
             // Create the JS Worker object wrapping the handle.
             let worker_obj = v8::Object::new(scope);
@@ -980,6 +1209,22 @@ fn worker_js_add_event_listener(
     let prop_name = v8::String::new(scope, &event_name).unwrap();
     this.set(scope, prop_name.into(), callback_fn.into());
     return_value.set_undefined();
+}
+
+/// Pump messages from nested child workers to their JS listeners.
+fn pump_nested_workers(scope: &mut v8::PinScope<'_, '_>, registry: &WorkerRegistrySlot) {
+    let len = registry.borrow().len();
+    for index in 0..len {
+        let messages = {
+            let r = registry.borrow();
+            r.get(index).map(|h| h.drain()).unwrap_or_default()
+        };
+        for msg in messages {
+            if let WorkerChannelMessage::FromWorker(data) = msg {
+                let _ = dispatch_message_event(scope, registry, index, data);
+            }
+        }
+    }
 }
 
 /// Dispatch a `message` event to a worker's JS listener.
@@ -1215,6 +1460,8 @@ mod tests {
             "worker.ts".to_owned(),
             CancellationToken::new(),
             None,
+            "test".to_owned(),
+            0,
         )
         .expect("spawn_worker should succeed");
 
@@ -1271,6 +1518,8 @@ mod tests {
             "worker.ts".to_owned(),
             CancellationToken::new(),
             None,
+            "test".to_owned(),
+            0,
         )
         .expect("spawn_worker should succeed");
 
@@ -1292,6 +1541,8 @@ mod tests {
             "meta-worker.ts".to_owned(),
             CancellationToken::new(),
             None,
+            "test".to_owned(),
+            0,
         )
         .expect("spawn_worker should succeed");
 
@@ -1331,6 +1582,8 @@ mod tests {
             "import-worker.ts".to_owned(),
             CancellationToken::new(),
             None,
+            "test".to_owned(),
+            0,
         )
         .expect("spawn_worker should succeed");
 
@@ -1366,6 +1619,8 @@ mod tests {
             "dynamic-import-worker.ts".to_owned(),
             CancellationToken::new(),
             None,
+            "test".to_owned(),
+            0,
         )
         .expect("spawn_worker should succeed");
 
@@ -1392,5 +1647,128 @@ mod tests {
             }
             other => panic!("expected FromWorker, got {other:?}"),
         }
+    }
+
+    // --- Task 4: AbortSignal, nested spawn, quota enforcement ---
+
+    /// Test that terminating a worker via WorkerHandle
+    /// releases the quota slot.
+    #[test]
+    fn worker_terminate_releases_quota() {
+        let quota = Arc::new(WorkerQuota::new(8, 32, 4));
+        let mut handle = spawn_worker(
+            "test-worker/".to_owned(),
+            "meta-worker.ts".to_owned(),
+            CancellationToken::new(),
+            Some(quota.clone()),
+            "test".to_owned(),
+            0,
+        )
+        .expect("spawn_worker should succeed");
+
+        assert_eq!(quota.current_global(), 1);
+        handle.terminate();
+        assert_eq!(quota.current_global(), 0);
+    }
+
+    /// Test that nested spawn works: a worker can `new Worker()`
+    /// inside its own isolate, and messages flow through.
+    #[test]
+    fn worker_nested_spawn_child() {
+        let quota = Arc::new(WorkerQuota::new(8, 32, 4));
+        let handle = spawn_worker(
+            "test-worker/".to_owned(),
+            "parent.ts".to_owned(),
+            CancellationToken::new(),
+            Some(quota.clone()),
+            "test".to_owned(),
+            0,
+        )
+        .expect("spawn_worker should succeed");
+
+        handle
+            .post_message(serde_json::json!("hello from parent"))
+            .expect("postMessage to parent should succeed");
+
+        // Parent spawns child, forwards message, child echoes back.
+        std::thread::sleep(Duration::from_millis(500));
+        let messages = handle.drain();
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "expected 1 message from child via parent, got {messages:?}"
+        );
+        match &messages[0] {
+            WorkerChannelMessage::FromWorker(data) => {
+                assert_eq!(
+                    data,
+                    &serde_json::json!("hello from parent"),
+                    "child should echo back parent's message"
+                );
+            }
+            other => panic!("expected FromWorker, got {other:?}"),
+        }
+    }
+
+    /// Test that per-plugin quota limit throws QuotaExceededError.
+    #[test]
+    fn worker_quota_per_plugin_exceeded() {
+        let quota = Arc::new(WorkerQuota::new(2, 32, 4));
+        // Spawn 2 (at limit).
+        let _h1 = spawn_worker(
+            "test-worker/".to_owned(),
+            "meta-worker.ts".to_owned(),
+            CancellationToken::new(),
+            Some(quota.clone()),
+            "test".to_owned(),
+            0,
+        )
+        .expect("first 2 should succeed");
+        let _h2 = spawn_worker(
+            "test-worker/".to_owned(),
+            "meta-worker.ts".to_owned(),
+            CancellationToken::new(),
+            Some(quota.clone()),
+            "test".to_owned(),
+            0,
+        )
+        .expect("second should succeed");
+        // Third should fail.
+        let result = spawn_worker(
+            "test-worker/".to_owned(),
+            "meta-worker.ts".to_owned(),
+            CancellationToken::new(),
+            Some(quota.clone()),
+            "test".to_owned(),
+            0,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("QuotaExceededError"),
+            "expected QuotaExceededError, got {err}"
+        );
+    }
+
+    /// Test that depth quota limit throws QuotaExceededError.
+    #[test]
+    fn worker_quota_depth_exceeded() {
+        let quota = Arc::new(WorkerQuota::new(8, 32, 2));
+        // Depth 0 is OK, depth 1 is OK, depth 2 should fail.
+        let result = spawn_worker(
+            "test-worker/".to_owned(),
+            "meta-worker.ts".to_owned(),
+            CancellationToken::new(),
+            Some(quota.clone()),
+            "test".to_owned(),
+            2,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("QuotaExceededError"),
+            "expected QuotaExceededError for depth, got {err}"
+        );
     }
 }

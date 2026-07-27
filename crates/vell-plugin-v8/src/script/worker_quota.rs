@@ -2,22 +2,20 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-// Reserved contract for Task 4 worker limits; consumed when Worker
-// constructor dispatches spawns.
-#[allow(dead_code)]
-#[allow(clippy::enum_variant_names)]
+// Worker quota limits: per-plugin, global, depth.
+// Shared via Arc across the host and all spawned worker isolates.
 #[derive(Debug)]
-pub(super) enum QuotaError {
+#[allow(clippy::enum_variant_names)]
+pub(crate) enum QuotaError {
     PerPluginExceeded,
     GlobalExceeded,
     DepthExceeded,
 }
 
-// Reserved contract for Task 4; the global quota is shared via Arc
-// across the host and all spawned worker isolates.
-#[allow(dead_code)]
+// The global quota is shared via Arc across the host and all
+// spawned worker isolates.
 #[derive(Debug)]
-pub(super) struct WorkerQuota {
+pub(crate) struct WorkerQuota {
     per_plugin: usize,
     global: usize,
     depth: usize,
@@ -25,10 +23,9 @@ pub(super) struct WorkerQuota {
     per_plugin_counts: Mutex<HashMap<String, usize>>,
 }
 
-// Reserved contract for Task 4; Drop releases the quota slot.
-#[allow(dead_code)]
+// Drop releases the quota slot.
 #[derive(Debug)]
-pub(super) struct QuotaHandle {
+pub(crate) struct QuotaHandle {
     plugin_id: String,
     quota: Arc<WorkerQuota>,
 }
@@ -46,10 +43,9 @@ impl Drop for QuotaHandle {
     }
 }
 
-// Reserved contract for Task 4 worker limits.
-#[allow(dead_code)]
+// Worker quota limits.
 impl WorkerQuota {
-    pub(super) fn new(per_plugin: usize, global: usize, depth: usize) -> Self {
+    pub(crate) fn new(per_plugin: usize, global: usize, depth: usize) -> Self {
         Self {
             per_plugin,
             global,
@@ -59,11 +55,11 @@ impl WorkerQuota {
         }
     }
 
-    pub(super) fn current_global(&self) -> usize {
+    pub(crate) fn current_global(&self) -> usize {
         self.global_count.load(Ordering::Relaxed)
     }
 
-    pub(super) fn try_acquire(
+    pub(crate) fn try_acquire(
         self: &Arc<WorkerQuota>,
         plugin_id: &str,
         current_depth: usize,

@@ -53,6 +53,9 @@ impl ScriptHost {
         isolate.set_slot(configuration.clone());
         isolate.set_slot(plugin_root.clone());
         isolate.set_slot(primitives.clone());
+        // Worker quota: per-plugin 8, global 32, depth 4.
+        let worker_quota = Some(Arc::new(worker::WorkerQuota::new(8, 32, 4)));
+        isolate.set_slot(worker_quota);
 
         let context = {
             v8::scope!(scope, &mut isolate);
@@ -63,6 +66,7 @@ impl ScriptHost {
             v8::scope_with_context!(scope, &mut isolate, context.clone());
             install_editor_api(scope);
             worker::install_global_worker_constructor(scope);
+            worker::install_abort_controller_global(scope);
         }
         let worker_registry: worker::WorkerRegistrySlot = Rc::new(RefCell::new(Vec::new()));
         isolate.set_slot(worker_registry);
