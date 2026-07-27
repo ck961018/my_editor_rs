@@ -423,3 +423,28 @@ pub(super) fn throw_script_error(scope: &mut v8::PinScope, message: &str) {
         scope.throw_exception(message.into());
     }
 }
+
+/// Throw a DOMException-shaped error: a plain `Error` with `.name`
+/// set to the given exception name (e.g. "QuotaExceededError").
+/// vell has no real DOMException constructor, but a plain Error
+/// with `.name` set is the standard polyfill and satisfies
+/// `e.name === "..."` checks.
+pub(super) fn throw_dom_exception(scope: &mut v8::PinScope, name: &str, message: &str) {
+    let error_constructor = scope
+        .get_current_context()
+        .global(scope)
+        .get(scope, v8::String::new(scope, "Error").unwrap().into());
+    if let Some(ctor) = error_constructor.and_then(|v| v8::Local::<v8::Function>::try_from(v).ok())
+    {
+        let msg = v8::String::new(scope, message).unwrap();
+        if let Some(error) = ctor.new_instance(scope, &[msg.into()]) {
+            let name_key = v8::String::new(scope, "name").unwrap();
+            let name_val = v8::String::new(scope, name).unwrap();
+            error.set(scope, name_key.into(), name_val.into());
+            scope.throw_exception(error.into());
+            return;
+        }
+    }
+    // Fallback: plain throw.
+    throw_script_error(scope, message);
+}

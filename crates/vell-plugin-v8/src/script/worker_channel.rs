@@ -81,6 +81,16 @@ impl WorkerHandle {
         // Release the quota slot.
         self.quota.take();
     }
+
+    /// Check if the worker thread has finished (canceled,
+    /// errored, or self-terminated).
+    #[allow(dead_code)] // used by worker_aborts_on_signal test
+    pub(super) fn is_finished(&self) -> bool {
+        match &self.thread {
+            Some(t) => t.is_finished(),
+            None => true,
+        }
+    }
 }
 
 impl Drop for WorkerHandle {

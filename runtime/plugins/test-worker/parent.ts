@@ -1,7 +1,10 @@
 // parent.ts — worker that spawns a nested child worker.
-// Uses a plain string path (no URL global in worker isolate yet).
+// Uses standard `new URL(..., import.meta.url)` form.
 
-const child = new Worker("child.ts", { type: "module" });
+const child = new Worker(
+    new URL("./child.ts", import.meta.url),
+    { type: "module" },
+);
 
 child.addEventListener("message", (e) => {
     // Forward child's response to our parent (the main thread).

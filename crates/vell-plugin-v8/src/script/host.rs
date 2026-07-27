@@ -67,6 +67,7 @@ impl ScriptHost {
             install_editor_api(scope);
             worker::install_global_worker_constructor(scope);
             worker::install_abort_controller_global(scope);
+            worker::install_url_global(scope);
         }
         let worker_registry: worker::WorkerRegistrySlot = Rc::new(RefCell::new(Vec::new()));
         isolate.set_slot(worker_registry);

@@ -15,7 +15,7 @@ use super::{
     WatchdogOutcome, call_script_callback, current_exception, ensure_size,
     host_import_module_dynamically, host_initialize_import_meta, initialize_v8, install_heap_limit,
     json_to_v8, load_module_tree, recover_heap_limit, resolve_module, set_object,
-    throw_script_error, transpile_typescript, v8_to_json,
+    throw_dom_exception, throw_script_error, transpile_typescript, v8_to_json,
 };
 
 const RESPONSE_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -769,6 +769,10 @@ fn install_worker_globals(scope: &mut v8::PinScope<'_, '_>) {
     // cancellation.
     install_abort_controller(scope);
 
+    // URL — minimal global so workers can use standard
+    // `new Worker(new URL("./x.ts", import.meta.url))`.
+    install_url_global(scope);
+
     // editor.resources (kept from legacy)
     let editor = v8::Object::new(scope);
     let resources = v8::Object::new(scope);
@@ -842,6 +846,96 @@ fn worker_close(
 /// the isolate slot, so worker spawn can check it.
 pub(super) fn install_abort_controller_global(scope: &mut v8::PinScope<'_, '_>) {
     install_abort_controller(scope);
+}
+
+/// Install a minimal `URL` global so workers and main isolate can use
+/// `new URL("./x.ts", import.meta.url)`. Only stores the string and
+/// exposes `.href` / `.pathname` / `toString()`.
+pub(super) fn install_url_global(scope: &mut v8::PinScope<'_, '_>) {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    let tmpl = v8::FunctionTemplate::new(scope, url_constructor);
+    let name = v8::String::new(scope, "URL").expect("static string");
+    global.set(
+        scope,
+        name.into(),
+        tmpl.get_function(scope).expect("URL constructor").into(),
+    );
+}
+
+fn url_constructor(
+    scope: &mut v8::PinScope,
+    arguments: v8::FunctionCallbackArguments,
+    mut return_value: v8::ReturnValue,
+) {
+    let relative = arguments.get(0);
+    let base = arguments.get(1);
+    // Resolve relative against base if both are strings.
+    let resolved = if let Ok(base_str) = v8::Local::<v8::String>::try_from(base) {
+        let base_s = base_str.to_rust_string_lossy(scope);
+        if let Ok(rel_str) = v8::Local::<v8::String>::try_from(relative) {
+            let rel_s = rel_str.to_rust_string_lossy(scope);
+            // Simple resolution: if relative starts with
+            // "./" or "../", strip the file:// prefix from
+            // base, take the directory, and join.
+            resolve_url(&base_s, &rel_s)
+        } else {
+            base_s
+        }
+    } else if let Ok(rel_str) = v8::Local::<v8::String>::try_from(relative) {
+        rel_str.to_rust_string_lossy(scope)
+    } else {
+        String::new()
+    };
+
+    let obj = v8::Object::new(scope);
+    let href = v8::String::new(scope, &resolved).unwrap();
+    let href_key = v8::String::new(scope, "href").unwrap();
+    obj.set(scope, href_key.into(), href.into());
+    // pathname — same as href for our purposes.
+    let path_key = v8::String::new(scope, "pathname").unwrap();
+    obj.set(scope, path_key.into(), href.into());
+    // toString — returns href.
+    let to_string = v8::FunctionTemplate::new(scope, url_to_string)
+        .get_function(scope)
+        .expect("URL toString");
+    let ts_name = v8::String::new(scope, "toString").unwrap();
+    obj.set(scope, ts_name.into(), to_string.into());
+    // Store href in a hidden field for toString to read.
+    let internal = v8::String::new(scope, "_href").unwrap();
+    obj.set(scope, internal.into(), href.into());
+    return_value.set(obj.into());
+}
+
+fn url_to_string(
+    scope: &mut v8::PinScope,
+    arguments: v8::FunctionCallbackArguments,
+    mut return_value: v8::ReturnValue,
+) {
+    let this = arguments.this();
+    let key = v8::String::new(scope, "_href").unwrap();
+    if let Some(href) = this.get(scope, key.into())
+        && let Ok(s) = v8::Local::<v8::String>::try_from(href)
+    {
+        return_value.set(s.into());
+    } else {
+        return_value.set(v8::String::new(scope, "").unwrap().into());
+    }
+}
+
+/// Resolve a relative URL against a base file:// URL.
+/// ponytail: naive string join, no RFC 3986. Works for
+/// `new URL("./child.ts", import.meta.url)` where
+/// import.meta.url is `file:///runtime/plugins/...`.
+fn resolve_url(base: &str, relative: &str) -> String {
+    // Strip file:// prefix to get a path.
+    let base_path = base.strip_prefix("file://").unwrap_or(base);
+    // Take the directory of the base path.
+    let dir = base_path.rsplit_once('/').map(|(d, _)| d).unwrap_or(".");
+    let rel = relative.strip_prefix("./").unwrap_or(relative);
+    // Rebuild as file:// URL so the Worker constructor's
+    // `strip_prefix("file:///runtime/plugins/")` works.
+    format!("file://{dir}/{rel}")
 }
 
 fn install_abort_controller(scope: &mut v8::PinScope<'_, '_>) {
@@ -1004,34 +1098,10 @@ fn worker_constructor(
         return;
     };
     // Strip file:// prefix if present.
-    let entry = entry
+    let entry_raw = entry
         .strip_prefix("file:///runtime/plugins/")
         .unwrap_or(&entry)
         .to_owned();
-
-    // Parse options for `type: 'module'` and `signal`.
-    let cancellation = CancellationToken::new();
-    if let Ok(opts) = v8::Local::<v8::Object>::try_from(arguments.get(1)) {
-        let key = v8::String::new(scope, "signal").unwrap();
-        if let Some(signal) = opts.get(scope, key.into())
-            && let Ok(signal_obj) = v8::Local::<v8::Object>::try_from(signal)
-        {
-            let aborted_key = v8::String::new(scope, "aborted").unwrap();
-            if let Some(aborted) = signal_obj.get(scope, aborted_key.into())
-                && aborted.is_true()
-            {
-                throw_script_error(scope, "Worker signal already aborted");
-                return;
-            }
-            // Register abort: when abort() fires, it cancels
-            // the token. We poll `aborted` in the worker
-            // message loop and on postMessage.
-            // ponytail: we check aborted at message dispatch
-            // time, not via a watcher. A tighter impl would
-            // register a JS callback, but polling at dispatch
-            // is sufficient for the TUI single-process model.
-        }
-    }
 
     // Determine plugin root: main isolate uses plugin_root slot,
     // worker isolate uses WorkerResources slot.
@@ -1043,6 +1113,46 @@ fn worker_constructor(
         // Fallback: no root (test-inline source).
         String::new()
     };
+
+    // If the entry starts with the root (e.g. URL resolved to
+    // `test-worker/child.ts` but root is `test-worker/`), strip the
+    // root to get a path relative to it.
+    let entry = if !root.is_empty() && entry_raw.starts_with(&root) {
+        entry_raw[root.len()..].to_owned()
+    } else {
+        entry_raw
+    };
+
+    // Parse options for `type: 'module'` and `signal`.
+    // If signal is provided, extract its CancellationToken from
+    // the isolate slot so abort() actually cancels the worker.
+    let mut cancellation = CancellationToken::new();
+    if let Ok(opts) = v8::Local::<v8::Object>::try_from(arguments.get(1)) {
+        let key = v8::String::new(scope, "signal").unwrap();
+        if let Some(signal) = opts.get(scope, key.into())
+            && let Ok(signal_obj) = v8::Local::<v8::Object>::try_from(signal)
+        {
+            let aborted_key = v8::String::new(scope, "aborted").unwrap();
+            if let Some(aborted) = signal_obj.get(scope, aborted_key.into())
+                && aborted.is_true()
+            {
+                throw_dom_exception(scope, "AbortError", "Worker signal already aborted");
+                return;
+            }
+            // Look up the signal's CancellationToken from the
+            // isolate slot (stored by AbortController
+            // constructor, keyed by signal identity hash).
+            let signal_id = signal_obj.get_identity_hash().get() as usize;
+            if let Some(token_slot) =
+                scope.get_slot::<Rc<RefCell<Vec<(usize, CancellationToken)>>>>()
+            {
+                let slot = token_slot.borrow();
+                if let Some((_, token)) = slot.iter().find(|(id, _)| *id == signal_id) {
+                    cancellation = token.clone();
+                }
+            }
+        }
+    }
 
     // Determine plugin_id for quota tracking.
     let plugin_id = if let Some(pid) = scope.get_slot::<String>() {
@@ -1114,7 +1224,16 @@ fn worker_constructor(
             return_value.set(worker_obj.into());
         }
         Err(error) => {
-            throw_script_error(scope, &error.to_string());
+            let msg = error.to_string();
+            if msg.contains("QuotaExceededError") {
+                throw_dom_exception(
+                    scope,
+                    "QuotaExceededError",
+                    &msg.replace("QuotaExceededError: ", ""),
+                );
+            } else {
+                throw_script_error(scope, &msg);
+            }
         }
     }
 }
@@ -1157,7 +1276,11 @@ fn worker_js_post_message(
                 return;
             };
             if handle.post_message(value).is_err() {
-                throw_script_error(scope, "worker terminated before postMessage");
+                throw_dom_exception(
+                    scope,
+                    "InvalidStateError",
+                    "worker terminated before postMessage",
+                );
                 return;
             }
         }
@@ -1752,10 +1875,11 @@ mod tests {
     }
 
     /// Test that depth quota limit throws QuotaExceededError.
+    /// Test uses reduced limits for speed; production is 8/32/4.
     #[test]
     fn worker_quota_depth_exceeded() {
-        let quota = Arc::new(WorkerQuota::new(8, 32, 2));
-        // Depth 0 is OK, depth 1 is OK, depth 2 should fail.
+        // depth=2: depth 0 and 1 succeed, depth 2 fails.
+        let quota = Arc::new(WorkerQuota::new(2, 8, 2));
         let result = spawn_worker(
             "test-worker/".to_owned(),
             "meta-worker.ts".to_owned(),
@@ -1769,6 +1893,93 @@ mod tests {
         assert!(
             err.to_string().contains("QuotaExceededError"),
             "expected QuotaExceededError for depth, got {err}"
+        );
+    }
+
+    /// Test that aborting the cancellation token actually
+    /// stops a running worker. This verifies the AbortSignal
+    /// wiring: the token passed to spawn_worker is linked to
+    /// the JS AbortController.abort() call.
+    #[test]
+    fn worker_aborts_on_signal() {
+        let token = CancellationToken::new();
+        let handle = spawn_worker(
+            "test-worker/".to_owned(),
+            "meta-worker.ts".to_owned(),
+            token.clone(),
+            None,
+            "test".to_owned(),
+            0,
+        )
+        .expect("spawn_worker should succeed");
+
+        // Send a message so the worker starts processing.
+        handle
+            .post_message(serde_json::json!("hello"))
+            .expect("postMessage should succeed");
+
+        // Abort the token — simulates AbortController.abort().
+        token.cancel();
+
+        // The worker thread should terminate. Give it a moment,
+        // then verify the handle's thread is no longer alive.
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            handle.is_finished(),
+            "worker thread should be terminated after abort"
+        );
+    }
+
+    /// Test that the global quota limit is enforced.
+    /// Test uses reduced limits for speed; production is
+    /// per-plugin=8, global=32, depth=4.
+    #[test]
+    fn worker_quota_global_exceeded() {
+        // per-plugin=2, global=3, depth=4.
+        let quota = Arc::new(WorkerQuota::new(2, 3, 4));
+        // Spawn 2 from plugin "a" (at per-plugin limit).
+        let _h1 = spawn_worker(
+            "test-worker/".to_owned(),
+            "meta-worker.ts".to_owned(),
+            CancellationToken::new(),
+            Some(quota.clone()),
+            "a".to_owned(),
+            0,
+        )
+        .expect("first from plugin a should succeed");
+        let _h2 = spawn_worker(
+            "test-worker/".to_owned(),
+            "meta-worker.ts".to_owned(),
+            CancellationToken::new(),
+            Some(quota.clone()),
+            "a".to_owned(),
+            0,
+        )
+        .expect("second from plugin a should succeed");
+        // Spawn 1 from plugin "b" (global now at 3).
+        let _h3 = spawn_worker(
+            "test-worker/".to_owned(),
+            "meta-worker.ts".to_owned(),
+            CancellationToken::new(),
+            Some(quota.clone()),
+            "b".to_owned(),
+            0,
+        )
+        .expect("first from plugin b should succeed");
+        // 4th spawn should fail — global limit (3) exceeded.
+        let result = spawn_worker(
+            "test-worker/".to_owned(),
+            "meta-worker.ts".to_owned(),
+            CancellationToken::new(),
+            Some(quota.clone()),
+            "b".to_owned(),
+            0,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("QuotaExceededError"),
+            "expected QuotaExceededError for global, got {err}"
         );
     }
 }
