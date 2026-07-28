@@ -262,6 +262,7 @@ interface AppPrimitives {
 interface BufferContentContext {
   readonly contentId: number;
   readonly revision?: number;
+  readonly text?: string;
   readonly resourceName?: string;
   readonly resourcePath?: string;
   readonly backingState?: "untitled" | "unmaterialized" | "materialized";

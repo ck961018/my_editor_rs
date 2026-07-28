@@ -109,6 +109,11 @@ impl TextChangeSet {
         }
     }
 
+    /// An empty change set (identity for composition).
+    pub fn empty() -> Self {
+        Self::builder(0)
+    }
+
     pub fn from_edits(
         before_len: usize,
         mut edits: Vec<TextEdit>,

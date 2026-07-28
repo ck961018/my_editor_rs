@@ -353,8 +353,8 @@ fn load_default_plugins() -> Result<Rc<RefCell<ScriptHost>>, ScriptError> {
     let mut host = ScriptHost::new();
     let mut plugins = default_plugin_entries()?;
     plugins.sort_by_key(|plugin| plugin.0);
-    for (_, path, source) in plugins {
-        host.execute_embedded_plugin(path, source)?;
+    for (_, path, _) in plugins {
+        host.execute_embedded_module(path)?;
     }
     Ok(Rc::new(RefCell::new(host)))
 }

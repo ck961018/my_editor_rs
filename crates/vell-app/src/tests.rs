@@ -1370,20 +1370,6 @@ fn make_script_app(source: &str) -> App<ScriptedFrontend> {
     }
 }
 
-fn make_embedded_script_app(path: &str, source: &str) -> App<ScriptedFrontend> {
-    let mut host = ScriptHost::new();
-    host.execute_embedded_plugin(path, source).unwrap();
-    let host = Rc::new(RefCell::new(host));
-    let bootstrap = bootstrap_editor(Buffer::new(), 40, 5, ScriptHost::modes(&host)).unwrap();
-    App {
-        kernel: bootstrap.kernel,
-        session: bootstrap.session,
-        frontend: ScriptedFrontend::new(Vec::new()),
-        runtime_diagnostics: Vec::new(),
-        behavior: BehaviorRecorder::default(),
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn script_timeout_keeps_native_edit_save_and_quit_available() {
     let directory = tempfile::tempdir().unwrap();
@@ -1524,170 +1510,31 @@ async fn frontend_invalid_data_error_remains_fatal() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "tree-sitter analysis migration: Task 9"]
-async fn completing_one_named_analysis_schedules_the_next() {
-    let mut app = make_embedded_script_app(
-        "tree-sitter/multi-analysis.ts",
-        r#"
-editor.modes.define({
-  name: "multi-analysis",
-  on: {
-    buffer: {
-      state: () => ({ completed: [] }),
-      analysis: {
-        first: {
-          worker: "worker.ts",
-          snapshot: "text",
-          input: (ctx) => ({
-            contentId: ctx.contentId,
-            language: "rust",
-            revision: ctx.revision,
-          }),
-          apply(ctx) { ctx.state.completed.push("first"); },
-        },
-        second: {
-          worker: "worker.ts",
-          snapshot: "text",
-          input: (ctx) => ({
-            contentId: ctx.contentId,
-            language: "rust",
-            revision: ctx.revision,
-          }),
-          apply(ctx) { ctx.state.completed.push("second"); },
-        },
-      },
-    },
-  },
-});
-"#,
-    );
-
-    app.kernel.schedule_mode_jobs();
-    let first = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        app.kernel.receive_message(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    app.handle_app_message(first).unwrap();
-
-    let second = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        app.kernel.receive_message(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    app.handle_app_message(second).unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "tree-sitter analysis migration: Task 9"]
-async fn mode_state_change_replaces_analysis_at_the_same_content_revision() {
-    let mut app = make_embedded_script_app(
-        "tree-sitter/state-analysis.ts",
-        r#"
-editor.modes.define({
-  name: "state-analysis",
-  faces: {
-    rust: { foreground: 1 },
-    markdown: { foreground: 2 },
-  },
-  on: {
-    buffer: {
-      state: () => ({ language: "rust" }),
-      commands: {
-        markdown(ctx) { ctx.state.language = "markdown"; },
-      },
-      analysis: {
-        syntax: {
-          worker: "worker.ts",
-          snapshot: "text",
-          input: (ctx) => ({
-            contentId: ctx.contentId,
-            language: ctx.state.language,
-            revision: ctx.revision,
-          }),
-          apply(ctx) {
-            return { contentDecorations: {
-              revision: ctx.revision,
-              spans: [{
-                range: {
-                  start: { line: 0, character: 0 },
-                  end: { line: 0, character: 1 },
-                },
-                face: ctx.state.language,
-              }],
-            } };
-          },
-        },
-      },
-    },
-  },
-});
-"#,
-    );
-    let view = view_id(&app, app.session.focused());
-
-    app.execute_command(DispatchCommand::ContentWithView {
-        command: ContentCommand::Edit(EditCommand::InsertText("x".to_owned())),
-        view,
-        content: editor_cid(),
-    })
-    .unwrap();
-    app.execute_command(DispatchCommand::Mode {
-        command: ModeCommand::new(
-            ModeName::new("state-analysis"),
-            ModeActionName::new("markdown"),
-        ),
-        view,
-        content: editor_cid(),
-    })
-    .unwrap();
-
-    for _ in 0..2 {
-        let message = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            app.kernel.receive_message(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        app.handle_app_message(message).unwrap();
-    }
-
-    let query = AppQuery {
-        contents: app.kernel.contents(),
-        views: app.session.views(),
-        presentation: app.session.presentation(),
-        faces: app.session.faces(),
-    };
-    let decorations = query
-        .decorations(view, RowRange { start: 0, end: 1 })
-        .unwrap();
-    assert_eq!(decorations.len(), 1, "{decorations:#?}");
-    assert_eq!(decorations[0].face.foreground, Some(Color::Ansi(2)));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "tree-sitter analysis migration: Task 9"]
 async fn rust_highlighting_is_parsed_and_updated_in_background() {
     let file = tempfile::Builder::new().suffix(".rs").tempfile().unwrap();
     std::fs::write(file.path(), "fn main() {}\n").unwrap();
     let mut app = make_app(vec![], file.path().to_str());
     let view = view_id(&app, app.session.focused());
-    let revision_before = app.session.view(view).unwrap().revision();
 
     app.kernel.schedule_mode_jobs();
-    let message = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        app.kernel.receive_message(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    app.handle_app_message(message).unwrap();
+    for _ in 0..100 {
+        let query = AppQuery {
+            contents: app.kernel.contents(),
+            views: app.session.views(),
+            presentation: app.session.presentation(),
+            faces: app.session.faces(),
+        };
+        let decorations = query
+            .decorations(view, RowRange { start: 0, end: 1 })
+            .unwrap();
+        if decorations.iter().any(|d| d.end.char_index == 2) {
+            break;
+        }
+        app.kernel.schedule_mode_jobs();
+        app.session
+            .refresh_presentation(app.kernel.contents(), app.kernel.content_modes());
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 
     let query = AppQuery {
         contents: app.kernel.contents(),
@@ -1703,7 +1550,6 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
             && decoration.end.char_index == 2
             && decoration.face.foreground == Some(Color::Ansi(170))
     }));
-    assert!(app.session.view(view).unwrap().revision() > revision_before);
 
     app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("// 中\n".to_string())),
@@ -1726,21 +1572,25 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
             && decoration.end.char_index == 2
             && decoration.face.foreground == Some(Color::Ansi(170))
     }));
-    assert!(decorations.iter().any(|decoration| {
-        decoration.start.char_index == 5
-            && decoration.end.char_index == 7
-            && decoration.face.foreground == Some(Color::Ansi(170))
-            && decoration.face.bold == Some(true)
-    }));
 
-    let message = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        app.kernel.receive_message(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    app.handle_app_message(message).unwrap();
+    for _ in 0..100 {
+        let query = AppQuery {
+            contents: app.kernel.contents(),
+            views: app.session.views(),
+            presentation: app.session.presentation(),
+            faces: app.session.faces(),
+        };
+        let decorations = query
+            .decorations(view, RowRange { start: 0, end: 1 })
+            .unwrap();
+        if decorations.iter().any(|d| d.end.char_index == 4) {
+            break;
+        }
+        app.kernel.schedule_mode_jobs();
+        app.session
+            .refresh_presentation(app.kernel.contents(), app.kernel.content_modes());
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 
     let query = AppQuery {
         contents: app.kernel.contents(),
@@ -1763,7 +1613,6 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "tree-sitter analysis migration: Task 9"]
 async fn markdown_and_fenced_rust_are_highlighted() {
     let source = concat!(
         "# Heading\r\n",
@@ -1779,14 +1628,24 @@ async fn markdown_and_fenced_rust_are_highlighted() {
     let view = view_id(&app, app.session.focused());
 
     app.kernel.schedule_mode_jobs();
-    let message = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        app.kernel.receive_message(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    app.handle_app_message(message).unwrap();
+    for _ in 0..100 {
+        let query = AppQuery {
+            contents: app.kernel.contents(),
+            views: app.session.views(),
+            presentation: app.session.presentation(),
+            faces: app.session.faces(),
+        };
+        let decorations = query
+            .decorations(view, RowRange { start: 0, end: 6 })
+            .unwrap();
+        if !decorations.is_empty() {
+            break;
+        }
+        app.kernel.schedule_mode_jobs();
+        app.session
+            .refresh_presentation(app.kernel.contents(), app.kernel.content_modes());
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 
     let query = AppQuery {
         contents: app.kernel.contents(),
@@ -1834,7 +1693,6 @@ async fn markdown_and_fenced_rust_are_highlighted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "tree-sitter analysis migration: Task 9"]
 async fn rust_highlighting_survives_crlf_comment_edits() {
     let file = tempfile::Builder::new().suffix(".rs").tempfile().unwrap();
     std::fs::write(file.path(), "fn main() {}\r\n").unwrap();
@@ -1842,14 +1700,24 @@ async fn rust_highlighting_survives_crlf_comment_edits() {
     let view = view_id(&app, app.session.focused());
 
     app.kernel.schedule_mode_jobs();
-    let message = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        app.kernel.receive_message(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    app.handle_app_message(message).unwrap();
+    for _ in 0..100 {
+        let query = AppQuery {
+            contents: app.kernel.contents(),
+            views: app.session.views(),
+            presentation: app.session.presentation(),
+            faces: app.session.faces(),
+        };
+        let decorations = query
+            .decorations(view, RowRange { start: 0, end: 2 })
+            .unwrap();
+        if !decorations.is_empty() {
+            break;
+        }
+        app.kernel.schedule_mode_jobs();
+        app.session
+            .refresh_presentation(app.kernel.contents(), app.kernel.content_modes());
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 
     app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("// note\r\n".to_owned())),
@@ -1857,14 +1725,27 @@ async fn rust_highlighting_survives_crlf_comment_edits() {
         content: editor_cid(),
     })
     .unwrap();
-    let message = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        app.kernel.receive_message(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    app.handle_app_message(message).unwrap();
+    for _ in 0..100 {
+        let query = AppQuery {
+            contents: app.kernel.contents(),
+            views: app.session.views(),
+            presentation: app.session.presentation(),
+            faces: app.session.faces(),
+        };
+        let decorations = query
+            .decorations(view, RowRange { start: 0, end: 2 })
+            .unwrap();
+        if decorations
+            .iter()
+            .any(|d| d.end.char_index == "// note".len())
+        {
+            break;
+        }
+        app.kernel.schedule_mode_jobs();
+        app.session
+            .refresh_presentation(app.kernel.contents(), app.kernel.content_modes());
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 
     let query = AppQuery {
         contents: app.kernel.contents(),

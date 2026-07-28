@@ -14,7 +14,7 @@ use vell_protocol::key_event::KeyEvent;
 
 use super::bridge::view_policy_from_json;
 use super::{
-    ScriptActionDefinition, ScriptAdapterDefinition, ScriptApiVersion, ScriptHost,
+    ScriptActionDefinition, ScriptAdapterDefinition, ScriptApiVersion, ScriptError, ScriptHost,
     ScriptModeDefinition, ScriptModeState, key_event_arguments, map_decoration_set, script_state,
     script_state_mut,
 };
@@ -154,14 +154,23 @@ impl Mode for ScriptMode {
         context: &ModeContentContext<'_>,
     ) -> Result<Box<dyn ModeState>, ModeError> {
         let adapter = self.adapter(context.content_kind());
-        self.host
-            .borrow_mut()
-            .create_content_state(adapter.create_content.as_ref(), self.version, context)
-            .map(|state| Box::new(ScriptModeState::new(state)) as Box<dyn ModeState>)
-            .map_err(|error| ModeError::CallbackFailed {
-                mode: self.name.clone(),
-                message: format!("callback '<content-state>': {error}"),
-            })
+        let mut host = self.host.borrow_mut();
+        let result = (|| {
+            let data =
+                host.create_content_state(adapter.create_content.as_ref(), self.version, context)?;
+            let mut state = ScriptModeState::new(data);
+            if let Some(callback) = adapter.content_changed.as_ref() {
+                let change = vell_core::content::ContentChange::Text(
+                    vell_core::transaction::TextChangeSet::empty(),
+                );
+                host.content_changed(callback, self.version, context, &mut state, &change)?;
+            }
+            Ok(Box::new(state) as Box<dyn ModeState>)
+        })();
+        result.map_err(|error: ScriptError| ModeError::CallbackFailed {
+            mode: self.name.clone(),
+            message: format!("callback '<content-state>': {error}"),
+        })
     }
 
     fn create_view_state(
@@ -281,13 +290,15 @@ impl Mode for ScriptMode {
         Ok(())
     }
 
+    fn poll_background(&self) {
+        self.host.borrow_mut().pump_worker_messages();
+    }
+
     fn take_background_jobs(
         &self,
         _state: &mut dyn ModeState,
         _context: &ModeContentContext<'_>,
     ) -> Vec<ModeJobRequest> {
-        // ponytail: analysis/v1 job dispatch removed in Task 7;
-        // workers now use new Worker() + editor.writeDecorations.
         Vec::new()
     }
 

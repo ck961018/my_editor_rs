@@ -205,6 +205,50 @@ impl ScriptHost {
         result
     }
 
+    pub(super) fn execute_embedded_module(&mut self, path: &str) -> Result<(), ScriptError> {
+        let definition_count = self.definitions.borrow().len();
+        let diagnostics = self.diagnostics.borrow().clone();
+        let configuration = self.configuration.borrow().clone();
+        let root = path
+            .rsplit_once('/')
+            .map(|(root, _)| format!("{root}/"))
+            .unwrap_or_default();
+        self.plugin_root.replace(Some(root));
+
+        let context = self.context.clone();
+        let modules = self.modules.clone();
+        let path = path.to_owned();
+        let result = self.invoke(ScriptInvocationKind::ModuleEvaluation, |isolate| {
+            isolate.set_slot(AssetSource::Embedded);
+            v8::scope_with_context!(scope, isolate, context);
+            v8::tc_scope!(let scope, scope);
+            let module = load_module_tree(scope, Path::new(&path), &modules)?;
+            match module.instantiate_module(scope, resolve_module) {
+                Some(true) => {}
+                _ => return Err(current_exception(scope, &path, "link")),
+            }
+            if module.evaluate(scope).is_none() {
+                return Err(current_exception(scope, &path, "execute"));
+            }
+            perform_microtask_checkpoint(scope);
+            if module.get_status() == v8::ModuleStatus::Errored {
+                return Err(ScriptError::new(format!(
+                    "failed to execute {path}: {}",
+                    module.get_exception().to_rust_string_lossy(scope)
+                )));
+            }
+            Ok(())
+        });
+
+        self.plugin_root.replace(None);
+        if result.is_err() {
+            self.definitions.borrow_mut().truncate(definition_count);
+            self.diagnostics.replace(diagnostics);
+            self.configuration.replace(configuration);
+        }
+        result
+    }
+
     pub(crate) fn execute_module(&mut self, entry: &Path) -> Result<(), ScriptError> {
         let entry = entry
             .canonicalize()
@@ -512,7 +556,7 @@ impl ScriptHost {
             v8::scope_with_context!(scope, isolate, v8_context);
             v8::tc_scope!(let scope, scope);
             let argument =
-                content_context_object(scope, context, false, version == ScriptApiVersion::V1)?;
+                content_context_object(scope, context, true, version == ScriptApiVersion::V1)?;
             let content_state = json_to_v8(scope, &current)?;
             set_value(scope, argument, content_state_name, content_state);
             let change_value = content_change_to_v8(scope, change)?;

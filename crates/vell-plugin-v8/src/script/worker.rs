@@ -11,220 +11,20 @@ use tokio_util::sync::CancellationToken;
 pub(super) use super::worker_channel::{WorkerChannelMessage, WorkerHandle};
 pub(crate) use super::worker_quota::{QuotaError, QuotaHandle, WorkerQuota};
 use super::{
-    AssetSource, DEFAULT_PLUGIN_ASSETS, InvocationWatchdog, MAX_SCRIPT_SOURCE_BYTES, ModuleMap,
-    SCRIPT_HEAP_LIMIT_BYTES, SCRIPT_STARTUP_TIMEOUT, ScriptError, ScriptInvocationKind,
-    WatchdogOutcome, call_script_callback, current_exception, ensure_size,
-    host_import_module_dynamically, host_initialize_import_meta, initialize_v8, install_heap_limit,
-    json_to_v8, load_module_tree, recover_heap_limit, resolve_module, set_object,
-    throw_dom_exception, throw_script_error, transpile_typescript, v8_to_json,
+    AssetSource, DEFAULT_PLUGIN_ASSETS, InvocationWatchdog, ModuleMap, SCRIPT_HEAP_LIMIT_BYTES,
+    SCRIPT_STARTUP_TIMEOUT, ScriptError, ScriptInvocationKind, WatchdogOutcome,
+    call_script_callback, current_exception, host_import_module_dynamically,
+    host_initialize_import_meta, initialize_v8, install_heap_limit, json_to_v8, load_module_tree,
+    recover_heap_limit, resolve_module, set_object, throw_dom_exception, throw_script_error,
+    v8_to_json,
 };
+#[cfg(test)]
+use super::{MAX_SCRIPT_SOURCE_BYTES, ensure_size, transpile_typescript};
 
-// ponytail: legacy ScriptWorker + editor.worker.onMessage kept for
-// tree-sitter (Task 9 migrates it). Removed after Task 9.
-#[allow(dead_code)]
-const RESPONSE_POLL_INTERVAL: Duration = Duration::from_millis(10);
-#[allow(dead_code)]
 const WORKER_TIMEOUT: Duration = Duration::from_secs(30);
-
-#[derive(Clone)]
-#[allow(dead_code)]
-pub(super) struct ScriptWorker {
-    sender: mpsc::Sender<WorkerRequest>,
-}
-
-#[allow(dead_code)]
-struct WorkerRequest {
-    message: serde_json::Value,
-    cancellation: CancellationToken,
-    response: mpsc::SyncSender<Result<serde_json::Value, String>>,
-}
 
 struct WorkerResources {
     root: String,
-}
-
-type WorkerHandler = Rc<RefCell<Option<v8::Global<v8::Function>>>>;
-
-#[allow(dead_code)]
-impl ScriptWorker {
-    pub(super) fn start(root: String, entry: String) -> Result<Self, ScriptError> {
-        let path = resolve_asset_path(&root, &entry)?;
-        let source = asset(&path)?;
-        let source = std::str::from_utf8(source)
-            .map_err(|error| ScriptError::new(format!("invalid UTF-8 in {path}: {error}")))?
-            .to_owned();
-        ensure_size("worker source", source.len(), MAX_SCRIPT_SOURCE_BYTES)?;
-        let javascript = transpile_typescript(&format!("file:///runtime/plugins/{path}"), &source)?;
-        ensure_size(
-            "transpiled worker",
-            javascript.len(),
-            MAX_SCRIPT_SOURCE_BYTES,
-        )?;
-        let (sender, receiver) = mpsc::channel();
-        std::thread::Builder::new()
-            .name(format!("script-worker-{path}"))
-            .spawn(move || run_worker(root, path, javascript, receiver))
-            .map_err(|error| ScriptError::new(format!("failed to start script worker: {error}")))?;
-        Ok(Self { sender })
-    }
-
-    pub(super) fn request(
-        &self,
-        message: serde_json::Value,
-        cancellation: CancellationToken,
-    ) -> Result<serde_json::Value, String> {
-        let (response, receiver) = mpsc::sync_channel(1);
-        self.sender
-            .send(WorkerRequest {
-                message,
-                cancellation: cancellation.clone(),
-                response,
-            })
-            .map_err(|_| "script worker stopped".to_owned())?;
-        loop {
-            if cancellation.is_cancelled() {
-                return Err("script worker request cancelled".to_owned());
-            }
-            match receiver.recv_timeout(RESPONSE_POLL_INTERVAL) {
-                Ok(result) => return result,
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err("script worker stopped before replying".to_owned());
-                }
-            }
-        }
-    }
-}
-
-#[allow(dead_code)]
-fn run_worker(
-    root: String,
-    path: String,
-    javascript: String,
-    receiver: mpsc::Receiver<WorkerRequest>,
-) {
-    initialize_v8();
-    let params = v8::CreateParams::default().heap_limits(0, SCRIPT_HEAP_LIMIT_BYTES);
-    let mut isolate = v8::Isolate::new(params);
-    isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
-    isolate.set_capture_stack_trace_for_uncaught_exceptions(true, 10);
-    let handler: WorkerHandler = Rc::new(RefCell::new(None));
-    isolate.set_slot(handler.clone());
-    isolate.set_slot(WorkerResources { root });
-    let context = {
-        v8::scope!(scope, &mut isolate);
-        let context = v8::Context::new(scope, Default::default());
-        v8::Global::new(scope, context)
-    };
-    let mut heap_limit = install_heap_limit(&mut isolate);
-    let watchdog = InvocationWatchdog::start(
-        isolate.thread_safe_handle(),
-        ScriptInvocationKind::ModuleEvaluation,
-        SCRIPT_STARTUP_TIMEOUT,
-    );
-    let startup = match watchdog {
-        Ok(watchdog) => {
-            let startup = {
-                v8::scope_with_context!(scope, &mut isolate, context.clone());
-                v8::tc_scope!(let scope, scope);
-                install_worker_api(scope);
-                evaluate_worker(scope, &path, &javascript)
-            };
-            watchdog.finish(startup)
-        }
-        Err(error) => Err(error),
-    };
-    let startup = if recover_heap_limit(&mut isolate, &mut heap_limit, SCRIPT_HEAP_LIMIT_BYTES) {
-        Err(ScriptError::new(
-            "script worker heap limit exceeded during startup",
-        ))
-    } else {
-        startup
-    };
-    let startup_error = startup
-        .err()
-        .or_else(|| {
-            handler
-                .borrow()
-                .is_none()
-                .then(|| ScriptError::new("script worker did not register editor.worker.onMessage"))
-        })
-        .map(|error| error.to_string());
-
-    while let Ok(request) = receiver.recv() {
-        let result = if request.cancellation.is_cancelled() {
-            Err("script worker request cancelled".to_owned())
-        } else {
-            match startup_error.as_ref() {
-                Some(error) => Err(error.clone()),
-                None => execute_request_with_watchdog(
-                    &mut isolate,
-                    context.clone(),
-                    handler.borrow().as_ref().expect("checked handler"),
-                    request.message,
-                    &request.cancellation,
-                    &mut heap_limit,
-                ),
-            }
-        };
-        let _ = request.response.send(result);
-    }
-}
-
-#[allow(dead_code)]
-fn execute_request_with_watchdog(
-    isolate: &mut v8::OwnedIsolate,
-    context: v8::Global<v8::Context>,
-    handler: &v8::Global<v8::Function>,
-    message: serde_json::Value,
-    cancellation: &CancellationToken,
-    heap_limit: &mut Box<super::HeapLimitState>,
-) -> Result<serde_json::Value, String> {
-    let handle = isolate.thread_safe_handle();
-    let mut watchdog = InvocationWatchdog::start_cancellable(
-        handle,
-        ScriptInvocationKind::ContentJob,
-        WORKER_TIMEOUT,
-        cancellation.clone(),
-    )
-    .map_err(|error| error.to_string())?;
-    let result = execute_request(isolate, context, handler, message, cancellation)
-        .map_err(|error| error.to_string());
-    let outcome = watchdog.stop();
-    if recover_heap_limit(isolate, heap_limit, SCRIPT_HEAP_LIMIT_BYTES) {
-        return Err("script worker heap limit exceeded".to_owned());
-    }
-    match outcome {
-        WatchdogOutcome::Completed => result,
-        WatchdogOutcome::TimedOut => Err("script worker request timed out".to_owned()),
-        WatchdogOutcome::Cancelled => Err("script worker request cancelled".to_owned()),
-    }
-}
-
-fn install_worker_api(scope: &mut v8::PinScope<'_, '_>) {
-    let context = scope.get_current_context();
-    let global = context.global(scope);
-    let editor = v8::Object::new(scope);
-    let worker = v8::Object::new(scope);
-    let on_message = v8::FunctionTemplate::new(scope, worker_on_message)
-        .get_function(scope)
-        .expect("worker callback function");
-    let name = v8::String::new(scope, "onMessage").expect("static string");
-    worker.set(scope, name.into(), on_message.into());
-    let resources = v8::Object::new(scope);
-    let read_text = v8::FunctionTemplate::new(scope, worker_read_text)
-        .get_function(scope)
-        .expect("resource callback function");
-    let name = v8::String::new(scope, "readText").expect("static string");
-    resources.set(scope, name.into(), read_text.into());
-    let read_binary = v8::FunctionTemplate::new(scope, worker_read_binary)
-        .get_function(scope)
-        .expect("resource callback function");
-    let name = v8::String::new(scope, "readBinary").expect("static string");
-    resources.set(scope, name.into(), read_binary.into());
-    set_object(scope, editor, "worker", worker);
-    set_object(scope, editor, "resources", resources);
-    set_object(scope, global, "editor", editor);
 }
 
 fn evaluate_worker(
@@ -279,78 +79,6 @@ fn evaluate_worker_module(
         }
     }
     Ok(())
-}
-
-fn execute_request(
-    isolate: &mut v8::OwnedIsolate,
-    context: v8::Global<v8::Context>,
-    handler: &v8::Global<v8::Function>,
-    message: serde_json::Value,
-    cancellation: &CancellationToken,
-) -> Result<serde_json::Value, ScriptError> {
-    v8::scope_with_context!(scope, isolate, context);
-    v8::tc_scope!(let scope, scope);
-    let handler = v8::Local::new(scope, handler);
-    let message = json_to_v8(scope, &message)?;
-    let receiver = v8::undefined(scope).into();
-    let value = call_script_callback(scope, handler, receiver, &[message])
-        .ok_or_else(|| current_exception(scope, "script worker callback", "execute"))?;
-    let value = await_value(scope, value, cancellation)?;
-    v8_to_json(scope, value, "script worker response")
-}
-
-fn await_value<'scope>(
-    scope: &mut v8::PinScope<'scope, '_>,
-    value: v8::Local<'scope, v8::Value>,
-    cancellation: &CancellationToken,
-) -> Result<v8::Local<'scope, v8::Value>, ScriptError> {
-    let Ok(promise) = v8::Local::<v8::Promise>::try_from(value) else {
-        return Ok(value);
-    };
-    let deadline = Instant::now() + WORKER_TIMEOUT;
-    loop {
-        scope.perform_microtask_checkpoint();
-        while v8::Platform::pump_message_loop(&v8::V8::get_current_platform(), scope, false) {}
-        match promise.state() {
-            v8::PromiseState::Fulfilled => return Ok(promise.result(scope)),
-            v8::PromiseState::Rejected => {
-                let message = promise.result(scope).to_rust_string_lossy(scope);
-                return Err(ScriptError::new(format!(
-                    "script worker promise rejected: {message}"
-                )));
-            }
-            v8::PromiseState::Pending => {}
-        }
-        if cancellation.is_cancelled() {
-            return Err(ScriptError::new("script worker request cancelled"));
-        }
-        if Instant::now() >= deadline {
-            return Err(ScriptError::new("script worker request timed out"));
-        }
-        std::thread::sleep(Duration::from_millis(1));
-    }
-}
-
-#[allow(dead_code)]
-fn worker_on_message(
-    scope: &mut v8::PinScope,
-    arguments: v8::FunctionCallbackArguments,
-    mut return_value: v8::ReturnValue,
-) {
-    let Ok(callback) = v8::Local::<v8::Function>::try_from(arguments.get(0)) else {
-        throw_script_error(scope, "editor.worker.onMessage expects a function");
-        return;
-    };
-    let Some(handler) = scope.get_slot::<WorkerHandler>().cloned() else {
-        throw_script_error(scope, "script worker registry is unavailable");
-        return;
-    };
-    if handler.borrow().is_some() {
-        throw_script_error(scope, "script worker already has a message handler");
-        return;
-    }
-    handler.replace(Some(v8::Global::new(scope, callback)));
-    return_value.set_undefined();
 }
 
 fn worker_read_text(
@@ -565,8 +293,6 @@ fn run_bidirectional_worker(
     isolate.set_host_initialize_import_meta_object_callback(host_initialize_import_meta);
     isolate.set_host_import_module_dynamically_callback(host_import_module_dynamically);
 
-    let handler: WorkerHandler = Rc::new(RefCell::new(None));
-    isolate.set_slot(handler.clone());
     isolate.set_slot(WorkerResources { root });
     // Store the sender so `self.postMessage` can reach the main thread.
     isolate.set_slot::<mpsc::Sender<WorkerChannelMessage>>(sender.clone());
@@ -648,7 +374,6 @@ fn run_bidirectional_worker(
                         let result = execute_worker_on_message(
                             &mut isolate,
                             context.clone(),
-                            handler.borrow().as_ref(),
                             data,
                             &cancellation,
                             &mut heap_limit,
@@ -709,7 +434,6 @@ fn run_bidirectional_worker(
 fn execute_worker_on_message(
     isolate: &mut v8::OwnedIsolate,
     context: v8::Global<v8::Context>,
-    _handler: Option<&v8::Global<v8::Function>>,
     message: serde_json::Value,
     cancellation: &CancellationToken,
     heap_limit: &mut Box<super::HeapLimitState>,
@@ -761,6 +485,38 @@ fn execute_worker_on_message(
         WatchdogOutcome::Completed => Ok(()),
         WatchdogOutcome::TimedOut => Err(ScriptError::new("worker request timed out")),
         WatchdogOutcome::Cancelled => Err(ScriptError::new("worker request cancelled")),
+    }
+}
+
+fn await_value<'scope>(
+    scope: &mut v8::PinScope<'scope, '_>,
+    value: v8::Local<'scope, v8::Value>,
+    cancellation: &CancellationToken,
+) -> Result<v8::Local<'scope, v8::Value>, ScriptError> {
+    let Ok(promise) = v8::Local::<v8::Promise>::try_from(value) else {
+        return Ok(value);
+    };
+    let deadline = Instant::now() + WORKER_TIMEOUT;
+    loop {
+        scope.perform_microtask_checkpoint();
+        while v8::Platform::pump_message_loop(&v8::V8::get_current_platform(), scope, false) {}
+        match promise.state() {
+            v8::PromiseState::Fulfilled => return Ok(promise.result(scope)),
+            v8::PromiseState::Rejected => {
+                let message = promise.result(scope).to_rust_string_lossy(scope);
+                return Err(ScriptError::new(format!(
+                    "worker promise rejected: {message}"
+                )));
+            }
+            v8::PromiseState::Pending => {}
+        }
+        if cancellation.is_cancelled() {
+            return Err(ScriptError::new("worker request cancelled"));
+        }
+        if Instant::now() >= deadline {
+            return Err(ScriptError::new("worker request timed out"));
+        }
+        std::thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -1134,22 +890,24 @@ fn worker_constructor(
         throw_script_error(scope, "Worker constructor expects a URL string");
         return;
     };
-    // Strip file:// prefix if present.
-    let entry_raw = entry
-        .strip_prefix("file:///runtime/plugins/")
-        .unwrap_or(&entry)
-        .to_owned();
+    let plugin_path = entry.strip_prefix("file:///runtime/plugins/");
+    let entry_raw = plugin_path.unwrap_or(&entry).to_owned();
 
-    // Determine plugin root: main isolate uses plugin_root slot,
-    // worker isolate uses WorkerResources slot.
-    let root = if let Some(plugin_root) = scope.get_slot::<Rc<RefCell<Option<String>>>>().cloned() {
-        plugin_root.borrow().clone().unwrap_or_default()
-    } else if let Some(resources) = scope.get_slot::<WorkerResources>() {
-        resources.root.clone()
-    } else {
-        // Fallback: no root (test-inline source).
-        String::new()
-    };
+    // Deferred callbacks run after `plugin_root` is cleared. A full
+    // plugin URL still carries the root as its first path segment.
+    let current_root = scope
+        .get_slot::<Rc<RefCell<Option<String>>>>()
+        .and_then(|root| root.borrow().clone())
+        .or_else(|| {
+            scope
+                .get_slot::<WorkerResources>()
+                .map(|resources| resources.root.clone())
+        });
+    let root = current_root.unwrap_or_else(|| {
+        plugin_path
+            .and_then(|path| path.split_once('/').map(|(plugin, _)| format!("{plugin}/")))
+            .unwrap_or_default()
+    });
 
     // If the entry starts with the root (e.g. URL resolved to
     // `test-worker/child.ts` but root is `test-worker/`), strip the
@@ -1420,12 +1178,14 @@ pub(super) fn dispatch_message_event(
     if let Some(worker_obj) = global.get(scope, worker_key.into())
         && let Ok(worker) = v8::Local::<v8::Object>::try_from(worker_obj)
     {
-        let msg_key = v8::String::new(scope, "message").unwrap();
-        if let Some(listener) = worker.get(scope, msg_key.into())
-            && let Ok(callback) = v8::Local::<v8::Function>::try_from(listener)
-        {
-            let receiver = v8::undefined(scope).into();
-            call_script_callback(scope, callback, receiver, &[event.into()]);
+        for property in ["onmessage", "message"] {
+            let key = v8::String::new(scope, property).unwrap();
+            if let Some(listener) = worker.get(scope, key.into())
+                && let Ok(callback) = v8::Local::<v8::Function>::try_from(listener)
+            {
+                let receiver = worker.into();
+                call_script_callback(scope, callback, receiver, &[event.into()]);
+            }
         }
     }
     Ok(())
@@ -1494,22 +1254,54 @@ pub(super) fn dispatch_error_event(
 mod tests {
     use super::*;
 
+    fn start_tree_sitter_worker(cancellation: CancellationToken) -> WorkerHandle {
+        spawn_worker(
+            "tree-sitter/".to_owned(),
+            "worker.ts".to_owned(),
+            cancellation,
+            None,
+            "tree-sitter".to_owned(),
+            1,
+        )
+        .unwrap()
+    }
+
+    fn worker_response(
+        worker: &WorkerHandle,
+        message: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        worker
+            .post_message(message)
+            .map_err(|error| error.to_string())?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            for message in worker.drain() {
+                match message {
+                    WorkerChannelMessage::FromWorker(value) => return Ok(value),
+                    WorkerChannelMessage::Error { message, .. } => return Err(message),
+                    WorkerChannelMessage::Terminated => return Err("worker terminated".to_owned()),
+                    WorkerChannelMessage::ToWorker(_) => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Err("worker response timed out".to_owned())
+    }
+
     #[test]
     fn worker_loads_embedded_resources_and_resolves_async_response() {
-        let worker =
-            ScriptWorker::start("tree-sitter/".to_owned(), "worker.ts".to_owned()).unwrap();
-        let result = worker
-            .request(
-                serde_json::json!({
+        let worker = start_tree_sitter_worker(CancellationToken::new());
+        let result = worker_response(
+            &worker,
+            serde_json::json!({
                     "contentId": 7,
                     "generation": 0,
                     "language": "markdown",
                     "revision": 0,
-                    "text": "```rust\nfn main() {}\n```\n",
-                }),
-                CancellationToken::new(),
-            )
-            .unwrap();
+                "text": "```rust\nfn main() {}\n```\n",
+            }),
+        )
+        .unwrap();
 
         assert_eq!(result["revision"], 0);
         assert!(
@@ -1532,20 +1324,18 @@ mod tests {
 
     #[test]
     fn worker_preserves_specific_tree_sitter_capture_names() {
-        let worker =
-            ScriptWorker::start("tree-sitter/".to_owned(), "worker.ts".to_owned()).unwrap();
-        let result = worker
-            .request(
-                serde_json::json!({
-                    "contentId": 8,
-                    "generation": 0,
-                    "language": "rust",
-                    "revision": 0,
-                    "text": "fn show(value: bool) { println!(\"{value}\"); }",
-                }),
-                CancellationToken::new(),
-            )
-            .unwrap();
+        let worker = start_tree_sitter_worker(CancellationToken::new());
+        let result = worker_response(
+            &worker,
+            serde_json::json!({
+                "contentId": 8,
+                "generation": 0,
+                "language": "rust",
+                "revision": 0,
+                "text": "fn show(value: bool) { println!(\"{value}\"); }",
+            }),
+        )
+        .unwrap();
 
         let faces = result["spans"]
             .as_array()
@@ -1560,8 +1350,7 @@ mod tests {
 
     #[test]
     fn rust_highlighter_returns_valid_spans_during_incomplete_edits() {
-        let worker =
-            ScriptWorker::start("tree-sitter/".to_owned(), "worker.ts".to_owned()).unwrap();
+        let worker = start_tree_sitter_worker(CancellationToken::new());
         for text in [
             "fn ",
             "struct ",
@@ -1572,18 +1361,17 @@ mod tests {
             "fn main() { let value = \"😀\"; }\r\n",
             "fn main() {\r\n    let value =\r\n}\r\n",
         ] {
-            let result = worker
-                .request(
-                    serde_json::json!({
-                        "contentId": 8,
-                        "generation": 0,
-                        "language": "rust",
-                        "revision": 0,
-                        "text": text,
-                    }),
-                    CancellationToken::new(),
-                )
-                .unwrap();
+            let result = worker_response(
+                &worker,
+                serde_json::json!({
+                    "contentId": 8,
+                    "generation": 0,
+                    "language": "rust",
+                    "revision": 0,
+                    "text": text,
+                }),
+            )
+            .unwrap();
             let snapshot = vell_core::text_snapshot::TextSnapshot::from_text(text);
             for span in result["spans"].as_array().unwrap() {
                 let start = &span["range"]["start"];
@@ -1605,35 +1393,23 @@ mod tests {
     }
 
     #[test]
-    fn tree_sitter_worker_recovers_after_a_cancelled_request() {
-        let worker =
-            ScriptWorker::start("tree-sitter/".to_owned(), "worker.ts".to_owned()).unwrap();
+    fn tree_sitter_worker_can_be_replaced_after_cancellation() {
         let cancellation = CancellationToken::new();
+        let worker = start_tree_sitter_worker(cancellation.clone());
         cancellation.cancel();
-        let cancelled = worker.request(
+        drop(worker);
+
+        let replacement = start_tree_sitter_worker(CancellationToken::new());
+        let result = worker_response(
+            &replacement,
             serde_json::json!({
                 "contentId": 9,
-                "generation": 0,
                 "language": "rust",
-                "revision": 0,
-                "text": "fn cancelled() {}\n",
+                "revision": 1,
+                "text": "fn recovered() {}\n",
             }),
-            cancellation,
-        );
-        assert!(cancelled.is_err());
-
-        let result = worker
-            .request(
-                serde_json::json!({
-                    "contentId": 9,
-                    "generation": 1,
-                    "language": "rust",
-                    "revision": 1,
-                    "text": "fn recovered() {}\n",
-                }),
-                CancellationToken::new(),
-            )
-            .unwrap();
+        )
+        .unwrap();
 
         assert_eq!(result["revision"], 1);
         assert!(!result["spans"].as_array().unwrap().is_empty());
@@ -1642,9 +1418,7 @@ mod tests {
     // --- Task 2: Standard Web Worker bidirectional postMessage ---
 
     /// Test that spawn_worker returns a handle that can postMessage
-    /// and drain responses.  Uses the tree-sitter worker (which still
-    /// uses editor.worker.onMessage in the legacy path) but exercises
-    /// the new bidirectional channel infrastructure.
+    /// and drain responses.
     #[test]
     fn spawn_worker_returns_handle_with_post_message() {
         let handle = spawn_worker(
@@ -2102,6 +1876,39 @@ ctrl.abort();",
         assert!(
             finished,
             "worker thread should be terminated after JS abort()"
+        );
+    }
+
+    #[test]
+    fn worker_spawned_after_plugin_evaluation_keeps_plugin_root() {
+        use super::super::host::ScriptHost;
+
+        let mut host = ScriptHost::new();
+        host.execute_embedded_plugin(
+            "test-worker/deferred-spawn.ts",
+            "globalThis.workerResult = null;\n\
+globalThis.spawnWorker = () => {\n\
+  const w = new Worker(\n\
+    'file:///runtime/plugins/test-worker/meta-worker.ts',\n\
+    { type: 'module' },\n\
+  );\n\
+  w.onmessage = (e) => { globalThis.workerResult = e.data; };\n\
+  w.postMessage({});\n\
+};",
+        )
+        .expect("plugin evaluation should succeed");
+        host.evaluate_script("globalThis.spawnWorker(); null")
+            .expect("deferred worker construction should succeed");
+
+        std::thread::sleep(Duration::from_millis(300));
+        host.pump_worker_messages();
+
+        let result = host
+            .evaluate_script("globalThis.workerResult")
+            .expect("eval should succeed");
+        assert!(
+            result.is_string(),
+            "worker should post its module URL: {result:?}"
         );
     }
 

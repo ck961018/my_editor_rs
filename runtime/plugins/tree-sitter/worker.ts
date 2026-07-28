@@ -352,14 +352,12 @@ function markdownSpans(
   return spans;
 }
 
-editor.worker.onMessage(async (message: ParseMessage) => {
+self.onmessage = async (e: MessageEvent<ParseMessage>) => {
+  const message = e.data;
   const { rust, rustQuery } = await ready;
   const positions = textPositions(message.text);
   const spans = message.language === "rust"
     ? highlightRust(message.contentId, message.text, 0, positions, rust, rustQuery)
     : markdownSpans(message, positions, rust, rustQuery);
-  return {
-    revision: message.revision,
-    spans,
-  };
-});
+  self.postMessage({ revision: message.revision, spans });
+};

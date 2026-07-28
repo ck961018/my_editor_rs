@@ -1373,6 +1373,7 @@ pub trait Mode {
     ) -> Result<(), ModeError> {
         Ok(())
     }
+    fn poll_background(&self) {}
     fn take_background_jobs(
         &self,
         _state: &mut dyn ModeState,
@@ -1905,7 +1906,11 @@ impl ModeContentStore {
                 .instances
                 .get(&(mode, content))
                 .expect("collected mode content exists");
-            if instance.fault.is_some() || !instance.background_job_dirty {
+            if instance.fault.is_some() {
+                continue;
+            }
+            instance.adapter().poll_background();
+            if !instance.background_job_dirty {
                 continue;
             }
             let draft = drafts.content_mut(mode, content, instance);
