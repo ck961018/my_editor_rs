@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -626,51 +627,70 @@ fn run_bidirectional_worker(
 
     // Main message loop: receive ToWorker, dispatch to self.onmessage.
     // Use recv_timeout so we can periodically pump nested workers.
-    while !cancellation.is_cancelled() {
-        match receiver.recv_timeout(Duration::from_millis(50)) {
-            Ok(message) => match message {
-                WorkerChannelMessage::ToWorker(data) => {
-                    let result = execute_worker_on_message(
-                        &mut isolate,
-                        context.clone(),
-                        handler.borrow().as_ref(),
-                        data,
-                        &cancellation,
-                        &mut heap_limit,
-                    );
-                    if let Err(error) = result {
-                        let name = error_name_for_worker(&error.to_string());
-                        let _ = sender.send(WorkerChannelMessage::Error {
-                            message: error.to_string(),
-                            name,
-                        });
+    // Wrap in catch_unwind so a Rust panic (e.g. from a .unwrap() on an
+    // oversized V8 string) is reported as an ErrorEvent to main,
+    // not a silent thread death.
+    let panic_result = catch_unwind(AssertUnwindSafe(|| {
+        while !cancellation.is_cancelled() {
+            match receiver.recv_timeout(Duration::from_millis(50)) {
+                Ok(message) => match message {
+                    WorkerChannelMessage::ToWorker(data) => {
+                        let result = execute_worker_on_message(
+                            &mut isolate,
+                            context.clone(),
+                            handler.borrow().as_ref(),
+                            data,
+                            &cancellation,
+                            &mut heap_limit,
+                        );
+                        if let Err(error) = result {
+                            let name = error_name_for_worker(&error.to_string());
+                            let _ = sender.send(WorkerChannelMessage::Error {
+                                message: error.to_string(),
+                                name,
+                            });
+                        }
                     }
+                    WorkerChannelMessage::Terminated => break,
+                    _ => {}
+                },
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            // Flush any microtasks and pump nested workers.
+            let registry_slot = isolate.get_slot::<WorkerRegistrySlot>().cloned();
+            {
+                v8::scope_with_context!(scope, &mut isolate, context.clone());
+                scope.perform_microtask_checkpoint();
+                if let Some(registry) = &registry_slot {
+                    pump_nested_workers(scope, registry);
                 }
-                WorkerChannelMessage::Terminated => break,
-                _ => {}
-            },
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
         }
-        // Flush any microtasks and pump nested workers.
-        let registry_slot = isolate.get_slot::<WorkerRegistrySlot>().cloned();
+        // Final pump before exiting.
+        let final_registry = isolate.get_slot::<WorkerRegistrySlot>().cloned();
         {
             v8::scope_with_context!(scope, &mut isolate, context.clone());
             scope.perform_microtask_checkpoint();
-            if let Some(registry) = &registry_slot {
+            if let Some(registry) = &final_registry {
                 pump_nested_workers(scope, registry);
+                while v8::Platform::pump_message_loop(&v8::V8::get_current_platform(), scope, false)
+                {
+                }
             }
         }
-    }
-    // Final pump before exiting.
-    let final_registry = isolate.get_slot::<WorkerRegistrySlot>().cloned();
-    {
-        v8::scope_with_context!(scope, &mut isolate, context.clone());
-        scope.perform_microtask_checkpoint();
-        if let Some(registry) = &final_registry {
-            pump_nested_workers(scope, registry);
-            while v8::Platform::pump_message_loop(&v8::V8::get_current_platform(), scope, false) {}
-        }
+    }));
+
+    if let Err(panic) = panic_result {
+        let msg = panic
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_else(|| "unknown panic".to_owned());
+        let _ = sender.send(WorkerChannelMessage::Error {
+            message: format!("worker panic: {msg}"),
+            name: "Error".to_owned(),
+        });
     }
 
     let _ = sender.send(WorkerChannelMessage::Terminated);
@@ -1435,6 +1455,16 @@ pub(super) fn dispatch_error_event(
     let name_val = v8::String::new(scope, &name).unwrap();
     let name_key = v8::String::new(scope, "name").unwrap();
     event.set(scope, name_key.into(), name_val.into());
+    // ponytail: filename/lineno/colno use sentinels because the
+    // WorkerChannelMessage::Error path does not carry the V8 Message
+    // (stack/line info). Wire real values when the channel carries them.
+    let filename_val = v8::String::new(scope, "unknown").unwrap();
+    let filename_key = v8::String::new(scope, "filename").unwrap();
+    event.set(scope, filename_key.into(), filename_val.into());
+    let lineno_key = v8::String::new(scope, "lineno").unwrap();
+    event.set(scope, lineno_key.into(), v8::Number::new(scope, 0.0).into());
+    let colno_key = v8::String::new(scope, "colno").unwrap();
+    event.set(scope, colno_key.into(), v8::Number::new(scope, 0.0).into());
     let worker_key = v8::String::new(scope, &format!("_worker_{index}")).unwrap();
     if let Some(worker_obj) = global.get(scope, worker_key.into())
         && let Ok(worker) = v8::Local::<v8::Object>::try_from(worker_obj)
@@ -2154,6 +2184,62 @@ w.postMessage({});",
             msg.is_string(),
             "error listener should have set errMsg \
              to a string, got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn worker_error_event_has_standard_fields() {
+        use super::super::host::ScriptHost;
+
+        let mut host = ScriptHost::new();
+        host.execute_embedded_plugin(
+            "test-worker/throw-listener.ts",
+            "globalThis.fields = null;\n\
+const w = new Worker(\"throw-worker.ts\", { type: \"module\" });\n\
+w.addEventListener(\"error\", (e) => {\n\
+  globalThis.fields = {\n\
+    message: typeof e.message,\n\
+    name: typeof e.name,\n\
+    filename: typeof e.filename,\n\
+    lineno: typeof e.lineno,\n\
+    colno: typeof e.colno,\n\
+  };\n\
+});\n\
+w.postMessage({});",
+        )
+        .expect("plugin evaluation should succeed");
+
+        std::thread::sleep(Duration::from_millis(300));
+        host.pump_worker_messages();
+
+        let fields = host
+            .evaluate_script("globalThis.fields")
+            .expect("eval should succeed");
+        let obj = fields.as_object().expect("fields should be an object");
+        assert_eq!(
+            obj.get("message").and_then(|v| v.as_str()),
+            Some("string"),
+            "message should be a string"
+        );
+        assert_eq!(
+            obj.get("name").and_then(|v| v.as_str()),
+            Some("string"),
+            "name should be a string"
+        );
+        assert_eq!(
+            obj.get("filename").and_then(|v| v.as_str()),
+            Some("string"),
+            "filename should be a string"
+        );
+        assert_eq!(
+            obj.get("lineno").and_then(|v| v.as_str()),
+            Some("number"),
+            "lineno should be a number"
+        );
+        assert_eq!(
+            obj.get("colno").and_then(|v| v.as_str()),
+            Some("number"),
+            "colno should be a number"
         );
     }
 }
