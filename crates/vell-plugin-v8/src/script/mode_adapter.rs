@@ -488,6 +488,13 @@ impl Mode for ScriptMode {
             .unwrap_or_default();
         if let Some(revision) = context.content_revision() {
             let content_id = context.content_id();
+            // Self-heal stale `current` from native edits that advanced
+            // the revision outside a script Mode action frame.
+            self.host
+                .borrow()
+                .worker_decorations
+                .borrow_mut()
+                .track_current(content_id, revision.0, Some(snapshot.clone()));
             if let Some(set) = self
                 .host
                 .borrow()

@@ -3165,4 +3165,109 @@ editor.writeDecorations({revision}, [{{
         assert_eq!(decorations.len(), 1);
         assert_eq!(decorations[0].face, FaceName::new("syntax.test"));
     }
+
+    #[test]
+    fn write_decorations_drops_when_revision_advances() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("test.txt");
+        fs::write(&path, "hello\nworld\n").unwrap();
+        let mut host = ScriptHost::new();
+        host.execute_embedded_plugin(
+            "tree-sitter/write-decorations-stale.ts",
+            r#"
+editor.modes.define({
+  name: "write-decorations-stale",
+  on: {
+    buffer: {
+      state: () => ({}),
+      commands: {
+        touch() {},
+      },
+    },
+  },
+});
+"#,
+        )
+        .unwrap();
+        let host = Rc::new(RefCell::new(host));
+        let mode = ScriptHost::script_modes(&host).pop().unwrap();
+        let content_id = ContentId(0);
+        let view_id = ViewId(0);
+        let mut buffer = Buffer::new();
+        buffer.open_path(path.to_str().unwrap()).unwrap();
+        let mut contents = ContentStore::default();
+        contents
+            .insert(content_id, Content::Buffer(buffer))
+            .unwrap();
+        let view_state_data = contents.create_view_state(content_id).unwrap();
+        let context =
+            ModeViewContext::new(view_id, content_id, &view_state_data, &contents).unwrap();
+        let content_context = ModeContentContext::new(content_id, &contents);
+        let mut content_state = mode.create_content_state(&content_context).unwrap();
+        let mut view_state = mode
+            .create_view_state(content_state.as_ref(), &context)
+            .unwrap();
+
+        // Execute a content action to set the current revision.
+        mode.execute_view_with_arguments(
+            content_state.as_mut(),
+            view_state.as_mut(),
+            &context,
+            &ModeActionName::new("touch"),
+            &ModeValue::Null,
+        )
+        .unwrap();
+
+        let revision = contents.revision(content_id).unwrap().0;
+
+        // Write decorations at the current revision.
+        host.borrow_mut()
+            .execute_typescript(
+                "file:///test.ts",
+                &format!(
+                    r#"
+editor.writeDecorations({revision}, [{{
+  range: {{ start: {{ line: 0, character: 0 }}, end: {{ line: 0, character: 5 }} }},
+  face: "syntax.test",
+}}]);
+"#,
+                ),
+            )
+            .unwrap();
+
+        // Verify decorations are present at the current revision.
+        {
+            let content_context = ModeContentContext::new(content_id, &contents);
+            let decorations = mode.content_decorations(
+                content_state.as_ref(),
+                &content_context,
+                RowRange { start: 0, end: 2 },
+            );
+            assert_eq!(decorations.len(), 1);
+        }
+
+        // Advance the content revision by applying a text edit.
+        let snapshot = contents
+            .text_snapshot(content_id)
+            .expect("buffer should have a snapshot");
+        let len = snapshot.len_chars();
+        let edit = vell_core::transaction::TextEdit::new(len..len, "x".to_string());
+        let change = vell_core::transaction::TextChangeSet::from_edits(len, vec![edit]).unwrap();
+        contents.apply(content_id, ContentAction::Text(change));
+
+        // Query again — the stale revision should be dropped.
+        {
+            let content_context = ModeContentContext::new(content_id, &contents);
+            let decorations = mode.content_decorations(
+                content_state.as_ref(),
+                &content_context,
+                RowRange { start: 0, end: 2 },
+            );
+            assert_eq!(
+                decorations.len(),
+                0,
+                "stale worker decorations should be dropped after revision advance"
+            );
+        }
+    }
 }
