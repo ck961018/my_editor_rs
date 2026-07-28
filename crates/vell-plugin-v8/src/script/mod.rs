@@ -14,9 +14,7 @@ use vell_core::content::ContentKind;
 use vell_mode::command::ModeValue;
 use vell_mode::mode_name::{ModeActionName, ModeName};
 use vell_mode::operation::MAX_MODE_CALLBACK_OPERATIONS;
-use vell_mode::{
-    Mode, ModeContentContext, ModeError, ModeJobRequest, ModeResult, ModeState, ModeViewContext,
-};
+use vell_mode::{Mode, ModeContentContext, ModeError, ModeResult, ModeState, ModeViewContext};
 use vell_protocol::content_query::{
     Color, Face, FaceDefinition, FaceName, FaceOverride, FacePatch, FaceValue, NamedTextDecoration,
     RowRange, ThemeName, UnderlineStyle,
@@ -54,7 +52,6 @@ use module::{
 };
 use primitives::PrimitiveRuntime;
 use schema::install_editor_api;
-use worker::ScriptWorker;
 
 static V8_INIT: Once = Once::new();
 const V2_INPUT_ACTION: &str = "$input";
@@ -130,15 +127,6 @@ struct ScriptActionDefinition {
     callback: v8::Global<v8::Function>,
 }
 
-#[derive(Clone)]
-struct ScriptAnalysisDefinition {
-    slot: String,
-    input: v8::Global<v8::Function>,
-    apply: v8::Global<v8::Function>,
-    worker: ScriptWorker,
-    snapshot_text: bool,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ScriptApiVersion {
     V1,
@@ -174,11 +162,7 @@ struct ScriptAdapterDefinition {
     input: Option<v8::Global<v8::Function>>,
     create_content: Option<v8::Global<v8::Function>>,
     content_changed: Option<v8::Global<v8::Function>>,
-    content_job: Option<v8::Global<v8::Function>>,
-    content_apply_job: Option<v8::Global<v8::Function>>,
     create_view: Option<v8::Global<v8::Function>>,
-    worker: Option<ScriptWorker>,
-    analyses: Vec<ScriptAnalysisDefinition>,
 }
 
 #[derive(Clone, Default)]
@@ -200,18 +184,6 @@ struct ScriptModeDefinition {
 struct ScriptModeState {
     data: serde_json::Value,
     decorations: DecorationSet,
-    analysis_decorations: HashMap<String, DecorationSet>,
-    analysis_schedules: HashMap<String, ScriptAnalysisSchedule>,
-    next_analysis_version: u64,
-    analysis_input_epoch: u64,
-}
-
-#[derive(Clone)]
-struct ScriptAnalysisSchedule {
-    version: u64,
-    content_revision: u64,
-    input_epoch: u64,
-    message: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Default)]
@@ -338,200 +310,17 @@ fn map_decoration_set(
     )
 }
 
-struct ScriptJob {
-    slot: String,
-    version: u64,
-    message: serde_json::Value,
-    include_text: bool,
-    text_snapshot: Option<vell_core::text_snapshot::TextSnapshot>,
-}
-
-struct PreparedAnalysisJob {
-    message: Option<serde_json::Value>,
-    text_snapshot: Option<vell_core::text_snapshot::TextSnapshot>,
-}
-
-enum ScriptJobOutput {
-    Response(serde_json::Value),
-    Disabled,
-    CallbackError(String),
-}
-
-impl ScriptJob {
-    fn from_json(value: serde_json::Value) -> Result<Self, ScriptError> {
-        let object = value
-            .as_object()
-            .ok_or_else(|| ScriptError::new("content job must be an object"))?;
-        let slot = object
-            .get("slot")
-            .and_then(serde_json::Value::as_str)
-            .filter(|slot| !slot.is_empty())
-            .ok_or_else(|| ScriptError::new("content job.slot must be a non-empty string"))?
-            .to_owned();
-        let version = object
-            .get("version")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| {
-                ScriptError::new("content job.version must be a non-negative integer")
-            })?;
-        let message = object
-            .get("message")
-            .cloned()
-            .ok_or_else(|| ScriptError::new("content job.message is required"))?;
-        let include_text = object
-            .get("includeText")
-            .map(|value| {
-                value
-                    .as_bool()
-                    .ok_or_else(|| ScriptError::new("content job.includeText must be a boolean"))
-            })
-            .transpose()?
-            .unwrap_or(false);
-        if include_text {
-            let message = message.as_object().ok_or_else(|| {
-                ScriptError::new("content job.message must be an object when includeText is true")
-            })?;
-            if message.contains_key("text") {
-                return Err(ScriptError::new(
-                    "content job.message.text is reserved when includeText is true",
-                ));
-            }
-        }
-        Ok(Self {
-            slot,
-            version,
-            message,
-            include_text,
-            text_snapshot: None,
-        })
-    }
-}
-
 impl ScriptModeState {
     fn new(data: serde_json::Value) -> Self {
         Self {
             data,
             decorations: DecorationSet::default(),
-            analysis_decorations: HashMap::new(),
-            analysis_schedules: HashMap::new(),
-            next_analysis_version: 0,
-            analysis_input_epoch: 0,
         }
     }
 
     fn publish_external_data(&mut self, data: serde_json::Value) {
-        if self.data != data {
-            self.analysis_input_epoch = self
-                .analysis_input_epoch
-                .checked_add(1)
-                .expect("script analysis input epoch overflow");
-            self.data = data;
-        }
+        self.data = data;
     }
-
-    fn mark_analysis_output_change(&mut self) {
-        self.analysis_input_epoch = self
-            .analysis_input_epoch
-            .checked_add(1)
-            .expect("script analysis input epoch overflow");
-    }
-
-    fn reconcile_analysis_input(
-        &mut self,
-        slot: &str,
-        content_revision: u64,
-        message: &Option<serde_json::Value>,
-    ) -> bool {
-        let Some(schedule) = self.analysis_schedules.get_mut(slot) else {
-            return false;
-        };
-        if schedule.content_revision != content_revision || schedule.message != *message {
-            return false;
-        }
-        schedule.input_epoch = self.analysis_input_epoch;
-        true
-    }
-
-    fn record_analysis_request(
-        &mut self,
-        slot: &str,
-        content_revision: u64,
-        message: Option<serde_json::Value>,
-    ) -> u64 {
-        let version = self.next_analysis_version;
-        self.next_analysis_version = self
-            .next_analysis_version
-            .checked_add(1)
-            .expect("script analysis version overflow");
-        self.analysis_schedules.insert(
-            slot.to_owned(),
-            ScriptAnalysisSchedule {
-                version,
-                content_revision,
-                input_epoch: self.analysis_input_epoch,
-                message,
-            },
-        );
-        version
-    }
-
-    fn analysis_request_is_current(&self, slot: &str, version: u64, content_revision: u64) -> bool {
-        self.analysis_schedules.get(slot).is_some_and(|schedule| {
-            schedule.version == version
-                && schedule.content_revision == content_revision
-                && schedule.input_epoch == self.analysis_input_epoch
-        })
-    }
-
-    fn accept_analysis_input(
-        &mut self,
-        slot: &str,
-        version: u64,
-        content_revision: u64,
-        message: Option<serde_json::Value>,
-    ) {
-        let Some(schedule) = self.analysis_schedules.get_mut(slot) else {
-            return;
-        };
-        if schedule.version == version && schedule.content_revision == content_revision {
-            schedule.input_epoch = self.analysis_input_epoch;
-            schedule.message = message;
-        }
-    }
-}
-
-fn failed_script_job(message: String) -> ModeJobRequest {
-    ModeJobRequest::new("script-error", 0, move |_| {
-        Ok(Box::new(ScriptJobOutput::CallbackError(message)))
-    })
-}
-
-fn disabled_script_job(slot: String, version: u64) -> ModeJobRequest {
-    ModeJobRequest::new(slot, version, |_| Ok(Box::new(ScriptJobOutput::Disabled)))
-}
-
-fn script_job_request(job: ScriptJob, worker: ScriptWorker) -> ModeJobRequest {
-    let ScriptJob {
-        slot,
-        version,
-        mut message,
-        text_snapshot,
-        ..
-    } = job;
-    ModeJobRequest::new(slot, version, move |cancellation| {
-        if let Some(snapshot) = text_snapshot {
-            message
-                .as_object_mut()
-                .expect("text snapshot analysis message was validated")
-                .insert(
-                    "text".to_owned(),
-                    serde_json::Value::String(snapshot.to_owned_string()),
-                );
-        }
-        worker.request(message, cancellation).map(|result| {
-            Box::new(ScriptJobOutput::Response(result)) as Box<dyn std::any::Any + Send>
-        })
-    })
 }
 
 fn script_state<'state>(
@@ -963,7 +752,7 @@ mod tests {
     use vell_core::content_store::ContentStore;
     use vell_core::content_view_state::ContentViewState;
     use vell_core::status_bar::StatusBar;
-    use vell_mode::{InputFlow, ModeJobSlot, ModeRegistry};
+    use vell_mode::{InputFlow, ModeRegistry};
     use vell_protocol::ids::{ContentId, ViewId};
 
     #[test]
@@ -1324,28 +1113,6 @@ editor.modes.define({{
                 .evaluate_typescript("file:///after-state.ts", "14 * 3")
                 .unwrap(),
             "42"
-        );
-    }
-
-    #[test]
-    fn rejects_oversized_analysis_input_result() {
-        let mut host = ScriptHost::with_timeouts(Duration::from_secs(5), Duration::from_secs(5));
-        let context = host.context.clone();
-        let source = format!("({{ payload: 'x'.repeat({}) }})", MAX_SCRIPT_JSON_BYTES + 1);
-        let error = host
-            .invoke(ScriptInvocationKind::AnalysisInput, |isolate| {
-                v8::scope_with_context!(scope, isolate, context);
-                let source = v8::String::new(scope, &source).unwrap();
-                let script = v8::Script::compile(scope, source, None).unwrap();
-                let value = script.run(scope).unwrap();
-                v8_to_json(scope, value, "analysis input")
-            })
-            .unwrap_err()
-            .to_string();
-
-        assert!(
-            error.contains("limit exceeded for analysis input"),
-            "{error}"
         );
     }
 
@@ -1869,7 +1636,7 @@ editor.modes.define({
             (
                 "raw-worker-lifecycle",
                 r#"on: { buffer: { job() {} } }"#,
-                "mode buffer.job moved to named analysis",
+                "mode buffer.job is not supported",
             ),
             (
                 "status-analysis",
@@ -1877,27 +1644,9 @@ editor.modes.define({
                 "mode statusBar.analysis is not supported",
             ),
             (
-                "incomplete-analysis",
+                "buffer-analysis-field-rejected",
                 r#"on: { buffer: { analysis: { syntax: {} } } }"#,
-                "mode analysis 'syntax'.worker is required",
-            ),
-            (
-                "invalid-analysis-snapshot",
-                concat!(
-                    r#"on: { buffer: { analysis: { syntax: { "#,
-                    r#"worker: "worker.ts", snapshot: "document", "#,
-                    r#"input() {}, apply() {} } } } }"#,
-                ),
-                "mode analysis 'syntax' has unknown snapshot 'document'",
-            ),
-            (
-                "analysis-host-field",
-                concat!(
-                    r#"on: { buffer: { analysis: { syntax: { "#,
-                    r#"worker: "worker.ts", slot: "parse", "#,
-                    r#"input() {}, apply() {} } } } }"#,
-                ),
-                "mode analysis 'syntax' has unknown field 'slot'",
+                "mode buffer.analysis is not supported",
             ),
             (
                 "invalid-input",
@@ -2256,11 +2005,7 @@ editor.modes.define({{
             .find(|definition| definition.name.as_str() == "syntax-highlighting")
             .unwrap();
         let adapter = highlighting.adapters.buffer.as_ref().unwrap();
-        assert!(adapter.worker.is_none());
-        assert!(adapter.content_job.is_none());
-        assert!(adapter.content_apply_job.is_none());
-        assert_eq!(adapter.analyses.len(), 1);
-        assert_eq!(adapter.analyses[0].slot, "analysis:syntax");
+        assert!(adapter.create_content.is_some());
         assert!(host.diagnostics.borrow().messages.is_empty());
     }
 
@@ -2375,448 +2120,6 @@ editor.modes.define({
             "@deprecated Removed in Vell {}",
             crate::V1_REMOVAL_VERSION
         )));
-    }
-
-    #[test]
-    fn invalid_analysis_input_does_not_publish_mutated_state() {
-        let mut host = ScriptHost::new();
-        host.execute_embedded_plugin(
-            "tree-sitter/invalid-analysis.ts",
-            r#"
-editor.modes.define({
-  name: "invalid-analysis",
-  on: {
-    buffer: {
-      state: () => ({ calls: 0 }),
-      analysis: {
-        syntax: {
-          worker: "worker.ts",
-          snapshot: "text",
-          input(ctx) {
-            ctx.state.calls++;
-            return { text: "reserved" };
-          },
-          apply() {},
-        },
-      },
-    },
-  },
-});
-"#,
-        )
-        .unwrap();
-        let analysis = host.definitions.borrow()[0]
-            .adapters
-            .buffer
-            .as_ref()
-            .unwrap()
-            .analyses[0]
-            .clone();
-        let content = ContentId(0);
-        let mut contents = ContentStore::default();
-        contents
-            .insert(content, Content::Buffer(Buffer::new()))
-            .unwrap();
-        let context = ModeContentContext::new(content, &contents);
-        let state = ScriptModeState::new(serde_json::json!({ "calls": 0 }));
-
-        let error = match host.prepare_analysis_job(&analysis, &context, &state) {
-            Err(error) => error.to_string(),
-            Ok(_) => panic!("invalid analysis input unexpectedly passed validation"),
-        };
-
-        assert!(error.contains("input.text is reserved"), "{error}");
-        assert_eq!(state.data, serde_json::json!({ "calls": 0 }));
-    }
-
-    #[test]
-    fn named_analyses_route_slots_and_reject_stale_results() {
-        let mut host = ScriptHost::new();
-        host.execute_embedded_plugin(
-            "tree-sitter/multiple-analyses.ts",
-            r#"
-editor.modes.define({
-  name: "multiple-analyses",
-  on: {
-    buffer: {
-      state: () => ({ applied: [] }),
-      analysis: {
-        first: {
-          worker: "worker.ts",
-          input: () => ({}),
-          apply(ctx) {
-            ctx.state.applied.push("first");
-            return { contentDecorations: {
-              revision: ctx.revision,
-              spans: [{
-                range: {
-                  start: { line: 0, character: 0 },
-                  end: { line: 0, character: 1 },
-                },
-                face: "first",
-              }],
-            } };
-          },
-        },
-        second: {
-          worker: "worker.ts",
-          input: () => ({}),
-          apply(ctx) {
-            ctx.state.applied.push("second");
-            return { contentDecorations: {
-              revision: ctx.revision,
-              spans: [{
-                range: {
-                  start: { line: 0, character: 1 },
-                  end: { line: 0, character: 2 },
-                },
-                face: "second",
-              }],
-            } };
-          },
-        },
-      },
-    },
-  },
-});
-"#,
-        )
-        .unwrap();
-        let host = Rc::new(RefCell::new(host));
-        let mode = ScriptHost::script_modes(&host).pop().unwrap();
-        let content = ContentId(0);
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("analysis.txt");
-        fs::write(&path, "ab").unwrap();
-        let mut buffer = Buffer::new();
-        buffer.open_path(path.to_str().unwrap()).unwrap();
-        let mut contents = ContentStore::default();
-        contents.insert(content, Content::Buffer(buffer)).unwrap();
-        let context = ModeContentContext::new(content, &contents);
-        let mut state = mode.create_content_state(&context).unwrap();
-
-        let stale = mode
-            .apply_background_job(
-                state.as_mut(),
-                &context,
-                &ModeJobSlot::from("analysis:first"),
-                1,
-                Ok(Box::new(ScriptJobOutput::Response(serde_json::json!({})))),
-            )
-            .unwrap();
-        assert!(!stale);
-
-        let mut initial = mode.take_background_jobs(state.as_mut(), &context);
-        assert_eq!(initial.len(), 2);
-        let first = initial.remove(0);
-        let second = initial.remove(0);
-        let (first_slot, first_version, _) = first.into_parts();
-        assert_eq!(first_slot.as_str(), "analysis:first");
-        assert_eq!(first_version, 0);
-        assert!(
-            mode.apply_background_job(
-                state.as_mut(),
-                &context,
-                &first_slot,
-                first_version,
-                Ok(Box::new(ScriptJobOutput::Response(serde_json::json!({})))),
-            )
-            .unwrap()
-        );
-
-        assert!(
-            mode.take_background_jobs(state.as_mut(), &context)
-                .is_empty()
-        );
-        let (second_slot, second_version, _) = second.into_parts();
-        assert_eq!(second_slot.as_str(), "analysis:second");
-        assert_eq!(second_version, 1);
-        mode.apply_background_job(
-            state.as_mut(),
-            &context,
-            &second_slot,
-            second_version,
-            Ok(Box::new(ScriptJobOutput::Response(serde_json::json!({})))),
-        )
-        .unwrap();
-        assert!(
-            mode.take_background_jobs(state.as_mut(), &context)
-                .is_empty()
-        );
-
-        assert_eq!(
-            script_state(state.as_ref(), mode.name()).unwrap().data,
-            serde_json::json!({ "applied": ["first", "second"] })
-        );
-        assert_eq!(
-            mode.content_decorations(state.as_ref(), &context, RowRange { start: 0, end: 1 })
-                .into_iter()
-                .map(|decoration| decoration.face)
-                .collect::<Vec<_>>(),
-            vec![FaceName::new("first"), FaceName::new("second")]
-        );
-    }
-
-    #[test]
-    fn analysis_apply_invalidates_other_slots_by_their_input_message() {
-        let mut host = ScriptHost::new();
-        host.execute_embedded_plugin(
-            "tree-sitter/analysis-dependencies.ts",
-            r#"
-editor.modes.define({
-  name: "analysis-dependencies",
-  on: {
-    buffer: {
-      state: () => ({ theme: "light" }),
-      analysis: {
-        first: {
-          worker: "worker.ts",
-          input: (ctx) => ({ theme: ctx.state.theme }),
-          apply() {},
-        },
-        second: {
-          worker: "worker.ts",
-          input: () => ({}),
-          apply(ctx) { ctx.state.theme = "dark"; },
-        },
-      },
-    },
-  },
-});
-"#,
-        )
-        .unwrap();
-        let host = Rc::new(RefCell::new(host));
-        let mode = ScriptHost::script_modes(&host).pop().unwrap();
-        let content = ContentId(0);
-        let mut contents = ContentStore::default();
-        contents
-            .insert(content, Content::Buffer(Buffer::new()))
-            .unwrap();
-        let context = ModeContentContext::new(content, &contents);
-        let mut state = mode.create_content_state(&context).unwrap();
-
-        let requests = mode.take_background_jobs(state.as_mut(), &context);
-        assert_eq!(requests.len(), 2);
-        for (request, expected_slot) in requests
-            .into_iter()
-            .zip(["analysis:first", "analysis:second"])
-        {
-            let (slot, version, _) = request.into_parts();
-            assert_eq!(slot.as_str(), expected_slot);
-            mode.apply_background_job(
-                state.as_mut(),
-                &context,
-                &slot,
-                version,
-                Ok(Box::new(ScriptJobOutput::Response(serde_json::json!({})))),
-            )
-            .unwrap();
-        }
-
-        let refreshed = mode
-            .take_background_jobs(state.as_mut(), &context)
-            .into_iter()
-            .next()
-            .unwrap();
-        let (slot, version, _) = refreshed.into_parts();
-        assert_eq!(slot.as_str(), "analysis:first");
-        assert_eq!(version, 2);
-    }
-
-    #[test]
-    fn disabled_analysis_emits_a_new_same_slot_request() {
-        let mut host = ScriptHost::new();
-        host.execute_embedded_plugin(
-            "tree-sitter/disabled-analysis.ts",
-            r#"
-editor.modes.define({
-  name: "disabled-analysis",
-  on: {
-    buffer: {
-      state: () => ({ enabled: true }),
-      analysis: {
-        syntax: {
-          worker: "worker.ts",
-          input: (ctx) => ctx.state.enabled ? {} : undefined,
-          apply() {},
-        },
-      },
-    },
-  },
-});
-"#,
-        )
-        .unwrap();
-        let host = Rc::new(RefCell::new(host));
-        let mode = ScriptHost::script_modes(&host).pop().unwrap();
-        let content = ContentId(0);
-        let mut contents = ContentStore::default();
-        contents
-            .insert(content, Content::Buffer(Buffer::new()))
-            .unwrap();
-        let context = ModeContentContext::new(content, &contents);
-        let mut state = mode.create_content_state(&context).unwrap();
-
-        let first = mode
-            .take_background_jobs(state.as_mut(), &context)
-            .into_iter()
-            .next()
-            .unwrap();
-        let (slot, version, _) = first.into_parts();
-        assert_eq!(slot.as_str(), "analysis:syntax");
-        assert_eq!(version, 0);
-
-        script_state_mut(state.as_mut(), mode.name())
-            .unwrap()
-            .publish_external_data(serde_json::json!({ "enabled": false }));
-        let disabled = mode
-            .take_background_jobs(state.as_mut(), &context)
-            .into_iter()
-            .next()
-            .unwrap();
-        let (slot, version, run) = disabled.into_parts();
-        assert_eq!(slot.as_str(), "analysis:syntax");
-        assert_eq!(version, 1);
-        let output = run(tokio_util::sync::CancellationToken::new()).unwrap();
-        assert!(matches!(
-            *output.downcast::<ScriptJobOutput>().unwrap(),
-            ScriptJobOutput::Disabled
-        ));
-    }
-
-    #[test]
-    fn one_poll_invalidates_every_changed_analysis_slot() {
-        let mut host = ScriptHost::new();
-        host.execute_embedded_plugin(
-            "tree-sitter/stale-analysis-slots.ts",
-            r#"
-editor.modes.define({
-  name: "stale-analysis-slots",
-  on: {
-    buffer: {
-      state: () => ({ theme: "light" }),
-      analysis: {
-        first: {
-          worker: "worker.ts",
-          input: (ctx) => ({ theme: ctx.state.theme }),
-          apply() {},
-        },
-        second: {
-          worker: "worker.ts",
-          input: (ctx) => ({ theme: ctx.state.theme }),
-          apply() {},
-        },
-      },
-    },
-  },
-});
-"#,
-        )
-        .unwrap();
-        let host = Rc::new(RefCell::new(host));
-        let mode = ScriptHost::script_modes(&host).pop().unwrap();
-        let content = ContentId(0);
-        let mut contents = ContentStore::default();
-        contents
-            .insert(content, Content::Buffer(Buffer::new()))
-            .unwrap();
-        let context = ModeContentContext::new(content, &contents);
-        let mut state = mode.create_content_state(&context).unwrap();
-
-        let mut old = mode.take_background_jobs(state.as_mut(), &context);
-        assert_eq!(old.len(), 2);
-        let _old_first = old.remove(0);
-        let (old_second_slot, old_second_version, _) = old.remove(0).into_parts();
-
-        script_state_mut(state.as_mut(), mode.name())
-            .unwrap()
-            .publish_external_data(serde_json::json!({ "theme": "dark" }));
-        let replacements = mode.take_background_jobs(state.as_mut(), &context);
-        assert_eq!(replacements.len(), 2);
-        let replacements = replacements
-            .into_iter()
-            .map(|request| {
-                let (slot, version, _) = request.into_parts();
-                (slot.as_str().to_owned(), version)
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            replacements,
-            vec![
-                ("analysis:first".to_owned(), 2),
-                ("analysis:second".to_owned(), 3),
-            ]
-        );
-
-        assert!(
-            !mode
-                .apply_background_job(
-                    state.as_mut(),
-                    &context,
-                    &old_second_slot,
-                    old_second_version,
-                    Ok(Box::new(ScriptJobOutput::Response(serde_json::json!({})))),
-                )
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn analysis_apply_accepts_its_own_post_state_without_feedback_loop() {
-        let mut host = ScriptHost::new();
-        host.execute_embedded_plugin(
-            "tree-sitter/self-state-analysis.ts",
-            r#"
-editor.modes.define({
-  name: "self-state-analysis",
-  on: {
-    buffer: {
-      state: () => ({ count: 0 }),
-      analysis: {
-        syntax: {
-          worker: "worker.ts",
-          input: (ctx) => ({ count: ctx.state.count }),
-          apply(ctx) { ctx.state.count++; },
-        },
-      },
-    },
-  },
-});
-"#,
-        )
-        .unwrap();
-        let host = Rc::new(RefCell::new(host));
-        let mode = ScriptHost::script_modes(&host).pop().unwrap();
-        let content = ContentId(0);
-        let mut contents = ContentStore::default();
-        contents
-            .insert(content, Content::Buffer(Buffer::new()))
-            .unwrap();
-        let context = ModeContentContext::new(content, &contents);
-        let mut state = mode.create_content_state(&context).unwrap();
-
-        let request = mode
-            .take_background_jobs(state.as_mut(), &context)
-            .remove(0);
-        let (slot, version, _) = request.into_parts();
-        mode.apply_background_job(
-            state.as_mut(),
-            &context,
-            &slot,
-            version,
-            Ok(Box::new(ScriptJobOutput::Response(serde_json::json!({})))),
-        )
-        .unwrap();
-
-        assert_eq!(
-            script_state(state.as_ref(), mode.name()).unwrap().data,
-            serde_json::json!({ "count": 1 })
-        );
-        assert!(
-            mode.take_background_jobs(state.as_mut(), &context)
-                .is_empty()
-        );
     }
 
     #[test]

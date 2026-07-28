@@ -46,8 +46,6 @@ pub(super) enum ScriptInvocationKind {
     Action,
     ContentChanged,
     ContentJob,
-    AnalysisInput,
-    AnalysisApply,
 }
 
 impl ScriptInvocationKind {
@@ -58,8 +56,6 @@ impl ScriptInvocationKind {
             Self::Action => "action",
             Self::ContentChanged => "content changed callback",
             Self::ContentJob => "content job callback",
-            Self::AnalysisInput => "analysis input callback",
-            Self::AnalysisApply => "analysis apply callback",
         }
     }
 

@@ -13,12 +13,10 @@ use vell_protocol::content_query::{FaceDefinition, NamedTextDecoration, RowRange
 use vell_protocol::key_event::KeyEvent;
 
 use super::bridge::view_policy_from_json;
-use super::worker::ScriptWorker;
 use super::{
-    ScriptActionDefinition, ScriptAdapterDefinition, ScriptAnalysisDefinition, ScriptApiVersion,
-    ScriptHost, ScriptJob, ScriptJobOutput, ScriptModeDefinition, ScriptModeState,
-    disabled_script_job, failed_script_job, key_event_arguments, map_decoration_set,
-    script_job_request, script_state, script_state_mut,
+    ScriptActionDefinition, ScriptAdapterDefinition, ScriptApiVersion, ScriptHost,
+    ScriptModeDefinition, ScriptModeState, key_event_arguments, map_decoration_set, script_state,
+    script_state_mut,
 };
 
 pub(super) struct ScriptMode {
@@ -38,11 +36,7 @@ struct ScriptAdapter {
     input: Option<v8::Global<v8::Function>>,
     create_content: Option<v8::Global<v8::Function>>,
     content_changed: Option<v8::Global<v8::Function>>,
-    content_job: Option<v8::Global<v8::Function>>,
-    content_apply_job: Option<v8::Global<v8::Function>>,
     create_view: Option<v8::Global<v8::Function>>,
-    worker: Option<ScriptWorker>,
-    analyses: Vec<ScriptAnalysisDefinition>,
 }
 
 #[derive(Default)]
@@ -77,11 +71,7 @@ impl ScriptAdapter {
             input: definition.input,
             create_content: definition.create_content,
             content_changed: definition.content_changed,
-            content_job: definition.content_job,
-            content_apply_job: definition.content_apply_job,
             create_view: definition.create_view,
-            worker: definition.worker,
-            analyses: definition.analyses,
         }
     }
 }
@@ -279,9 +269,6 @@ impl Mode for ScriptMode {
         let adapter = self.adapter(context.content_kind());
         let vell_core::content::ContentChange::Text(text_change) = change;
         state.decorations = map_decoration_set(&state.decorations, text_change);
-        for decorations in state.analysis_decorations.values_mut() {
-            *decorations = map_decoration_set(decorations, text_change);
-        }
         if let Some(callback) = adapter.content_changed.as_ref() {
             self.host
                 .borrow_mut()
@@ -296,173 +283,24 @@ impl Mode for ScriptMode {
 
     fn take_background_jobs(
         &self,
-        state: &mut dyn ModeState,
-        context: &ModeContentContext<'_>,
+        _state: &mut dyn ModeState,
+        _context: &ModeContentContext<'_>,
     ) -> Vec<ModeJobRequest> {
-        let adapter = self.adapter(context.content_kind());
-        let state = match script_state_mut(state, &self.name) {
-            Ok(state) => state,
-            Err(error) => {
-                return vec![failed_script_job(error.to_string())];
-            }
-        };
-        if let (Some(callback), Some(worker)) =
-            (adapter.content_job.as_ref(), adapter.worker.as_ref())
-        {
-            let job = match self.host.borrow_mut().take_content_job(
-                callback,
-                self.version,
-                context,
-                state,
-            ) {
-                Ok(Some(job)) => job,
-                Ok(None) => return Vec::new(),
-                Err(error) => return vec![failed_script_job(error.to_string())],
-            };
-            return vec![script_job_request(job, worker.clone())];
-        }
-        let Some(content_revision) = context.content_revision().map(|revision| revision.0) else {
-            return Vec::new();
-        };
-        let prepared = adapter
-            .analyses
-            .iter()
-            .map(|analysis| {
-                self.host
-                    .borrow_mut()
-                    .prepare_analysis_job(analysis, context, state)
-            })
-            .collect::<Result<Vec<_>, _>>();
-        let prepared = match prepared {
-            Ok(prepared) => prepared,
-            Err(error) => return vec![failed_script_job(error.to_string())],
-        };
-        let mut requests = Vec::new();
-        for (analysis, prepared) in adapter.analyses.iter().zip(prepared) {
-            if state.reconcile_analysis_input(&analysis.slot, content_revision, &prepared.message) {
-                continue;
-            }
-            let version = state.record_analysis_request(
-                &analysis.slot,
-                content_revision,
-                prepared.message.clone(),
-            );
-            let Some(message) = prepared.message else {
-                requests.push(disabled_script_job(analysis.slot.clone(), version));
-                continue;
-            };
-            requests.push(script_job_request(
-                ScriptJob {
-                    slot: analysis.slot.clone(),
-                    version,
-                    message,
-                    include_text: analysis.snapshot_text,
-                    text_snapshot: prepared.text_snapshot,
-                },
-                analysis.worker.clone(),
-            ));
-        }
-        requests
+        // ponytail: analysis/v1 job dispatch removed in Task 7;
+        // workers now use new Worker() + editor.writeDecorations.
+        Vec::new()
     }
 
     fn apply_background_job(
         &self,
-        state: &mut dyn ModeState,
-        context: &ModeContentContext<'_>,
-        slot: &ModeJobSlot,
-        version: u64,
-        result: ModeJobResult,
+        _state: &mut dyn ModeState,
+        _context: &ModeContentContext<'_>,
+        _slot: &ModeJobSlot,
+        _version: u64,
+        _result: ModeJobResult,
     ) -> Result<bool, ModeError> {
-        let slot = slot.as_str();
-        let adapter = self.adapter(context.content_kind());
-        let state = script_state_mut(state, &self.name)?;
-        let current_revision = context.content_revision().map(|revision| revision.0);
-        let Ok(result) = result else {
-            if adapter.content_apply_job.is_some() {
-                return Ok(false);
-            }
-            let Some(content_revision) = current_revision else {
-                return Ok(false);
-            };
-            if !state.analysis_request_is_current(slot, version, content_revision) {
-                return Ok(false);
-            }
-            return Ok(true);
-        };
-        let result =
-            result
-                .downcast::<ScriptJobOutput>()
-                .map_err(|_| ModeError::CallbackFailed {
-                    mode: self.name.clone(),
-                    message: "script worker returned an invalid host value".to_owned(),
-                })?;
-        let result = match *result {
-            ScriptJobOutput::Response(result) => Some(result),
-            ScriptJobOutput::Disabled => None,
-            ScriptJobOutput::CallbackError(message) => {
-                return Err(ModeError::CallbackFailed {
-                    mode: self.name.clone(),
-                    message,
-                });
-            }
-        };
-        if let Some(callback) = adapter.content_apply_job.as_ref() {
-            return self
-                .host
-                .borrow_mut()
-                .apply_content_job(
-                    callback,
-                    self.version,
-                    context,
-                    state,
-                    version,
-                    result
-                        .as_ref()
-                        .expect("legacy jobs always return a response"),
-                )
-                .map_err(|error| ModeError::CallbackFailed {
-                    mode: self.name.clone(),
-                    message: error.to_string(),
-                });
-        }
-        let Some(analysis) = adapter
-            .analyses
-            .iter()
-            .find(|analysis| analysis.slot == slot)
-        else {
-            return Ok(false);
-        };
-        let Some(content_revision) = current_revision else {
-            return Ok(false);
-        };
-        if !state.analysis_request_is_current(slot, version, content_revision) {
-            return Ok(false);
-        }
-        if let Some(result) = result {
-            let previous_state = state.data.clone();
-            self.host
-                .borrow_mut()
-                .apply_analysis_result(analysis, context, state, &result)
-                .map_err(|error| ModeError::CallbackFailed {
-                    mode: self.name.clone(),
-                    message: error.to_string(),
-                })?;
-            if state.data != previous_state {
-                state.mark_analysis_output_change();
-            }
-        }
-        let accepted = self
-            .host
-            .borrow_mut()
-            .prepare_analysis_job(analysis, context, state)
-            .map_err(|error| ModeError::CallbackFailed {
-                mode: self.name.clone(),
-                message: error.to_string(),
-            })?;
-        state.accept_analysis_input(slot, version, content_revision, accepted.message);
-        // Poll all named analyses after any completion. Their input messages are
-        // the dependency signatures, so only changed inputs produce new jobs.
-        Ok(true)
+        // ponytail: analysis/v1 job apply removed in Task 7.
+        Ok(false)
     }
 
     fn content_decorations(
@@ -474,17 +312,8 @@ impl Mode for ScriptMode {
         let Some(snapshot) = context.buffer().and_then(|context| context.text_snapshot()) else {
             return Vec::new();
         };
-        let adapter = self.adapter(context.content_kind());
         let mut decorations = script_state(content_state, &self.name)
-            .map(|state| {
-                let mut decorations = state.decorations.visible(&snapshot, visible_rows);
-                for analysis in &adapter.analyses {
-                    if let Some(layer) = state.analysis_decorations.get(&analysis.slot) {
-                        decorations.extend(layer.visible(&snapshot, visible_rows));
-                    }
-                }
-                decorations
-            })
+            .map(|state| state.decorations.visible(&snapshot, visible_rows))
             .unwrap_or_default();
         if let Some(revision) = context.content_revision() {
             let content_id = context.content_id();

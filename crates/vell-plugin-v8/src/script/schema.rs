@@ -264,16 +264,7 @@ fn parse_v1_adapter(
     let input_action = parse_input_action(scope, object, &actions)?;
     let create_content = optional_factory(scope, object, "content")?;
     let content_changed = optional_section_callback(scope, object, "content", "changed")?;
-    let content_job = optional_section_callback(scope, object, "content", "job")?;
-    let content_apply_job = optional_section_callback(scope, object, "content", "applyJob")?;
     let create_view = optional_factory(scope, object, "view")?;
-    let worker = parse_worker(scope, object)?;
-    if content_job.is_some() != worker.is_some() || content_apply_job.is_some() != worker.is_some()
-    {
-        return Err(ScriptError::new(
-            "mode worker, content.job, and content.applyJob must be defined together",
-        ));
-    }
     Ok(ScriptAdapterDefinition {
         actions,
         bindings,
@@ -281,11 +272,7 @@ fn parse_v1_adapter(
         input: None,
         create_content,
         content_changed,
-        content_job,
-        content_apply_job,
         create_view,
-        worker,
-        analyses: Vec::new(),
     })
 }
 
@@ -351,20 +338,17 @@ fn parse_v2_adapter(
         )));
     }
     let input = optional_function(scope, object, "input")?;
-    let (content_changed, analyses) = match kind {
+    let content_changed = match kind {
         ContentKind::Buffer => {
-            for field in ["worker", "job", "applyJob"] {
+            for field in ["worker", "job", "applyJob", "analysis"] {
                 if property(scope, object, field).is_some_and(|value| !value.is_null_or_undefined())
                 {
                     return Err(ScriptError::new(format!(
-                        "mode buffer.{field} moved to named analysis"
+                        "mode buffer.{field} is not supported"
                     )));
                 }
             }
-            (
-                optional_function(scope, object, "changed")?,
-                parse_analyses(scope, object)?,
-            )
+            optional_function(scope, object, "changed")?
         }
         ContentKind::StatusBar => {
             for field in ["changed", "worker", "job", "applyJob", "analysis"] {
@@ -375,7 +359,7 @@ fn parse_v2_adapter(
                     )));
                 }
             }
-            (None, Vec::new())
+            None
         }
     };
     Ok(ScriptAdapterDefinition {
@@ -385,101 +369,8 @@ fn parse_v2_adapter(
         actions,
         create_content: optional_function(scope, object, "state")?,
         content_changed,
-        content_job: None,
-        content_apply_job: None,
         create_view: optional_function(scope, object, "viewState")?,
-        worker: None,
-        analyses,
     })
-}
-
-fn parse_analyses(
-    scope: &mut v8::PinScope,
-    adapter: v8::Local<v8::Object>,
-) -> Result<Vec<ScriptAnalysisDefinition>, ScriptError> {
-    let Some(value) = property(scope, adapter, "analysis") else {
-        return Ok(Vec::new());
-    };
-    if value.is_null_or_undefined() {
-        return Ok(Vec::new());
-    }
-    let object = v8::Local::<v8::Object>::try_from(value)
-        .map_err(|_| ScriptError::new("mode buffer.analysis must be an object"))?;
-    let keys = object
-        .get_own_property_names(scope, Default::default())
-        .ok_or_else(|| ScriptError::new("failed to enumerate mode analyses"))?;
-    let mut analyses = Vec::new();
-    for index in 0..keys.length() {
-        let key = keys
-            .get_index(scope, index)
-            .ok_or_else(|| ScriptError::new("failed to read analysis name"))?;
-        let name = key.to_rust_string_lossy(scope);
-        if name.is_empty() {
-            return Err(ScriptError::new("mode analysis name must not be empty"));
-        }
-        let value = object
-            .get(scope, key)
-            .ok_or_else(|| ScriptError::new(format!("failed to read analysis '{name}'")))?;
-        let definition = v8::Local::<v8::Object>::try_from(value)
-            .map_err(|_| ScriptError::new(format!("mode analysis '{name}' must be an object")))?;
-        let fields = definition
-            .get_own_property_names(scope, Default::default())
-            .ok_or_else(|| ScriptError::new(format!("failed to enumerate analysis '{name}'")))?;
-        for field_index in 0..fields.length() {
-            let field = fields
-                .get_index(scope, field_index)
-                .ok_or_else(|| ScriptError::new("failed to read analysis field"))?
-                .to_rust_string_lossy(scope);
-            if !matches!(field.as_str(), "worker" | "snapshot" | "input" | "apply") {
-                return Err(ScriptError::new(format!(
-                    "mode analysis '{name}' has unknown field '{field}'"
-                )));
-            }
-        }
-        let snapshot_text = match optional_string(scope, definition, "snapshot")? {
-            None => false,
-            Some(snapshot) if snapshot == "text" => true,
-            Some(snapshot) => {
-                return Err(ScriptError::new(format!(
-                    "mode analysis '{name}' has unknown snapshot '{snapshot}'"
-                )));
-            }
-        };
-        let worker = parse_worker(scope, definition)?.ok_or_else(|| {
-            ScriptError::new(format!("mode analysis '{name}'.worker is required"))
-        })?;
-        let input = optional_function(scope, definition, "input")?
-            .ok_or_else(|| ScriptError::new(format!("mode analysis '{name}'.input is required")))?;
-        let apply = optional_function(scope, definition, "apply")?
-            .ok_or_else(|| ScriptError::new(format!("mode analysis '{name}'.apply is required")))?;
-        analyses.push(ScriptAnalysisDefinition {
-            slot: format!("analysis:{name}"),
-            input,
-            apply,
-            worker,
-            snapshot_text,
-        });
-    }
-    Ok(analyses)
-}
-
-fn parse_worker(
-    scope: &mut v8::PinScope,
-    object: v8::Local<v8::Object>,
-) -> Result<Option<ScriptWorker>, ScriptError> {
-    optional_string(scope, object, "worker")?
-        .map(|entry| {
-            let root = scope
-                .get_slot::<Rc<RefCell<Option<String>>>>()
-                .and_then(|root| root.borrow().clone())
-                .ok_or_else(|| {
-                    ScriptError::new(
-                        "mode workers currently require an embedded plugin resource root",
-                    )
-                })?;
-            ScriptWorker::start(root, entry)
-        })
-        .transpose()
 }
 
 fn parse_actions(

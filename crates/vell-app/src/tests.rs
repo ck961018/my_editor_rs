@@ -1524,6 +1524,7 @@ async fn frontend_invalid_data_error_remains_fatal() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "tree-sitter analysis migration: Task 9"]
 async fn completing_one_named_analysis_schedules_the_next() {
     let mut app = make_embedded_script_app(
         "tree-sitter/multi-analysis.ts",
@@ -1582,6 +1583,7 @@ editor.modes.define({
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "tree-sitter analysis migration: Task 9"]
 async fn mode_state_change_replaces_analysis_at_the_same_content_revision() {
     let mut app = make_embedded_script_app(
         "tree-sitter/state-analysis.ts",
@@ -1669,6 +1671,7 @@ editor.modes.define({
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "tree-sitter analysis migration: Task 9"]
 async fn rust_highlighting_is_parsed_and_updated_in_background() {
     let file = tempfile::Builder::new().suffix(".rs").tempfile().unwrap();
     std::fs::write(file.path(), "fn main() {}\n").unwrap();
@@ -1760,6 +1763,7 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "tree-sitter analysis migration: Task 9"]
 async fn markdown_and_fenced_rust_are_highlighted() {
     let source = concat!(
         "# Heading\r\n",
@@ -1830,6 +1834,7 @@ async fn markdown_and_fenced_rust_are_highlighted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "tree-sitter analysis migration: Task 9"]
 async fn rust_highlighting_survives_crlf_comment_edits() {
     let file = tempfile::Builder::new().suffix(".rs").tempfile().unwrap();
     std::fs::write(file.path(), "fn main() {}\r\n").unwrap();

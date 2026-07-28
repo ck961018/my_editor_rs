@@ -26,34 +26,6 @@ editor.modes.define<HighlightState, null, HighlightResult>({
           language: languageFor(context.resourceName),
         };
       },
-      analysis: {
-        syntax: {
-          worker: "worker.ts",
-          snapshot: "text",
-          input(context) {
-            if (
-              context.state.language === null ||
-              context.revision === undefined
-            ) {
-              return;
-            }
-            return {
-              contentId: context.contentId,
-              language: context.state.language,
-              revision: context.revision,
-            };
-          },
-          apply(context) {
-            const result = context.arguments;
-            return {
-              contentDecorations: {
-                revision: context.revision,
-                spans: result.spans,
-              },
-            };
-          },
-        },
-      },
     },
   },
 });

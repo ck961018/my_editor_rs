@@ -19,14 +19,20 @@ use super::{
     throw_dom_exception, throw_script_error, transpile_typescript, v8_to_json,
 };
 
+// ponytail: legacy ScriptWorker + editor.worker.onMessage kept for
+// tree-sitter (Task 9 migrates it). Removed after Task 9.
+#[allow(dead_code)]
 const RESPONSE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+#[allow(dead_code)]
 const WORKER_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub(super) struct ScriptWorker {
     sender: mpsc::Sender<WorkerRequest>,
 }
 
+#[allow(dead_code)]
 struct WorkerRequest {
     message: serde_json::Value,
     cancellation: CancellationToken,
@@ -39,6 +45,7 @@ struct WorkerResources {
 
 type WorkerHandler = Rc<RefCell<Option<v8::Global<v8::Function>>>>;
 
+#[allow(dead_code)]
 impl ScriptWorker {
     pub(super) fn start(root: String, entry: String) -> Result<Self, ScriptError> {
         let path = resolve_asset_path(&root, &entry)?;
@@ -89,6 +96,7 @@ impl ScriptWorker {
     }
 }
 
+#[allow(dead_code)]
 fn run_worker(
     root: String,
     path: String,
@@ -163,6 +171,7 @@ fn run_worker(
     }
 }
 
+#[allow(dead_code)]
 fn execute_request_with_watchdog(
     isolate: &mut v8::OwnedIsolate,
     context: v8::Global<v8::Context>,
@@ -322,6 +331,7 @@ fn await_value<'scope>(
     }
 }
 
+#[allow(dead_code)]
 fn worker_on_message(
     scope: &mut v8::PinScope,
     arguments: v8::FunctionCallbackArguments,
