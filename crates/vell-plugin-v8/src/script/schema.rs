@@ -25,7 +25,70 @@ pub(super) fn install_editor_api(scope: &mut v8::PinScope<'_, '_>) {
     set_object(scope, editor, "modes", modes);
     set_object(scope, editor, "theme", theme);
     set_object(scope, editor, "faces", faces);
+    let write_decorations_name = v8::String::new(scope, "writeDecorations").unwrap();
+    let write_decorations = v8::FunctionTemplate::new(scope, write_decorations)
+        .get_function(scope)
+        .unwrap();
+    editor.set(
+        scope,
+        write_decorations_name.into(),
+        write_decorations.into(),
+    );
     set_object(scope, global, "editor", editor);
+}
+
+fn write_decorations(
+    scope: &mut v8::PinScope,
+    arguments: v8::FunctionCallbackArguments,
+    mut return_value: v8::ReturnValue,
+) {
+    let revision = arguments.get(0);
+    let Some(revision) = revision.number_value(scope) else {
+        throw_script_error(scope, "editor.writeDecorations expects a revision number");
+        return;
+    };
+    let revision = revision as u64;
+    let spans = match v8::Local::<v8::Array>::try_from(arguments.get(1)) {
+        Ok(array) => array,
+        Err(_) => {
+            throw_script_error(scope, "editor.writeDecorations expects a spans array");
+            return;
+        }
+    };
+    let Some(buffer) = scope
+        .get_slot::<Rc<RefCell<WorkerDecorationBuffer>>>()
+        .cloned()
+    else {
+        throw_script_error(scope, "worker decoration buffer is unavailable");
+        return;
+    };
+    let buffer_ref = buffer.borrow();
+    let Some((content_id, current_revision)) = buffer_ref.current() else {
+        throw_script_error(
+            scope,
+            "editor.writeDecorations called with no active content",
+        );
+        return;
+    };
+    if revision != current_revision {
+        // Stale: silently drop.
+        return;
+    }
+    let Some(snapshot) = buffer_ref.snapshot() else {
+        throw_script_error(scope, "editor.writeDecorations requires a text snapshot");
+        return;
+    };
+    match parse_decoration_spans(scope, spans, snapshot) {
+        Ok(decorations) => {
+            let set = DecorationSet::new(decorations);
+            drop(buffer_ref);
+            buffer.borrow_mut().write(content_id, revision, set);
+        }
+        Err(error) => {
+            throw_script_error(scope, &error.to_string());
+        }
+    }
+    return_value.set_undefined();
 }
 
 fn select_theme(

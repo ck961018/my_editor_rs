@@ -21,6 +21,7 @@ use vell_protocol::content_query::{
     Color, Face, FaceDefinition, FaceName, FaceOverride, FacePatch, FaceValue, NamedTextDecoration,
     RowRange, ThemeName, UnderlineStyle,
 };
+use vell_protocol::ids::ContentId;
 use vell_protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
 
 mod bridge;
@@ -257,6 +258,57 @@ impl DecorationSet {
             .filter(|decoration| decoration.end.char_index > range.start)
             .cloned()
             .collect()
+    }
+}
+
+/// Buffer for `editor.writeDecorations` calls from worker `onmessage`
+/// listeners. Stores decorations keyed by `ContentId` with the content
+/// revision they were written at. Stale entries (revision mismatch) are
+/// dropped on both write and read.
+#[derive(Default)]
+pub(super) struct WorkerDecorationBuffer {
+    current: Option<(ContentId, u64)>,
+    snapshot: Option<vell_core::text_snapshot::TextSnapshot>,
+    entries: HashMap<ContentId, (u64, DecorationSet)>,
+}
+
+impl WorkerDecorationBuffer {
+    /// Record the latest known `(ContentId, revision)` and text snapshot
+    /// from a Mode action frame. The sink callback uses this to validate
+    /// incoming writes and parse positions.
+    fn track_current(
+        &mut self,
+        content_id: ContentId,
+        revision: u64,
+        snapshot: Option<vell_core::text_snapshot::TextSnapshot>,
+    ) {
+        self.current = Some((content_id, revision));
+        self.snapshot = snapshot;
+    }
+
+    /// Current `(ContentId, revision)` or `None` if no Mode action has run.
+    fn current(&self) -> Option<(ContentId, u64)> {
+        self.current
+    }
+
+    /// Snapshot from the last Mode action frame, or `None`.
+    fn snapshot(&self) -> Option<&vell_core::text_snapshot::TextSnapshot> {
+        self.snapshot.as_ref()
+    }
+
+    /// Write decorations for the given `revision`. Silently drops if the
+    /// revision doesn't match the current content revision.
+    fn write(&mut self, content_id: ContentId, revision: u64, set: DecorationSet) {
+        if self.current.is_some_and(|(_, rev)| rev == revision) {
+            self.entries.insert(content_id, (revision, set));
+        }
+    }
+
+    /// Read decorations for `content_id` if the stored revision matches
+    /// `current_revision`. Returns `None` if stale or absent.
+    fn read(&self, content_id: ContentId, current_revision: u64) -> Option<&DecorationSet> {
+        let (stored_rev, set) = self.entries.get(&content_id)?;
+        (*stored_rev == current_revision).then_some(set)
     }
 }
 
@@ -859,6 +911,46 @@ fn parse_decorations_property(
     }
     decorations.sort_by_key(|decoration| (decoration.start.char_index, decoration.end.char_index));
     Ok(Some(decorations))
+}
+
+/// Parse a raw spans array (as passed to `editor.writeDecorations`)
+/// into sorted `NamedTextDecoration`s. Unlike `parse_decorations_property`,
+/// this takes the spans array directly — revision validation is the
+/// caller's responsibility.
+pub(super) fn parse_decoration_spans(
+    scope: &mut v8::PinScope,
+    spans: v8::Local<v8::Array>,
+    snapshot: &vell_core::text_snapshot::TextSnapshot,
+) -> Result<Vec<NamedTextDecoration>, ScriptError> {
+    ensure_count(
+        "decorations",
+        spans.length() as usize,
+        MAX_SCRIPT_DECORATIONS,
+    )?;
+    let mut decorations = Vec::with_capacity(spans.length() as usize);
+    for index in 0..spans.length() {
+        let span = spans
+            .get_index(scope, index)
+            .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+            .ok_or_else(|| ScriptError::new(format!("decoration {index} must be an object")))?;
+        let range = required_object(scope, span, "range")?;
+        let start_value = required_object(scope, range, "start")?;
+        let start = parse_position(scope, start_value, snapshot)?;
+        let end_value = required_object(scope, range, "end")?;
+        let end = parse_position(scope, end_value, snapshot)?;
+        if start >= end {
+            return Err(ScriptError::new(format!(
+                "decoration {index} must have a non-empty ordered range"
+            )));
+        }
+        decorations.push(NamedTextDecoration {
+            start: vell_protocol::selection::TextOffset { char_index: start },
+            end: vell_protocol::selection::TextOffset { char_index: end },
+            face: FaceName::new(required_string(scope, span, "face")?),
+        });
+    }
+    decorations.sort_by_key(|decoration| (decoration.start.char_index, decoration.end.char_index));
+    Ok(decorations)
 }
 
 #[cfg(test)]
@@ -2858,5 +2950,219 @@ editor.modes.define({
             .to_string();
 
         assert!(error.contains("current action"), "{error}");
+    }
+
+    #[test]
+    fn write_decorations_installs_for_current_revision() {
+        let mut host = ScriptHost::new();
+        host.execute_embedded_plugin(
+            "tree-sitter/write-decorations.ts",
+            r#"
+editor.modes.define({
+  name: "write-decorations",
+  on: {
+    buffer: {
+      state: () => ({}),
+      commands: {
+        touch() {},
+      },
+    },
+  },
+});
+"#,
+        )
+        .unwrap();
+        let host = Rc::new(RefCell::new(host));
+        let mode = ScriptHost::script_modes(&host).pop().unwrap();
+        let content_id = ContentId(0);
+        let view_id = ViewId(0);
+        let mut contents = ContentStore::default();
+        contents
+            .insert(content_id, Content::Buffer(Buffer::new()))
+            .unwrap();
+        let view_state_data = contents.create_view_state(content_id).unwrap();
+        let context =
+            ModeViewContext::new(view_id, content_id, &view_state_data, &contents).unwrap();
+        let content_context = ModeContentContext::new(content_id, &contents);
+        let mut content_state = mode.create_content_state(&content_context).unwrap();
+        let mut view_state = mode
+            .create_view_state(content_state.as_ref(), &context)
+            .unwrap();
+
+        // Execute a content action to set the current revision.
+        mode.execute_view_with_arguments(
+            content_state.as_mut(),
+            view_state.as_mut(),
+            &context,
+            &ModeActionName::new("touch"),
+            &ModeValue::Null,
+        )
+        .unwrap();
+
+        // Now call editor.writeDecorations with the current revision (0).
+        host.borrow_mut()
+            .execute_typescript(
+                "file:///test.ts",
+                r#"
+editor.writeDecorations(0, []);
+"#,
+            )
+            .unwrap();
+
+        // With 0 decorations, content_decorations should be empty.
+        let decorations = mode.content_decorations(
+            content_state.as_ref(),
+            &content_context,
+            RowRange { start: 0, end: 1 },
+        );
+        assert!(decorations.is_empty());
+    }
+
+    #[test]
+    fn write_decorations_drops_stale_revision() {
+        let mut host = ScriptHost::new();
+        host.execute_embedded_plugin(
+            "tree-sitter/write-decorations-stale.ts",
+            r#"
+editor.modes.define({
+  name: "write-decorations-stale",
+  on: {
+    buffer: {
+      state: () => ({}),
+      commands: {
+        touch() {},
+      },
+    },
+  },
+});
+"#,
+        )
+        .unwrap();
+        let host = Rc::new(RefCell::new(host));
+        let mode = ScriptHost::script_modes(&host).pop().unwrap();
+        let content_id = ContentId(0);
+        let view_id = ViewId(0);
+        let mut contents = ContentStore::default();
+        contents
+            .insert(content_id, Content::Buffer(Buffer::new()))
+            .unwrap();
+        let view_state_data = contents.create_view_state(content_id).unwrap();
+        let context =
+            ModeViewContext::new(view_id, content_id, &view_state_data, &contents).unwrap();
+        let content_context = ModeContentContext::new(content_id, &contents);
+        let mut content_state = mode.create_content_state(&content_context).unwrap();
+        let mut view_state = mode
+            .create_view_state(content_state.as_ref(), &context)
+            .unwrap();
+
+        // Execute a content action to set the current revision (0).
+        mode.execute_view_with_arguments(
+            content_state.as_mut(),
+            view_state.as_mut(),
+            &context,
+            &ModeActionName::new("touch"),
+            &ModeValue::Null,
+        )
+        .unwrap();
+
+        // Call writeDecorations with a stale revision (99).
+        host.borrow_mut()
+            .execute_typescript(
+                "file:///test.ts",
+                r#"
+editor.writeDecorations(99, [{
+  range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+  face: "test",
+}]);
+"#,
+            )
+            .unwrap();
+
+        // Stale write should be dropped — no decorations.
+        let decorations = mode.content_decorations(
+            content_state.as_ref(),
+            &content_context,
+            RowRange { start: 0, end: 1 },
+        );
+        assert!(decorations.is_empty());
+    }
+
+    #[test]
+    fn write_decorations_visible_in_content_decorations() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("test.txt");
+        fs::write(&path, "hello\nworld\n").unwrap();
+        let mut host = ScriptHost::new();
+        host.execute_embedded_plugin(
+            "tree-sitter/write-decorations-visible.ts",
+            r#"
+editor.modes.define({
+  name: "write-decorations-visible",
+  on: {
+    buffer: {
+      state: () => ({}),
+      commands: {
+        touch() {},
+      },
+    },
+  },
+});
+"#,
+        )
+        .unwrap();
+        let host = Rc::new(RefCell::new(host));
+        let mode = ScriptHost::script_modes(&host).pop().unwrap();
+        let content_id = ContentId(0);
+        let view_id = ViewId(0);
+        let mut buffer = Buffer::new();
+        buffer.open_path(path.to_str().unwrap()).unwrap();
+        let mut contents = ContentStore::default();
+        contents
+            .insert(content_id, Content::Buffer(buffer))
+            .unwrap();
+        let view_state_data = contents.create_view_state(content_id).unwrap();
+        let context =
+            ModeViewContext::new(view_id, content_id, &view_state_data, &contents).unwrap();
+        let content_context = ModeContentContext::new(content_id, &contents);
+        let mut content_state = mode.create_content_state(&content_context).unwrap();
+        let mut view_state = mode
+            .create_view_state(content_state.as_ref(), &context)
+            .unwrap();
+
+        // Execute a content action to set the current revision.
+        mode.execute_view_with_arguments(
+            content_state.as_mut(),
+            view_state.as_mut(),
+            &context,
+            &ModeActionName::new("touch"),
+            &ModeValue::Null,
+        )
+        .unwrap();
+
+        // Get the current revision from the buffer.
+        let revision = contents.revision(content_id).unwrap().0;
+
+        // Call writeDecorations with a valid span.
+        host.borrow_mut()
+            .execute_typescript(
+                "file:///test.ts",
+                &format!(
+                    r#"
+editor.writeDecorations({revision}, [{{
+  range: {{ start: {{ line: 0, character: 0 }}, end: {{ line: 0, character: 5 }} }},
+  face: "syntax.test",
+}}]);
+"#,
+                ),
+            )
+            .unwrap();
+
+        let decorations = mode.content_decorations(
+            content_state.as_ref(),
+            &content_context,
+            RowRange { start: 0, end: 2 },
+        );
+        assert_eq!(decorations.len(), 1);
+        assert_eq!(decorations[0].face, FaceName::new("syntax.test"));
     }
 }

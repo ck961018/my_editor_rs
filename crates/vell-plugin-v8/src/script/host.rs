@@ -14,6 +14,7 @@ pub struct ScriptHost {
     pub(super) configuration: Rc<RefCell<ScriptConfigurationDraft>>,
     plugin_root: Rc<RefCell<Option<String>>>,
     primitives: Rc<RefCell<PrimitiveRuntime>>,
+    pub(super) worker_decorations: Rc<RefCell<WorkerDecorationBuffer>>,
 }
 
 impl Default for ScriptHost {
@@ -71,6 +72,8 @@ impl ScriptHost {
         }
         let worker_registry: worker::WorkerRegistrySlot = Rc::new(RefCell::new(Vec::new()));
         isolate.set_slot(worker_registry);
+        let worker_decorations = Rc::new(RefCell::new(WorkerDecorationBuffer::default()));
+        isolate.set_slot(worker_decorations.clone());
         let heap_limit = install_heap_limit(&mut isolate);
 
         Self {
@@ -85,6 +88,7 @@ impl ScriptHost {
             configuration,
             plugin_root,
             primitives,
+            worker_decorations,
         }
     }
 
@@ -300,6 +304,13 @@ impl ScriptHost {
         let primitives = self.primitives.clone();
         let current_content = content_state.data.clone();
         let current_view = view_state.data.clone();
+        if let Some(revision) = context.content_revision() {
+            self.worker_decorations.borrow_mut().track_current(
+                context.content_id(),
+                revision.0,
+                context.buffer().and_then(|context| context.text_snapshot()),
+            );
+        }
         let (result, next_content, next_view, content_decorations, view_decorations) = self
             .invoke(ScriptInvocationKind::Action, |isolate| {
                 v8::scope_with_context!(scope, isolate, v8_context);

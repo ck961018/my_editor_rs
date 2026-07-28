@@ -475,7 +475,7 @@ impl Mode for ScriptMode {
             return Vec::new();
         };
         let adapter = self.adapter(context.content_kind());
-        script_state(content_state, &self.name)
+        let mut decorations = script_state(content_state, &self.name)
             .map(|state| {
                 let mut decorations = state.decorations.visible(&snapshot, visible_rows);
                 for analysis in &adapter.analyses {
@@ -485,7 +485,20 @@ impl Mode for ScriptMode {
                 }
                 decorations
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if let Some(revision) = context.content_revision() {
+            let content_id = context.content_id();
+            if let Some(set) = self
+                .host
+                .borrow()
+                .worker_decorations
+                .borrow()
+                .read(content_id, revision.0)
+            {
+                decorations.extend(set.visible(&snapshot, visible_rows));
+            }
+        }
+        decorations
     }
 
     fn view_decorations(
