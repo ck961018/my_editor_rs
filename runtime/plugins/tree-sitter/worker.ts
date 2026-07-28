@@ -359,5 +359,9 @@ self.onmessage = async (e: MessageEvent<ParseMessage>) => {
   const spans = message.language === "rust"
     ? highlightRust(message.contentId, message.text, 0, positions, rust, rustQuery)
     : markdownSpans(message, positions, rust, rustQuery);
-  self.postMessage({ revision: message.revision, spans });
+  self.postMessage({
+    contentId: message.contentId,
+    revision: message.revision,
+    spans,
+  });
 };

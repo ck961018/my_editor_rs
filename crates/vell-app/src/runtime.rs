@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fmt;
 use std::future;
 use std::io;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::action::{TransactionIntent, ViewAction};
 use crate::application::App;
@@ -189,6 +189,10 @@ impl<F: Frontend> App<F> {
         self.session
             .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
         self.render()?;
+        // ponytail: poll until the platform exposes a cross-crate wake channel.
+        let mut background_tick = tokio::time::interval(Duration::from_millis(16));
+        background_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        background_tick.tick().await;
         loop {
             let input_deadline = self
                 .session
@@ -197,6 +201,16 @@ impl<F: Frontend> App<F> {
             let should_render = tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => break,
+                _ = background_tick.tick() => {
+                    let changed = self.kernel.schedule_mode_jobs();
+                    if changed {
+                        self.session.refresh_presentation(
+                            self.kernel.contents(),
+                            self.kernel.content_modes(),
+                        );
+                    }
+                    changed
+                }
                 _ = wait_for_input_deadline(input_deadline) => {
                     match self.handle_input_timeout() {
                         Ok(()) => true,

@@ -6,25 +6,27 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use deno_ast::ModuleSpecifier;
 use tokio_util::sync::CancellationToken;
 
 pub(super) use super::worker_channel::{WorkerChannelMessage, WorkerHandle};
 pub(crate) use super::worker_quota::{QuotaError, QuotaHandle, WorkerQuota};
 use super::{
-    AssetSource, DEFAULT_PLUGIN_ASSETS, InvocationWatchdog, ModuleMap, SCRIPT_HEAP_LIMIT_BYTES,
-    SCRIPT_STARTUP_TIMEOUT, ScriptError, ScriptInvocationKind, WatchdogOutcome,
-    call_script_callback, current_exception, host_import_module_dynamically,
-    host_initialize_import_meta, initialize_v8, install_heap_limit, json_to_v8, load_module_tree,
-    recover_heap_limit, resolve_module, set_object, throw_dom_exception, throw_script_error,
-    v8_to_json,
+    AssetSource, DEFAULT_PLUGIN_ASSETS, InvocationWatchdog, MAX_SCRIPT_INPUT_BYTES, ModuleMap,
+    SCRIPT_HEAP_LIMIT_BYTES, SCRIPT_STARTUP_TIMEOUT, ScriptError, ScriptInvocationKind,
+    WatchdogOutcome, call_script_callback, current_exception, ensure_size,
+    host_import_module_dynamically, host_initialize_import_meta, initialize_v8, install_heap_limit,
+    json_to_v8, load_module_tree, recover_heap_limit, resolve_module, set_object,
+    throw_dom_exception, throw_script_error, v8_to_json,
 };
 #[cfg(test)]
-use super::{MAX_SCRIPT_SOURCE_BYTES, ensure_size, transpile_typescript};
+use super::{MAX_SCRIPT_SOURCE_BYTES, transpile_typescript};
 
 const WORKER_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct WorkerResources {
     root: String,
+    source: AssetSource,
 }
 
 fn evaluate_worker(
@@ -87,7 +89,7 @@ fn worker_read_text(
     mut return_value: v8::ReturnValue,
 ) {
     let result = read_resource(scope, arguments.get(0)).and_then(|(path, bytes)| {
-        let text = std::str::from_utf8(bytes)
+        let text = std::str::from_utf8(&bytes)
             .map_err(|error| ScriptError::new(format!("invalid UTF-8 in {path}: {error}")))?;
         v8::String::new(scope, text)
             .map(v8::Local::<v8::Value>::from)
@@ -106,7 +108,7 @@ fn worker_read_binary(
 ) {
     let result = read_resource(scope, arguments.get(0)).and_then(|(_, bytes)| {
         let length = bytes.len();
-        let store = v8::ArrayBuffer::new_backing_store_from_vec(bytes.to_vec()).make_shared();
+        let store = v8::ArrayBuffer::new_backing_store_from_vec(bytes).make_shared();
         let buffer = v8::ArrayBuffer::with_backing_store(scope, &store);
         v8::Uint8Array::new(scope, buffer, 0, length)
             .map(v8::Local::<v8::Value>::from)
@@ -121,7 +123,7 @@ fn worker_read_binary(
 fn read_resource<'scope>(
     scope: &mut v8::PinScope<'scope, '_>,
     value: v8::Local<v8::Value>,
-) -> Result<(String, &'static [u8]), ScriptError> {
+) -> Result<(String, Vec<u8>), ScriptError> {
     if !value.is_string() {
         return Err(ScriptError::new("plugin resource path must be a string"));
     }
@@ -129,7 +131,14 @@ fn read_resource<'scope>(
         .get_slot::<WorkerResources>()
         .ok_or_else(|| ScriptError::new("plugin resources are unavailable"))?;
     let path = resolve_asset_path(&resources.root, &value.to_rust_string_lossy(scope))?;
-    Ok((path.clone(), asset(&path)?))
+    let bytes = match resources.source {
+        AssetSource::Embedded => asset(&path)?.to_vec(),
+        AssetSource::Filesystem => std::fs::read(&path).map_err(|error| {
+            ScriptError::new(format!("failed to read plugin resource {path}: {error}"))
+        })?,
+    };
+    ensure_size("plugin resource", bytes.len(), MAX_SCRIPT_INPUT_BYTES)?;
+    Ok((path, bytes))
 }
 
 fn resolve_asset_path(root: &str, relative: &str) -> Result<String, ScriptError> {
@@ -164,7 +173,28 @@ fn asset(path: &str) -> Result<&'static [u8], ScriptError> {
 /// The `QuotaHandle` is held for the worker's lifetime (Drop releases).
 /// `plugin_id` — identity for per-plugin quota tracking.
 /// `depth` — current nesting depth (0 = top-level).
+#[cfg(test)]
 pub(super) fn spawn_worker(
+    root: String,
+    entry: String,
+    cancellation: CancellationToken,
+    quota: Option<Arc<WorkerQuota>>,
+    plugin_id: String,
+    depth: usize,
+) -> Result<WorkerHandle, ScriptError> {
+    spawn_worker_with_source(
+        AssetSource::Embedded,
+        root,
+        entry,
+        cancellation,
+        quota,
+        plugin_id,
+        depth,
+    )
+}
+
+fn spawn_worker_with_source(
+    source: AssetSource,
     root: String,
     entry: String,
     cancellation: CancellationToken,
@@ -187,8 +217,17 @@ pub(super) fn spawn_worker(
     };
 
     let path = resolve_asset_path(&root, &entry)?;
-    // Verify the asset exists before spawning.
-    let _source = asset(&path)?;
+    // Verify the entry exists before spawning the thread.
+    match source {
+        AssetSource::Embedded => {
+            asset(&path)?;
+        }
+        AssetSource::Filesystem => {
+            std::fs::metadata(&path).map_err(|error| {
+                ScriptError::new(format!("failed to read worker entry {path}: {error}"))
+            })?;
+        }
+    }
 
     let (main_sender, worker_receiver) = mpsc::channel::<WorkerChannelMessage>();
     let (worker_sender, main_receiver) = mpsc::channel::<WorkerChannelMessage>();
@@ -202,6 +241,7 @@ pub(super) fn spawn_worker(
         .name(format!("script-worker-{path}"))
         .spawn(move || {
             run_bidirectional_worker(
+                source,
                 root,
                 path,
                 None,
@@ -250,6 +290,7 @@ fn spawn_worker_from_source(
         .name(format!("script-worker-{path}"))
         .spawn(move || {
             run_bidirectional_worker(
+                AssetSource::Embedded,
                 root,
                 path,
                 Some(javascript),
@@ -274,6 +315,7 @@ fn spawn_worker_from_source(
 
 #[allow(clippy::too_many_arguments)]
 fn run_bidirectional_worker(
+    source: AssetSource,
     root: String,
     path: String,
     inline_javascript: Option<String>,
@@ -293,14 +335,12 @@ fn run_bidirectional_worker(
     isolate.set_host_initialize_import_meta_object_callback(host_initialize_import_meta);
     isolate.set_host_import_module_dynamically_callback(host_import_module_dynamically);
 
-    isolate.set_slot(WorkerResources { root });
+    isolate.set_slot(WorkerResources { root, source });
     // Store the sender so `self.postMessage` can reach the main thread.
     isolate.set_slot::<mpsc::Sender<WorkerChannelMessage>>(sender.clone());
     // Store the cancellation for the watchdog.
     isolate.set_slot(cancellation.clone());
-    // Worker modules resolve from embedded assets, not the
-    // filesystem.
-    isolate.set_slot(AssetSource::Embedded);
+    isolate.set_slot(source);
     // Set up a ModuleMap for ES module loading.
     let module_root = PathBuf::from(path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or(""));
     let modules = Rc::new(RefCell::new(ModuleMap::default()));
@@ -834,12 +874,10 @@ fn abort_signal_abort(
 
     // Cancel the token.
     if let Some(token_slot) = scope.get_slot::<Rc<RefCell<Vec<(usize, CancellationToken)>>>>() {
-        let slot = token_slot.borrow();
-        for (id, token) in slot.iter() {
-            if *id == signal_id {
-                token.cancel();
-                break;
-            }
+        let mut slot = token_slot.borrow_mut();
+        if let Some(index) = slot.iter().position(|(id, _)| *id == signal_id) {
+            let (_, token) = slot.swap_remove(index);
+            token.cancel();
         }
     }
     return_value.set_undefined();
@@ -864,7 +902,7 @@ pub(super) fn install_global_worker_constructor(scope: &mut v8::PinScope<'_, '_>
 
 /// Slot storing WorkerHandles on the main isolate so the JS Worker
 /// object and pump can call back into Rust.
-pub(super) type WorkerRegistrySlot = Rc<RefCell<Vec<WorkerHandle>>>;
+pub(super) type WorkerRegistrySlot = Rc<RefCell<Vec<Option<WorkerHandle>>>>;
 
 fn worker_constructor(
     scope: &mut v8::PinScope,
@@ -890,32 +928,61 @@ fn worker_constructor(
         throw_script_error(scope, "Worker constructor expects a URL string");
         return;
     };
-    let plugin_path = entry.strip_prefix("file:///runtime/plugins/");
-    let entry_raw = plugin_path.unwrap_or(&entry).to_owned();
-
-    // Deferred callbacks run after `plugin_root` is cleared. A full
-    // plugin URL still carries the root as its first path segment.
-    let current_root = scope
-        .get_slot::<Rc<RefCell<Option<String>>>>()
-        .and_then(|root| root.borrow().clone())
-        .or_else(|| {
-            scope
-                .get_slot::<WorkerResources>()
-                .map(|resources| resources.root.clone())
-        });
-    let root = current_root.unwrap_or_else(|| {
-        plugin_path
-            .and_then(|path| path.split_once('/').map(|(plugin, _)| format!("{plugin}/")))
-            .unwrap_or_default()
-    });
-
-    // If the entry starts with the root (e.g. URL resolved to
-    // `test-worker/child.ts` but root is `test-worker/`), strip the
-    // root to get a path relative to it.
-    let entry = if !root.is_empty() && entry_raw.starts_with(&root) {
-        entry_raw[root.len()..].to_owned()
+    let embedded_path = entry.strip_prefix("file:///runtime/plugins/");
+    let (source, root, entry) = if let Some(path) = embedded_path {
+        let (root, entry) = path
+            .rsplit_once('/')
+            .map(|(root, entry)| (format!("{root}/"), entry.to_owned()))
+            .unwrap_or_else(|| (String::new(), path.to_owned()));
+        (AssetSource::Embedded, root, entry)
+    } else if entry.starts_with("file:") {
+        let url = match ModuleSpecifier::parse(&entry) {
+            Ok(url) => url,
+            Err(error) => {
+                throw_script_error(scope, &format!("invalid worker URL: {error}"));
+                return;
+            }
+        };
+        let path = match url.to_file_path() {
+            Ok(path) => path,
+            Err(()) => {
+                throw_script_error(scope, "worker URL is not a file path");
+                return;
+            }
+        };
+        let Some(parent) = path.parent() else {
+            throw_script_error(scope, "worker URL has no parent directory");
+            return;
+        };
+        let Some(file_name) = path.file_name() else {
+            throw_script_error(scope, "worker URL has no entry file");
+            return;
+        };
+        (
+            AssetSource::Filesystem,
+            format!(
+                "{}{separator}",
+                parent.display(),
+                separator = std::path::MAIN_SEPARATOR
+            ),
+            file_name.to_string_lossy().into_owned(),
+        )
     } else {
-        entry_raw
+        let source = scope
+            .get_slot::<AssetSource>()
+            .copied()
+            .unwrap_or(AssetSource::Embedded);
+        let root = scope
+            .get_slot::<Rc<RefCell<Option<String>>>>()
+            .and_then(|root| root.borrow().clone())
+            .or_else(|| {
+                scope
+                    .get_slot::<WorkerResources>()
+                    .map(|resources| resources.root.clone())
+            })
+            .unwrap_or_default();
+        let entry = entry.strip_prefix(&root).unwrap_or(&entry).to_owned();
+        (source, root, entry)
     };
 
     // Parse options for `type: 'module'` and `signal`.
@@ -977,13 +1044,13 @@ fn worker_constructor(
     let depth = current_depth + 1;
 
     let mut registry = registry_slot.borrow_mut();
-    match spawn_worker(root, entry, cancellation, quota, plugin_id, depth) {
+    match spawn_worker_with_source(source, root, entry, cancellation, quota, plugin_id, depth) {
         Ok(handle) => {
             // Create the JS Worker object wrapping the handle.
             let worker_obj = v8::Object::new(scope);
             // Store the handle index in an internal field.
             let handle_index = registry.len();
-            registry.push(handle);
+            registry.push(Some(handle));
 
             // postMessage
             let post = v8::FunctionTemplate::new(scope, worker_js_post_message)
@@ -1066,8 +1133,8 @@ fn worker_js_post_message(
                 return;
             };
             let registry = registry.borrow();
-            let Some(handle) = registry.get(index) else {
-                throw_script_error(scope, "worker handle not found");
+            let Some(handle) = registry.get(index).and_then(Option::as_ref) else {
+                throw_dom_exception(scope, "InvalidStateError", "worker is terminated");
                 return;
             };
             if handle.post_message(value).is_err() {
@@ -1101,9 +1168,12 @@ fn worker_js_terminate(
         return;
     };
     let mut registry = registry.borrow_mut();
-    if let Some(handle) = registry.get_mut(index) {
-        handle.terminate();
+    if let Some(handle) = registry.get_mut(index).and_then(Option::take) {
+        drop(handle);
     }
+    let worker_key = v8::String::new(scope, &format!("_worker_{index}")).unwrap();
+    let global = scope.get_current_context().global(scope);
+    global.delete(scope, worker_key.into());
     return_value.set_undefined();
 }
 
@@ -1135,7 +1205,10 @@ fn pump_nested_workers(scope: &mut v8::PinScope<'_, '_>, registry: &WorkerRegist
     for index in 0..len {
         let messages = {
             let r = registry.borrow();
-            r.get(index).map(|h| h.drain()).unwrap_or_default()
+            r.get(index)
+                .and_then(Option::as_ref)
+                .map(WorkerHandle::drain)
+                .unwrap_or_default()
         };
         for msg in messages {
             match msg {
@@ -1158,11 +1231,11 @@ pub(super) fn dispatch_message_event(
     index: usize,
     data: serde_json::Value,
 ) -> Result<(), ScriptError> {
-    let registry = registry.borrow();
-    let Some(handle) = registry.get(index) else {
+    let registry_ref = registry.borrow();
+    if registry_ref.get(index).and_then(Option::as_ref).is_none() {
         return Ok(());
-    };
-    let _ = handle; // handle exists, we dispatch via JS
+    }
+    drop(registry_ref);
     // We can't access the JS Worker object from here directly.
     // Instead, dispatch via a global helper.
     let context = scope.get_current_context();
@@ -1211,11 +1284,11 @@ pub(super) fn dispatch_error_event(
     message: String,
     name: String,
 ) -> Result<(), ScriptError> {
-    let registry = registry.borrow();
-    let Some(handle) = registry.get(index) else {
+    let registry_ref = registry.borrow();
+    if registry_ref.get(index).and_then(Option::as_ref).is_none() {
         return Ok(());
-    };
-    let _ = handle;
+    }
+    drop(registry_ref);
     let context = scope.get_current_context();
     let global = context.global(scope);
     let event = v8::Object::new(scope);
@@ -1866,7 +1939,7 @@ ctrl.abort();",
                 let registry = scope.get_slot::<WorkerRegistrySlot>().cloned();
                 if let Some(registry) = registry {
                     let registry = registry.borrow();
-                    Ok(registry.iter().all(|h| h.is_finished()))
+                    Ok(registry.iter().flatten().all(WorkerHandle::is_finished))
                 } else {
                     Ok(true)
                 }
@@ -1897,6 +1970,11 @@ globalThis.spawnWorker = () => {\n\
 };",
         )
         .expect("plugin evaluation should succeed");
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.ts");
+        std::fs::write(&config, "globalThis.userConfigLoaded = true;").unwrap();
+        host.execute_module(&config)
+            .expect("filesystem module should load");
         host.evaluate_script("globalThis.spawnWorker(); null")
             .expect("deferred worker construction should succeed");
 

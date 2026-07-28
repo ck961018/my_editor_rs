@@ -62,6 +62,7 @@ mod baseline;
 
 struct ScriptedFrontend {
     events: VecDeque<FrontendEvent>,
+    next_event_at: Option<tokio::time::Instant>,
     renders: usize,
     scene_revisions: Vec<Revision>,
     fail_next_event: bool,
@@ -1259,6 +1260,7 @@ impl ScriptedFrontend {
     fn new(events: Vec<FrontendEvent>) -> Self {
         Self {
             events: events.into(),
+            next_event_at: None,
             renders: 0,
             scene_revisions: Vec::new(),
             fail_next_event: false,
@@ -1274,6 +1276,9 @@ impl ScriptedFrontend {
 
 impl Frontend for ScriptedFrontend {
     async fn next_event(&mut self) -> io::Result<Option<FrontendEvent>> {
+        if let Some(deadline) = self.next_event_at {
+            tokio::time::sleep_until(deadline).await;
+        }
         if self.fail_next_event {
             self.fail_next_event = false;
             return Err(io::Error::other("scripted frontend failure"));
@@ -1690,6 +1695,37 @@ async fn markdown_and_fenced_rust_are_highlighted() {
         }),
         "{decorations:#?}"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_polls_worker_results_without_input() {
+    let file = tempfile::Builder::new().suffix(".md").tempfile().unwrap();
+    std::fs::write(file.path(), "# Heading\n").unwrap();
+    let mut app = make_app(
+        vec![FrontendEvent::Key(KeyEvent::ctrl('q'))],
+        file.path().to_str(),
+    );
+    app.frontend.next_event_at =
+        Some(tokio::time::Instant::now() + std::time::Duration::from_millis(200));
+    let view = view_id(&app, app.session.focused());
+
+    app.run().await.unwrap();
+
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+    let decorations = query
+        .decorations(view, RowRange { start: 0, end: 1 })
+        .unwrap();
+    assert!(app.frontend.renders >= 2);
+    assert!(decorations.iter().any(|decoration| {
+        decoration.start.char_index == 0
+            && decoration.end.char_index == "# Heading".len()
+            && decoration.face.foreground == Some(Color::Ansi(75))
+    }));
 }
 
 #[tokio::test(flavor = "multi_thread")]

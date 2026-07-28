@@ -12,7 +12,20 @@ function languageFor(fileName?: string): HighlightState["language"] {
     : null;
 }
 
-const workers = new Map<number, { worker: Worker; abort: AbortController }>();
+interface HighlightResult {
+  contentId: number;
+  revision: number;
+  spans: TextDecorationSpan[];
+}
+
+const worker = new Worker(
+  new URL("./worker.ts", import.meta.url),
+  { type: "module" },
+);
+worker.onmessage = (event: MessageEvent<HighlightResult>) => {
+  const { contentId, revision, spans } = event.data;
+  editor.writeDecorations(contentId, revision, spans);
+};
 
 editor.modes.define<HighlightState, null>({
   name: "syntax-highlighting",
@@ -31,22 +44,6 @@ editor.modes.define<HighlightState, null>({
         const revision = context.revision;
         if (text === undefined || revision === undefined) return;
 
-        const prev = workers.get(contentId);
-        if (prev !== undefined) {
-          prev.abort.abort();
-          prev.worker.terminate();
-        }
-
-        const abort = new AbortController();
-        const worker = new Worker(
-          new URL("./worker.ts", import.meta.url),
-          { type: "module", signal: abort.signal },
-        );
-        worker.onmessage = (e) => {
-          const { revision, spans } = e.data;
-          editor.writeDecorations(revision, spans);
-        };
-        workers.set(contentId, { worker, abort });
         worker.postMessage({ contentId, language, revision, text });
       },
     },

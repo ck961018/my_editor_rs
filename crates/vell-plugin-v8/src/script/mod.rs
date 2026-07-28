@@ -239,39 +239,35 @@ impl DecorationSet {
 /// dropped on both write and read.
 #[derive(Default)]
 pub(super) struct WorkerDecorationBuffer {
-    current: Option<(ContentId, u64)>,
-    snapshot: Option<vell_core::text_snapshot::TextSnapshot>,
+    current: HashMap<ContentId, (u64, Option<vell_core::text_snapshot::TextSnapshot>)>,
     entries: HashMap<ContentId, (u64, DecorationSet)>,
 }
 
 impl WorkerDecorationBuffer {
-    /// Record the latest known `(ContentId, revision)` and text snapshot
-    /// from a Mode action frame. The sink callback uses this to validate
-    /// incoming writes and parse positions.
+    /// Record the latest known revision and text snapshot for a content.
     fn track_current(
         &mut self,
         content_id: ContentId,
         revision: u64,
         snapshot: Option<vell_core::text_snapshot::TextSnapshot>,
     ) {
-        self.current = Some((content_id, revision));
-        self.snapshot = snapshot;
+        self.current.insert(content_id, (revision, snapshot));
     }
 
-    /// Current `(ContentId, revision)` or `None` if no Mode action has run.
-    fn current(&self) -> Option<(ContentId, u64)> {
+    fn current_revision(&self, content_id: ContentId) -> Option<u64> {
+        self.current.get(&content_id).map(|(revision, _)| *revision)
+    }
+
+    fn snapshot(&self, content_id: ContentId) -> Option<&vell_core::text_snapshot::TextSnapshot> {
         self.current
-    }
-
-    /// Snapshot from the last Mode action frame, or `None`.
-    fn snapshot(&self) -> Option<&vell_core::text_snapshot::TextSnapshot> {
-        self.snapshot.as_ref()
+            .get(&content_id)
+            .and_then(|(_, snapshot)| snapshot.as_ref())
     }
 
     /// Write decorations for the given `revision`. Silently drops if the
     /// revision doesn't match the current content revision.
     fn write(&mut self, content_id: ContentId, revision: u64, set: DecorationSet) {
-        if self.current.is_some_and(|(_, rev)| rev == revision) {
+        if self.current_revision(content_id) == Some(revision) {
             self.entries.insert(content_id, (revision, set));
         }
     }
@@ -880,6 +876,50 @@ throw new Error("rollback");
             configuration.face_overrides[1].patch.background,
             FaceValue::Reset
         );
+    }
+
+    #[test]
+    fn user_config_worker_loads_after_embedded_plugins() {
+        let host = load_default_plugins().unwrap();
+        let mode_count = ScriptHost::script_modes(&host).len();
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.ts");
+        fs::write(
+            &config,
+            r#"
+const worker = new Worker(
+  new URL("./worker.ts", import.meta.url),
+  { type: "module" },
+);
+worker.onmessage = (event) => {
+  if (event.data !== "ready") throw new Error("unexpected worker response");
+  editor.modes.define({
+    name: "user-worker-after-defaults",
+    on: { buffer: {} },
+  });
+};
+worker.postMessage(null);
+"#,
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("worker.ts"),
+            "self.onmessage = () => self.postMessage(\n\
+editor.resources.readText('data.txt'));",
+        )
+        .unwrap();
+        fs::write(directory.path().join("data.txt"), "ready").unwrap();
+
+        load_optional_user_config(&host, &config).unwrap();
+        for _ in 0..50 {
+            host.borrow_mut().pump_worker_messages();
+            if ScriptHost::script_modes(&host).len() > mode_count {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(ScriptHost::script_modes(&host).len(), mode_count + 1);
     }
 
     #[test]
@@ -2307,7 +2347,7 @@ editor.modes.define({
             .execute_typescript(
                 "file:///test.ts",
                 r#"
-editor.writeDecorations(0, []);
+editor.writeDecorations(0, 0, []);
 "#,
             )
             .unwrap();
@@ -2319,6 +2359,57 @@ editor.writeDecorations(0, []);
             RowRange { start: 0, end: 1 },
         );
         assert!(decorations.is_empty());
+    }
+
+    #[test]
+    fn write_decorations_routes_equal_revisions_by_content_id() {
+        let mut host = ScriptHost::new();
+        let first = ContentId(7);
+        let second = ContentId(8);
+        {
+            let mut buffer = host.worker_decorations.borrow_mut();
+            buffer.track_current(
+                first,
+                3,
+                Some(vell_core::text_snapshot::TextSnapshot::from_text("a")),
+            );
+            buffer.track_current(
+                second,
+                3,
+                Some(vell_core::text_snapshot::TextSnapshot::from_text("b")),
+            );
+        }
+
+        host.execute_typescript(
+            "file:///write-two-contents.ts",
+            r#"
+editor.writeDecorations(7, 3, [{
+  range: {
+    start: { line: 0, character: 0 },
+    end: { line: 0, character: 1 },
+  },
+  face: "syntax.first",
+}]);
+editor.writeDecorations(8, 3, [{
+  range: {
+    start: { line: 0, character: 0 },
+    end: { line: 0, character: 1 },
+  },
+  face: "syntax.second",
+}]);
+"#,
+        )
+        .unwrap();
+
+        let buffer = host.worker_decorations.borrow();
+        assert_eq!(
+            buffer.read(first, 3).unwrap().iter().next().unwrap().face,
+            FaceName::new("syntax.first")
+        );
+        assert_eq!(
+            buffer.read(second, 3).unwrap().iter().next().unwrap().face,
+            FaceName::new("syntax.second")
+        );
     }
 
     #[test]
@@ -2373,7 +2464,7 @@ editor.modes.define({
             .execute_typescript(
                 "file:///test.ts",
                 r#"
-editor.writeDecorations(99, [{
+editor.writeDecorations(0, 99, [{
   range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
   face: "test",
 }]);
@@ -2451,7 +2542,7 @@ editor.modes.define({
                 "file:///test.ts",
                 &format!(
                     r#"
-editor.writeDecorations({revision}, [{{
+editor.writeDecorations(0, {revision}, [{{
   range: {{ start: {{ line: 0, character: 0 }}, end: {{ line: 0, character: 5 }} }},
   face: "syntax.test",
 }}]);
@@ -2529,7 +2620,7 @@ editor.modes.define({
                 "file:///test.ts",
                 &format!(
                     r#"
-editor.writeDecorations({revision}, [{{
+editor.writeDecorations(0, {revision}, [{{
   range: {{ start: {{ line: 0, character: 0 }}, end: {{ line: 0, character: 5 }} }},
   face: "syntax.test",
 }}]);

@@ -490,5 +490,9 @@ declare const editor: {
     readText(path: string): string;
     readBinary(path: string): Uint8Array;
   };
-  writeDecorations(revision: number, spans: TextDecorationSpan[]): void;
+  writeDecorations(
+    contentId: number,
+    revision: number,
+    spans: TextDecorationSpan[],
+  ): void;
 };

@@ -290,8 +290,8 @@ impl Mode for ScriptMode {
         Ok(())
     }
 
-    fn poll_background(&self) {
-        self.host.borrow_mut().pump_worker_messages();
+    fn poll_background(&self) -> bool {
+        self.host.borrow_mut().pump_worker_messages()
     }
 
     fn take_background_jobs(

@@ -130,9 +130,15 @@ controller.abort();
 
 // --- editor.writeDecorations frame-safe sink ---
 
-editor.writeDecorations(1, [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, face: "syntax.keyword" }]);
+editor.writeDecorations(1, 1, [{
+  range: {
+    start: { line: 0, character: 0 },
+    end: { line: 0, character: 1 },
+  },
+  face: "syntax.keyword",
+}]);
 
-// @ts-expect-error writeDecorations requires revision + spans.
+// @ts-expect-error writeDecorations requires content, revision, and spans.
 editor.writeDecorations();
 // @ts-expect-error writeDecorations spans must be TextDecorationSpan[].
-editor.writeDecorations(1, "not-spans");
+editor.writeDecorations(1, 1, "not-spans");

@@ -128,23 +128,26 @@ impl ScriptHost {
     /// Drain all pending worker→main messages and dispatch them to
     /// registered JS event listeners on each Worker object.
     #[allow(dead_code)]
-    pub fn pump_worker_messages(&mut self) {
+    pub fn pump_worker_messages(&mut self) -> bool {
         let context = self.context.clone();
         self.invoke(ScriptInvocationKind::Action, |isolate| {
             v8::scope_with_context!(scope, isolate, context);
             let Some(registry) = scope.get_slot::<worker::WorkerRegistrySlot>().cloned() else {
-                return Ok(());
+                return Ok(false);
             };
             let messages: Vec<(usize, worker::WorkerChannelMessage)> = {
                 let registry = registry.borrow();
                 let mut all = Vec::new();
                 for (index, handle) in registry.iter().enumerate() {
-                    for message in handle.drain() {
-                        all.push((index, message));
+                    if let Some(handle) = handle {
+                        for message in handle.drain() {
+                            all.push((index, message));
+                        }
                     }
                 }
                 all
             };
+            let changed = !messages.is_empty();
             for (index, message) in messages {
                 match message {
                     worker::WorkerChannelMessage::FromWorker(data) => {
@@ -157,9 +160,9 @@ impl ScriptHost {
                     worker::WorkerChannelMessage::ToWorker(_) => {}
                 }
             }
-            Ok(())
+            Ok(changed)
         })
-        .ok();
+        .unwrap_or(false)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -265,6 +268,7 @@ impl ScriptHost {
         let modules = self.modules.clone();
         let context = self.context.clone();
         let result = self.invoke(ScriptInvocationKind::ModuleEvaluation, |isolate| {
+            isolate.set_slot(AssetSource::Filesystem);
             v8::scope_with_context!(scope, isolate, context);
             v8::tc_scope!(let scope, scope);
 
@@ -548,6 +552,13 @@ impl ScriptHost {
         state: &mut ScriptModeState,
         change: &vell_core::content::ContentChange,
     ) -> Result<(), ScriptError> {
+        if let Some(revision) = context.content_revision() {
+            self.worker_decorations.borrow_mut().track_current(
+                context.content_id(),
+                revision.0,
+                context.buffer().and_then(|buffer| buffer.text_snapshot()),
+            );
+        }
         let v8_context = self.context.clone();
         let content_state_name = version.content_state_name();
         let current = state.data.clone();

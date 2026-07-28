@@ -1373,7 +1373,9 @@ pub trait Mode {
     ) -> Result<(), ModeError> {
         Ok(())
     }
-    fn poll_background(&self) {}
+    fn poll_background(&self) -> bool {
+        false
+    }
     fn take_background_jobs(
         &self,
         _state: &mut dyn ModeState,
@@ -1616,6 +1618,14 @@ impl ModeRegistry {
 
     pub fn register(&mut self, mode: impl Mode + 'static) -> Result<ModeId, ModeRegistrationError> {
         self.register_boxed(Box::new(mode))
+    }
+
+    pub fn poll_background(&self) -> bool {
+        let mut changed = false;
+        for registration in self.definitions.values() {
+            changed |= registration.definition.poll_background();
+        }
+        changed
     }
 
     pub fn register_boxed(&mut self, mode: Box<dyn Mode>) -> Result<ModeId, ModeRegistrationError> {
@@ -1894,6 +1904,12 @@ impl ModeContentStore {
             .downcast_ref()
     }
 
+    pub fn mark_presentation_dirty(&mut self) {
+        for instance in self.instances.values_mut() {
+            instance.revision.next();
+        }
+    }
+
     pub fn take_background_jobs(
         &mut self,
         contents: &ContentStore,
@@ -1909,7 +1925,6 @@ impl ModeContentStore {
             if instance.fault.is_some() {
                 continue;
             }
-            instance.adapter().poll_background();
             if !instance.background_job_dirty {
                 continue;
             }

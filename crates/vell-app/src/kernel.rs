@@ -260,14 +260,19 @@ impl Kernel {
         self.tasks.cancellation_token()
     }
 
-    pub(super) fn schedule_mode_jobs(&mut self) {
+    pub(super) fn schedule_mode_jobs(&mut self) -> bool {
+        let presentation_changed = self.modes.poll_background();
+        if presentation_changed {
+            self.content_modes.mark_presentation_dirty();
+        }
         if tokio::runtime::Handle::try_current().is_err() {
-            return;
+            return presentation_changed;
         }
         let jobs = self.content_modes.take_background_jobs(&self.contents);
         for (mode, content, request) in jobs {
             self.queue_mode_job(mode, content, request);
         }
+        presentation_changed
     }
 
     fn queue_mode_job(&mut self, mode: ModeId, content: ContentId, request: ModeJobRequest) {

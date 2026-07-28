@@ -42,13 +42,29 @@ fn write_decorations(
     arguments: v8::FunctionCallbackArguments,
     mut return_value: v8::ReturnValue,
 ) {
-    let revision = arguments.get(0);
-    let Some(revision) = revision.number_value(scope) else {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    let Some(content_id) = arguments.get(0).number_value(scope) else {
+        throw_script_error(scope, "editor.writeDecorations expects a content id");
+        return;
+    };
+    if !(0.0..=MAX_SAFE_INTEGER).contains(&content_id) || content_id.fract() != 0.0 {
+        throw_script_error(
+            scope,
+            "editor.writeDecorations expects an integer content id",
+        );
+        return;
+    }
+    let content_id = ContentId(content_id as u64);
+    let Some(revision) = arguments.get(1).number_value(scope) else {
         throw_script_error(scope, "editor.writeDecorations expects a revision number");
         return;
     };
+    if !(0.0..=MAX_SAFE_INTEGER).contains(&revision) || revision.fract() != 0.0 {
+        throw_script_error(scope, "editor.writeDecorations expects an integer revision");
+        return;
+    }
     let revision = revision as u64;
-    let spans = match v8::Local::<v8::Array>::try_from(arguments.get(1)) {
+    let spans = match v8::Local::<v8::Array>::try_from(arguments.get(2)) {
         Ok(array) => array,
         Err(_) => {
             throw_script_error(scope, "editor.writeDecorations expects a spans array");
@@ -63,18 +79,15 @@ fn write_decorations(
         return;
     };
     let buffer_ref = buffer.borrow();
-    let Some((content_id, current_revision)) = buffer_ref.current() else {
-        throw_script_error(
-            scope,
-            "editor.writeDecorations called with no active content",
-        );
+    let Some(current_revision) = buffer_ref.current_revision(content_id) else {
+        throw_script_error(scope, "editor.writeDecorations called for unknown content");
         return;
     };
     if revision != current_revision {
         // Stale: silently drop.
         return;
     }
-    let Some(snapshot) = buffer_ref.snapshot() else {
+    let Some(snapshot) = buffer_ref.snapshot(content_id) else {
         throw_script_error(scope, "editor.writeDecorations requires a text snapshot");
         return;
     };
