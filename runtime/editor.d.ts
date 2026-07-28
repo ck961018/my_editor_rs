@@ -6,13 +6,10 @@ type ScriptData =
   | ScriptData[]
   | { [key: string]: ScriptData };
 
-// Standard Web Worker types are provided by the TS DOM lib.
-// vell declares global availability so plugin .ts files resolve them
-// without importing.
-declare const Worker: typeof globalThis.Worker;
-declare const AbortController: typeof globalThis.AbortController;
-declare const ErrorEvent: typeof globalThis.ErrorEvent;
-declare const MessageEvent: typeof globalThis.MessageEvent;
+// Standard Web Worker types are provided by the TS DOM lib,
+// which the type-tests tsconfig includes (lib: ["ES2022", "DOM"]).
+// Plugin .ts files resolve Worker/AbortController/ErrorEvent/
+// MessageEvent as globals without importing.
 
 // vell's Worker constructor accepts an AbortSignal for cancellation,
 // augmenting the DOM lib's WorkerOptions.
