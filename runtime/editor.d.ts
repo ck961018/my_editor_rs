@@ -6,6 +6,20 @@ type ScriptData =
   | ScriptData[]
   | { [key: string]: ScriptData };
 
+// Standard Web Worker types are provided by the TS DOM lib.
+// vell declares global availability so plugin .ts files resolve them
+// without importing.
+declare const Worker: typeof globalThis.Worker;
+declare const AbortController: typeof globalThis.AbortController;
+declare const ErrorEvent: typeof globalThis.ErrorEvent;
+declare const MessageEvent: typeof globalThis.MessageEvent;
+
+// vell's Worker constructor accepts an AbortSignal for cancellation,
+// augmenting the DOM lib's WorkerOptions.
+interface WorkerOptions {
+  signal?: AbortSignal;
+}
+
 type DeepReadonly<T> = T extends readonly (infer Item)[]
   ? readonly DeepReadonly<Item>[]
   : T extends object
@@ -311,7 +325,6 @@ interface StatusBarCommandContext<
 interface BufferAdapterDefinition<
   ContentState,
   ViewState,
-  WorkerResponse = ScriptData,
 > {
   state?(context: BufferContentContext): ContentState;
   viewState?(state: Readonly<ContentState>): ViewState & {
@@ -337,53 +350,7 @@ interface BufferAdapterDefinition<
       state: ContentState;
     },
   ): void;
-  analysis?: Record<
-    string,
-    BackgroundAnalysisDefinition<ContentState, WorkerResponse>
-  >;
 }
-
-type BackgroundAnalysisInputContext<ContentState> = Omit<
-  BufferContentContext,
-  "revision"
-> & {
-  readonly revision: number;
-  readonly state: DeepReadonly<ContentState>;
-};
-
-type BackgroundAnalysisApplyContext<ContentState, WorkerResponse> = Omit<
-  BufferContentContext,
-  "revision"
-> & {
-  readonly revision: number;
-  readonly arguments: WorkerResponse;
-  state: ContentState;
-};
-
-interface BackgroundAnalysisBase<ContentState, WorkerResponse> {
-  worker: string;
-  apply(
-    context: BackgroundAnalysisApplyContext<ContentState, WorkerResponse>,
-  ): Pick<ModeActionResult, "contentDecorations"> | void;
-}
-
-type TextSnapshotAnalysisMessage = Record<string, ScriptData> & {
-  readonly text?: never;
-};
-
-type BackgroundAnalysisDefinition<ContentState, WorkerResponse> =
-  | (BackgroundAnalysisBase<ContentState, WorkerResponse> & {
-      snapshot: "text";
-      input(
-        context: BackgroundAnalysisInputContext<ContentState>,
-      ): TextSnapshotAnalysisMessage | void;
-    })
-  | (BackgroundAnalysisBase<ContentState, WorkerResponse> & {
-      snapshot?: never;
-      input(
-        context: BackgroundAnalysisInputContext<ContentState>,
-      ): ScriptData | void;
-    });
 
 interface StatusBarAdapterDefinition<ContentState, ViewState> {
   state?(context: StatusBarContentContext): ContentState;
@@ -407,7 +374,6 @@ interface StatusBarAdapterDefinition<ContentState, ViewState> {
 interface ModeDefinitionV2<
   BufferState = ScriptData,
   BufferViewState = ScriptData,
-  BufferWorkerResponse = ScriptData,
   StatusBarState = ScriptData,
   StatusBarViewState = ScriptData,
 > {
@@ -417,8 +383,7 @@ interface ModeDefinitionV2<
   on: {
     buffer?: BufferAdapterDefinition<
       BufferState,
-      BufferViewState,
-      BufferWorkerResponse
+      BufferViewState
     >;
     statusBar?: StatusBarAdapterDefinition<
       StatusBarState,
@@ -446,7 +411,6 @@ interface ContentContext<ContentState, Arguments = ScriptData> {
   /** @deprecated Use resourceName and dirty on v2 Buffer contexts. */
   readonly document?: DocumentContext;
   readonly change?: ContentChange[];
-  readonly jobVersion?: number;
   readonly arguments?: Arguments;
   contentState: ContentState;
 }
@@ -467,35 +431,19 @@ interface ModeContext<ContentState, ViewState, Arguments = ScriptData>
   forward(): true;
 }
 
-interface ContentJob {
-  slot: string;
-  version: number;
-  includeText?: boolean;
-  message: ScriptData;
-}
-
 /** @deprecated Removed in Vell 0.3.0. Use ModeDefinitionV2. */
 interface ModeDefinition<
   ContentState,
   ViewState,
-  WorkerResponse = ScriptData,
 > {
   name: string;
   before?: string;
-  worker?: string;
   faces?: Record<string, EditorModeFace>;
   content?: {
     create(
       context: Omit<ContentContext<never>, "contentState" | "arguments">,
     ): ContentState;
     changed?(context: ContentContext<ContentState>): void;
-    job?(context: ContentContext<ContentState>): ContentJob | void;
-    applyJob?(
-      context: ContentContext<ContentState, WorkerResponse> & {
-        readonly jobVersion: number;
-        readonly arguments: WorkerResponse;
-      },
-    ): Pick<ModeActionResult, "contentDecorations"> | void;
   };
   view?: {
     create(contentState: ContentState): ViewState & { viewPolicy?: ViewPolicy };
@@ -525,30 +473,24 @@ declare const editor: {
     define<
       BufferState = ScriptData,
       BufferViewState = ScriptData,
-      BufferWorkerResponse = ScriptData,
       StatusBarState = ScriptData,
       StatusBarViewState = ScriptData,
     >(
       definition: ModeDefinitionV2<
         BufferState,
         BufferViewState,
-        BufferWorkerResponse,
         StatusBarState,
         StatusBarViewState
       >,
     ): void;
     /** @deprecated Removed in Vell 0.3.0. Use the `on` adapter schema. */
-    define<ContentState, ViewState, WorkerResponse = ScriptData>(
-      definition: ModeDefinition<ContentState, ViewState, WorkerResponse>,
+    define<ContentState, ViewState>(
+      definition: ModeDefinition<ContentState, ViewState>,
     ): void;
   };
   readonly resources: {
     readText(path: string): string;
     readBinary(path: string): Uint8Array;
   };
-  readonly worker: {
-    onMessage<Message = ScriptData, Response = ScriptData>(
-      callback: (message: Message) => Response | Promise<Response>,
-    ): void;
-  };
+  writeDecorations(revision: number, spans: TextDecorationSpan[]): void;
 };
