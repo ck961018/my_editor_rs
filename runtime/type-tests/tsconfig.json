@@ -11,6 +11,8 @@
     "../plugins/tree-sitter/plugin.ts",
     "../plugins/vim/plugin.ts",
     "../examples/v1-migration.ts",
+    "../examples/worker-platform.ts",
+    "../examples/worker-platform-worker.ts",
     "v2-mode.ts"
   ]
 }

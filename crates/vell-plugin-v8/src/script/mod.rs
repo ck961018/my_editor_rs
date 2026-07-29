@@ -2163,6 +2163,31 @@ editor.modes.define({
     }
 
     #[test]
+    fn public_contract_executes_the_worker_platform_example() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("worker-platform.ts");
+        fs::write(
+            &config,
+            include_str!("../../../../runtime/examples/worker-platform.ts"),
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("worker-platform-worker.ts"),
+            include_str!("../../../../runtime/examples/worker-platform-worker.ts"),
+        )
+        .unwrap();
+
+        let mut host = ScriptHost::new();
+        host.execute_module(&config).unwrap();
+
+        assert!(
+            ScriptHost::script_modes(&Rc::new(RefCell::new(host)))
+                .iter()
+                .any(|mode| mode.name().as_str() == "worker-platform-example")
+        );
+    }
+
+    #[test]
     fn native_apply_edits_converts_utf16_positions_to_content_action() {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.ts");
