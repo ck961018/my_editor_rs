@@ -149,6 +149,10 @@ impl ModuleMap {
         self.by_id.entry(id).or_default().push((path, module));
     }
 
+    pub(super) fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub(super) fn reserve_source(&mut self, bytes: usize) -> Result<(), ScriptError> {
         let total = self.source_bytes.saturating_add(bytes);
         ensure_size("module graph", total, MAX_MODULE_GRAPH_BYTES)?;

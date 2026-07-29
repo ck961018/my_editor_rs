@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -28,6 +29,15 @@ struct WorkerResources {
     root: String,
     source: AssetSource,
 }
+
+#[derive(Clone)]
+struct WorkerUrlOrigin {
+    source: AssetSource,
+    root: String,
+    plugin_id: String,
+}
+
+type WorkerUrlRegistrySlot = Rc<RefCell<HashMap<usize, WorkerUrlOrigin>>>;
 
 fn evaluate_worker(
     scope: &mut v8::PinnedRef<'_, v8::TryCatch<'_, '_, v8::HandleScope<'_>>>,
@@ -685,6 +695,9 @@ pub(super) fn install_abort_controller_global(scope: &mut v8::PinScope<'_, '_>) 
 /// `new URL("./x.ts", import.meta.url)`. Only stores the string and
 /// exposes `.href` / `.pathname` / `toString()`.
 pub(super) fn install_url_global(scope: &mut v8::PinScope<'_, '_>) {
+    if scope.get_slot::<WorkerUrlRegistrySlot>().is_none() {
+        scope.set_slot::<WorkerUrlRegistrySlot>(Rc::new(RefCell::new(HashMap::new())));
+    }
     let context = scope.get_current_context();
     let global = context.global(scope);
     let tmpl = v8::FunctionTemplate::new(scope, url_constructor);
@@ -737,6 +750,44 @@ fn url_constructor(
     // Store href in a hidden field for toString to read.
     let internal = v8::String::new(scope, "_href").unwrap();
     obj.set(scope, internal.into(), href.into());
+
+    let source = scope
+        .get_slot::<AssetSource>()
+        .copied()
+        .unwrap_or(AssetSource::Embedded);
+    let root = match source {
+        AssetSource::Filesystem => scope.get_slot::<Rc<RefCell<ModuleMap>>>().map(|modules| {
+            format!(
+                "{}{separator}",
+                modules.borrow().root().display(),
+                separator = std::path::MAIN_SEPARATOR
+            )
+        }),
+        AssetSource::Embedded => scope
+            .get_slot::<Rc<RefCell<Option<String>>>>()
+            .and_then(|root| root.borrow().clone())
+            .or_else(|| {
+                scope
+                    .get_slot::<WorkerResources>()
+                    .map(|resources| resources.root.clone())
+            }),
+    };
+    if let Some(root) = root
+        && let Some(registry) = scope.get_slot::<WorkerUrlRegistrySlot>()
+    {
+        let plugin_id = scope
+            .get_slot::<String>()
+            .cloned()
+            .unwrap_or_else(|| root.clone());
+        registry.borrow_mut().insert(
+            obj.get_identity_hash().get() as usize,
+            WorkerUrlOrigin {
+                source,
+                root,
+                plugin_id,
+            },
+        );
+    }
     return_value.set(obj.into());
 }
 
@@ -910,32 +961,37 @@ fn worker_constructor(
     mut return_value: v8::ReturnValue,
 ) {
     let url = arguments.get(0);
-    let entry = if let Ok(url_string) = v8::Local::<v8::String>::try_from(url) {
-        // Plain string path.
-        url_string.to_rust_string_lossy(scope)
+    let (entry, url_origin) = if let Ok(url_string) = v8::Local::<v8::String>::try_from(url) {
+        (url_string.to_rust_string_lossy(scope), None)
     } else if let Ok(url_obj) = v8::Local::<v8::Object>::try_from(url) {
-        // URL object: try .href, then toString().
         let href_key = v8::String::new(scope, "href").unwrap();
-        if let Some(href) = url_obj.get(scope, href_key.into())
+        let entry = if let Some(href) = url_obj.get(scope, href_key.into())
             && let Ok(href_str) = v8::Local::<v8::String>::try_from(href)
         {
             href_str.to_rust_string_lossy(scope)
         } else {
-            // Fallback to toString().
             url.to_rust_string_lossy(scope)
-        }
+        };
+        let origin = scope
+            .get_slot::<WorkerUrlRegistrySlot>()
+            .and_then(|registry| {
+                registry
+                    .borrow()
+                    .get(&(url_obj.get_identity_hash().get() as usize))
+                    .cloned()
+            });
+        (entry, origin)
     } else {
         throw_script_error(scope, "Worker constructor expects a URL string");
         return;
     };
+    let source = url_origin
+        .as_ref()
+        .map(|origin| origin.source)
+        .or_else(|| scope.get_slot::<AssetSource>().copied())
+        .unwrap_or(AssetSource::Embedded);
     let embedded_path = entry.strip_prefix("file:///runtime/plugins/");
-    let (source, root, entry) = if let Some(path) = embedded_path {
-        let (root, entry) = path
-            .rsplit_once('/')
-            .map(|(root, entry)| (format!("{root}/"), entry.to_owned()))
-            .unwrap_or_else(|| (String::new(), path.to_owned()));
-        (AssetSource::Embedded, root, entry)
-    } else if entry.starts_with("file:") {
+    let (source, root, entry) = if source == AssetSource::Filesystem && entry.starts_with("file:") {
         let url = match ModuleSpecifier::parse(&entry) {
             Ok(url) => url,
             Err(error) => {
@@ -950,28 +1006,61 @@ fn worker_constructor(
                 return;
             }
         };
-        let Some(parent) = path.parent() else {
-            throw_script_error(scope, "worker URL has no parent directory");
+        let path = match std::fs::canonicalize(path) {
+            Ok(path) => path,
+            Err(_) => {
+                throw_script_error(scope, "worker URL is not a readable file path");
+                return;
+            }
+        };
+        let root_path = if let Some(origin) = &url_origin {
+            PathBuf::from(&origin.root)
+        } else if let Some(modules) = scope.get_slot::<Rc<RefCell<ModuleMap>>>() {
+            modules.borrow().root().to_owned()
+        } else {
+            throw_script_error(scope, "worker module root is unavailable");
             return;
         };
-        let Some(file_name) = path.file_name() else {
-            throw_script_error(scope, "worker URL has no entry file");
+        let Ok(relative) = path.strip_prefix(&root_path) else {
+            throw_script_error(scope, "script import escapes the config directory");
             return;
         };
         (
             AssetSource::Filesystem,
             format!(
                 "{}{separator}",
-                parent.display(),
+                root_path.display(),
                 separator = std::path::MAIN_SEPARATOR
             ),
-            file_name.to_string_lossy().into_owned(),
+            relative.to_string_lossy().into_owned(),
         )
+    } else if let Some(path) = embedded_path {
+        let configured_root = url_origin
+            .as_ref()
+            .map(|origin| origin.root.clone())
+            .or_else(|| {
+                scope
+                    .get_slot::<Rc<RefCell<Option<String>>>>()
+                    .and_then(|root| root.borrow().clone())
+            })
+            .or_else(|| {
+                scope
+                    .get_slot::<WorkerResources>()
+                    .map(|resources| resources.root.clone())
+            });
+        let (root, entry) = if let Some(root) = configured_root {
+            let Some(entry) = path.strip_prefix(&root) else {
+                throw_script_error(scope, "worker URL escapes the plugin directory");
+                return;
+            };
+            (root, entry.to_owned())
+        } else {
+            path.rsplit_once('/')
+                .map(|(root, entry)| (format!("{root}/"), entry.to_owned()))
+                .unwrap_or_else(|| (String::new(), path.to_owned()))
+        };
+        (AssetSource::Embedded, root, entry)
     } else {
-        let source = scope
-            .get_slot::<AssetSource>()
-            .copied()
-            .unwrap_or(AssetSource::Embedded);
         let root = scope
             .get_slot::<Rc<RefCell<Option<String>>>>()
             .and_then(|root| root.borrow().clone())
@@ -1017,11 +1106,10 @@ fn worker_constructor(
     }
 
     // Determine plugin_id for quota tracking.
-    let plugin_id = if let Some(pid) = scope.get_slot::<String>() {
-        pid.clone()
-    } else {
-        root.clone()
-    };
+    let plugin_id = url_origin
+        .map(|origin| origin.plugin_id)
+        .or_else(|| scope.get_slot::<String>().cloned())
+        .unwrap_or_else(|| root.clone());
 
     // Get or create the WorkerRegistry slot.
     let registry_slot = scope
@@ -1960,11 +2048,12 @@ ctrl.abort();",
         host.execute_embedded_plugin(
             "test-worker/deferred-spawn.ts",
             "globalThis.workerResult = null;\n\
+const workerUrl = new URL(\n\
+  './meta-worker.ts',\n\
+  'file:///runtime/plugins/test-worker/deferred-spawn.ts',\n\
+);\n\
 globalThis.spawnWorker = () => {\n\
-  const w = new Worker(\n\
-    'file:///runtime/plugins/test-worker/meta-worker.ts',\n\
-    { type: 'module' },\n\
-  );\n\
+  const w = new Worker(workerUrl, { type: 'module' });\n\
   w.onmessage = (e) => { globalThis.workerResult = e.data; };\n\
   w.postMessage({});\n\
 };",
@@ -1988,6 +2077,33 @@ globalThis.spawnWorker = () => {\n\
             result.is_string(),
             "worker should post its module URL: {result:?}"
         );
+    }
+
+    #[test]
+    fn worker_url_cannot_escape_filesystem_plugin_root() {
+        use super::super::host::ScriptHost;
+
+        let directory = tempfile::tempdir().unwrap();
+        let plugin = directory.path().join("plugin");
+        std::fs::create_dir(&plugin).unwrap();
+        std::fs::write(
+            directory.path().join("outside.ts"),
+            "self.onmessage = () => {};",
+        )
+        .unwrap();
+        let config = plugin.join("config.ts");
+        std::fs::write(
+            &config,
+            "new Worker(new URL('../outside.ts', import.meta.url), \
+             { type: 'module' });",
+        )
+        .unwrap();
+
+        let mut host = ScriptHost::new();
+        let error = host
+            .execute_module(&config)
+            .expect_err("worker URL must stay inside the plugin root");
+        assert!(error.to_string().contains("escapes the config directory"));
     }
 
     // --- Task 5: ErrorEvent dispatch ---
