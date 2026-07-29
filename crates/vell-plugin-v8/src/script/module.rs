@@ -201,11 +201,7 @@ impl ModuleMap {
             .map(|(origin, _)| origin)
     }
 
-    pub(super) fn origin_for_url(&self, url: &str) -> Option<ModuleOrigin> {
-        self.origins_by_url.get(url).cloned()
-    }
-
-    fn origin_for_path(&self, path: &Path) -> Option<ModuleOrigin> {
+    pub(super) fn origin_for_path(&self, path: &Path) -> Option<ModuleOrigin> {
         self.origins_by_url.get(&module_url(path)).cloned()
     }
 }

@@ -822,10 +822,15 @@ fn url_constructor(
     let internal = v8::String::new(scope, "_href").unwrap();
     obj.set(scope, internal.into(), href.into());
 
-    let module_origin = base_url.as_deref().and_then(|base| {
+    // The base string is caller-controlled. Attribute the URL to the module
+    // executing this constructor so a literal URL cannot borrow another
+    // plugin's sandbox identity.
+    let caller_path = v8::StackTrace::current_script_name_or_source_url(scope)
+        .map(|name| name.to_rust_string_lossy(scope));
+    let module_origin = caller_path.as_deref().and_then(|path| {
         scope
             .get_slot::<Rc<RefCell<ModuleMap>>>()
-            .and_then(|modules| modules.borrow().origin_for_url(base))
+            .and_then(|modules| modules.borrow().origin_for_path(Path::new(path)))
     });
     let source = module_origin
         .as_ref()
@@ -2399,6 +2404,35 @@ ctrl.abort();",
 
     /// A worker that throws in `self.onmessage` should send
     /// an `Error` message back to the main thread.
+    #[test]
+    fn filesystem_config_cannot_borrow_embedded_url_identity() {
+        use super::super::host::ScriptHost;
+
+        let mut host = ScriptHost::new();
+        host.execute_embedded_module("test-worker/deferred-url-main.ts")
+            .expect("embedded plugin should load");
+        let plugin = tempfile::tempdir().unwrap();
+        let config = plugin.path().join("config.ts");
+        std::fs::write(
+            &config,
+            "globalThis.crossPluginError = null;\n\
+             try {\n\
+               new Worker(\n\
+                 new URL('./meta-worker.ts', 'file:///runtime/plugins/test-worker/deferred-url-main.ts'),\n\
+                 { type: 'module' },\n\
+               );\n\
+             } catch (error) { globalThis.crossPluginError = error.name; }",
+        )
+        .unwrap();
+        host.execute_module(&config)
+            .expect("filesystem config should load");
+
+        assert_eq!(
+            host.evaluate_script("globalThis.crossPluginError").unwrap(),
+            serde_json::json!("TypeError")
+        );
+    }
+
     #[test]
     fn filesystem_worker_import_cannot_escape_plugin_root() {
         use super::super::host::ScriptHost;
