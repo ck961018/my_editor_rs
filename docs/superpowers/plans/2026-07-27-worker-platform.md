@@ -347,7 +347,7 @@ Expected: FAIL with "Worker is not defined"
 
 核心改动:
 
-1. `WorkerRequest` 改为双向:
+`WorkerRequest` 改为双向:
 
 ```rust
 enum WorkerChannelMessage {
@@ -361,7 +361,7 @@ enum WorkerChannelMessage {
 1. `ScriptWorker::start` 保留 std::thread + isolate,但 worker 全局
    挂 `self.onmessage`/`self.postMessage` 标准(而非
    `editor.worker.onMessage`)。
-2. 主线程挂全局 `Worker` 构造器:
+主线程挂全局 `Worker` 构造器:
 
 ```rust
 // host.rs install_editor_api 内,或 worker.rs 新增 install_global_worker
