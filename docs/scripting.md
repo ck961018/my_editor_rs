@@ -211,8 +211,9 @@ shape 和具名 selection face。
 
 ## 后台 Worker
 
-插件可以在顶层创建标准 module Worker。Worker 不属于 Mode，也不需要
-`analysis` 声明：
+插件可以在顶层创建 module Worker。Worker 不属于 Mode，也不需要
+`analysis` 声明。构造参数必须是 `new URL(...)` 产生的 URL 对象；vell 不接受
+缺少插件来源 identity 的裸字符串：
 
 ```ts
 const worker = new Worker(
@@ -282,9 +283,9 @@ v1 在 0.1.x 中已弃用，在 0.2.x 中仍可使用并产生一次结构化 wa
 
 ## 模块与信任边界
 
-用户配置支持在配置目录内通过静态相对路径导入 `.ts` 和 `.js`。
-bare package、URL、CommonJS、dynamic import、top-level await，以及越出
-配置目录的 import 都会被拒绝。
+用户配置支持在配置目录内通过静态或动态相对路径导入 `.ts` 和 `.js`。
+bare package、远程 URL、CommonJS、top-level await，以及越出配置目录的
+import 都会被拒绝。
 
 内建 Worker 脚本和二进制资源在构建时嵌入。文件系统用户配置也可以从自己的
 配置目录创建 Worker；入口及其 module graph 不能越出该目录。

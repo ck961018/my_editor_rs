@@ -1,6 +1,6 @@
 # Worker 平台原语设计
 
-- 状态:已确认,待写实现计划
+- 状态:已实现
 - 日期:2026-07-27
 - 主题:把 vell 的线程能力从 Mode 的 `analysis` 子字段提升为
   标准 Web Worker 平台原语
@@ -81,7 +81,7 @@ worker.addEventListener("message", (e: MessageEvent<Spans>) => {
   // e.data = worker 回推的结果
 });
 
-// 标准取消(AbortSignal 替代自定义 CancellationToken)
+// vell 生命周期扩展
 const ctrl = new AbortController();
 const worker2 = new Worker(
   new URL("./parser.ts", import.meta.url),
@@ -91,6 +91,9 @@ ctrl.abort();
 
 worker.terminate();
 ```
+
+构造参数必须是 vell `URL` 构造器产生的对象。裸字符串没有可靠的插件来源
+identity，会同步抛 `TypeError`。
 
 ### worker 侧 API(worker.ts 全局)
 

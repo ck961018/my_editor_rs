@@ -46,7 +46,7 @@ interface Worker {
 }
 
 declare const Worker: {
-  new(url: string | URL, options?: WorkerOptions): Worker;
+  new(url: URL, options?: WorkerOptions): Worker;
 };
 
 interface WorkerGlobalScope {

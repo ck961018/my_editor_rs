@@ -49,6 +49,9 @@ impl WorkerHandle {
 
     /// Send a message to the worker (main to worker).
     pub(super) fn post_message(&self, data: serde_json::Value) -> Result<(), ScriptError> {
+        if self.cancellation.is_cancelled() {
+            return Err(ScriptError::new("worker is terminated"));
+        }
         self.sender
             .send(WorkerChannelMessage::ToWorker(data))
             .map_err(|_| ScriptError::new("worker terminated before postMessage"))
@@ -66,13 +69,11 @@ impl WorkerHandle {
         messages
     }
 
-    /// Terminate the worker: cancel + join thread.
+    /// Request termination without blocking the main thread.
     pub(super) fn terminate(&mut self) {
         self.cancellation.cancel();
         let _ = self.sender.send(WorkerChannelMessage::Terminated);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        self.thread.take();
     }
 
     /// Check if the worker thread has finished (canceled,

@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -143,9 +143,16 @@ fn read_resource<'scope>(
     let path = resolve_asset_path(&resources.root, &value.to_rust_string_lossy(scope))?;
     let bytes = match resources.source {
         AssetSource::Embedded => asset(&path)?.to_vec(),
-        AssetSource::Filesystem => std::fs::read(&path).map_err(|error| {
-            ScriptError::new(format!("failed to read plugin resource {path}: {error}"))
-        })?,
+        AssetSource::Filesystem => {
+            let checked =
+                checked_filesystem_resource(&resources.root, &value.to_rust_string_lossy(scope))?;
+            std::fs::read(&checked).map_err(|error| {
+                ScriptError::new(format!(
+                    "failed to read plugin resource {}: {error}",
+                    checked.display()
+                ))
+            })?
+        }
     };
     ensure_size("plugin resource", bytes.len(), MAX_SCRIPT_INPUT_BYTES)?;
     Ok((path, bytes))
@@ -165,6 +172,46 @@ fn resolve_asset_path(root: &str, relative: &str) -> Result<String, ScriptError>
         )));
     }
     Ok(format!("{root}{relative}"))
+}
+
+fn checked_filesystem_resource(root: &str, relative: &str) -> Result<PathBuf, ScriptError> {
+    let root = std::fs::canonicalize(root)
+        .map_err(|error| ScriptError::new(format!("invalid plugin root: {error}")))?;
+    let path = std::fs::canonicalize(root.join(relative)).map_err(|error| {
+        ScriptError::new(format!(
+            "failed to resolve plugin resource {relative}: {error}"
+        ))
+    })?;
+    if !path.starts_with(&root) {
+        return Err(ScriptError::new(
+            "plugin resource escapes the plugin directory",
+        ));
+    }
+    Ok(path)
+}
+
+fn checked_worker_entry(root: &Path, target: &Path) -> Result<(PathBuf, PathBuf), ScriptError> {
+    let root = std::fs::canonicalize(root)
+        .map_err(|error| ScriptError::new(format!("invalid worker module root: {error}")))?;
+    let mut existing = target;
+    while !existing.exists() {
+        existing = existing
+            .parent()
+            .ok_or_else(|| ScriptError::new("worker URL has no existing parent"))?;
+    }
+    let suffix = target
+        .strip_prefix(existing)
+        .map_err(|_| ScriptError::new("invalid worker URL"))?;
+    let target = std::fs::canonicalize(existing)
+        .map_err(|error| ScriptError::new(format!("invalid worker URL: {error}")))?
+        .join(suffix);
+    if !target.starts_with(&root) {
+        return Err(ScriptError::new("worker URL escapes the plugin directory"));
+    }
+    let relative = target
+        .strip_prefix(&root)
+        .map_err(|_| ScriptError::new("worker URL escapes the plugin directory"))?;
+    Ok((root, relative.to_owned()))
 }
 
 fn asset(path: &str) -> Result<&'static [u8], ScriptError> {
@@ -227,17 +274,6 @@ fn spawn_worker_with_source(
     };
 
     let path = resolve_asset_path(&root, &entry)?;
-    // Verify the entry exists before spawning the thread.
-    match source {
-        AssetSource::Embedded => {
-            asset(&path)?;
-        }
-        AssetSource::Filesystem => {
-            std::fs::metadata(&path).map_err(|error| {
-                ScriptError::new(format!("failed to read worker entry {path}: {error}"))
-            })?;
-        }
-    }
 
     let (main_sender, worker_receiver) = mpsc::channel::<WorkerChannelMessage>();
     let (worker_sender, main_receiver) = mpsc::channel::<WorkerChannelMessage>();
@@ -322,6 +358,14 @@ fn spawn_worker_from_source(
     ))
 }
 
+struct WorkerTerminationNotifier(mpsc::Sender<WorkerChannelMessage>);
+
+impl Drop for WorkerTerminationNotifier {
+    fn drop(&mut self) {
+        let _ = self.0.send(WorkerChannelMessage::Terminated);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_bidirectional_worker(
     source: AssetSource,
@@ -335,6 +379,7 @@ fn run_bidirectional_worker(
     plugin_id: String,
     depth: usize,
 ) {
+    let _termination = WorkerTerminationNotifier(sender.clone());
     initialize_v8();
     let params = v8::CreateParams::default().heap_limits(0, SCRIPT_HEAP_LIMIT_BYTES);
     let mut isolate = v8::Isolate::new(params);
@@ -372,10 +417,11 @@ fn run_bidirectional_worker(
     let mut heap_limit = install_heap_limit(&mut isolate);
 
     let startup = {
-        let watchdog = InvocationWatchdog::start(
+        let watchdog = InvocationWatchdog::start_cancellable(
             isolate.thread_safe_handle(),
             ScriptInvocationKind::ModuleEvaluation,
             SCRIPT_STARTUP_TIMEOUT,
+            cancellation.clone(),
         );
         match watchdog {
             Ok(watchdog) => {
@@ -403,9 +449,10 @@ fn run_bidirectional_worker(
     };
 
     if let Err(error) = startup {
+        let message = error.to_string();
         let _ = sender.send(WorkerChannelMessage::Error {
-            message: error.to_string(),
-            name: "Error".to_owned(),
+            name: error_name_for_worker(&message),
+            message,
         });
         return;
     }
@@ -477,8 +524,6 @@ fn run_bidirectional_worker(
             name: "Error".to_owned(),
         });
     }
-
-    let _ = sender.send(WorkerChannelMessage::Terminated);
 }
 
 fn execute_worker_on_message(
@@ -519,6 +564,9 @@ fn execute_worker_on_message(
         let event = v8::Object::new(scope);
         let data_key = v8::String::new(scope, "data").expect("static string");
         event.set(scope, data_key.into(), message);
+        let type_key = v8::String::new(scope, "type").expect("static string");
+        let message_type = v8::String::new(scope, "message").expect("static string");
+        event.set(scope, type_key.into(), message_type.into());
         let receiver = v8::undefined(scope).into();
         let value = call_script_callback(scope, handler, receiver, &[event.into()])
             .ok_or_else(|| current_exception(scope, "worker onmessage", "execute"))?;
@@ -964,30 +1012,33 @@ fn worker_constructor(
     mut return_value: v8::ReturnValue,
 ) {
     let url = arguments.get(0);
-    let (entry, url_origin) = if let Ok(url_string) = v8::Local::<v8::String>::try_from(url) {
-        (url_string.to_rust_string_lossy(scope), None)
-    } else if let Ok(url_obj) = v8::Local::<v8::Object>::try_from(url) {
-        let href_key = v8::String::new(scope, "href").unwrap();
-        let entry = if let Some(href) = url_obj.get(scope, href_key.into())
-            && let Ok(href_str) = v8::Local::<v8::String>::try_from(href)
-        {
-            href_str.to_rust_string_lossy(scope)
-        } else {
-            url.to_rust_string_lossy(scope)
-        };
-        let origin = scope
-            .get_slot::<WorkerUrlRegistrySlot>()
-            .and_then(|registry| {
-                registry
-                    .borrow()
-                    .get(&(url_obj.get_identity_hash().get() as usize))
-                    .cloned()
-            });
-        (entry, origin)
-    } else {
-        throw_script_error(scope, "Worker constructor expects a URL string");
+    let Ok(url_obj) = v8::Local::<v8::Object>::try_from(url) else {
+        throw_type_error(scope, "Worker constructor expects a URL object");
         return;
     };
+    let Some(url_origin) = scope
+        .get_slot::<WorkerUrlRegistrySlot>()
+        .and_then(|registry| {
+            registry
+                .borrow()
+                .get(&(url_obj.get_identity_hash().get() as usize))
+                .cloned()
+        })
+    else {
+        throw_type_error(scope, "Worker URL must be created by the URL constructor");
+        return;
+    };
+    let href_key = v8::String::new(scope, "href").unwrap();
+    let Some(href) = url_obj.get(scope, href_key.into()) else {
+        throw_type_error(scope, "Worker URL has no href");
+        return;
+    };
+    let Ok(href) = v8::Local::<v8::String>::try_from(href) else {
+        throw_type_error(scope, "Worker URL href must be a string");
+        return;
+    };
+    let entry = href.to_rust_string_lossy(scope);
+    let url_origin = Some(url_origin);
     let source = url_origin
         .as_ref()
         .map(|origin| origin.source)
@@ -998,35 +1049,24 @@ fn worker_constructor(
         let url = match ModuleSpecifier::parse(&entry) {
             Ok(url) => url,
             Err(error) => {
-                throw_script_error(scope, &format!("invalid worker URL: {error}"));
+                throw_type_error(scope, &format!("invalid worker URL: {error}"));
                 return;
             }
         };
         let path = match url.to_file_path() {
             Ok(path) => path,
             Err(()) => {
-                throw_script_error(scope, "worker URL is not a file path");
+                throw_type_error(scope, "worker URL is not a file path");
                 return;
             }
         };
-        let path = match std::fs::canonicalize(path) {
-            Ok(path) => path,
-            Err(_) => {
-                throw_script_error(scope, "worker URL is not a readable file path");
+        let root_path = PathBuf::from(&url_origin.as_ref().expect("checked URL origin").root);
+        let (root_path, relative) = match checked_worker_entry(&root_path, &path) {
+            Ok(result) => result,
+            Err(error) => {
+                throw_type_error(scope, &error.to_string());
                 return;
             }
-        };
-        let root_path = if let Some(origin) = &url_origin {
-            PathBuf::from(&origin.root)
-        } else if let Some(modules) = scope.get_slot::<Rc<RefCell<ModuleMap>>>() {
-            modules.borrow().root().to_owned()
-        } else {
-            throw_script_error(scope, "worker module root is unavailable");
-            return;
-        };
-        let Ok(relative) = path.strip_prefix(&root_path) else {
-            throw_script_error(scope, "script import escapes the config directory");
-            return;
         };
         let mut root = root_path.to_string_lossy().into_owned();
         if !root.ends_with(std::path::MAIN_SEPARATOR) {
@@ -1053,7 +1093,7 @@ fn worker_constructor(
             });
         let (root, entry) = if let Some(root) = configured_root {
             let Some(entry) = path.strip_prefix(&root) else {
-                throw_script_error(scope, "worker URL escapes the plugin directory");
+                throw_type_error(scope, "worker URL escapes the plugin directory");
                 return;
             };
             (root, entry.to_owned())
@@ -1064,17 +1104,8 @@ fn worker_constructor(
         };
         (AssetSource::Embedded, root, entry)
     } else {
-        let root = scope
-            .get_slot::<Rc<RefCell<Option<String>>>>()
-            .and_then(|root| root.borrow().clone())
-            .or_else(|| {
-                scope
-                    .get_slot::<WorkerResources>()
-                    .map(|resources| resources.root.clone())
-            })
-            .unwrap_or_default();
-        let entry = entry.strip_prefix(&root).unwrap_or(&entry).to_owned();
-        (source, root, entry)
+        throw_type_error(scope, "only plugin-local file Worker URLs are supported");
+        return;
     };
 
     // Parse options for `type: 'module'` and `signal`.
@@ -1385,8 +1416,16 @@ fn pump_nested_workers(scope: &mut v8::PinScope<'_, '_>, registry: &WorkerRegist
                 WorkerChannelMessage::ToWorker(_) => {}
             }
         }
-        if terminated && let Some(handle) = registry.borrow_mut().get_mut(index) {
-            handle.take();
+        if terminated {
+            if let Some(handle) = registry.borrow_mut().get_mut(index) {
+                handle.take();
+            }
+            let worker_key =
+                v8::String::new(scope, &format!("_worker_{index}")).expect("worker registry key");
+            scope
+                .get_current_context()
+                .global(scope)
+                .delete(scope, worker_key.into());
         }
     }
 }
@@ -1514,6 +1553,21 @@ pub(super) fn dispatch_error_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_resource_symlink_cannot_escape_plugin_root() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("plugin");
+        std::fs::create_dir(&root).unwrap();
+        let outside = parent.path().join("outside.txt");
+        std::fs::write(&outside, "secret").unwrap();
+        symlink(&outside, root.join("escape.txt")).unwrap();
+        let error = checked_filesystem_resource(root.to_str().unwrap(), "escape.txt").unwrap_err();
+        assert!(error.to_string().contains("escapes"));
+    }
 
     fn start_tree_sitter_worker(cancellation: CancellationToken) -> WorkerHandle {
         spawn_worker(
@@ -1907,6 +1961,32 @@ mod tests {
 
         assert_eq!(quota.current_global(), 1);
         handle.terminate();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while quota.current_global() != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(quota.current_global(), 0);
+    }
+
+    #[test]
+    fn worker_terminate_interrupts_startup_without_blocking() {
+        let quota = Arc::new(WorkerQuota::new(8, 32, 4));
+        let mut handle = spawn_worker(
+            "test-worker/".to_owned(),
+            "infinite-startup.ts".to_owned(),
+            CancellationToken::new(),
+            Some(quota.clone()),
+            "test".to_owned(),
+            1,
+        )
+        .unwrap();
+        let started = Instant::now();
+        handle.terminate();
+        assert!(started.elapsed() < Duration::from_millis(100));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while quota.current_global() != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert_eq!(quota.current_global(), 0);
     }
 
@@ -1917,7 +1997,7 @@ mod tests {
         let mut host = ScriptHost::new();
         host.execute_embedded_plugin(
             "test-worker/close-main.ts",
-            "const worker = new Worker('close-worker.ts', { type: 'module' });\n\
+            "const worker = new Worker(new URL('./close-worker.ts', 'file:///runtime/plugins/test-worker/close-main.ts'), { type: 'module' });\n\
              worker.postMessage(null);",
         )
         .unwrap();
@@ -2192,7 +2272,7 @@ mod tests {
             "test-worker/abort-inline.ts",
             "const ctrl = new AbortController();\n\
 globalThis.w = new Worker(\n\
-  \"abort-fixture.ts\",\n\
+  new URL(\"./abort-fixture.ts\", \"file:///runtime/plugins/test-worker/abort-inline.ts\"),\n\
   { type: \"module\", signal: ctrl.signal },\n\
 );\n\
 ctrl.abort();",
@@ -2288,7 +2368,7 @@ globalThis.spawnWorker = () => {\n\
         let error = host
             .execute_module(&config)
             .expect_err("worker URL must stay inside the plugin root");
-        assert!(error.to_string().contains("escapes the config directory"));
+        assert!(error.to_string().contains("escapes the plugin directory"));
     }
 
     // --- Task 5: ErrorEvent dispatch ---
@@ -2362,7 +2442,7 @@ globalThis.spawnWorker = () => {\n\
             "test-worker/throw-listener.ts",
             "globalThis.errMsg = null;\n\
 globalThis.errName = null;\n\
-const w = new Worker(\"throw-worker.ts\", { type: \"module\" });\n\
+const w = new Worker(new URL(\"./throw-worker.ts\", \"file:///runtime/plugins/test-worker/main.ts\"), { type: \"module\" });\n\
 w.onerror = (e) => {\n\
   globalThis.errMsg = e.message;\n\
   globalThis.errName = e.name;\n\
@@ -2406,7 +2486,7 @@ w.postMessage({});",
         host.execute_embedded_plugin(
             "test-worker/listeners.ts",
             "globalThis.calls = [];\n\
-const w = new Worker(\"echo-worker.ts\", { type: \"module\" });\n\
+const w = new Worker(new URL(\"./echo-worker.ts\", \"file:///runtime/plugins/test-worker/main.ts\"), { type: \"module\" });\n\
 const first = () => globalThis.calls.push(\"first\");\n\
 const second = () => globalThis.calls.push(\"second\");\n\
 w.addEventListener(\"message\", first);\n\
@@ -2423,6 +2503,24 @@ w.postMessage({});",
     }
 
     #[test]
+    fn worker_rejects_string_url_synchronously() {
+        use super::super::host::ScriptHost;
+
+        let mut host = ScriptHost::new();
+        host.execute_embedded_plugin(
+            "test-worker/string-url.ts",
+            "globalThis.stringTypeError = false;\n\
+try { new Worker('echo-worker.ts', { type: 'module' }); }\n\
+catch (error) { globalThis.stringTypeError = error instanceof TypeError; }",
+        )
+        .unwrap();
+        assert_eq!(
+            host.evaluate_script("globalThis.stringTypeError").unwrap(),
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
     fn worker_rejects_unsupported_classic_option_synchronously() {
         use super::super::host::ScriptHost;
 
@@ -2431,7 +2529,7 @@ w.postMessage({});",
             "test-worker/classic-option.ts",
             "globalThis.classicTypeError = false;\n\
 try {\n\
-  new Worker(\"echo-worker.ts\", { type: \"classic\" });\n\
+  new Worker(new URL(\"./echo-worker.ts\", \"file:///runtime/plugins/test-worker/main.ts\"), { type: \"classic\" });\n\
 } catch (error) { globalThis.classicTypeError = error instanceof TypeError; }",
         )
         .unwrap();
@@ -2451,7 +2549,7 @@ try {\n\
             "globalThis.constructorThrew = false;\n\
 globalThis.startupError = null;\n\
 try {\n\
-  const worker = new Worker(\"invalid-worker.ts\", { type: \"module\" });\n\
+  const worker = new Worker(new URL(\"./invalid-worker.ts\", \"file:///runtime/plugins/test-worker/main.ts\"), { type: \"module\" });\n\
   worker.onerror = (event) => { globalThis.startupError = event.message; };\n\
 } catch (_) { globalThis.constructorThrew = true; }",
         )
@@ -2469,6 +2567,65 @@ try {\n\
                 .is_string(),
             "module parse failure must dispatch an asynchronous error event"
         );
+        let context = host.context.clone();
+        let live = host
+            .invoke(ScriptInvocationKind::Action, |isolate| {
+                v8::scope_with_context!(scope, isolate, context);
+                let registry = scope
+                    .get_slot::<WorkerRegistrySlot>()
+                    .expect("worker registry");
+                Ok(registry.borrow().iter().flatten().count())
+            })
+            .unwrap();
+        assert_eq!(live, 0, "startup failure must be reaped");
+        assert_eq!(
+            host.evaluate_script("typeof globalThis._worker_0").unwrap(),
+            serde_json::json!("undefined")
+        );
+    }
+
+    #[test]
+    fn worker_missing_entry_is_reported_asynchronously() {
+        use super::super::host::ScriptHost;
+
+        let mut host = ScriptHost::new();
+        host.execute_embedded_plugin(
+            "test-worker/missing-entry-listener.ts",
+            "globalThis.missingConstructorThrew = false;\n\
+globalThis.missingEntryError = null;\n\
+try {\n\
+  const worker = new Worker(new URL('./missing-worker.ts', 'file:///runtime/plugins/test-worker/main.ts'), { type: 'module' });\n\
+  worker.onerror = (event) => { globalThis.missingEntryError = event.message; };\n\
+} catch (_) { globalThis.missingConstructorThrew = true; }",
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        host.pump_worker_messages();
+        assert_eq!(
+            host.evaluate_script("globalThis.missingConstructorThrew")
+                .unwrap(),
+            serde_json::json!(false)
+        );
+        assert!(
+            host.evaluate_script("globalThis.missingEntryError")
+                .unwrap()
+                .is_string()
+        );
+    }
+
+    #[test]
+    fn worker_message_event_has_standard_type() {
+        let handle = spawn_worker(
+            "test-worker/".to_owned(),
+            "event-type-worker.ts".to_owned(),
+            CancellationToken::new(),
+            None,
+            "test".to_owned(),
+            1,
+        )
+        .unwrap();
+        let response = worker_response(&handle, serde_json::json!(null)).unwrap();
+        assert_eq!(response, serde_json::json!("message"));
     }
 
     #[test]
@@ -2479,7 +2636,7 @@ try {\n\
         host.execute_embedded_plugin(
             "test-worker/throw-listener.ts",
             "globalThis.fields = null;\n\
-const w = new Worker(\"throw-worker.ts\", { type: \"module\" });\n\
+const w = new Worker(new URL(\"./throw-worker.ts\", \"file:///runtime/plugins/test-worker/main.ts\"), { type: \"module\" });\n\
 w.addEventListener(\"error\", (e) => {\n\
   globalThis.fields = {\n\
     message: typeof e.message,\n\

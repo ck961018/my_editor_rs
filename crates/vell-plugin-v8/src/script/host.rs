@@ -166,6 +166,12 @@ impl ScriptHost {
                 if let Some(handle) = registry.get_mut(index) {
                     handle.take();
                 }
+                let worker_key = v8::String::new(scope, &format!("_worker_{index}"))
+                    .expect("worker registry key");
+                scope
+                    .get_current_context()
+                    .global(scope)
+                    .delete(scope, worker_key.into());
             }
             Ok(changed)
         })

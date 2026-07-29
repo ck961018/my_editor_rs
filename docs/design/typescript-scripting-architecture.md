@@ -2,7 +2,7 @@
 
 **状态：** 当前实现
 
-**更新日期：** 2026-07-22
+**更新日期：** 2026-07-28
 
 ## 1. 定位
 
@@ -20,9 +20,9 @@ embedded plugins / optional config.ts
 ```
 
 `vell-app` 的普通依赖不含 V8。根二进制先调用
-`vell_plugin_v8::load_user_configuration()`，再把 Mode、ThemeName 和纯
-protocol Face override DTO 注入 App。V8 类型不跨出 `vell-plugin-v8` 的
-公共边界。
+`vell_plugin_v8::load_user_configuration()`，再把 Mode、后台运行时、
+ThemeName 和纯 protocol Face override DTO 注入 App。V8 类型不跨出
+`vell-plugin-v8` 的公共边界。
 
 ## 2. 加载与所有权
 
@@ -36,10 +36,11 @@ protocol Face override DTO 注入 App。V8 类型不跨出 `vell-plugin-v8` 的
 5. 把每个 definition 包装为 `ScriptMode`；
 6. 将通用 Mode 与视觉 DTO 交给 App bootstrap。
 
-所有 `ScriptMode` 通过 `Rc<RefCell<ScriptHost>>` 共享主 isolate、context、
-module map、callback registry 和 diagnostics。Mode definition 进入
-`ModeRegistry` 后，host 的生命周期由这些 adapter 保持；App 不直接保存或
-识别 ScriptHost。
+所有 `ScriptMode` 和一个独立 `ScriptBackground` 通过
+`Rc<RefCell<ScriptHost>>` 共享主 isolate、context、module map、callback
+registry 和 diagnostics。Mode definition 进入 `ModeRegistry`；后台运行时进入
+App 的 background owner 列表，因此没有 Mode 的插件也能持续泵送 Worker。
+App 不识别具体 ScriptHost 类型。
 
 内建插件失败表示安装损坏，会阻止启动。可选用户配置失败会输出 warning，
 原子回滚该模块新增的 definition、Theme 选择和 Face override，并继续使用
@@ -56,12 +57,12 @@ module map、callback registry 和 diagnostics。Mode definition 进入
 
 编辑器不会自动执行当前工作目录或所打开项目中的脚本。
 
-用户配置支持 `.ts`、`.js` 与配置目录内的静态相对 import。以下能力被
-拒绝：
+用户配置支持 `.ts`、`.js`，以及配置目录内的静态和动态相对 import。
+以下能力被拒绝：
 
 - URL 与裸 package specifier；
 - CommonJS `require`；
-- dynamic import 和 top-level await；
+- top-level await；
 - 越出配置根目录的路径；
 - Node、Deno、网络、timer、子进程和任意异步文件 API。
 
