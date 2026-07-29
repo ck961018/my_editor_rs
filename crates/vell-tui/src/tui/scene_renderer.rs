@@ -498,15 +498,6 @@ fn paint_text_item(
                 let last = anchor.row.max(head.row);
                 buf_row >= first && buf_row <= last
             });
-        clear_item_row_with_highlight(
-            canvas,
-            screen_row,
-            item.rect.x as usize,
-            width,
-            linewise_highlight,
-            &text.selection_face,
-            &text.base_face,
-        )?;
         let hi = if linewise_highlight {
             Some((0, usize::MAX))
         } else if matches!(
@@ -551,7 +542,9 @@ fn paint_text_item(
                 face: decoration.face.clone(),
             })
             .collect();
-        paint_line_with_highlight(
+        let item_col = item.rect.x as usize;
+        canvas.move_cursor(screen_row, item_col)?;
+        let painted_width = paint_line_with_highlight(
             canvas,
             line,
             vp.left_col,
@@ -559,6 +552,15 @@ fn paint_text_item(
             hi,
             &text.selection_face,
             &row_decorations,
+            &text.base_face,
+        )?;
+        clear_item_row_with_highlight(
+            canvas,
+            screen_row,
+            item_col + painted_width,
+            width.saturating_sub(painted_width),
+            linewise_highlight,
+            &text.selection_face,
             &text.base_face,
         )?;
     }
@@ -726,13 +728,14 @@ fn paint_line_with_highlight(
     selection_face: &FacePatch,
     decorations: &[RowDecoration],
     base_face: &PaintFace,
-) -> io::Result<()> {
+) -> io::Result<usize> {
     if width == 0 {
-        return Ok(());
+        return Ok(0);
     }
     let content = line_content(line);
     let visible_end = left_col.saturating_add(width);
     let mut cell_col: usize = 0;
+    let mut painted_width: usize = 0;
     let mut reverse_on = false;
     let mut active_face = base_face.clone();
     let mut previous_char_was_visible = false;
@@ -774,7 +777,9 @@ fn paint_line_with_highlight(
                 canvas.set_reverse(false)?;
                 reverse_on = false;
             }
-            canvas.write_str(&" ".repeat(char_end.min(visible_end) - left_col))?;
+            let clipped_width = char_end.min(visible_end) - left_col;
+            canvas.write_str(&" ".repeat(clipped_width))?;
+            painted_width += clipped_width;
             continue;
         }
         if char_start >= visible_end || char_end > visible_end {
@@ -814,6 +819,7 @@ fn paint_line_with_highlight(
         }
         let mut encoded = [0; 4];
         canvas.write_str(ch.encode_utf8(&mut encoded))?;
+        painted_width += char_width;
         previous_char_was_visible = true;
     }
     if reverse_on {
@@ -822,7 +828,7 @@ fn paint_line_with_highlight(
     if active_face != *base_face {
         canvas.set_face(base_face)?;
     }
-    Ok(())
+    Ok(painted_width)
 }
 
 #[cfg(test)]
@@ -1277,6 +1283,29 @@ mod tests {
     }
 
     #[test]
+    fn render_writes_text_before_clearing_later_empty_rows() {
+        let (scene, editor) = editor_scene(20, 5, ViewId(0), ViewId(1));
+        let query = StubQuery {
+            editor_cid: ContentId(0),
+            lines: vec!["edited".to_owned(), "stable statement".to_owned()],
+            selections: Selections::single(Selection::collapsed(TextOffset::origin())),
+        };
+        let mut renderer = SceneRenderer::new();
+        let mut out = Output::new(Vec::new());
+        renderer
+            .render(&scene, Revision(0), &query, editor, &mut out)
+            .unwrap();
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        let text = output.find("stable statement");
+        let full_row_clear = output.find("                    ");
+        assert!(
+            text.is_some() && full_row_clear.is_some() && text < full_row_clear,
+            "output: {output}"
+        );
+    }
+
+    #[test]
     fn renders_editor_lines_and_status() {
         let (scene, ed) = editor_scene(40, 5, ViewId(0), ViewId(1));
         let query = StubQuery {
@@ -1488,11 +1517,8 @@ mod tests {
             .unwrap();
 
         let output = String::from_utf8(out.into_inner()).unwrap();
-        assert!(
-            output.contains("\x1b[7m        \x1b[27m"),
-            "output: {output}"
-        );
         assert!(output.contains("\x1b[7mhello\x1b[27m"), "output: {output}");
+        assert!(output.contains("\x1b[7m   \x1b[27m"), "output: {output}");
     }
 
     #[test]
