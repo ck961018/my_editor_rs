@@ -1631,9 +1631,10 @@ impl ModeRegistry {
     }
 
     pub fn poll_background(&self) -> bool {
-        let mut changed = self.backgrounds.iter().fold(false, |changed, background| {
-            background.poll_background() || changed
-        });
+        let mut changed = false;
+        for background in &self.backgrounds {
+            changed |= background.poll_background();
+        }
         for registration in self.definitions.values() {
             changed |= registration.definition.poll_background();
         }

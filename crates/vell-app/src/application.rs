@@ -99,6 +99,8 @@ impl<F: Frontend> App<F> {
         )
     }
 
+    // ponytail: composition-root inputs stay explicit; add a builder only if this grows.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_modes_visuals_and_backgrounds(
         path: Option<&str>,
         width: usize,
@@ -121,6 +123,8 @@ impl<F: Frontend> App<F> {
         )
     }
 
+    // ponytail: this private funnel mirrors the public composition-root inputs.
+    #[allow(clippy::too_many_arguments)]
     fn build(
         path: Option<&str>,
         width: usize,
