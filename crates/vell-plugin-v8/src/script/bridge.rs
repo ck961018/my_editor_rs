@@ -424,6 +424,13 @@ pub(super) fn throw_script_error(scope: &mut v8::PinScope, message: &str) {
     }
 }
 
+pub(super) fn throw_type_error(scope: &mut v8::PinScope, message: &str) {
+    if let Some(message) = v8::String::new(scope, message) {
+        let error = v8::Exception::type_error(scope, message);
+        scope.throw_exception(error);
+    }
+}
+
 /// Throw a DOMException-shaped error: a plain `Error` with `.name`
 /// set to the given exception name (e.g. "QuotaExceededError").
 /// vell has no real DOMException constructor, but a plain Error

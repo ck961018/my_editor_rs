@@ -39,7 +39,7 @@ use bridge::{
     content_change_to_v8, content_context_object, json_to_mode_value, json_to_v8, optional_string,
     parse_position, property, required_object, required_string, required_usize, set_number,
     set_object, set_resource_facts, set_save_state, set_value, throw_dom_exception,
-    throw_script_error, v8_to_json, view_policy_from_json,
+    throw_script_error, throw_type_error, v8_to_json, view_policy_from_json,
 };
 pub use host::ScriptHost;
 use invocation::{

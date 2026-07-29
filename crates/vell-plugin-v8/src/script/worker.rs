@@ -18,7 +18,7 @@ use super::{
     WatchdogOutcome, call_script_callback, current_exception, ensure_size,
     host_import_module_dynamically, host_initialize_import_meta, initialize_v8, install_heap_limit,
     json_to_v8, load_module_tree, recover_heap_limit, resolve_module, set_object,
-    throw_dom_exception, throw_script_error, v8_to_json,
+    throw_dom_exception, throw_script_error, throw_type_error, v8_to_json,
 };
 #[cfg(test)]
 use super::{MAX_SCRIPT_SOURCE_BYTES, transpile_typescript};
@@ -1082,6 +1082,19 @@ fn worker_constructor(
     // the isolate slot so abort() actually cancels the worker.
     let mut cancellation = CancellationToken::new();
     if let Ok(opts) = v8::Local::<v8::Object>::try_from(arguments.get(1)) {
+        let type_key = v8::String::new(scope, "type").unwrap();
+        if let Some(worker_type) = opts.get(scope, type_key.into())
+            && !worker_type.is_undefined()
+        {
+            let Ok(worker_type) = v8::Local::<v8::String>::try_from(worker_type) else {
+                throw_type_error(scope, "Worker option 'type' must be 'module'");
+                return;
+            };
+            if worker_type.to_rust_string_lossy(scope) != "module" {
+                throw_type_error(scope, "only module workers are supported");
+                return;
+            }
+        }
         let key = v8::String::new(scope, "signal").unwrap();
         if let Some(signal) = opts.get(scope, key.into())
             && let Ok(signal_obj) = v8::Local::<v8::Object>::try_from(signal)
@@ -2407,6 +2420,55 @@ w.postMessage({});",
         host.pump_worker_messages();
         let calls = host.evaluate_script("globalThis.calls").unwrap();
         assert_eq!(calls, serde_json::json!(["second"]));
+    }
+
+    #[test]
+    fn worker_rejects_unsupported_classic_option_synchronously() {
+        use super::super::host::ScriptHost;
+
+        let mut host = ScriptHost::new();
+        host.execute_embedded_plugin(
+            "test-worker/classic-option.ts",
+            "globalThis.classicTypeError = false;\n\
+try {\n\
+  new Worker(\"echo-worker.ts\", { type: \"classic\" });\n\
+} catch (error) { globalThis.classicTypeError = error instanceof TypeError; }",
+        )
+        .unwrap();
+        assert_eq!(
+            host.evaluate_script("globalThis.classicTypeError").unwrap(),
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
+    fn worker_startup_syntax_error_is_reported_asynchronously() {
+        use super::super::host::ScriptHost;
+
+        let mut host = ScriptHost::new();
+        host.execute_embedded_plugin(
+            "test-worker/startup-error-listener.ts",
+            "globalThis.constructorThrew = false;\n\
+globalThis.startupError = null;\n\
+try {\n\
+  const worker = new Worker(\"invalid-worker.ts\", { type: \"module\" });\n\
+  worker.onerror = (event) => { globalThis.startupError = event.message; };\n\
+} catch (_) { globalThis.constructorThrew = true; }",
+        )
+        .expect("worker construction should not throw for module load errors");
+
+        std::thread::sleep(Duration::from_millis(100));
+        host.pump_worker_messages();
+        assert_eq!(
+            host.evaluate_script("globalThis.constructorThrew").unwrap(),
+            serde_json::json!(false)
+        );
+        assert!(
+            host.evaluate_script("globalThis.startupError")
+                .unwrap()
+                .is_string(),
+            "module parse failure must dispatch an asynchronous error event"
+        );
     }
 
     #[test]
