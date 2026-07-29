@@ -357,6 +357,7 @@ enum WorkerChannelMessage {
     Terminated,
 }
 ```
+
 1. `ScriptWorker::start` 保留 std::thread + isolate,但 worker 全局
    挂 `self.onmessage`/`self.postMessage` 标准(而非
    `editor.worker.onMessage`)。
@@ -371,6 +372,7 @@ fn install_global_worker(scope: &mut v8::PinScope<'_, '_>) {
     global.set(scope, name.into(), tmpl.get_function(scope).unwrap().into());
 }
 ```
+
 1. `worker_constructor` 回调解析 `new Worker(url, options)`,
    调 `ScriptWorker::start`,返回 `WorkerHandle` JS 对象(挂
    postMessage/terminate/addEventListener)。
