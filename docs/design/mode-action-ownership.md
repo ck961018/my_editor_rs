@@ -58,7 +58,7 @@ Space 只标识 Scene 布局节点，也不拥有 View 或 Mode 状态。
 - Buffer content context 可以查询文档状态、稳定文本快照和范围；
 - Buffer view context 还包含目标 View 的 selections；
 - StatusBar context 只提供状态栏相关 owned 数据；
-- 不合法的 cursor、edit 或 analysis 能力不会出现在对应 adapter 上。
+- 不合法的 cursor、edit 或 Buffer 文本能力不会出现在对应 adapter 上。
 
 Context 只在 callback 期间有效，不借出 `&mut Content`、`&mut View`、
 `ContentStore` 或 App。脚本 context 中的 native function 在 callback

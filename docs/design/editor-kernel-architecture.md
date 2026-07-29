@@ -332,8 +332,11 @@ path、bytes、revision 和 state，成功 frame 才启动临时文件加 rename
 modified；在途保存期间的新请求保留最新快照。关闭时取消普通任务，但等待
 critical 保存任务完成。
 
-Mode 后台 job 只接收 owned snapshot/request。worker result 通过 message 回到
+Mode 后台 job 只接收 owned snapshot/request。job result 通过 message 回到
 主循环，并校验 job slot/version 后安装；异步任务不能直接修改宿主状态。
+
+Script Worker 是独立的平台能力，不占 Mode job slot。`vell-plugin-v8` 在主
+事件循环的 worker poll tick 泵送消息，并通过 revision-safe sink 发布结果。
 
 ## 12. 前后端与远程语义边界
 

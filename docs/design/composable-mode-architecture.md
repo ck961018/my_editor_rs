@@ -153,7 +153,7 @@ View 的 `ContentViewState`，再通知相关 Mode attachment。
 content-change callback 是被动 observer：
 
 - 可以更新自身 content state；
-- 可以使 presentation 或后台 analysis 变脏；
+- 可以更新 presentation，或向已创建的 Worker 发送 owned snapshot；
 - 不能产生宿主 operation；
 - 失败只 fault 对应 attachment，不回滚已经成功的基础文本编辑。
 

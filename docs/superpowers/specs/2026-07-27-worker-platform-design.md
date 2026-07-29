@@ -26,14 +26,15 @@ theme 插件、纯后台索引器同理。
 
 - 任何插件、任何位置都能拉起后台线程,不再限于 Mode 的
   `analysis`。
-- worker 通信面 100% 照搬 Web Worker 标准:`postMessage`、
-  `addEventListener("message")`、`AbortSignal`、`MessageEvent`。
+- worker 通信面对齐 Web Worker 核心:`postMessage`、
+  `addEventListener("message")`、`MessageEvent`;`AbortSignal` 是
+  vell 的生命周期扩展。
 - worker.ts 是 ES module,支持 `import`/`export`/`import type` 跨文件
   复用。
 - 构造面用标准 `new Worker(url, { type: "module" })`。
 - 删除 `analysis`、`editor.worker.onMessage` 等 Mode-bound 表面。
-- analysis 的安全精华(revision 校验、事务化安装、失败回滚)
-  抽成通用 frame-safe sink,不绑 Mode。
+- analysis 的安全精华(revision 校验)抽成通用 revision-safe sink,
+  不绑 Mode。
 
 ## 非目标
 
@@ -43,8 +44,8 @@ theme 插件、纯后台索引器同理。
 - 不实现 BroadcastChannel。
 - 不实现 worker 池或调度器(等真实瓶颈再加)。
 - 不实现 graceful shutdown 协议(编辑器场景不需要)。
-- 不实现 URL scheme 路由(无 `https://`、`blob:`),只支持相对/
-  绝对路径。
+- 不实现 URL scheme 路由(无 `https://`、`blob:`),只支持最终仍在
+  插件根目录内的相对路径、绝对路径和 `file:` URL。
 - 不保留 v1/v2 兼容层(无包袱,字段推倒重来)。
 
 ## 总体架构
@@ -53,8 +54,8 @@ theme 插件、纯后台索引器同理。
 
 1. **平台原语(新)** —— 标准 Web Worker,全局可用,worker 可嵌套
    spawn。
-2. **frame-safe sink(新)** —— analysis 的安全精华抽成通用平台
-   sink,任何 worker 结果可调。
+2. **revision-safe sink(新)** —— analysis 的 revision 校验抽成
+   通用平台 sink,任何 worker 结果可调。
 3. **Mode 回调(不变)** —— 仍在 `ExecutionFrame` 内写 draft,
    不再是进线程的唯一入口。
 
@@ -134,34 +135,34 @@ worker.ts 是标准 `DedicatedWorkerGlobalScope`:`self.onmessage`、
 | 构造语法 | 非标准 | 标准 `new Worker` |
 | 嵌套 | 不支持 | 支持 |
 
-## frame-safe sink
+## revision-safe sink
 
 ### 动机
 
-analysis 之前帮作者做的安全活(revision 校验、事务化安装、
-失败回滚)有真价值,不该让每个插件作者重造。
-但也不该绑死在
-Mode/装饰场景。抽成通用平台 sink。
+analysis 之前帮作者做的 revision 校验有真价值,不该让每个插件
+作者重造,也不该绑死在 Mode job。它成为 ScriptHost 级平台 sink。
 
 ### 作者侧
 
 ```ts
 declare const editor: {
   writeDecorations(
+    contentId: number,
     revision: number,
     spans: TextDecorationSpan[],
   ): void;
 };
 ```
 
-作者在 worker 的 `addEventListener("message")` 回调里调
+作者在主 isolate 的 Worker message callback 中调用
 `editor.writeDecorations`,宿主内部:
 
-- revision 校验 —— sink 拿到的 revision 和当前 Content revision
-  比对,过期丢弃。
-- 事务化安装 —— 写入框进当前 frame,失败回滚 Content/View。
-- 失败隔离 —— sink 调用本身不抛到 worker isolate,不污染
-  主线程状态。
+- identity 校验 —— `contentId` 明确目标 Content,不会因两个 Buffer
+  revision 相同而串写。
+- revision 校验 —— sink 只安装仍匹配 live Content revision 的结果,
+  过期结果丢弃。
+- 单一发布层 —— decoration buffer 由 ScriptHost 共享,各 ScriptMode
+  presentation 只读取一次,不会重复合并。
 
 ### 扩展性
 
@@ -169,7 +170,7 @@ declare const editor: {
 
 ```ts
 declare const editor: {
-  writeDecorations(revision, spans): void;
+  writeDecorations(contentId, revision, spans): void;
   // 未来按需加(不现在做)
   // writeDiagnostics(revision, diags): void;
   // statusBar(segments): void;
@@ -182,31 +183,26 @@ declare const editor: {
 ### worker.ts 不感知 sink
 
 worker 作者写标准 Worker,回 `postMessage`,安全层在主线程 sink
-里。worker 不知道 frame/transaction/revision 校验存在。
+里。worker 不知道 Content revision 校验存在。
 
-### 取消自动化没了
+### 取消与过期结果
 
-统一 `new Worker` 意味着取消也标准化。作者用 `AbortController`
-自己取消被取代的 worker:
+常驻任务只需创建一个 Worker,每次变化发送新 snapshot。旧任务即使晚返回,
+revision-safe sink 也会丢弃结果:
 
 ```ts
-let ctrl: AbortController | null = null;
-function onBufferChange(text: string, rev: number) {
-  ctrl?.abort();
-  ctrl = new AbortController();
-  const w = new Worker(
-    new URL("./parser.ts", import.meta.url),
-    { type: "module", signal: ctrl.signal },
-  );
-  w.addEventListener("message", (e) => {
-    editor.writeDecorations(e.data.revision, e.data.spans);
-  });
-  w.postMessage({ text, revision: rev });
-}
+const worker = new Worker(
+  new URL("./parser.ts", import.meta.url),
+  { type: "module" },
+);
+worker.onmessage = (event) => {
+  const { contentId, revision, spans } = event.data;
+  editor.writeDecorations(contentId, revision, spans);
+};
 ```
 
-这是"统一标准"的诚实代价:作者多写 3 行取消逻辑,换的是
-任何位置都能 `new Worker`、不再假装自己是 buffer 分析。
+需要结束整个 Worker 生命周期时,作者可调用 `terminate()` 或通过
+`AbortController` 取消。平台不再提供 analysis generation 或自动 replacement。
 
 ## 嵌套 spawn、生命周期与错误模型
 
@@ -233,10 +229,10 @@ try/catch。
 
 | 事件 | 标准 | vell 实现 |
 | --- | --- | --- |
-| 构造 | `new Worker` 返回 | 起线程、建 isolate、transpile、evaluate |
-| `worker.terminate()` | 主线程强杀 | 端 mpsc、join 线程、释放 isolate |
-| `self.close()` | worker 自杀 | 同上,worker 主动触发 |
-| `AbortSignal` abort | 标准 | 端当前请求 mpsc;worker 检测 token 后退出 |
+| 构造 | `new Worker` 返回 | 校验后返回；后台线程加载 module |
+| `worker.terminate()` | 主线程强杀 | 取消 token、移除句柄,线程退出后释放 isolate |
+| `self.close()` | worker 自杀 | 主线程 pump 回收句柄,线程退出 |
+| `AbortSignal` abort | vell 扩展 | 取消整个 Worker 生命周期 |
 | 主线程退出 | n/a | 所有 worker 随进程退出,不做 graceful shutdown |
 
 ### 错误模型
@@ -251,9 +247,9 @@ worker 内未捕获异常:worker 触发 `error` 事件,主线程
 `SCRIPT_HEAP_LIMIT_BYTES` 终止 isolate,主线程收 `error` 事件
 (name=`ResourceExhausted`)。
 
-transpile/加载失败:构造 `new Worker` 时 transpile 失败抛同步
-`SyntaxError`;module graph 解析失败(越界 import、bare import)抛
-同步 `TypeError`。
+构造器同步校验 URL、module-only options 和配额。Worker module 的
+transpile、加载或 module graph 错误在线程启动后通过异步 `error` 事件报告,
+与标准 Web Worker 的构造时序一致。
 
 ### 错误清单
 
@@ -261,7 +257,7 @@ transpile/加载失败:构造 `new Worker` 时 transpile 失败抛同步
 | --- | --- | --- |
 | 超线程配额 | `QuotaExceededError` | 标准 DOMException |
 | 路径越界 | `TypeError` | 标准 |
-| transpile 语法错 | `SyntaxError` | 标准 |
+| transpile/module 加载失败 | 异步 `error` 事件 | 标准 |
 | worker 未捕获异常 | `error` 事件 | 标准 |
 | 超时/heap | `error` 事件(name 指明) | vell 扩展(标准框架内) |
 | 给 terminated worker postMessage | `InvalidStateError` | 标准 |
@@ -272,14 +268,14 @@ transpile/加载失败:构造 `new Worker` 时 transpile 失败抛同步
 
 只 tree-sitter 用 worker(`runtime/plugins/tree-sitter/`)。迁移后:
 
-- `plugin.ts` 的 `analysis` 声明改为显式 `new Worker` +
-  `AbortController` + `editor.writeDecorations`。
+- `plugin.ts` 的 `analysis` 声明改为单个常驻 `new Worker` +
+  `editor.writeDecorations`；revision sink 丢弃过期结果。
 - `worker.ts` 的 `editor.worker.onMessage` 改为标准 `self.onmessage`。
 - `worker.ts` 可拆成 `parser.ts`/`query.ts`/`worker.ts` 多文件
   (现在 355 行单文件)。
 
-迁移代价:tree-sitter 作者手写取消逻辑(3 行)和 sink 调用
-(1 行)。失去 analysis 的"自动轮询 input 签名",但
+迁移代价:tree-sitter 作者显式发送 snapshot 和调用 sink。失去 analysis
+的"自动轮询 input 签名",但
 tree-sitter 的 `input`
 逻辑(`if language === null return; return {...}`)搬到
 `on.buffer.changed` 回调,等价。
@@ -297,12 +293,12 @@ tree-sitter 的 `input`
 
 - revision 校验(analysis 内部做的)→ 搬进
   `editor.writeDecorations` 实现。
-- 事务化安装 → 搬进 sink 实现。
+- owned decoration 安装 → ScriptHost 共享 revision-gated buffer。
 
 ### 不保留的逻辑
 
-- generation 单调递增 / 自动取消被取代任务 —— 作者用
-  `AbortController` 自己管。这是统一标准的诚实代价。
+- generation 单调递增 / 自动取消被取代任务。常驻 Worker 可依赖 sink
+  丢弃 stale revision；需要结束 Worker 时使用 `AbortController`。
 
 ## 测试策略
 
@@ -326,7 +322,7 @@ tree-sitter 的 `input`
 | `worker_es_module_imports` | worker.ts import ./parser.ts 多文件 |
 | `worker_import_meta_url` | import.meta.url 返回正确 URL |
 | `worker_dynamic_import` | `await import("./x.ts")` 解析 |
-| `write_decorations_frame_safe` | sink 校验 revision、事务化、失败回滚 |
+| `write_decorations_frame_safe` | sink 校验 Content identity 与 revision |
 | `write_decorations_stale_revision` | 过期 revision 的 spans 被丢弃 |
 
 ### TypeScript 侧(`runtime/`)
@@ -336,7 +332,7 @@ tree-sitter 的 `input`
 
 - `new Worker(new URL(..., import.meta.url))` 类型正确。
 - `Worker` 构造器 options 类型(`type: "module"`, `signal`)。
-- `editor.writeDecorations(revision, spans)` 签名。
+- `editor.writeDecorations(contentId, revision, spans)` 签名。
 - `AbortController` / `AbortSignal` 全局可用(lib 已含)。
 
 ### 迁移示例(`runtime/examples/`)

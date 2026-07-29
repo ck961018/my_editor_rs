@@ -98,7 +98,7 @@ Buffer 与 StatusBar adapter 获得不同的静态 context。Buffer context 暴�
 资源名、路径、载体状态、脏状态、保存结果和文本统计；StatusBar view
 context 还暴露
 目标 View 与 Content ID，并可通过 `viewPolicy.statusBar` 定制左、中、右分段
-及 Face。StatusBar 不暴露 cursor、text edit 或 background analysis。
+及 Face。StatusBar 不暴露 cursor、text edit 或 Buffer 文本能力。
 
 v1 `content/view/actions/keys` schema 只作为兼容 parser 存在。每个 host 最多
 产生一条结构化弃用诊断；`V1_REMOVAL_VERSION` 为 `0.3.0`。兼容层不会改变
@@ -192,46 +192,39 @@ Script callback
 Content decoration 带 Content revision。文本变化后，旧 decoration 可先通过
 `ContentChange` 映射，直到新的异步 snapshot 安装，避免空白高亮帧。
 
-## 9. 命名后台 analysis
+## 9. Worker 平台原语
 
-Buffer adapter 可以声明多个命名 analysis：
+`Worker` 是 ScriptHost 级平台能力，不属于 Mode definition。插件顶层可以创建
+module Worker，主 isolate 定期泵送其消息：
 
 ```ts
-analysis: {
-  syntax: {
-    worker: "worker.ts",
-    snapshot: "text",
-    input(ctx) {
-      return { language: ctx.state.language, revision: ctx.revision };
-    },
-    apply(ctx) {
-      return {
-        contentDecorations: {
-          revision: ctx.revision,
-          spans: ctx.arguments.spans,
-        },
-      };
-    },
-  },
-}
+const worker = new Worker(
+  new URL("./worker.ts", import.meta.url),
+  { type: "module" },
+);
+worker.onmessage = (event) => {
+  const { contentId, revision, spans } = event.data;
+  editor.writeDecorations(contentId, revision, spans);
+};
 ```
 
-analysis 名称映射为宿主内部 job slot。`input` 是纯函数，其返回 message
-同时是依赖签名。`snapshot: "text"` 让宿主在线程边界把稳定文本快照加入
-message；普通 UI callback 不复制全文到 V8。
+每个 Worker 使用独立 OS 线程和 V8 isolate。主线程与 Worker 只传递
+JSON-compatible owned data；通信是主线程与各 Worker 之间的星形拓扑。
+Worker 可静态或动态 import 同一插件根目录内的 module，也可在配额和深度限制
+内嵌套创建 Worker。
 
-宿主为请求分配单调 generation，并捕获 Content revision 与 input epoch：
+`ScriptHost` 持有 Worker registry、配额和 decoration sink。Mode adapter
+只调用脚本 callback，不负责 Worker 生命周期或消息轮询。事件循环每个 worker
+poll tick 调用 ScriptHost pump；即使插件没有定义 Mode，顶层 Worker 也会继续
+接收消息。
 
-- 同 slot 的新 message 或 `void` 取消旧请求；
-- 一次 poll 先计算所有 slot 的签名，再发布替换；
-- stale revision、epoch、message 或 generation 不进入 `apply`；
-- `apply` 使用短生命周期 Mode draft；
-- 当前 slot 接受 post-apply signature，避免自身 state 形成反馈循环；
-- 不同 slot 的结果和 decoration cache 彼此隔离。
+`editor.writeDecorations(contentId, revision, spans)` 在主 isolate 接收结果。
+它以 `(ContentId, revision)` 校验 live Content，过期结果不会进入 presentation。
+这层安全不依赖 Mode job slot、generation 或 analysis apply。
 
-Worker 使用独立 isolate 和线程，只能读取嵌入插件目录的只读资源。它没有网络、
-timer、Node API 或任意文件访问。Promise 通过受控 microtask pump 完成，并响应
-cancellation 与执行预算。
+Worker module graph 和资源读取都限制在插件根目录。它没有网络、timer、DOM、
+Node API、共享内存或任意文件访问。Promise 通过受控 microtask pump 完成；
+取消、超时、heap exhaustion 和未捕获异常只终止对应 Worker。
 
 ## 10. 预算与恢复
 
@@ -258,9 +251,9 @@ cache 之前。
 失败。App 恢复 Content、View、input 与 history checkpoint，丢弃 operation 和
 Mode draft，但事件循环继续。
 
-被动 content-change、presentation、state factory 或 analysis apply 失败时，只
-fault 对应 attachment。基础文本编辑、其他 Mode 与渲染继续工作；诊断包含
-Mode、callback phase 和 message。
+被动 content-change、presentation 或 state factory 失败时，只 fault 对应
+attachment。Worker 错误通过自身 `error` 事件隔离。基础文本编辑、其他 Mode
+与渲染继续工作；诊断包含 Mode、callback phase 和 message。
 
 主 isolate 由全部 ScriptMode 共享，因此这些限制不是恶意代码的进程级隔离。
 在需要自动运行不受信任插件前，必须重新评估 isolate 或进程边界。
@@ -272,7 +265,7 @@ vell-plugin-v8::script
 ├── mod          façade、加载、共享运行时类型
 ├── host         isolate、context、definition 与 callback registry
 ├── invocation   调用、microtask、watchdog 与 heap 恢复
-├── mode_adapter ScriptMode、状态与后台 job 接线
+├── mode_adapter ScriptMode、状态与 presentation 接线
 ├── module       本地 ES module graph 与 TypeScript 转译
 ├── bridge       Rust、JSON 与 V8 值转换
 ├── schema       v1/v2 definition 解析

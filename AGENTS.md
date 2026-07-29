@@ -142,8 +142,8 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
   的 context 能力。
 - 脚本 state 必须是 JSON-compatible owned data。V8 handle、函数、Promise、
   循环引用和宿主引用不得进入 Mode state。
-- 后台分析通过命名 `analysis` 和独立 worker 运行；render query 只读取已
-  发布的 Rust presentation snapshot。
+- 后台任务使用全局标准 `new Worker`；Worker 不属于 Mode。结果通过主
+  isolate 的 revision-safe sink（如 `editor.writeDecorations`）发布。
 - 不要绕开脚本预算、原子发布、故障隔离、路径限制或 v1 兼容诊断。
 
 ## 测试重点

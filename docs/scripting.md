@@ -207,60 +207,49 @@ snapshot 到达。这样既能避免高亮短暂消失，也能保持 revision �
 `viewState.viewPolicy` 可以设置 cursor style、cursor domain、selection
 shape 和具名 selection face。
 
-## 后台 worker
+## 后台 Worker
 
-内建插件可以指定一个持久的 `worker.ts`：
-
-```ts
-editor.worker.onMessage(async (message) => {
-  const bytes = editor.resources.readBinary("vendor/parser.wasm");
-  return await analyze(bytes, message);
-});
-```
-
-Worker 资源是只读的，并限制在插件目录中。宿主不提供绝对路径、父目录穿越、
-网络访问、timer 或 Node API。
-
-高级 Buffer adapter 可以独立于普通 command 和 input 声明具名后台 analysis：
+插件可以在顶层创建标准 module Worker。Worker 不属于 Mode，也不需要
+`analysis` 声明：
 
 ```ts
-analysis: {
-  syntax: {
-    worker: "worker.ts",
-    snapshot: "text",
-    input(ctx) {
-      if (ctx.state.language === null) return;
-      return { language: ctx.state.language, revision: ctx.revision };
-    },
-    apply(ctx) {
-      return {
-        contentDecorations: {
-          revision: ctx.revision,
-          spans: ctx.arguments.spans,
-        },
-      };
-    },
-  },
-}
+const worker = new Worker(
+  new URL("./worker.ts", import.meta.url),
+  { type: "module" },
+);
+
+worker.onmessage = (event: MessageEvent<HighlightResult>) => {
+  const { contentId, revision, spans } = event.data;
+  editor.writeDecorations(contentId, revision, spans);
+};
 ```
 
-Analysis 名称是稳定的任务 identity。`input` 必须是纯函数；其返回值同时
-也是依赖签名。宿主在发布任何 replacement 前轮询全部具名 analysis，分配
-单调递增的 generation，并捕获 Content revision 和 input epoch。message
-变化或返回 `void` 会取消已被取代的任务；过期结果不会进入 `apply`；
-`apply` 在事务化 Mode state 上运行。当前 analysis 会接受自己在 apply
-之后的新签名，避免 state 更新不断触发自身；其他 analysis 只在各自的
-message 变化时重新运行。
+主线程和 Worker 通过 `postMessage`、`onmessage` 或
+`addEventListener("message", ...)` 交换 JSON-compatible owned data。
+Worker 入口是 ES module，可使用静态或动态相对 import：
 
-`snapshot: "text"` 会在 UI 线程之外把当前文档文本加入 worker message；
-`input` 必须返回不含 `text` 字段的对象。多个具名 analysis 各自维护独立
-的 decoration cache layer。
+```ts
+self.onmessage = async (event: MessageEvent<HighlightRequest>) => {
+  const parser = await import("./parser.ts");
+  self.postMessage(await parser.highlight(event.data));
+};
+```
 
-Worker 可以返回 Promise。worker isolate 会驱动 V8 microtask、响应编辑器
-取消，并拒绝超过执行预算的请求。主 ScriptHost 对 input 和 command callback
-仍然同步执行，但 watchdog 会限制每次调用，并在超时或 heap pressure 时终止
-V8。只有 invocation 成功后，经过验证的 state、operation 和 presentation
-数据才会发布。
+`editor.writeDecorations(contentId, revision, spans)` 是 revision-safe sink。
+宿主只安装仍与目标 Content 当前 revision 匹配的结果；过期 Worker 结果会被
+丢弃。Worker 只计算并 `postMessage`，sink 必须在主 isolate 的消息回调中调用。
+
+需要取消时，可把 `AbortSignal` 传给构造器，或调用
+`worker.terminate()`。`self.close()` 从 Worker 内结束自身。Worker 内也可
+创建 Worker；硬限制为每插件 8 个、全局 32 个、最多 4 层 Worker。
+
+Worker 资源只读，并限制在插件根目录。相对路径、绝对路径和 `file:` URL
+最终都必须位于该根目录；父目录穿越会被拒绝。宿主不提供网络、timer、DOM、
+Node API、共享内存或 worker-to-worker 通道。
+
+Worker 模块加载或语法错误通过异步 `error` 事件报告。URL/options 校验和配额
+错误可由构造器同步抛出。未捕获异常、超时或 heap exhaustion 会终止对应
+Worker 并产生 `ErrorEvent`，不会终止主 isolate。
 
 独立 command 仍有意保持为延后功能。目前没有 command palette 或非 Mode
 调用入口，因此 `context.commands.invoke()` 只解析已注册的 Mode-local
@@ -295,8 +284,8 @@ v1 在 0.1.x 中已弃用，在 0.2.x 中仍可使用并产生一次结构化 wa
 bare package、URL、CommonJS、dynamic import、top-level await，以及越出
 配置目录的 import 都会被拒绝。
 
-内建 worker 脚本和二进制资源在构建时嵌入。当前还不支持来自文件系统的
-用户 worker。
+内建 Worker 脚本和二进制资源在构建时嵌入。文件系统用户配置也可以从自己的
+配置目录创建 Worker；入口及其 module graph 不能越出该目录。
 
 ## Windows 构建说明
 
