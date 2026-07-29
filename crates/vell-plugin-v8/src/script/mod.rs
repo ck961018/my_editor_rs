@@ -280,6 +280,25 @@ impl WorkerDecorationBuffer {
         let (stored_rev, set) = self.entries.get(&content_id)?;
         (*stored_rev == current_revision).then_some(set)
     }
+
+    /// Reflow the last valid decorations onto the next revision so
+    /// they stay visible until the worker returns fresh results.
+    fn reflow(
+        &mut self,
+        content_id: ContentId,
+        current_revision: u64,
+        change: &vell_core::transaction::TextChangeSet,
+    ) {
+        let Some((stored_rev, set)) = self.entries.get_mut(&content_id) else {
+            return;
+        };
+        // A missed change leaves no safe position mapping.
+        if *stored_rev + 1 != current_revision {
+            return;
+        }
+        *set = map_decoration_set(set, change);
+        *stored_rev = current_revision;
+    }
 }
 
 fn map_decoration_set(
@@ -2691,7 +2710,7 @@ for (const name of ["worker-owner-a", "worker-owner-b"]) {
     }
 
     #[test]
-    fn write_decorations_drops_when_revision_advances() {
+    fn worker_decorations_reflow_notified_changes_and_drop_untracked_revisions() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("test.txt");
         fs::write(&path, "hello\nworld\n").unwrap();
@@ -2770,28 +2789,42 @@ editor.writeDecorations(0, {revision}, [{{
             assert_eq!(decorations.len(), 1);
         }
 
-        // Advance the content revision by applying a text edit.
+        // A normal content-change notification reflows the previous
+        // layer while its replacement is still being computed.
         let snapshot = contents
             .text_snapshot(content_id)
             .expect("buffer should have a snapshot");
         let len = snapshot.len_chars();
+        let edit = vell_core::transaction::TextEdit::new(0..0, "x".to_string());
+        let text_change =
+            vell_core::transaction::TextChangeSet::from_edits(len, vec![edit]).unwrap();
+        contents.apply(content_id, ContentAction::Text(text_change.clone()));
+        let change = vell_core::content::ContentChange::Text(text_change);
+        let content_context = ModeContentContext::new(content_id, &contents);
+        mode.on_content_changed(content_state.as_mut(), &content_context, &change)
+            .unwrap();
+        let decorations = mode.content_decorations(
+            content_state.as_ref(),
+            &content_context,
+            RowRange { start: 0, end: 2 },
+        );
+        assert_eq!(decorations.len(), 1);
+        assert_eq!(decorations[0].start.char_index, 1);
+        assert_eq!(decorations[0].end.char_index, 6);
+
+        // Without the change set there is no safe mapping, so the
+        // existing stale-on-read behavior still drops the layer.
+        let snapshot = contents.text_snapshot(content_id).unwrap();
+        let len = snapshot.len_chars();
         let edit = vell_core::transaction::TextEdit::new(len..len, "x".to_string());
         let change = vell_core::transaction::TextChangeSet::from_edits(len, vec![edit]).unwrap();
         contents.apply(content_id, ContentAction::Text(change));
-
-        // Query again — the stale revision should be dropped.
-        {
-            let content_context = ModeContentContext::new(content_id, &contents);
-            let decorations = mode.content_decorations(
-                content_state.as_ref(),
-                &content_context,
-                RowRange { start: 0, end: 2 },
-            );
-            assert_eq!(
-                decorations.len(),
-                0,
-                "stale worker decorations should be dropped after revision advance"
-            );
-        }
+        let content_context = ModeContentContext::new(content_id, &contents);
+        let decorations = mode.content_decorations(
+            content_state.as_ref(),
+            &content_context,
+            RowRange { start: 0, end: 2 },
+        );
+        assert!(decorations.is_empty());
     }
 }

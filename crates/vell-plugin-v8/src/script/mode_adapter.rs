@@ -309,6 +309,17 @@ impl Mode for ScriptMode {
                     message: error.to_string(),
                 })?;
         }
+        // Keep the previous worker layer mapped to the post-edit text
+        // until a fresh result replaces it.
+        if self.owns_worker_decorations
+            && let Some(revision) = context.content_revision()
+        {
+            self.host.borrow().worker_decorations.borrow_mut().reflow(
+                context.content_id(),
+                revision.0,
+                text_change,
+            );
+        }
         Ok(())
     }
 
