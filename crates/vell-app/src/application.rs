@@ -6,7 +6,7 @@ use crate::behavior::BehaviorRecorder;
 use crate::bootstrap::{bootstrap_editor, bootstrap_editor_with_theme};
 use crate::diagnostics::RuntimeDiagnostic;
 use crate::kernel::Kernel;
-use crate::mode::{Mode, ModeAttachmentError};
+use crate::mode::{Mode, ModeAttachmentError, ModeBackground};
 use crate::mode_name::ModeName;
 use crate::session::ClientSession;
 use vell_core::buffer::Buffer;
@@ -26,7 +26,16 @@ pub struct App<F: Frontend> {
 impl<F: Frontend> App<F> {
     #[allow(dead_code, reason = "unconfigured application constructor")]
     pub fn new(path: Option<&str>, width: usize, height: usize, frontend: F) -> io::Result<Self> {
-        Self::build(path, width, height, frontend, Vec::new(), None, Vec::new())
+        Self::build(
+            path,
+            width,
+            height,
+            frontend,
+            Vec::new(),
+            Vec::new(),
+            None,
+            Vec::new(),
+        )
     }
 
     pub fn with_modes(
@@ -36,7 +45,16 @@ impl<F: Frontend> App<F> {
         frontend: F,
         modes: Vec<Box<dyn Mode>>,
     ) -> io::Result<Self> {
-        Self::build(path, width, height, frontend, modes, None, Vec::new())
+        Self::build(
+            path,
+            width,
+            height,
+            frontend,
+            modes,
+            Vec::new(),
+            None,
+            Vec::new(),
+        )
     }
 
     pub fn with_modes_and_theme(
@@ -54,6 +72,7 @@ impl<F: Frontend> App<F> {
             height,
             frontend,
             modes,
+            Vec::new(),
             Some(&theme),
             Vec::new(),
         )
@@ -74,6 +93,29 @@ impl<F: Frontend> App<F> {
             height,
             frontend,
             modes,
+            Vec::new(),
+            theme.as_ref(),
+            face_overrides,
+        )
+    }
+
+    pub fn with_modes_visuals_and_backgrounds(
+        path: Option<&str>,
+        width: usize,
+        height: usize,
+        frontend: F,
+        modes: Vec<Box<dyn Mode>>,
+        backgrounds: Vec<Box<dyn ModeBackground>>,
+        theme: Option<ThemeName>,
+        face_overrides: Vec<FaceOverride>,
+    ) -> io::Result<Self> {
+        Self::build(
+            path,
+            width,
+            height,
+            frontend,
+            modes,
+            backgrounds,
             theme.as_ref(),
             face_overrides,
         )
@@ -85,6 +127,7 @@ impl<F: Frontend> App<F> {
         height: usize,
         frontend: F,
         modes: Vec<Box<dyn Mode>>,
+        backgrounds: Vec<Box<dyn ModeBackground>>,
         theme: Option<&ThemeName>,
         face_overrides: Vec<FaceOverride>,
     ) -> io::Result<Self> {
@@ -107,6 +150,9 @@ impl<F: Frontend> App<F> {
                 bootstrap_editor_with_theme(buffer, width, height, modes, None, face_overrides)?
             }
         };
+        for background in backgrounds {
+            bootstrap.kernel.register_mode_background(background);
+        }
         bootstrap
             .session
             .faces_mut()

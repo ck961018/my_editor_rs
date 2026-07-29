@@ -14,7 +14,9 @@ use vell_core::content::ContentKind;
 use vell_mode::command::ModeValue;
 use vell_mode::mode_name::{ModeActionName, ModeName};
 use vell_mode::operation::MAX_MODE_CALLBACK_OPERATIONS;
-use vell_mode::{Mode, ModeContentContext, ModeError, ModeResult, ModeState, ModeViewContext};
+use vell_mode::{
+    Mode, ModeBackground, ModeContentContext, ModeError, ModeResult, ModeState, ModeViewContext,
+};
 use vell_protocol::content_query::{
     Color, Face, FaceDefinition, FaceName, FaceOverride, FacePatch, FaceValue, NamedTextDecoration,
     RowRange, ThemeName, UnderlineStyle,
@@ -45,7 +47,7 @@ use invocation::{
     WatchdogOutcome, call_script_callback, install_heap_limit, perform_microtask_checkpoint,
     recover_heap_limit,
 };
-use mode_adapter::ScriptMode;
+use mode_adapter::{ScriptBackground, ScriptMode};
 use module::{
     AssetSource, ModuleMap, current_exception, host_import_module_dynamically,
     host_initialize_import_meta, load_module_tree, resolve_module, transpile_typescript,
@@ -459,6 +461,7 @@ pub fn load_user_configuration() -> Result<LoadedEditorConfiguration, ScriptErro
     };
     Ok(LoadedEditorConfiguration {
         modes,
+        backgrounds: vec![Box::new(ScriptBackground::new(host.clone()))],
         theme: configuration.theme,
         face_overrides: configuration.face_overrides,
     })
@@ -476,7 +479,12 @@ pub fn load_typescript_modes(
         .into_iter()
         .map(|mode| Box::new(mode) as Box<dyn Mode>)
         .collect();
-    Ok(LoadedScriptModes { modes, diagnostics })
+    let backgrounds = vec![Box::new(ScriptBackground::new(host)) as Box<dyn ModeBackground>];
+    Ok(LoadedScriptModes {
+        modes,
+        backgrounds,
+        diagnostics,
+    })
 }
 
 fn resolve_config_path(primary: Option<PathBuf>, root: Option<PathBuf>) -> Option<PathBuf> {
@@ -2100,6 +2108,45 @@ editor.modes.define({ name: "legacy-two", actions: {} });
     }
 
     #[test]
+    fn worker_only_plugin_keeps_a_background_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.ts");
+        let worker_path = directory.path().join("worker.ts");
+        fs::write(
+            &worker_path,
+            "self.onmessage = () => self.postMessage('done');",
+        )
+        .unwrap();
+        fs::write(
+            &config,
+            r#"
+const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
+worker.onmessage = () => {};
+worker.postMessage(null);
+"#,
+        )
+        .unwrap();
+        let mut host = ScriptHost::new();
+        host.execute_module(&config).unwrap();
+        let host = Rc::new(RefCell::new(host));
+
+        assert!(ScriptHost::script_modes(&host).is_empty());
+        let background = ScriptBackground::new(host);
+        let delivered = (0..100).any(|_| {
+            if background.poll_background() {
+                true
+            } else {
+                std::thread::sleep(Duration::from_millis(5));
+                false
+            }
+        });
+        assert!(
+            delivered,
+            "worker-only plugin must remain alive and be polled"
+        );
+    }
+
+    #[test]
     fn v1_content_context_keeps_the_legacy_document_view() {
         let loaded = load_typescript_modes(
             "file:///legacy-document.ts",
@@ -2583,6 +2630,67 @@ editor.writeDecorations(0, {revision}, [{{
         );
         assert_eq!(decorations.len(), 1);
         assert_eq!(decorations[0].face, FaceName::new("syntax.test"));
+    }
+
+    #[test]
+    fn worker_decorations_are_emitted_once_across_script_modes() {
+        let mut host = ScriptHost::new();
+        host.execute_embedded_plugin(
+            "test-worker/two-modes.ts",
+            r#"
+for (const name of ["worker-owner-a", "worker-owner-b"]) {
+  editor.modes.define({ name, on: { buffer: {} } });
+}
+"#,
+        )
+        .unwrap();
+        let host = Rc::new(RefCell::new(host));
+        let modes = ScriptHost::script_modes(&host);
+        let content_id = ContentId(0);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("test.txt");
+        fs::write(&path, "x").unwrap();
+        let mut buffer = Buffer::new();
+        buffer.open_path(path.to_str().unwrap()).unwrap();
+        let mut contents = ContentStore::default();
+        contents
+            .insert(content_id, Content::Buffer(buffer))
+            .unwrap();
+        let context = ModeContentContext::new(content_id, &contents);
+        let states: Vec<_> = modes
+            .iter()
+            .map(|mode| mode.create_content_state(&context).unwrap())
+            .collect();
+        let revision = contents.revision(content_id).unwrap().0;
+        host.borrow().worker_decorations.borrow_mut().track_current(
+            content_id,
+            revision,
+            context.buffer().unwrap().text_snapshot(),
+        );
+        host.borrow_mut()
+            .execute_typescript(
+                "file:///test.ts",
+                &format!(
+                    r#"editor.writeDecorations(0, {revision}, [{{
+  range: {{ start: {{ line: 0, character: 0 }}, end: {{ line: 0, character: 1 }} }},
+  face: "syntax.test",
+}}]);"#,
+                ),
+            )
+            .unwrap();
+
+        let count: usize = modes
+            .iter()
+            .zip(&states)
+            .map(|(mode, state)| {
+                mode.content_decorations(state.as_ref(), &context, RowRange { start: 0, end: 1 })
+                    .len()
+            })
+            .sum();
+        assert_eq!(
+            count, 1,
+            "host decorations must have one presentation owner"
+        );
     }
 
     #[test]

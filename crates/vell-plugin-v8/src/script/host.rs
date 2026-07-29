@@ -327,9 +327,15 @@ impl ScriptHost {
 
     pub(super) fn script_modes(host: &Rc<RefCell<Self>>) -> Vec<ScriptMode> {
         let definitions = host.borrow().definitions.borrow().clone();
+        let decoration_owner = definitions
+            .iter()
+            .position(|definition| definition.adapters.buffer.is_some());
         definitions
             .into_iter()
-            .map(|definition| ScriptMode::new(host.clone(), definition))
+            .enumerate()
+            .map(|(index, definition)| {
+                ScriptMode::new(host.clone(), definition, decoration_owner == Some(index))
+            })
             .collect()
     }
 

@@ -6,8 +6,8 @@ use vell_core::keymap::Keymap;
 use vell_mode::command::{Command, ModeCommand, ModeValue};
 use vell_mode::mode_name::{ModeActionName, ModeName};
 use vell_mode::{
-    Mode, ModeAdapters, ModeContentContext, ModeError, ModeJobRequest, ModeJobResult, ModeJobSlot,
-    ModeResult, ModeState, ModeViewContext, ModeViewPolicy,
+    Mode, ModeAdapters, ModeBackground, ModeContentContext, ModeError, ModeJobRequest,
+    ModeJobResult, ModeJobSlot, ModeResult, ModeState, ModeViewContext, ModeViewPolicy,
 };
 use vell_protocol::content_query::{FaceDefinition, NamedTextDecoration, RowRange};
 use vell_protocol::key_event::KeyEvent;
@@ -19,6 +19,22 @@ use super::{
     script_state_mut,
 };
 
+pub(super) struct ScriptBackground {
+    host: Rc<RefCell<ScriptHost>>,
+}
+
+impl ScriptBackground {
+    pub(super) fn new(host: Rc<RefCell<ScriptHost>>) -> Self {
+        Self { host }
+    }
+}
+
+impl ModeBackground for ScriptBackground {
+    fn poll_background(&self) -> bool {
+        self.host.borrow_mut().pump_worker_messages()
+    }
+}
+
 pub(super) struct ScriptMode {
     host: Rc<RefCell<ScriptHost>>,
     name: ModeName,
@@ -27,6 +43,7 @@ pub(super) struct ScriptMode {
     adapters: ScriptAdapters,
     face_definitions: Vec<FaceDefinition>,
     before: Option<ModeName>,
+    owns_worker_decorations: bool,
 }
 
 struct ScriptAdapter {
@@ -77,7 +94,11 @@ impl ScriptAdapter {
 }
 
 impl ScriptMode {
-    pub(super) fn new(host: Rc<RefCell<ScriptHost>>, definition: ScriptModeDefinition) -> Self {
+    pub(super) fn new(
+        host: Rc<RefCell<ScriptHost>>,
+        definition: ScriptModeDefinition,
+        owns_worker_decorations: bool,
+    ) -> Self {
         let mut actions = Vec::new();
         for adapter in [
             definition.adapters.buffer.as_ref(),
@@ -110,6 +131,7 @@ impl ScriptMode {
             adapters,
             face_definitions: definition.face_definitions,
             before: definition.before,
+            owns_worker_decorations,
         }
     }
 
@@ -290,10 +312,6 @@ impl Mode for ScriptMode {
         Ok(())
     }
 
-    fn poll_background(&self) -> bool {
-        self.host.borrow_mut().pump_worker_messages()
-    }
-
     fn take_background_jobs(
         &self,
         _state: &mut dyn ModeState,
@@ -326,7 +344,9 @@ impl Mode for ScriptMode {
         let mut decorations = script_state(content_state, &self.name)
             .map(|state| state.decorations.visible(&snapshot, visible_rows))
             .unwrap_or_default();
-        if let Some(revision) = context.content_revision() {
+        if self.owns_worker_decorations
+            && let Some(revision) = context.content_revision()
+        {
             let content_id = context.content_id();
             // Self-heal stale `current` from native edits that advanced
             // the revision outside a script Mode action frame.

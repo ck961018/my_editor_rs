@@ -30,12 +30,13 @@ async fn main() -> io::Result<()> {
     let frontend = TuiFrontend::new(Output::new(io::BufWriter::new(io::stdout())));
     let configuration = load_user_configuration().map_err(io::Error::other)?;
     let theme = theme.map(ThemeName::new).or(configuration.theme);
-    let mut app = App::with_modes_and_visuals(
+    let mut app = App::with_modes_visuals_and_backgrounds(
         path.as_deref(),
         width as usize,
         height as usize,
         frontend,
         configuration.modes,
+        configuration.backgrounds,
         theme,
         configuration.face_overrides,
     )?;

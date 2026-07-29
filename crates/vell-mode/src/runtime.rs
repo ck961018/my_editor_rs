@@ -1580,9 +1580,14 @@ impl From<ModeContextError> for ModeAttachmentError {
     }
 }
 
+pub trait ModeBackground {
+    fn poll_background(&self) -> bool;
+}
+
 pub struct ModeRegistry {
     definitions: HashMap<ModeId, Rc<ModeRegistration>>,
     ids_by_name: HashMap<ModeName, ModeId>,
+    backgrounds: Vec<Box<dyn ModeBackground>>,
     next_id: u32,
 }
 
@@ -1612,6 +1617,7 @@ impl ModeRegistry {
         Self {
             definitions: HashMap::new(),
             ids_by_name: HashMap::new(),
+            backgrounds: Vec::new(),
             next_id: 0,
         }
     }
@@ -1620,8 +1626,14 @@ impl ModeRegistry {
         self.register_boxed(Box::new(mode))
     }
 
+    pub fn register_background(&mut self, background: Box<dyn ModeBackground>) {
+        self.backgrounds.push(background);
+    }
+
     pub fn poll_background(&self) -> bool {
-        let mut changed = false;
+        let mut changed = self.backgrounds.iter().fold(false, |changed, background| {
+            background.poll_background() || changed
+        });
         for registration in self.definitions.values() {
             changed |= registration.definition.poll_background();
         }

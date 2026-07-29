@@ -7,8 +7,8 @@ use tokio::sync::mpsc;
 use crate::command::ModeCommand;
 use crate::message::AppMessage;
 use crate::mode::{
-    ModeContentStore, ModeDraftJournal, ModeError, ModeId, ModeJobKey, ModeJobRequest,
-    ModeJobResult, ModeJobRunner, ModeRegistry, ModeResult,
+    ModeBackground, ModeContentStore, ModeDraftJournal, ModeError, ModeId, ModeJobKey,
+    ModeJobRequest, ModeJobResult, ModeJobRunner, ModeRegistry, ModeResult,
 };
 use crate::tasks::AppTasks;
 use crate::transaction::{
@@ -52,6 +52,10 @@ impl Kernel {
             pending_saves: HashMap::new(),
             command_transaction: None,
         }
+    }
+
+    pub(super) fn register_mode_background(&mut self, background: Box<dyn ModeBackground>) {
+        self.modes.register_background(background);
     }
 
     pub(super) fn contents(&self) -> &ContentStore {
