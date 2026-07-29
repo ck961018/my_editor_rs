@@ -1161,6 +1161,12 @@ fn worker_constructor(
                 .expect("addEventListener function");
             let listener_name = v8::String::new(scope, "addEventListener").unwrap();
             worker_obj.set(scope, listener_name.into(), add_listener.into());
+            // removeEventListener
+            let remove_listener = v8::FunctionTemplate::new(scope, worker_js_remove_event_listener)
+                .get_function(scope)
+                .expect("removeEventListener function");
+            let remove_name = v8::String::new(scope, "removeEventListener").unwrap();
+            worker_obj.set(scope, remove_name.into(), remove_listener.into());
 
             // Store handle index as a hidden property.
             let index_val = v8::Number::new(scope, handle_index as f64);
@@ -1285,8 +1291,60 @@ fn worker_js_add_event_listener(
         return;
     };
     let event_name = event_str.to_rust_string_lossy(scope);
-    let prop_name = v8::String::new(scope, &event_name).unwrap();
-    this.set(scope, prop_name.into(), callback_fn.into());
+    let prop_name = v8::String::new(scope, &format!("_listeners_{event_name}")).unwrap();
+    let listeners = this
+        .get(scope, prop_name.into())
+        .and_then(|value| v8::Local::<v8::Array>::try_from(value).ok())
+        .unwrap_or_else(|| v8::Array::new(scope, 0));
+    for index in 0..listeners.length() {
+        if listeners
+            .get_index(scope, index)
+            .is_some_and(|listener| listener.strict_equals(callback_fn.into()))
+        {
+            return_value.set_undefined();
+            return;
+        }
+    }
+    listeners.set_index(scope, listeners.length(), callback_fn.into());
+    this.set(scope, prop_name.into(), listeners.into());
+    return_value.set_undefined();
+}
+
+fn worker_js_remove_event_listener(
+    scope: &mut v8::PinScope,
+    arguments: v8::FunctionCallbackArguments,
+    mut return_value: v8::ReturnValue,
+) {
+    let event_type = arguments.get(0);
+    let callback = arguments.get(1);
+    let this = arguments.this();
+    let Ok(event_str) = v8::Local::<v8::String>::try_from(event_type) else {
+        throw_script_error(scope, "removeEventListener expects a string event type");
+        return;
+    };
+    let Ok(callback_fn) = v8::Local::<v8::Function>::try_from(callback) else {
+        throw_script_error(scope, "removeEventListener expects a function callback");
+        return;
+    };
+    let event_name = event_str.to_rust_string_lossy(scope);
+    let prop_name = v8::String::new(scope, &format!("_listeners_{event_name}")).unwrap();
+    let Some(listeners) = this
+        .get(scope, prop_name.into())
+        .and_then(|value| v8::Local::<v8::Array>::try_from(value).ok())
+    else {
+        return_value.set_undefined();
+        return;
+    };
+    let retained = v8::Array::new(scope, 0);
+    for index in 0..listeners.length() {
+        let Some(listener) = listeners.get_index(scope, index) else {
+            continue;
+        };
+        if !listener.strict_equals(callback_fn.into()) {
+            retained.set_index(scope, retained.length(), listener);
+        }
+    }
+    this.set(scope, prop_name.into(), retained.into());
     return_value.set_undefined();
 }
 
@@ -1320,6 +1378,35 @@ fn pump_nested_workers(scope: &mut v8::PinScope<'_, '_>, registry: &WorkerRegist
     }
 }
 
+fn dispatch_worker_event<'scope>(
+    scope: &mut v8::PinScope<'scope, '_>,
+    worker: v8::Local<'scope, v8::Object>,
+    event_name: &str,
+    event: v8::Local<'scope, v8::Object>,
+) {
+    let receiver = worker.into();
+    let handler_key = v8::String::new(scope, &format!("on{event_name}")).unwrap();
+    if let Some(handler) = worker.get(scope, handler_key.into())
+        && let Ok(callback) = v8::Local::<v8::Function>::try_from(handler)
+    {
+        call_script_callback(scope, callback, receiver, &[event.into()]);
+    }
+    let listeners_key = v8::String::new(scope, &format!("_listeners_{event_name}")).unwrap();
+    let Some(listeners) = worker
+        .get(scope, listeners_key.into())
+        .and_then(|value| v8::Local::<v8::Array>::try_from(value).ok())
+    else {
+        return;
+    };
+    for index in 0..listeners.length() {
+        if let Some(listener) = listeners.get_index(scope, index)
+            && let Ok(callback) = v8::Local::<v8::Function>::try_from(listener)
+        {
+            call_script_callback(scope, callback, receiver, &[event.into()]);
+        }
+    }
+}
+
 /// Dispatch a `message` event to a worker's JS listener.
 pub(super) fn dispatch_message_event(
     scope: &mut v8::PinScope<'_, '_>,
@@ -1341,21 +1428,16 @@ pub(super) fn dispatch_message_event(
     let data_val = json_to_v8(scope, &data)?;
     let data_key = v8::String::new(scope, "data").unwrap();
     event.set(scope, data_key.into(), data_val);
-    // Call the worker's `message` listener if it exists.
+    let type_key = v8::String::new(scope, "type").unwrap();
+    let event_type = v8::String::new(scope, "message").unwrap();
+    event.set(scope, type_key.into(), event_type.into());
+    // Call the worker's message listeners if they exist.
     // The worker object is stored in global as `_worker_<index>`.
     let worker_key = v8::String::new(scope, &format!("_worker_{index}")).unwrap();
     if let Some(worker_obj) = global.get(scope, worker_key.into())
         && let Ok(worker) = v8::Local::<v8::Object>::try_from(worker_obj)
     {
-        for property in ["onmessage", "message"] {
-            let key = v8::String::new(scope, property).unwrap();
-            if let Some(listener) = worker.get(scope, key.into())
-                && let Ok(callback) = v8::Local::<v8::Function>::try_from(listener)
-            {
-                let receiver = worker.into();
-                call_script_callback(scope, callback, receiver, &[event.into()]);
-            }
-        }
+        dispatch_worker_event(scope, worker, "message", event);
     }
     Ok(())
 }
@@ -1394,6 +1476,9 @@ pub(super) fn dispatch_error_event(
     let name_val = v8::String::new(scope, &name).unwrap();
     let name_key = v8::String::new(scope, "name").unwrap();
     event.set(scope, name_key.into(), name_val.into());
+    let type_key = v8::String::new(scope, "type").unwrap();
+    let event_type = v8::String::new(scope, "error").unwrap();
+    event.set(scope, type_key.into(), event_type.into());
     // ponytail: filename/lineno/colno use sentinels because the
     // WorkerChannelMessage::Error path does not carry the V8 Message
     // (stack/line info). Wire real values when the channel carries them.
@@ -1408,13 +1493,7 @@ pub(super) fn dispatch_error_event(
     if let Some(worker_obj) = global.get(scope, worker_key.into())
         && let Ok(worker) = v8::Local::<v8::Object>::try_from(worker_obj)
     {
-        let err_key = v8::String::new(scope, "error").unwrap();
-        if let Some(listener) = worker.get(scope, err_key.into())
-            && let Ok(callback) = v8::Local::<v8::Function>::try_from(listener)
-        {
-            let receiver = v8::undefined(scope).into();
-            call_script_callback(scope, callback, receiver, &[event.into()]);
-        }
+        dispatch_worker_event(scope, worker, "error", event);
     }
     Ok(())
 }
@@ -2255,10 +2334,10 @@ globalThis.spawnWorker = () => {\n\
             "globalThis.errMsg = null;\n\
 globalThis.errName = null;\n\
 const w = new Worker(\"throw-worker.ts\", { type: \"module\" });\n\
-w.addEventListener(\"error\", (e) => {\n\
+w.onerror = (e) => {\n\
   globalThis.errMsg = e.message;\n\
   globalThis.errName = e.name;\n\
-});\n\
+};\n\
 w.postMessage({});",
         )
         .expect("plugin evaluation should succeed");
@@ -2288,6 +2367,30 @@ w.postMessage({});",
             })
             .unwrap();
         assert_eq!(live, 0, "failed worker handle must be reaped");
+    }
+
+    #[test]
+    fn worker_event_listeners_support_multiple_callbacks_and_removal() {
+        use super::super::host::ScriptHost;
+
+        let mut host = ScriptHost::new();
+        host.execute_embedded_plugin(
+            "test-worker/listeners.ts",
+            "globalThis.calls = [];\n\
+const w = new Worker(\"echo-worker.ts\", { type: \"module\" });\n\
+const first = () => globalThis.calls.push(\"first\");\n\
+const second = () => globalThis.calls.push(\"second\");\n\
+w.addEventListener(\"message\", first);\n\
+w.addEventListener(\"message\", second);\n\
+w.removeEventListener(\"message\", first);\n\
+w.postMessage({});",
+        )
+        .expect("plugin evaluation should succeed");
+
+        std::thread::sleep(Duration::from_millis(100));
+        host.pump_worker_messages();
+        let calls = host.evaluate_script("globalThis.calls").unwrap();
+        assert_eq!(calls, serde_json::json!(["second"]));
     }
 
     #[test]

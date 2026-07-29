@@ -6,15 +6,82 @@ type ScriptData =
   | ScriptData[]
   | { [key: string]: ScriptData };
 
-// Standard Web Worker types are provided by the TS DOM lib,
-// which the type-tests tsconfig includes (lib: ["ES2022", "DOM"]).
-// Plugin .ts files resolve Worker/AbortController/ErrorEvent/
-// MessageEvent as globals without importing.
+interface MessageEvent<T = unknown> {
+  readonly type: "message";
+  readonly data: T;
+}
 
-// vell's Worker constructor accepts an AbortSignal for cancellation,
-// augmenting the DOM lib's WorkerOptions.
+interface ErrorEvent {
+  readonly type: "error";
+  readonly message: string;
+  readonly name: string;
+  readonly filename: string;
+  readonly lineno: number;
+  readonly colno: number;
+}
+
+interface WorkerEventMap {
+  message: MessageEvent<unknown>;
+  error: ErrorEvent;
+}
+
 interface WorkerOptions {
+  type?: "module";
   signal?: AbortSignal;
+}
+
+interface Worker {
+  onmessage: ((this: Worker, event: MessageEvent<any>) => void) | null;
+  onerror: ((this: Worker, event: ErrorEvent) => void) | null;
+  postMessage(message: unknown): void;
+  terminate(): void;
+  addEventListener<K extends keyof WorkerEventMap>(
+    type: K,
+    listener: (this: Worker, event: WorkerEventMap[K]) => void,
+  ): void;
+  removeEventListener<K extends keyof WorkerEventMap>(
+    type: K,
+    listener: (this: Worker, event: WorkerEventMap[K]) => void,
+  ): void;
+}
+
+declare const Worker: {
+  new(url: string | URL, options?: WorkerOptions): Worker;
+};
+
+interface WorkerGlobalScope {
+  onmessage: ((event: MessageEvent<any>) => void) | null;
+  postMessage(message: unknown): void;
+  close(): void;
+}
+
+declare const self: WorkerGlobalScope;
+
+interface AbortSignal {
+  readonly aborted: boolean;
+}
+
+interface AbortController {
+  readonly signal: AbortSignal;
+  abort(): void;
+}
+
+declare const AbortController: {
+  new(): AbortController;
+};
+
+interface URL {
+  readonly href: string;
+  readonly pathname: string;
+  toString(): string;
+}
+
+declare const URL: {
+  new(url: string | URL, base?: string | URL): URL;
+};
+
+interface ImportMeta {
+  readonly url: string;
 }
 
 type DeepReadonly<T> = T extends readonly (infer Item)[]

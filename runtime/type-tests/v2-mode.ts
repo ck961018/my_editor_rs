@@ -118,8 +118,15 @@ const worker: Worker = new Worker(
   { type: "module" },
 );
 worker.postMessage({ text: "" });
-worker.addEventListener("message", (e: MessageEvent) => { void e.data; });
+const messageListener = (e: MessageEvent) => { void e.data; };
+worker.addEventListener("message", messageListener);
+worker.removeEventListener("message", messageListener);
+worker.onerror = (event) => { void event.message; };
 worker.terminate();
+// @ts-expect-error vell does not expose unsupported EventTarget events.
+worker.addEventListener("messageerror", () => {});
+// @ts-expect-error vell exposes only the implemented Worker subset.
+worker.dispatchEvent({ type: "message" });
 
 const controller: AbortController = new AbortController();
 new Worker(
