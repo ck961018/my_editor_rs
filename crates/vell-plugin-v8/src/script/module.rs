@@ -128,12 +128,31 @@ fn transpile_module(path: &Path, source: &str) -> Result<String, ScriptError> {
     Ok(emitted.text)
 }
 
+fn module_url(path: &Path) -> String {
+    let display = path.display().to_string();
+    if path.is_absolute() {
+        ModuleSpecifier::from_file_path(path)
+            .map(|specifier| specifier.to_string())
+            .unwrap_or(display)
+    } else {
+        format!("file:///runtime/plugins/{display}")
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct ModuleOrigin {
+    pub(super) path: PathBuf,
+    pub(super) root: PathBuf,
+    pub(super) source: AssetSource,
+}
+
 #[derive(Default)]
 pub(super) struct ModuleMap {
     root: PathBuf,
     source_bytes: usize,
     by_path: HashMap<PathBuf, v8::Global<v8::Module>>,
-    by_id: HashMap<i32, Vec<(PathBuf, v8::Global<v8::Module>)>>,
+    by_id: HashMap<i32, Vec<(ModuleOrigin, v8::Global<v8::Module>)>>,
+    origins_by_url: HashMap<String, ModuleOrigin>,
 }
 
 impl ModuleMap {
@@ -141,12 +160,26 @@ impl ModuleMap {
         self.root = root;
         self.source_bytes = 0;
         self.by_path.clear();
-        self.by_id.clear();
     }
 
-    fn insert(&mut self, path: PathBuf, module: v8::Global<v8::Module>, id: i32) {
-        self.by_path.insert(path.clone(), module.clone());
-        self.by_id.entry(id).or_default().push((path, module));
+    fn insert(
+        &mut self,
+        path: PathBuf,
+        module: v8::Global<v8::Module>,
+        id: i32,
+        source: AssetSource,
+    ) {
+        let origin = ModuleOrigin {
+            path: path.clone(),
+            root: self.root.clone(),
+            source,
+        };
+        self.by_path.insert(path, module.clone());
+        self.by_id
+            .entry(id)
+            .or_default()
+            .push((origin.clone(), module));
+        self.origins_by_url.insert(module_url(&origin.path), origin);
     }
 
     pub(super) fn root(&self) -> &Path {
@@ -160,12 +193,20 @@ impl ModuleMap {
         Ok(())
     }
 
-    fn path_for(&self, id: i32, module: &v8::Global<v8::Module>) -> Option<&PathBuf> {
+    fn origin_for_module(&self, id: i32, module: &v8::Global<v8::Module>) -> Option<&ModuleOrigin> {
         self.by_id
             .get(&id)?
             .iter()
             .find(|(_, candidate)| candidate == module)
-            .map(|(path, _)| path)
+            .map(|(origin, _)| origin)
+    }
+
+    pub(super) fn origin_for_url(&self, url: &str) -> Option<ModuleOrigin> {
+        self.origins_by_url.get(url).cloned()
+    }
+
+    fn origin_for_path(&self, path: &Path) -> Option<ModuleOrigin> {
+        self.origins_by_url.get(&module_url(path)).cloned()
     }
 }
 
@@ -190,10 +231,15 @@ pub(super) fn load_module_tree<'scope>(
     let module = v8::script_compiler::compile_module(scope, &mut compiler_source)
         .ok_or_else(|| ScriptError::new(format!("failed to compile {}", path.display())))?;
 
+    let source = scope
+        .get_slot::<AssetSource>()
+        .copied()
+        .unwrap_or(AssetSource::Embedded);
     modules.borrow_mut().insert(
         path.to_owned(),
         v8::Global::new(scope, module),
         module.get_identity_hash().get(),
+        source,
     );
 
     let requests = module.get_module_requests();
@@ -285,9 +331,9 @@ pub(super) fn resolve_module<'scope>(
     let modules = scope.get_slot::<Rc<RefCell<ModuleMap>>>()?.clone();
     let referrer_global = v8::Global::new(scope, referrer);
     let map = modules.borrow();
-    let referrer_path = map.path_for(referrer.get_identity_hash().get(), &referrer_global)?;
+    let referrer = map.origin_for_module(referrer.get_identity_hash().get(), &referrer_global)?;
     let specifier = specifier.to_rust_string_lossy(scope);
-    let path = match resolve_path(referrer_path, &specifier, &map.root) {
+    let path = match resolve_path(&referrer.path, &specifier, &referrer.root) {
         Ok(path) => path,
         Err(error) => {
             let message = v8::String::new(scope, &error.to_string())?;
@@ -317,20 +363,11 @@ pub(super) extern "C" fn host_initialize_import_meta(
     };
     let map = modules.borrow();
     let module_global = v8::Global::new(scope, module);
-    let Some(path) = map.path_for(module.get_identity_hash().get(), &module_global) else {
+    let Some(origin) = map.origin_for_module(module.get_identity_hash().get(), &module_global)
+    else {
         return;
     };
-    // Build a file:// URL from the path.  For embedded assets,
-    // the path is relative (e.g. "test-worker/meta-worker.ts") —
-    // prepend "runtime/plugins/" to make a valid-looking URL.
-    let display = path.display().to_string();
-    let url = if path.is_absolute() {
-        ModuleSpecifier::from_file_path(path)
-            .map(|s| s.to_string())
-            .unwrap_or_else(|_| display)
-    } else {
-        format!("file:///runtime/plugins/{display}")
-    };
+    let url = module_url(&origin.path);
     let Some(key) = v8::String::new(scope, "url") else {
         return;
     };
@@ -357,8 +394,17 @@ pub(super) fn host_import_module_dynamically<'a, 'i, 's>(
     let promise = resolver.get_promise(scope);
 
     let modules = scope.get_slot::<Rc<RefCell<ModuleMap>>>().cloned()?;
-    let root = modules.borrow().root.clone();
     let resource_name = resource_name.to_rust_string_lossy(scope);
+    let origin = modules.borrow().origin_for_path(Path::new(&resource_name));
+    let root = origin
+        .as_ref()
+        .map(|origin| origin.root.clone())
+        .unwrap_or_else(|| modules.borrow().root.clone());
+    let source = origin
+        .as_ref()
+        .map(|origin| origin.source)
+        .or_else(|| scope.get_slot::<AssetSource>().copied())
+        .unwrap_or(AssetSource::Embedded);
     let referrer = if resource_name.is_empty() {
         root.join("<dynamic-import>")
     } else {
@@ -375,8 +421,18 @@ pub(super) fn host_import_module_dynamically<'a, 'i, 's>(
         }
     };
 
-    // Load, instantiate, and evaluate the module.
-    match load_module_tree(scope, &path, &modules) {
+    // Load using the referrer's source, not whichever plugin ran last.
+    let previous_source = scope.get_slot::<AssetSource>().copied();
+    let previous_root = std::mem::replace(&mut modules.borrow_mut().root, root);
+    scope.set_slot(source);
+    let loaded = load_module_tree(scope, &path, &modules);
+    modules.borrow_mut().root = previous_root;
+    if let Some(previous_source) = previous_source {
+        scope.set_slot(previous_source);
+    }
+
+    // Instantiate and evaluate the module.
+    match loaded {
         Ok(module) => {
             if module.instantiate_module(scope, resolve_module).is_none() {
                 let msg =

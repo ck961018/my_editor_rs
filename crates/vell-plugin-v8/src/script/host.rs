@@ -229,6 +229,9 @@ impl ScriptHost {
             .rsplit_once('/')
             .map(|(root, _)| format!("{root}/"))
             .unwrap_or_default();
+        self.modules
+            .borrow_mut()
+            .reset(PathBuf::from(root.trim_end_matches('/')));
         self.plugin_root.replace(Some(root));
 
         let context = self.context.clone();

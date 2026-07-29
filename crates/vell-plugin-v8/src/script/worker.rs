@@ -785,17 +785,19 @@ fn url_constructor(
 ) {
     let relative = arguments.get(0);
     let base = arguments.get(1);
+    let base_url = v8::Local::<v8::String>::try_from(base)
+        .ok()
+        .map(|base| base.to_rust_string_lossy(scope));
     // Resolve relative against base if both are strings.
-    let resolved = if let Ok(base_str) = v8::Local::<v8::String>::try_from(base) {
-        let base_s = base_str.to_rust_string_lossy(scope);
+    let resolved = if let Some(base_s) = &base_url {
         if let Ok(rel_str) = v8::Local::<v8::String>::try_from(relative) {
             let rel_s = rel_str.to_rust_string_lossy(scope);
             // Simple resolution: if relative starts with
             // "./" or "../", strip the file:// prefix from
             // base, take the directory, and join.
-            resolve_url(&base_s, &rel_s)
+            resolve_url(base_s, &rel_s)
         } else {
-            base_s
+            base_s.clone()
         }
     } else if let Ok(rel_str) = v8::Local::<v8::String>::try_from(relative) {
         rel_str.to_rust_string_lossy(scope)
@@ -820,27 +822,43 @@ fn url_constructor(
     let internal = v8::String::new(scope, "_href").unwrap();
     obj.set(scope, internal.into(), href.into());
 
-    let source = scope
-        .get_slot::<AssetSource>()
-        .copied()
+    let module_origin = base_url.as_deref().and_then(|base| {
+        scope
+            .get_slot::<Rc<RefCell<ModuleMap>>>()
+            .and_then(|modules| modules.borrow().origin_for_url(base))
+    });
+    let source = module_origin
+        .as_ref()
+        .map(|origin| origin.source)
+        .or_else(|| scope.get_slot::<AssetSource>().copied())
         .unwrap_or(AssetSource::Embedded);
-    let root = match source {
-        AssetSource::Filesystem => scope.get_slot::<Rc<RefCell<ModuleMap>>>().map(|modules| {
-            format!(
+    let root = module_origin
+        .as_ref()
+        .map(|origin| match source {
+            AssetSource::Filesystem => format!(
                 "{}{separator}",
-                modules.borrow().root().display(),
+                origin.root.display(),
                 separator = std::path::MAIN_SEPARATOR
-            )
-        }),
-        AssetSource::Embedded => scope
-            .get_slot::<Rc<RefCell<Option<String>>>>()
-            .and_then(|root| root.borrow().clone())
-            .or_else(|| {
-                scope
-                    .get_slot::<WorkerResources>()
-                    .map(|resources| resources.root.clone())
+            ),
+            AssetSource::Embedded => format!("{}/", origin.root.display()),
+        })
+        .or_else(|| match source {
+            AssetSource::Filesystem => scope.get_slot::<Rc<RefCell<ModuleMap>>>().map(|modules| {
+                format!(
+                    "{}{separator}",
+                    modules.borrow().root().display(),
+                    separator = std::path::MAIN_SEPARATOR
+                )
             }),
-    };
+            AssetSource::Embedded => scope
+                .get_slot::<Rc<RefCell<Option<String>>>>()
+                .and_then(|root| root.borrow().clone())
+                .or_else(|| {
+                    scope
+                        .get_slot::<WorkerResources>()
+                        .map(|resources| resources.root.clone())
+                }),
+        });
     if let Some(root) = root
         && let Some(registry) = scope.get_slot::<WorkerUrlRegistrySlot>()
     {
@@ -2328,20 +2346,8 @@ ctrl.abort();",
         use super::super::host::ScriptHost;
 
         let mut host = ScriptHost::new();
-        host.execute_embedded_plugin(
-            "test-worker/deferred-spawn.ts",
-            "globalThis.workerResult = null;\n\
-const workerUrl = new URL(\n\
-  './meta-worker.ts',\n\
-  'file:///runtime/plugins/test-worker/deferred-spawn.ts',\n\
-);\n\
-globalThis.spawnWorker = () => {\n\
-  const w = new Worker(workerUrl, { type: 'module' });\n\
-  w.onmessage = (e) => { globalThis.workerResult = e.data; };\n\
-  w.postMessage({});\n\
-};",
-        )
-        .expect("plugin evaluation should succeed");
+        host.execute_embedded_module("test-worker/deferred-url-main.ts")
+            .expect("plugin evaluation should succeed");
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.ts");
         std::fs::write(&config, "globalThis.userConfigLoaded = true;").unwrap();
