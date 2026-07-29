@@ -389,14 +389,18 @@ fn run_bidirectional_worker(
     isolate.set_host_initialize_import_meta_object_callback(host_initialize_import_meta);
     isolate.set_host_import_module_dynamically_callback(host_import_module_dynamically);
 
-    isolate.set_slot(WorkerResources { root, source });
+    let module_root = PathBuf::from(root.trim_end_matches(['/', '\\']));
+    isolate.set_slot(WorkerResources {
+        root: root.clone(),
+        source,
+    });
     // Store the sender so `self.postMessage` can reach the main thread.
     isolate.set_slot::<mpsc::Sender<WorkerChannelMessage>>(sender.clone());
     // Store the cancellation for the watchdog.
     isolate.set_slot(cancellation.clone());
     isolate.set_slot(source);
-    // Set up a ModuleMap for ES module loading.
-    let module_root = PathBuf::from(path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or(""));
+    // Every module in this worker stays inside the plugin root,
+    // including imports from worker entries in subdirectories.
     let modules = Rc::new(RefCell::new(ModuleMap::default()));
     modules.borrow_mut().reset(module_root);
     isolate.set_slot(modules.clone());
@@ -2375,6 +2379,49 @@ globalThis.spawnWorker = () => {\n\
 
     /// A worker that throws in `self.onmessage` should send
     /// an `Error` message back to the main thread.
+    #[test]
+    fn filesystem_worker_import_cannot_escape_plugin_root() {
+        use super::super::host::ScriptHost;
+
+        let directory = tempfile::tempdir().unwrap();
+        let plugin = directory.path().join("plugin");
+        std::fs::create_dir(&plugin).unwrap();
+        std::fs::write(
+            directory.path().join("outside.ts"),
+            "export const value = 42;",
+        )
+        .unwrap();
+        std::fs::write(
+            plugin.join("worker.ts"),
+            "import { value } from '../outside.ts'; self.postMessage(value);",
+        )
+        .unwrap();
+        let config = plugin.join("config.ts");
+        std::fs::write(
+            &config,
+            "globalThis.value = null; globalThis.workerError = null;\n\
+             const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });\n\
+             worker.onmessage = (event) => { globalThis.value = event.data; };\n\
+             worker.onerror = (event) => { globalThis.workerError = event.message; };",
+        )
+        .unwrap();
+
+        let mut host = ScriptHost::new();
+        host.execute_module(&config).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        host.pump_worker_messages();
+        assert_eq!(
+            host.evaluate_script("globalThis.value").unwrap(),
+            serde_json::Value::Null
+        );
+        assert!(
+            host.evaluate_script("globalThis.workerError")
+                .unwrap()
+                .as_str()
+                .is_some_and(|message| message.contains("escapes"))
+        );
+    }
+
     #[test]
     fn worker_error_on_uncaught_exception() {
         let handle = spawn_worker(
