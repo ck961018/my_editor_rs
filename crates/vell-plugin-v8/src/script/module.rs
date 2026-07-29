@@ -348,7 +348,7 @@ pub(super) extern "C" fn host_initialize_import_meta(
 pub(super) fn host_import_module_dynamically<'a, 'i, 's>(
     scope: &'a mut v8::PinnedRef<'s, v8::HandleScope<'i>>,
     _host_defined_options: v8::Local<'s, v8::Data>,
-    _resource_name: v8::Local<'s, v8::Value>,
+    resource_name: v8::Local<'s, v8::Value>,
     specifier: v8::Local<'s, v8::String>,
     _import_attributes: v8::Local<'s, v8::FixedArray>,
 ) -> Option<v8::Local<'s, v8::Promise>> {
@@ -358,25 +358,13 @@ pub(super) fn host_import_module_dynamically<'a, 'i, 's>(
 
     let modules = scope.get_slot::<Rc<RefCell<ModuleMap>>>().cloned()?;
     let root = modules.borrow().root.clone();
-
-    // ponytail: dynamic import resolves relative to the ModuleMap root,
-    // not the importer's directory. V8 passes `_resource_name` (the
-    // referrer's resource name) which we ignore because workers are
-    // single-directory today. Ceiling: nested-subdirectory dynamic
-    // imports resolve to the wrong dir. Upgrade: parse _resource_name
-    // back to the importer's dir and resolve against that.
-    let requested = Path::new(&specifier);
-    let path = if requested.is_absolute() {
-        resolve_path(&root, &specifier, &root)
+    let resource_name = resource_name.to_rust_string_lossy(scope);
+    let referrer = if resource_name.is_empty() {
+        root.join("<dynamic-import>")
     } else {
-        // Relative: join with the root directory.
-        let candidate = root.join(requested);
-        let normalized = normalize_path(&candidate);
-        if !normalized.starts_with(&root) {
-            return None;
-        }
-        Ok(normalized)
+        PathBuf::from(resource_name)
     };
+    let path = resolve_path(&referrer, &specifier, &root);
     let path = match path {
         Ok(p) => p,
         Err(error) => {

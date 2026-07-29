@@ -62,9 +62,9 @@ impl WorkerQuota {
     pub(crate) fn try_acquire(
         self: &Arc<WorkerQuota>,
         plugin_id: &str,
-        current_depth: usize,
+        spawn_depth: usize,
     ) -> Result<QuotaHandle, QuotaError> {
-        if current_depth >= self.depth {
+        if spawn_depth > self.depth {
             return Err(QuotaError::DepthExceeded);
         }
         let mut counts = self.per_plugin_counts.lock().unwrap();
@@ -118,9 +118,9 @@ mod tests {
     #[test]
     fn try_acquire_fails_over_depth() {
         let quota = Arc::new(WorkerQuota::new(100, 100, 2));
-        let _h1 = quota.try_acquire("p1", 0).unwrap();
-        let _h2 = quota.try_acquire("p1", 1).unwrap();
-        let err = quota.try_acquire("p1", 2).unwrap_err();
+        let _h1 = quota.try_acquire("p1", 1).unwrap();
+        let _h2 = quota.try_acquire("p1", 2).unwrap();
+        let err = quota.try_acquire("p1", 3).unwrap_err();
         assert!(matches!(err, QuotaError::DepthExceeded));
     }
 }

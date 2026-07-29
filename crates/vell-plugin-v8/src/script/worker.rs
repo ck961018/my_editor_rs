@@ -1957,6 +1957,22 @@ mod tests {
     /// Test that nested spawn works: a worker can `new Worker()`
     /// inside its own isolate, and messages flow through.
     #[test]
+    fn worker_dynamic_import_resolves_from_importer_directory() {
+        let handle = spawn_worker(
+            "test-worker/".to_owned(),
+            "nested-dynamic-entry.ts".to_owned(),
+            CancellationToken::new(),
+            None,
+            "test".to_owned(),
+            1,
+        )
+        .expect("spawn_worker should succeed");
+
+        let result = worker_response(&handle, serde_json::Value::Null).unwrap();
+        assert_eq!(result, serde_json::json!(43));
+    }
+
+    #[test]
     fn worker_nested_spawn_child() {
         let quota = Arc::new(WorkerQuota::new(8, 32, 4));
         let handle = spawn_worker(
@@ -2038,7 +2054,7 @@ mod tests {
     /// Test uses reduced limits for speed; production is 8/32/4.
     #[test]
     fn worker_quota_depth_exceeded() {
-        // depth=2: depth 0 and 1 succeed, depth 2 fails.
+        // depth=2: worker depths 1 and 2 succeed; depth 3 fails.
         let quota = Arc::new(WorkerQuota::new(2, 8, 2));
         let result = spawn_worker(
             "test-worker/".to_owned(),
@@ -2046,7 +2062,7 @@ mod tests {
             CancellationToken::new(),
             Some(quota.clone()),
             "test".to_owned(),
-            2,
+            3,
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
