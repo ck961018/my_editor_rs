@@ -1,0 +1,1 @@
+self.onmessage = () => self.close();

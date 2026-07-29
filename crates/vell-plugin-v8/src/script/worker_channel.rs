@@ -5,7 +5,6 @@ use std::thread::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::ScriptError;
-use super::worker_quota::QuotaHandle;
 
 /// Bidirectional messages flowing between main thread and worker.
 #[derive(Debug)]
@@ -31,8 +30,6 @@ pub(super) struct WorkerHandle {
     receiver: Arc<Mutex<mpsc::Receiver<WorkerChannelMessage>>>,
     cancellation: CancellationToken,
     thread: Option<JoinHandle<()>>,
-    #[allow(dead_code)]
-    quota: Option<QuotaHandle>,
 }
 
 impl WorkerHandle {
@@ -41,14 +38,12 @@ impl WorkerHandle {
         receiver: mpsc::Receiver<WorkerChannelMessage>,
         cancellation: CancellationToken,
         thread: JoinHandle<()>,
-        quota: Option<QuotaHandle>,
     ) -> Self {
         Self {
             sender,
             receiver: Arc::new(Mutex::new(receiver)),
             cancellation,
             thread: Some(thread),
-            quota,
         }
     }
 
@@ -78,8 +73,6 @@ impl WorkerHandle {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        // Release the quota slot.
-        self.quota.take();
     }
 
     /// Check if the worker thread has finished (canceled,

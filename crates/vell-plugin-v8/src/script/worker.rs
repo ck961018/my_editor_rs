@@ -250,6 +250,7 @@ fn spawn_worker_with_source(
     let thread = std::thread::Builder::new()
         .name(format!("script-worker-{path}"))
         .spawn(move || {
+            let _quota_handle = quota_handle;
             run_bidirectional_worker(
                 source,
                 root,
@@ -270,7 +271,6 @@ fn spawn_worker_with_source(
         main_receiver,
         cancellation,
         thread,
-        quota_handle,
     ))
 }
 
@@ -319,7 +319,6 @@ fn spawn_worker_from_source(
         main_receiver,
         cancellation,
         thread,
-        None,
     ))
 }
 
@@ -434,6 +433,7 @@ fn run_bidirectional_worker(
                                 message: error.to_string(),
                                 name,
                             });
+                            break;
                         }
                     }
                     WorkerChannelMessage::Terminated => break,
@@ -677,6 +677,9 @@ fn worker_close(
         throw_script_error(scope, "worker message channel is unavailable");
         return;
     };
+    if let Some(cancellation) = scope.get_slot::<CancellationToken>() {
+        cancellation.cancel();
+    }
     let _ = sender.send(WorkerChannelMessage::Terminated);
     return_value.set_undefined();
 }
@@ -1025,13 +1028,13 @@ fn worker_constructor(
             throw_script_error(scope, "script import escapes the config directory");
             return;
         };
+        let mut root = root_path.to_string_lossy().into_owned();
+        if !root.ends_with(std::path::MAIN_SEPARATOR) {
+            root.push(std::path::MAIN_SEPARATOR);
+        }
         (
             AssetSource::Filesystem,
-            format!(
-                "{}{separator}",
-                root_path.display(),
-                separator = std::path::MAIN_SEPARATOR
-            ),
+            root,
             relative.to_string_lossy().into_owned(),
         )
     } else if let Some(path) = embedded_path {
@@ -1298,6 +1301,7 @@ fn pump_nested_workers(scope: &mut v8::PinScope<'_, '_>, registry: &WorkerRegist
                 .map(WorkerHandle::drain)
                 .unwrap_or_default()
         };
+        let mut terminated = false;
         for msg in messages {
             match msg {
                 WorkerChannelMessage::FromWorker(data) => {
@@ -1306,8 +1310,12 @@ fn pump_nested_workers(scope: &mut v8::PinScope<'_, '_>, registry: &WorkerRegist
                 WorkerChannelMessage::Error { message, name } => {
                     let _ = dispatch_error_event(scope, registry, index, message, name);
                 }
-                _ => {}
+                WorkerChannelMessage::Terminated => terminated = true,
+                WorkerChannelMessage::ToWorker(_) => {}
             }
+        }
+        if terminated && let Some(handle) = registry.borrow_mut().get_mut(index) {
+            handle.take();
         }
     }
 }
@@ -1639,6 +1647,18 @@ mod tests {
 
     /// Test that WorkerHandle::terminate kills the worker.
     #[test]
+    fn worker_self_close_stops_thread() {
+        let handle = spawn_worker_from_source(
+            "self.onmessage = () => self.close();",
+            CancellationToken::new(),
+        )
+        .expect("worker should start");
+        handle.post_message(serde_json::json!(null)).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(handle.is_finished(), "self.close() must stop the worker");
+    }
+
+    #[test]
     fn worker_handle_terminate_stops_worker() {
         let mut handle = spawn_worker(
             "tree-sitter/".to_owned(),
@@ -1796,6 +1816,63 @@ mod tests {
         assert_eq!(quota.current_global(), 1);
         handle.terminate();
         assert_eq!(quota.current_global(), 0);
+    }
+
+    #[test]
+    fn worker_pump_reaps_self_closed_handle() {
+        use super::super::host::ScriptHost;
+
+        let mut host = ScriptHost::new();
+        host.execute_embedded_plugin(
+            "test-worker/close-main.ts",
+            "const worker = new Worker('close-worker.ts', { type: 'module' });\n\
+             worker.postMessage(null);",
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        host.pump_worker_messages();
+
+        let context = host.context.clone();
+        let live = host
+            .invoke(ScriptInvocationKind::Action, |isolate| {
+                v8::scope_with_context!(scope, isolate, context);
+                let registry = scope
+                    .get_slot::<WorkerRegistrySlot>()
+                    .expect("worker registry");
+                Ok(registry.borrow().iter().flatten().count())
+            })
+            .unwrap();
+        assert_eq!(live, 0, "finished worker handle must be reaped");
+    }
+
+    #[test]
+    fn worker_self_close_releases_quota_before_handle_drop() {
+        let quota = Arc::new(WorkerQuota::new(1, 1, 4));
+        let handle = spawn_worker(
+            "test-worker/".to_owned(),
+            "close-worker.ts".to_owned(),
+            CancellationToken::new(),
+            Some(quota.clone()),
+            "test".to_owned(),
+            1,
+        )
+        .expect("worker should start");
+        handle.post_message(serde_json::json!(null)).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(handle.is_finished(), "self.close() must stop the worker");
+
+        let replacement = spawn_worker(
+            "test-worker/".to_owned(),
+            "meta-worker.ts".to_owned(),
+            CancellationToken::new(),
+            Some(quota),
+            "test".to_owned(),
+            1,
+        );
+        assert!(
+            replacement.is_ok(),
+            "finished worker must release quota before its handle is dropped"
+        );
     }
 
     /// Test that nested spawn works: a worker can `new Worker()`
@@ -2143,6 +2220,10 @@ globalThis.spawnWorker = () => {\n\
             "expected an Error message containing 'boom', \
              got {messages:?}"
         );
+        assert!(
+            handle.is_finished(),
+            "uncaught worker error must terminate the worker"
+        );
     }
 
     /// A worker timeout should classify as `TimeoutError`.
@@ -2196,6 +2277,17 @@ w.postMessage({});",
             "error listener should have set errMsg \
              to a string, got {msg:?}"
         );
+        let context = host.context.clone();
+        let live = host
+            .invoke(ScriptInvocationKind::Action, |isolate| {
+                v8::scope_with_context!(scope, isolate, context);
+                let registry = scope
+                    .get_slot::<WorkerRegistrySlot>()
+                    .expect("worker registry");
+                Ok(registry.borrow().iter().flatten().count())
+            })
+            .unwrap();
+        assert_eq!(live, 0, "failed worker handle must be reaped");
     }
 
     #[test]

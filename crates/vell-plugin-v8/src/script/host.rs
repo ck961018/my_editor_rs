@@ -148,6 +148,7 @@ impl ScriptHost {
                 all
             };
             let changed = !messages.is_empty();
+            let mut terminated = Vec::new();
             for (index, message) in messages {
                 match message {
                     worker::WorkerChannelMessage::FromWorker(data) => {
@@ -156,8 +157,14 @@ impl ScriptHost {
                     worker::WorkerChannelMessage::Error { message, name } => {
                         worker::dispatch_error_event(scope, &registry, index, message, name)?;
                     }
-                    worker::WorkerChannelMessage::Terminated => {}
+                    worker::WorkerChannelMessage::Terminated => terminated.push(index),
                     worker::WorkerChannelMessage::ToWorker(_) => {}
+                }
+            }
+            let mut registry = registry.borrow_mut();
+            for index in terminated {
+                if let Some(handle) = registry.get_mut(index) {
+                    handle.take();
                 }
             }
             Ok(changed)
