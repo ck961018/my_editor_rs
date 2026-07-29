@@ -174,10 +174,16 @@ fn resolve_asset_path(root: &str, relative: &str) -> Result<String, ScriptError>
     Ok(format!("{root}{relative}"))
 }
 
+fn join_asset_path(root: &Path, relative: &str) -> PathBuf {
+    relative
+        .split('/')
+        .fold(root.to_owned(), |path, part| path.join(part))
+}
+
 fn checked_filesystem_resource(root: &str, relative: &str) -> Result<PathBuf, ScriptError> {
     let root = std::fs::canonicalize(root)
         .map_err(|error| ScriptError::new(format!("invalid plugin root: {error}")))?;
-    let path = std::fs::canonicalize(root.join(relative)).map_err(|error| {
+    let path = std::fs::canonicalize(join_asset_path(&root, relative)).map_err(|error| {
         ScriptError::new(format!(
             "failed to resolve plugin resource {relative}: {error}"
         ))
@@ -273,7 +279,15 @@ fn spawn_worker_with_source(
         None
     };
 
-    let path = resolve_asset_path(&root, &entry)?;
+    let path = match source {
+        AssetSource::Embedded => resolve_asset_path(&root, &entry)?,
+        AssetSource::Filesystem => {
+            resolve_asset_path("", &entry)?;
+            join_asset_path(Path::new(&root), &entry)
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
 
     let (main_sender, worker_receiver) = mpsc::channel::<WorkerChannelMessage>();
     let (worker_sender, main_receiver) = mpsc::channel::<WorkerChannelMessage>();
@@ -1079,7 +1093,7 @@ fn worker_constructor(
         (
             AssetSource::Filesystem,
             root,
-            relative.to_string_lossy().into_owned(),
+            relative.to_string_lossy().replace('\\', "/"),
         )
     } else if let Some(path) = embedded_path {
         let configured_root = url_origin
@@ -2419,6 +2433,41 @@ globalThis.spawnWorker = () => {\n\
                 .unwrap()
                 .as_str()
                 .is_some_and(|message| message.contains("escapes"))
+        );
+    }
+
+    #[test]
+    fn filesystem_worker_subdirectory_can_import_from_plugin_root() {
+        use super::super::host::ScriptHost;
+
+        let plugin = tempfile::tempdir().unwrap();
+        let nested = plugin.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(plugin.path().join("helper.ts"), "export const value = 42;").unwrap();
+        std::fs::write(
+            nested.join("worker.ts"),
+            "import { value } from '../helper.ts'; self.postMessage(value);",
+        )
+        .unwrap();
+        let config = plugin.path().join("config.ts");
+        std::fs::write(
+            &config,
+            "globalThis.value = null; globalThis.workerError = null;\n\
+             const worker = new Worker(new URL('./nested/worker.ts', import.meta.url), { type: 'module' });\n\
+             worker.onmessage = (event) => { globalThis.value = event.data; };\n\
+             worker.onerror = (event) => { globalThis.workerError = event.message; };",
+        )
+        .unwrap();
+
+        let mut host = ScriptHost::new();
+        host.execute_module(&config).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        host.pump_worker_messages();
+        let error = host.evaluate_script("globalThis.workerError").unwrap();
+        assert_eq!(
+            host.evaluate_script("globalThis.value").unwrap(),
+            serde_json::json!(42),
+            "worker error: {error}"
         );
     }
 
