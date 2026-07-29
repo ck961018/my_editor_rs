@@ -2,7 +2,7 @@
 
 **状态：** 当前插件作者指南
 
-**更新日期：** 2026-07-22
+**更新日期：** 2026-07-28
 
 宿主架构与信任边界见
 [`TypeScript 脚本架构`](design/typescript-scripting-architecture.md)。
@@ -37,12 +37,14 @@ let loaded = vell_plugin_v8::load_typescript_modes(
 )?;
 assert!(loaded.diagnostics.is_empty());
 let modes = loaded.modes;
+let backgrounds = loaded.backgrounds;
 ```
 
-结果只暴露通用 `Mode` 对象和结构化诊断；V8 类型不会跨越 crate 边界。
-`PLUGIN_API_VERSION` 标识当前 schema 版本。根二进制通过
-`load_user_configuration()` 原子取得 Mode、Theme 和 Face override，再构建
-App。`load_user_modes()` 继续作为只需要 Mode 的兼容入口。
+结果只暴露通用 `Mode`、`ModeBackground` 和结构化诊断；V8 类型不会跨越
+crate 边界。`PLUGIN_API_VERSION` 标识当前 schema 版本。根二进制通过
+`load_user_configuration()` 原子取得 Mode、后台运行时、Theme 和 Face
+override，再构建 App。内建配置的测试或 headless 入口可使用
+`load_default_configuration()`。
 
 ## 选择 Theme 与覆盖 Face
 

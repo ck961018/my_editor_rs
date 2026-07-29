@@ -1350,12 +1350,16 @@ impl Frontend for ScriptedFrontend {
 }
 
 fn make_app(events: Vec<FrontendEvent>, path: Option<&str>) -> App<ScriptedFrontend> {
-    App::with_modes(
+    let configuration = vell_plugin_v8::load_default_configuration().unwrap();
+    App::with_modes_visuals_and_backgrounds(
         path,
         40,
         5,
         ScriptedFrontend::new(events),
-        vell_plugin_v8::load_default_modes().unwrap(),
+        configuration.modes,
+        configuration.backgrounds,
+        configuration.theme,
+        configuration.face_overrides,
     )
     .unwrap()
 }

@@ -437,20 +437,17 @@ fn load_optional_user_config(
     result
 }
 
-pub fn load_default_modes() -> Result<Vec<Box<dyn Mode>>, ScriptError> {
-    let host = load_default_plugins()?;
-    Ok(ScriptHost::script_modes(&host)
-        .into_iter()
-        .map(|mode| Box::new(mode) as Box<dyn Mode>)
-        .collect())
-}
-
-pub fn load_user_modes() -> Result<Vec<Box<dyn Mode>>, ScriptError> {
-    Ok(load_user_configuration()?.modes)
+pub fn load_default_configuration() -> Result<LoadedEditorConfiguration, ScriptError> {
+    loaded_editor_configuration(load_default_plugins()?)
 }
 
 pub fn load_user_configuration() -> Result<LoadedEditorConfiguration, ScriptError> {
-    let host = load_user_config()?;
+    loaded_editor_configuration(load_user_config()?)
+}
+
+fn loaded_editor_configuration(
+    host: Rc<RefCell<ScriptHost>>,
+) -> Result<LoadedEditorConfiguration, ScriptError> {
     let modes = ScriptHost::script_modes(&host)
         .into_iter()
         .map(|mode| Box::new(mode) as Box<dyn Mode>)
@@ -461,7 +458,7 @@ pub fn load_user_configuration() -> Result<LoadedEditorConfiguration, ScriptErro
     };
     Ok(LoadedEditorConfiguration {
         modes,
-        backgrounds: vec![Box::new(ScriptBackground::new(host.clone()))],
+        backgrounds: vec![Box::new(ScriptBackground::new(host))],
         theme: configuration.theme,
         face_overrides: configuration.face_overrides,
     })
