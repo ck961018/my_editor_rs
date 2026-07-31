@@ -7,10 +7,10 @@ use vell_core::content::ContentKind;
 use vell_core::content_store::ContentStore;
 use vell_core::content_view_state::ContentViewState;
 use vell_protocol::content_query::{
-    BufferBackingState, ContentData, ContentQuery, ContentQueryKind, CursorStyle, DirtyState,
-    FaceName, FacePatch, RenderQuery, RenderQueryError, RowRange, SaveState, SelectionShape,
-    StatusBarPresentation, StatusBarSegment, TextDecoration, TextPresentation, ViewData,
-    ViewPresentation,
+    BufferBackingState, ContentData, ContentQuery, ContentQueryKind, CursorStyle,
+    DEFAULT_TAB_WIDTH, DirtyState, FaceName, FacePatch, MAX_TAB_WIDTH, RenderQuery,
+    RenderQueryError, RowRange, SaveState, SelectionShape, StatusBarPresentation, StatusBarSegment,
+    TextDecoration, TextPresentation, ViewData, ViewPresentation,
 };
 use vell_protocol::ids::{ContentId, ViewId};
 
@@ -76,6 +76,10 @@ impl RenderQuery for AppQuery<'_> {
                             self.faces
                                 .resolve_for(&FaceName::new("ui.selection"), content, id)
                         }),
+                    tab_width: policy
+                        .tab_width
+                        .unwrap_or(DEFAULT_TAB_WIDTH)
+                        .clamp(1, MAX_TAB_WIDTH),
                 })
             }
             (ContentKind::StatusBar, ContentViewState::StatusBar(state)) => {

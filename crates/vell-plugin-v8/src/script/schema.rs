@@ -827,6 +827,8 @@ fn parse_key(key: &str) -> Result<KeyEvent, ScriptError> {
         "Escape" => KeyCode::Escape,
         "Enter" => KeyCode::Enter,
         "Backspace" => KeyCode::Backspace,
+        "Tab" => KeyCode::Tab,
+        "BackTab" => KeyCode::BackTab,
         "ArrowUp" => KeyCode::Arrow(ArrowKey::Up),
         "ArrowDown" => KeyCode::Arrow(ArrowKey::Down),
         "ArrowLeft" => KeyCode::Arrow(ArrowKey::Left),
@@ -834,4 +836,15 @@ fn parse_key(key: &str) -> Result<KeyEvent, ScriptError> {
         _ => return Err(ScriptError::new(format!("unsupported key binding: {key}"))),
     };
     Ok(KeyEvent::plain(code))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_bindings_use_the_public_key_codes() {
+        assert_eq!(parse_key("Tab").unwrap().code, KeyCode::Tab);
+        assert_eq!(parse_key("BackTab").unwrap().code, KeyCode::BackTab);
+    }
 }

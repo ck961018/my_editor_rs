@@ -14,11 +14,18 @@ use crate::protocol::selection::Selections;
 
 pub enum ContentInput {
     Save,
+    SaveAs(PathBuf),
     Event(ContentEvent),
 }
 
 pub enum ContentEvent {
+    Reload {
+        path: PathBuf,
+        text: String,
+        backing_state: crate::protocol::content_query::BufferBackingState,
+    },
     SaveFinished {
+        path: PathBuf,
         state: TextStateId,
         result: std::io::Result<()>,
     },
@@ -125,6 +132,21 @@ pub enum ContentKind {
 }
 
 impl Content {
+    pub fn empty(kind: ContentKind) -> Self {
+        match kind {
+            ContentKind::Buffer => Self::Buffer(Buffer::new()),
+            ContentKind::StatusBar => Self::StatusBar(StatusBar::new()),
+        }
+    }
+
+    pub fn buffer_from_file(path: PathBuf, text: String) -> Self {
+        Self::Buffer(Buffer::from_file(path, text))
+    }
+
+    pub fn buffer_for_new_file(path: PathBuf) -> Self {
+        Self::Buffer(Buffer::for_new_file(path))
+    }
+
     pub fn kind(&self) -> ContentKind {
         match self {
             Self::Buffer(_) => ContentKind::Buffer,
@@ -286,22 +308,56 @@ impl Content {
                     ContentResult::Handled(ContentOutcome::new(ContentEffect::None, changed, false))
                 }
             },
+            (Self::Buffer(buffer), ContentInput::SaveAs(path)) => ContentResult::Handled(
+                ContentEffect::Save(SaveSnapshot {
+                    path,
+                    bytes: buffer.slice().to_string(),
+                    revision: buffer.revision(),
+                    state: buffer.state_id(),
+                })
+                .into(),
+            ),
             (
                 Self::Buffer(buffer),
-                ContentInput::Event(ContentEvent::SaveFinished { state, result }),
+                ContentInput::Event(ContentEvent::Reload {
+                    path,
+                    text,
+                    backing_state,
+                }),
             ) => {
+                let change = buffer.reload(path, text, backing_state);
+                ContentResult::Handled(
+                    ContentOutcome::new(ContentEffect::None, true, false).with_change(change),
+                )
+            }
+            (
+                Self::Buffer(buffer),
+                ContentInput::Event(ContentEvent::SaveFinished {
+                    path,
+                    state,
+                    result,
+                }),
+            ) => {
+                let before_path = buffer.path().cloned();
                 let before_modified = buffer.modified();
                 let before_save_state = buffer.save_state();
                 let before_backing_state = buffer.backing_state();
                 let save_state = match result {
-                    Ok(()) if buffer.mark_saved(state) => SaveState::Saved,
-                    Ok(()) => SaveState::Idle,
+                    Ok(()) => {
+                        buffer.set_path(path);
+                        if buffer.mark_saved(state) {
+                            SaveState::Saved
+                        } else {
+                            SaveState::Idle
+                        }
+                    }
                     Err(_) => SaveState::Failed,
                 };
                 buffer.set_save_state(save_state);
                 ContentResult::Handled(ContentOutcome::new(
                     ContentEffect::None,
-                    buffer.modified() != before_modified
+                    buffer.path() != before_path.as_ref()
+                        || buffer.modified() != before_modified
                         || buffer.save_state() != before_save_state
                         || buffer.backing_state() != before_backing_state,
                     false,

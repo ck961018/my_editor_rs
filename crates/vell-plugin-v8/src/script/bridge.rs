@@ -4,7 +4,8 @@ use vell_mode::{
     NamedStatusBarSegment,
 };
 use vell_protocol::content_query::{
-    BufferBackingState, CursorStyle, DirtyState, FaceName, SaveState, SelectionShape, TextMetrics,
+    BufferBackingState, CursorStyle, DirtyState, FaceName, MAX_TAB_WIDTH, SaveState,
+    SelectionShape, TextMetrics,
 };
 
 use super::{MAX_SCRIPT_INPUT_BYTES, MAX_SCRIPT_JSON_BYTES, ScriptError, ensure_size};
@@ -154,11 +155,26 @@ pub(super) fn view_policy_from_json(
             )));
         }
     };
+    let tab_width = object
+        .get("tabWidth")
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .filter(|value| (1..=MAX_TAB_WIDTH).contains(value))
+                .ok_or_else(|| {
+                    ScriptError::new(format!(
+                        "viewState.viewPolicy.tabWidth must be an integer between 1 and {MAX_TAB_WIDTH}"
+                    ))
+                })
+        })
+        .transpose()?;
     Ok(ModeViewPolicy {
         cursor_style,
         cursor_domain,
         selection_shape,
         selection_face: string("selectionFace")?.map(FaceName::new),
+        tab_width,
         status_bar: parse_status_bar_presentation(object)?,
     })
 }
@@ -454,4 +470,35 @@ pub(super) fn throw_dom_exception(scope: &mut v8::PinScope, name: &str, message:
     }
     // Fallback: plain throw.
     throw_script_error(scope, message);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_policy_accepts_a_bounded_tab_width() {
+        let policy = view_policy_from_json(&serde_json::json!({
+            "viewPolicy": { "tabWidth": 8 }
+        }))
+        .unwrap();
+
+        assert_eq!(policy.tab_width, Some(8));
+    }
+
+    #[test]
+    fn view_policy_rejects_invalid_tab_widths() {
+        for value in [
+            serde_json::json!(0),
+            serde_json::json!(MAX_TAB_WIDTH + 1),
+            serde_json::json!(1.5),
+            serde_json::json!("4"),
+        ] {
+            let error = view_policy_from_json(&serde_json::json!({
+                "viewPolicy": { "tabWidth": value }
+            }))
+            .unwrap_err();
+            assert!(error.to_string().contains("tabWidth"));
+        }
+    }
 }

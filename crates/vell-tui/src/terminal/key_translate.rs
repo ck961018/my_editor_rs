@@ -27,6 +27,11 @@ pub(crate) fn translate_key(key: CrosstermKey) -> KeyEvent {
             KeyCode::Char(character)
         }
         CrosstermCode::Backspace => KeyCode::Backspace,
+        CrosstermCode::Tab => KeyCode::Tab,
+        CrosstermCode::BackTab => {
+            modifiers.shift = false;
+            KeyCode::BackTab
+        }
         CrosstermCode::Enter => KeyCode::Enter,
         CrosstermCode::Esc => KeyCode::Escape,
         CrosstermCode::Left => KeyCode::Arrow(ArrowKey::Left),
@@ -122,6 +127,14 @@ mod tests {
             super::translate_key(key(CrosstermCode::Esc, CrosstermModifiers::empty())),
             KeyEvent::plain(KeyCode::Escape)
         );
+        assert_eq!(
+            super::translate_key(key(CrosstermCode::Tab, CrosstermModifiers::empty())),
+            KeyEvent::plain(KeyCode::Tab)
+        );
+        assert_eq!(
+            super::translate_key(key(CrosstermCode::BackTab, CrosstermModifiers::SHIFT)),
+            KeyEvent::plain(KeyCode::BackTab)
+        );
     }
 
     #[test]
@@ -156,7 +169,7 @@ mod tests {
     fn unknown_key_keeps_all_modifiers() {
         assert_eq!(
             super::translate_key(key(
-                CrosstermCode::Tab,
+                CrosstermCode::Null,
                 CrosstermModifiers::CONTROL | CrosstermModifiers::ALT | CrosstermModifiers::SHIFT,
             )),
             KeyEvent::modified(

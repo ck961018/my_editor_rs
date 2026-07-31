@@ -12,6 +12,7 @@ pub struct NamedPolicySources {
     pub cursor_domain: Option<ModeName>,
     pub selection_shape: Option<ModeName>,
     pub selection_face: Option<ModeName>,
+    pub tab_width: Option<ModeName>,
     pub status_bar: Option<ModeName>,
 }
 
@@ -125,6 +126,7 @@ fn named_policy_sources(
         cursor_domain: sources.cursor_domain.map(name),
         selection_shape: sources.selection_shape.map(name),
         selection_face: sources.selection_face.map(name),
+        tab_width: sources.tab_width.map(name),
         status_bar: sources.status_bar.map(name),
     }
 }

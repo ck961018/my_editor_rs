@@ -562,6 +562,12 @@ fn key_event_arguments(key: KeyEvent) -> ModeValue {
         KeyCode::Backspace => {
             value.insert("code".to_owned(), ModeValue::String("backspace".to_owned()));
         }
+        KeyCode::Tab => {
+            value.insert("code".to_owned(), ModeValue::String("tab".to_owned()));
+        }
+        KeyCode::BackTab => {
+            value.insert("code".to_owned(), ModeValue::String("backtab".to_owned()));
+        }
         KeyCode::Enter => {
             value.insert("code".to_owned(), ModeValue::String("enter".to_owned()));
         }
@@ -774,6 +780,19 @@ mod tests {
     use vell_core::status_bar::StatusBar;
     use vell_mode::{InputFlow, ModeRegistry};
     use vell_protocol::ids::{ContentId, ViewId};
+
+    #[test]
+    fn tab_input_uses_the_public_key_codes() {
+        for (code, expected) in [(KeyCode::Tab, "tab"), (KeyCode::BackTab, "backtab")] {
+            let ModeValue::Map(arguments) = key_event_arguments(KeyEvent::plain(code)) else {
+                panic!("key arguments must be an object");
+            };
+            assert_eq!(
+                arguments.get("code"),
+                Some(&ModeValue::String(expected.to_owned()))
+            );
+        }
+    }
 
     #[test]
     fn decoration_set_returns_only_spans_intersecting_visible_rows() {

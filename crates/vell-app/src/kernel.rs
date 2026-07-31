@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
+use std::path::PathBuf;
 
 use tokio::sync::mpsc;
 
+use crate::buffer_lifecycle::normalize_path;
 use crate::command::ModeCommand;
-use crate::message::AppMessage;
+use crate::message::{AppMessage, OpenedBuffer, OpenedPath};
 use crate::mode::{
     ModeBackground, ModeContentStore, ModeDraftJournal, ModeError, ModeId, ModeJobKey,
     ModeJobRequest, ModeJobResult, ModeJobRunner, ModeRegistry, ModeResult,
@@ -16,16 +18,41 @@ use crate::transaction::{
 };
 use vell_core::action::{ContentAction, ContentEditPlan};
 use vell_core::content::{
-    ContentActionResult, ContentChange, ContentEvent, ContentInput, ContentResult,
-    ContentTransactionError, SaveSnapshot,
+    Content, ContentActionResult, ContentChange, ContentEvent, ContentInput, ContentKind,
+    ContentResult, ContentTransactionError, SaveSnapshot,
 };
 use vell_core::content_store::{ContentSnapshot, ContentStore};
 use vell_core::transaction::{TextStateId, TransactionDirection};
-use vell_protocol::ids::{ContentId, ViewId};
+use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 use vell_protocol::selection::Selections;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum FileBaseline {
+    Missing,
+    Materialized(String),
+}
+
+#[derive(Clone, Debug)]
+enum SaveGuard {
+    Force,
+    Matches(String),
+    CreateNew,
+}
+
+#[derive(Clone, Debug)]
+struct BufferPathRecord {
+    identity: PathBuf,
+    path: PathBuf,
+    baseline: FileBaseline,
+}
 
 pub(super) struct Kernel {
     contents: ContentStore,
+    buffer_paths: HashMap<ContentId, BufferPathRecord>,
+    path_contents: HashMap<PathBuf, ContentId>,
+    reserved_paths: HashMap<PathBuf, ContentId>,
+    pending_opens: HashMap<ContentId, PendingOpen>,
+    latest_opens: HashMap<SpaceId, ContentId>,
     modes: ModeRegistry,
     content_modes: ModeContentStore,
     transactions: TransactionManager,
@@ -35,13 +62,24 @@ pub(super) struct Kernel {
     mode_jobs: HashMap<ModeJobKey, ModeJobSlot>,
     pending_saves: HashMap<ContentId, PendingSave>,
     command_transaction: Option<CommandTransaction>,
+    next_content_id: u64,
 }
 
 impl Kernel {
     pub(super) fn new(contents: ContentStore, modes: ModeRegistry) -> Self {
+        let next_content_id = contents
+            .ids()
+            .map(|id| id.0)
+            .max()
+            .map_or(0, |id| id.checked_add(1).expect("content id overflow"));
         let (message_tx, message_rx) = mpsc::unbounded_channel();
         Self {
             contents,
+            buffer_paths: HashMap::new(),
+            path_contents: HashMap::new(),
+            reserved_paths: HashMap::new(),
+            pending_opens: HashMap::new(),
+            latest_opens: HashMap::new(),
             modes,
             content_modes: ModeContentStore::default(),
             transactions: TransactionManager::default(),
@@ -51,7 +89,111 @@ impl Kernel {
             mode_jobs: HashMap::new(),
             pending_saves: HashMap::new(),
             command_transaction: None,
+            next_content_id,
         }
+    }
+
+    pub(super) fn create_content(&mut self, kind: ContentKind) -> ContentId {
+        self.insert_content(Content::empty(kind))
+    }
+
+    pub(super) fn insert_content(&mut self, value: Content) -> ContentId {
+        let id = self.reserve_content_id();
+        self.contents
+            .insert(id, value)
+            .expect("allocated content id is unique");
+        id
+    }
+
+    fn reserve_content_id(&mut self) -> ContentId {
+        loop {
+            let id = ContentId(self.next_content_id);
+            self.next_content_id = self
+                .next_content_id
+                .checked_add(1)
+                .expect("content id overflow");
+            if !self.contents.contains(id) {
+                return id;
+            }
+        }
+    }
+
+    pub(super) fn content_for_path(&self, identity: &Path) -> Option<ContentId> {
+        self.path_contents.get(identity).copied()
+    }
+
+    pub(super) fn path_owner(&self, identity: &Path) -> Option<ContentId> {
+        self.path_contents
+            .get(identity)
+            .or_else(|| self.reserved_paths.get(identity))
+            .copied()
+    }
+
+    pub(super) fn register_buffer_path(
+        &mut self,
+        content: ContentId,
+        identity: PathBuf,
+        path: PathBuf,
+        baseline: FileBaseline,
+    ) -> Result<(), ContentId> {
+        if let Some(existing) = self.path_owner(&identity)
+            && existing != content
+        {
+            return Err(existing);
+        }
+        if let Some(previous) = self.buffer_paths.remove(&content) {
+            self.path_contents.remove(&previous.identity);
+        }
+        self.path_contents.insert(identity.clone(), content);
+        self.buffer_paths.insert(
+            content,
+            BufferPathRecord {
+                identity,
+                path,
+                baseline,
+            },
+        );
+        Ok(())
+    }
+
+    pub(super) fn buffer_path_record(
+        &self,
+        content: ContentId,
+    ) -> Option<(&PathBuf, &FileBaseline)> {
+        self.buffer_paths
+            .get(&content)
+            .map(|record| (&record.path, &record.baseline))
+    }
+
+    pub(super) fn update_buffer_baseline(
+        &mut self,
+        content: ContentId,
+        path: PathBuf,
+        baseline: FileBaseline,
+    ) {
+        let record = self
+            .buffer_paths
+            .get_mut(&content)
+            .expect("path-backed buffer has a registry record");
+        record.path = path;
+        record.baseline = baseline;
+    }
+
+    pub(super) fn clear_history(&mut self, content: ContentId) {
+        self.transactions.remove(content);
+    }
+
+    fn save_guard(&self, content: ContentId, path: &Path, force: bool) -> SaveGuard {
+        if force {
+            return SaveGuard::Force;
+        }
+        self.buffer_paths
+            .get(&content)
+            .filter(|record| record.path == path)
+            .map_or(SaveGuard::CreateNew, |record| match &record.baseline {
+                FileBaseline::Missing => SaveGuard::CreateNew,
+                FileBaseline::Materialized(text) => SaveGuard::Matches(text.clone()),
+            })
     }
 
     pub(super) fn register_mode_background(&mut self, background: Box<dyn ModeBackground>) {
@@ -210,6 +352,24 @@ impl Kernel {
         });
     }
 
+    pub(super) fn retarget_command_transaction(&mut self, target: ContentId) -> bool {
+        let Some(command) = self.command_transaction.as_mut() else {
+            self.command_transaction = Some(CommandTransaction {
+                target,
+                snapshot: None,
+            });
+            return true;
+        };
+        if command.target == target {
+            return true;
+        }
+        if command.snapshot.is_some() {
+            return false;
+        }
+        command.target = target;
+        true
+    }
+
     pub(super) fn finish_command_transaction(&mut self, success: bool) {
         let Some(command) = self.command_transaction.take() else {
             return;
@@ -316,7 +476,7 @@ impl Kernel {
             let result = tokio::task::spawn_blocking(move || (pending.run)(cancellation))
                 .await
                 .unwrap_or_else(|error| Err(format!("mode job panicked: {error}")));
-            let _ = tx.send(AppMessage::ModeJobCompleted {
+            let _ = tx.send(AppMessage::ModeJobFinished {
                 key,
                 version,
                 result,
@@ -382,37 +542,208 @@ impl Kernel {
         !self.pending_saves.is_empty()
     }
 
-    #[cfg(test)]
     pub(super) fn has_pending_save(&self, content: ContentId) -> bool {
         self.pending_saves.contains_key(&content)
     }
 
+    pub(super) fn remove_content(&mut self, content: ContentId) -> bool {
+        assert!(
+            !self.has_pending_save(content),
+            "pending saves must be resolved before removing content"
+        );
+        self.mode_jobs.retain(|key, slot| {
+            if key.content != content {
+                return true;
+            }
+            if let Some(running) = &slot.running {
+                running.cancellation.cancel();
+            }
+            false
+        });
+        self.transactions.remove(content);
+        if let Some(record) = self.buffer_paths.remove(&content) {
+            self.path_contents.remove(&record.identity);
+        }
+        if self
+            .command_transaction
+            .as_ref()
+            .is_some_and(|command| command.target == content)
+        {
+            self.command_transaction = None;
+        }
+        self.contents.remove(content)
+    }
+
+    pub(super) fn queue_open(
+        &mut self,
+        target: SpaceId,
+        expected_view: Option<ViewId>,
+        requested_path: PathBuf,
+    ) -> ContentId {
+        self.detach_open_target(target);
+        let content = self.reserve_content_id();
+        self.pending_opens.insert(
+            content,
+            PendingOpen {
+                targets: HashMap::from([(target, expected_view)]),
+            },
+        );
+        self.latest_opens.insert(target, content);
+        let tx = self.message_tx.clone();
+        self.tasks.spawn_critical(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let (path, identity) = normalize_path(&requested_path)?;
+                let buffer = match std::fs::read_to_string(&path) {
+                    Ok(text) => OpenedBuffer {
+                        content: Content::buffer_from_file(path.clone(), text.clone()),
+                        baseline: FileBaseline::Materialized(text),
+                    },
+                    Err(source) if source.kind() == io::ErrorKind::NotFound => OpenedBuffer {
+                        content: Content::buffer_for_new_file(path.clone()),
+                        baseline: FileBaseline::Missing,
+                    },
+                    Err(source) => return Err(source),
+                };
+                Ok(OpenedPath {
+                    path,
+                    identity,
+                    buffer,
+                })
+            })
+            .await
+            .map_err(io::Error::other)
+            .and_then(|result| result);
+            let _ = tx.send(AppMessage::OpenCompleted { content, result });
+        });
+        content
+    }
+
+    fn detach_open_target(&mut self, target: SpaceId) {
+        let Some(previous) = self.latest_opens.remove(&target) else {
+            return;
+        };
+        if let Some(pending) = self.pending_opens.get_mut(&previous) {
+            pending.targets.remove(&target);
+        }
+    }
+
+    pub(super) fn complete_open(
+        &mut self,
+        content: ContentId,
+        result: io::Result<OpenedPath>,
+    ) -> io::Result<Option<OpenCompletion>> {
+        let Some(pending) = self.pending_opens.remove(&content) else {
+            return Ok(None);
+        };
+        let targets = pending
+            .targets
+            .into_iter()
+            .filter_map(|(space, expected_view)| {
+                (self.latest_opens.remove(&space) == Some(content)).then_some(OpenTarget {
+                    space,
+                    expected_view,
+                })
+            })
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            return Ok(None);
+        }
+        let opened = result?;
+        if let Some(existing) = self.path_contents.get(&opened.identity) {
+            return Ok(Some(OpenCompletion {
+                content: *existing,
+                path: opened.path,
+                identity: opened.identity,
+                opened: None,
+                targets,
+            }));
+        }
+        if self.reserved_paths.contains_key(&opened.identity) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "open path is reserved by a pending Save As",
+            ));
+        }
+        Ok(Some(OpenCompletion {
+            content,
+            path: opened.path,
+            identity: opened.identity,
+            opened: Some(opened.buffer),
+            targets,
+        }))
+    }
+
+    pub(super) fn install_open(
+        &mut self,
+        completion: OpenCompletion,
+    ) -> io::Result<(ContentId, bool)> {
+        let content = completion.content;
+        let Some(opened) = completion.opened else {
+            return Ok((content, false));
+        };
+        self.contents
+            .insert(content, opened.content)
+            .map_err(|_| io::Error::new(io::ErrorKind::AlreadyExists, "content id is occupied"))?;
+        self.path_contents
+            .insert(completion.identity.clone(), content);
+        self.buffer_paths.insert(
+            content,
+            BufferPathRecord {
+                identity: completion.identity,
+                path: completion.path,
+                baseline: opened.baseline,
+            },
+        );
+        Ok((content, true))
+    }
+
     /// 发起异步保存；同一 content 已在保存时，仅保留最新的后续快照。
-    pub(super) fn queue_save(&mut self, content: ContentId, snapshot: SaveSnapshot) -> bool {
+    pub(super) fn queue_save(
+        &mut self,
+        content: ContentId,
+        mut snapshot: SaveSnapshot,
+        force: bool,
+    ) -> bool {
         if let Some(pending) = self.pending_saves.get_mut(&content) {
+            if pending.path_identity.is_some() {
+                snapshot.path = pending.path.clone();
+            }
             let queued_revision = pending
                 .queued
                 .as_ref()
-                .map_or(pending.revision, |queued| queued.revision);
+                .map_or(pending.revision, |(queued, _)| queued.revision);
             if snapshot.revision > queued_revision {
-                pending.queued = Some(snapshot);
+                pending.queued = Some((snapshot, force));
+            } else if snapshot.revision == queued_revision && force {
+                if let Some((_, queued_force)) = pending.queued.as_mut() {
+                    *queued_force = true;
+                } else if !pending.force {
+                    pending.queued = Some((snapshot, true));
+                }
             }
             return false;
         }
 
+        let guard = self.save_guard(content, &snapshot.path, force);
         let tx = self.message_tx.clone();
         let revision = snapshot.revision;
         let state = snapshot.state;
+        let path = snapshot.path.clone();
+        let bytes = snapshot.bytes.clone();
         self.pending_saves.insert(
             content,
             PendingSave {
                 revision,
                 state,
+                path,
+                bytes,
+                path_identity: None,
+                force,
                 queued: None,
             },
         );
         self.tasks.spawn_critical(async move {
-            let result = atomic_write(snapshot).await;
+            let result = atomic_write(snapshot, guard).await;
             let _ = tx.send(AppMessage::SaveCompleted {
                 content,
                 revision,
@@ -421,6 +752,62 @@ impl Kernel {
             });
         });
         true
+    }
+
+    pub(super) fn queue_save_as(
+        &mut self,
+        content: ContentId,
+        snapshot: SaveSnapshot,
+        identity: PathBuf,
+        force: bool,
+    ) -> Result<bool, ContentId> {
+        if self.has_pending_save(content) {
+            return Ok(false);
+        }
+        if let Some(existing) = self.path_owner(&identity)
+            && existing != content
+        {
+            return Err(existing);
+        }
+        self.reserved_paths.insert(identity.clone(), content);
+        let guard = if force {
+            SaveGuard::Force
+        } else {
+            self.buffer_paths
+                .get(&content)
+                .filter(|record| record.path == snapshot.path)
+                .map_or(SaveGuard::CreateNew, |record| match &record.baseline {
+                    FileBaseline::Missing => SaveGuard::CreateNew,
+                    FileBaseline::Materialized(text) => SaveGuard::Matches(text.clone()),
+                })
+        };
+        let tx = self.message_tx.clone();
+        let revision = snapshot.revision;
+        let state = snapshot.state;
+        let path = snapshot.path.clone();
+        let bytes = snapshot.bytes.clone();
+        self.pending_saves.insert(
+            content,
+            PendingSave {
+                revision,
+                state,
+                path,
+                bytes,
+                path_identity: Some(identity),
+                force,
+                queued: None,
+            },
+        );
+        self.tasks.spawn_critical(async move {
+            let result = atomic_write(snapshot, guard).await;
+            let _ = tx.send(AppMessage::SaveCompleted {
+                content,
+                revision,
+                state,
+                result,
+            });
+        });
+        Ok(true)
     }
 
     pub(super) fn complete_save(
@@ -436,14 +823,70 @@ impl Kernel {
             .expect("save completion must match a pending save");
         assert_eq!(pending.revision, revision, "save revision mismatch");
         assert_eq!(pending.state, state, "save state mismatch");
+        let succeeded = result.is_ok();
+        if let Some(identity) = &pending.path_identity {
+            self.reserved_paths.remove(identity);
+            if succeeded {
+                if let Some(previous) = self.buffer_paths.remove(&content) {
+                    self.path_contents.remove(&previous.identity);
+                }
+                self.path_contents.insert(identity.clone(), content);
+                self.buffer_paths.insert(
+                    content,
+                    BufferPathRecord {
+                        identity: identity.clone(),
+                        path: pending.path.clone(),
+                        baseline: FileBaseline::Materialized(pending.bytes.clone()),
+                    },
+                );
+            }
+        } else if succeeded && let Some(record) = self.buffer_paths.get_mut(&content) {
+            record.path = pending.path.clone();
+            record.baseline = FileBaseline::Materialized(pending.bytes.clone());
+        }
         let result = self.contents.execute(
             content,
-            ContentInput::Event(ContentEvent::SaveFinished { state, result }),
+            ContentInput::Event(ContentEvent::SaveFinished {
+                path: pending.path,
+                state,
+                result,
+            }),
         );
-        SaveCompletion {
-            result,
-            queued: pending.queued,
-        }
+        let queued = if !succeeded && pending.path_identity.is_some() {
+            None
+        } else {
+            pending.queued
+        };
+        SaveCompletion { result, queued }
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_mode_jobs_for_content_for_test(&self, content: ContentId) -> bool {
+        self.mode_jobs.keys().any(|key| key.content == content)
+    }
+
+    #[cfg(test)]
+    pub(super) fn track_mode_job_for_test(
+        &mut self,
+        mode: ModeId,
+        content: ContentId,
+    ) -> tokio_util::sync::CancellationToken {
+        let cancellation = self.tasks.cancellation_token().child_token();
+        self.mode_jobs.insert(
+            ModeJobKey {
+                mode,
+                content,
+                slot: "test".into(),
+            },
+            ModeJobSlot {
+                running: Some(RunningModeJob {
+                    version: 1,
+                    cancellation: cancellation.clone(),
+                }),
+                queued: None,
+            },
+        );
+        cancellation
     }
 
     #[cfg(test)]
@@ -459,7 +902,11 @@ impl Kernel {
             PendingSave {
                 revision,
                 state,
-                queued,
+                path: PathBuf::new(),
+                bytes: String::new(),
+                path_identity: None,
+                force: false,
+                queued: queued.map(|snapshot| (snapshot, false)),
             },
         );
     }
@@ -467,19 +914,40 @@ impl Kernel {
 
 pub(super) struct SaveCompletion {
     result: ContentResult,
-    queued: Option<SaveSnapshot>,
+    queued: Option<(SaveSnapshot, bool)>,
 }
 
 impl SaveCompletion {
-    pub(super) fn into_parts(self) -> (ContentResult, Option<SaveSnapshot>) {
+    pub(super) fn into_parts(self) -> (ContentResult, Option<(SaveSnapshot, bool)>) {
         (self.result, self.queued)
     }
+}
+
+pub(super) struct OpenTarget {
+    pub space: SpaceId,
+    pub expected_view: Option<ViewId>,
+}
+
+pub(super) struct OpenCompletion {
+    pub content: ContentId,
+    pub path: PathBuf,
+    pub identity: PathBuf,
+    pub opened: Option<OpenedBuffer>,
+    pub targets: Vec<OpenTarget>,
+}
+
+struct PendingOpen {
+    targets: HashMap<SpaceId, Option<ViewId>>,
 }
 
 struct PendingSave {
     revision: u64,
     state: TextStateId,
-    queued: Option<SaveSnapshot>,
+    path: PathBuf,
+    bytes: String,
+    path_identity: Option<PathBuf>,
+    force: bool,
+    queued: Option<(SaveSnapshot, bool)>,
 }
 
 struct CommandTransaction {
@@ -503,7 +971,7 @@ struct PendingModeJob {
     run: ModeJobRunner,
 }
 
-async fn atomic_write(snapshot: SaveSnapshot) -> io::Result<()> {
+async fn atomic_write(snapshot: SaveSnapshot, guard: SaveGuard) -> io::Result<()> {
     tokio::task::spawn_blocking(move || {
         use std::io::Write;
 
@@ -514,15 +982,40 @@ async fn atomic_write(snapshot: SaveSnapshot) -> io::Result<()> {
             .unwrap_or_else(|| Path::new("."));
         let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
         temporary.write_all(snapshot.bytes.as_bytes())?;
-        if let Ok(metadata) = std::fs::metadata(&snapshot.path) {
+        if !matches!(guard, SaveGuard::CreateNew)
+            && let Ok(metadata) = std::fs::metadata(&snapshot.path)
+        {
             temporary
                 .as_file()
                 .set_permissions(metadata.permissions())?;
         }
         temporary.as_file().sync_all()?;
-        temporary
-            .persist(&snapshot.path)
-            .map_err(|error| error.error)?;
+        match guard {
+            SaveGuard::Force => {
+                temporary
+                    .persist(&snapshot.path)
+                    .map_err(|error| error.error)?;
+            }
+            SaveGuard::Matches(expected) => {
+                if !matches!(
+                    std::fs::read_to_string(&snapshot.path),
+                    Ok(actual) if actual == expected
+                ) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "file changed since it was opened",
+                    ));
+                }
+                temporary
+                    .persist(&snapshot.path)
+                    .map_err(|error| error.error)?;
+            }
+            SaveGuard::CreateNew => {
+                temporary
+                    .persist_noclobber(&snapshot.path)
+                    .map_err(|error| error.error)?;
+            }
+        };
         Ok(())
     })
     .await
@@ -548,6 +1041,46 @@ mod tests {
         fn adapters(&self) -> crate::mode::ModeAdapters {
             crate::mode::ModeAdapters::buffer()
         }
+    }
+
+    #[tokio::test]
+    async fn guarded_atomic_write_does_not_overwrite_a_changed_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("changed.txt");
+        std::fs::write(&path, "external").unwrap();
+        let snapshot = SaveSnapshot {
+            path: path.clone(),
+            bytes: "editor".to_owned(),
+            revision: 1,
+            state: TextStateId(1),
+        };
+
+        let error = atomic_write(snapshot, SaveGuard::Matches("opened".to_owned()))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "external");
+    }
+
+    #[tokio::test]
+    async fn create_new_atomic_write_does_not_overwrite_a_raced_save_as_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("created.txt");
+        std::fs::write(&path, "external").unwrap();
+        let snapshot = SaveSnapshot {
+            path: path.clone(),
+            bytes: "editor".to_owned(),
+            revision: 1,
+            state: TextStateId(1),
+        };
+
+        let error = atomic_write(snapshot, SaveGuard::CreateNew)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "external");
     }
 
     #[tokio::test(flavor = "multi_thread")]

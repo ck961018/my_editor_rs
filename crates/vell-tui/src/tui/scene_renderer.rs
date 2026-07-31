@@ -4,10 +4,12 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use crate::protocol::content_query::{
-    ContentData, ContentQuery, ContentQueryKind, FacePatch, PaintFace, RenderQuery,
-    RenderQueryError, RowRange, SelectionShape, StatusBarPresentation, StatusBarSegment,
-    TextPresentation, ViewData, ViewPresentation,
+    ContentData, ContentQuery, ContentQueryKind, DEFAULT_TAB_WIDTH, FacePatch, PaintFace,
+    RenderQuery, RenderQueryError, RowRange, SelectionShape, StatusBarPresentation,
+    StatusBarSegment, TextPresentation, ViewData, ViewPresentation,
 };
 use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::revision::Revision;
@@ -21,8 +23,8 @@ use crate::terminal::output::Canvas;
 use crate::tui::resolved::{RenderItem, ResolvedScene};
 use crate::tui::taffy_engine::TaffyEngine;
 use crate::tui::text_cells::{
-    display_width_before_col, line_content, sanitize_terminal_text, take_display_width,
-    terminal_char, terminal_char_width,
+    display_width_before_col, grapheme_width, line_content, sanitize_terminal_text,
+    take_display_width, terminal_grapheme,
 };
 
 pub struct SceneRenderer {
@@ -95,7 +97,13 @@ impl SceneRenderer {
         let focused_display_col = match focused_head {
             Some(head) => {
                 let line = text_row(query, focused_view.content, head.row)?;
-                Some(display_width_before_col(&line, head.col))
+                Some(display_width_before_col(
+                    &line,
+                    head.col,
+                    focused_text
+                        .expect("text cursor has text presentation")
+                        .tab_width,
+                ))
             }
             None => None,
         };
@@ -553,6 +561,7 @@ fn paint_text_item(
             &text.selection_face,
             &row_decorations,
             &text.base_face,
+            text.tab_width,
         )?;
         clear_item_row_with_highlight(
             canvas,
@@ -633,7 +642,7 @@ fn status_segments_width(segments: &[StatusBarSegment]) -> usize {
         .iter()
         .map(|segment| {
             let text = sanitize_terminal_text(&segment.text);
-            display_width_before_col(&text, text.chars().count())
+            display_width_before_col(&text, text.chars().count(), DEFAULT_TAB_WIDTH)
         })
         .sum()
 }
@@ -659,7 +668,7 @@ fn paint_status_segments(
         canvas.move_cursor(row, col + written)?;
         canvas.set_face(&segment.face.resolve(base_face))?;
         canvas.write_str(&clipped)?;
-        written += display_width_before_col(&clipped, clipped.chars().count());
+        written += display_width_before_col(&clipped, clipped.chars().count(), DEFAULT_TAB_WIDTH);
     }
     Ok(())
 }
@@ -714,7 +723,7 @@ fn clear_item_row_with_highlight(
 
 /// Paint the visible display-cell interval `[left_col, left_col + width)` of one logical row.
 /// A trailing logical newline is discarded. `hi`, when present, remains an absolute logical-char
-/// range; each complete visible character is highlighted according to its logical column.
+/// range; each complete visible grapheme is highlighted according to its logical column.
 #[allow(
     clippy::too_many_arguments,
     reason = "rendering hot line paints from flat inputs"
@@ -728,17 +737,18 @@ fn paint_line_with_highlight(
     selection_face: &FacePatch,
     decorations: &[RowDecoration],
     base_face: &PaintFace,
+    tab_width: usize,
 ) -> io::Result<usize> {
     if width == 0 {
         return Ok(0);
     }
     let content = line_content(line);
     let visible_end = left_col.saturating_add(width);
-    let mut cell_col: usize = 0;
-    let mut painted_width: usize = 0;
+    let mut logical_col = 0;
+    let mut cell_col = 0;
+    let mut painted_width = 0;
     let mut reverse_on = false;
     let mut active_face = base_face.clone();
-    let mut previous_char_was_visible = false;
     let mut decoration_events: Vec<_> = decorations
         .iter()
         .enumerate()
@@ -754,39 +764,17 @@ fn paint_line_with_highlight(
     let mut next_event = 0;
     let mut active_decorations = Vec::new();
 
-    for (logical_col, source) in content.chars().enumerate() {
-        let ch = terminal_char(source);
-        let char_width = terminal_char_width(ch);
-        let char_start = cell_col;
-        let char_end = char_start.saturating_add(char_width);
-        cell_col = char_end;
+    for source in content.graphemes(true) {
+        let rendered = terminal_grapheme(source);
+        let source_width = grapheme_width(source, cell_col, tab_width);
+        let source_start = cell_col;
+        let source_end = source_start.saturating_add(source_width);
+        let source_chars = source.chars().count();
+        cell_col = source_end;
 
-        if char_width == 0 {
-            if previous_char_was_visible {
-                let mut encoded = [0; 4];
-                canvas.write_str(ch.encode_utf8(&mut encoded))?;
-            }
-            continue;
-        }
-        previous_char_was_visible = false;
-        if char_end <= left_col {
-            continue;
-        }
-        if char_start < left_col {
-            if reverse_on {
-                canvas.set_reverse(false)?;
-                reverse_on = false;
-            }
-            let clipped_width = char_end.min(visible_end) - left_col;
-            canvas.write_str(&" ".repeat(clipped_width))?;
-            painted_width += clipped_width;
-            continue;
-        }
-        if char_start >= visible_end || char_end > visible_end {
-            break;
-        }
-
-        let highlighted = hi.is_some_and(|(start, end)| logical_col >= start && logical_col < end);
+        let highlighted = hi.is_some_and(|(start, end)| {
+            logical_col < end && logical_col.saturating_add(source_chars) > start
+        });
         let reverse_highlighted = highlighted && selection_face == &FacePatch::default();
         let mut face = base_face.clone();
         while let Some(&(col, entering, index)) = decoration_events.get(next_event)
@@ -800,27 +788,42 @@ fn paint_line_with_highlight(
             }
             next_event += 1;
         }
+        logical_col += source_chars;
         for &index in &active_decorations {
             face.apply_patch(&decorations[index].face, base_face);
         }
         if highlighted {
             face.apply_patch(selection_face, base_face);
         }
+
+        if source_width == 0 || source_end <= left_col {
+            continue;
+        }
+        if source_start >= visible_end {
+            break;
+        }
+        if source != "\t" && source_start >= left_col && source_end > visible_end {
+            break;
+        }
         if face != active_face {
             canvas.set_face(&face)?;
             active_face = face;
-            if reverse_highlighted {
-                canvas.set_reverse(true)?;
-            }
         }
         if reverse_highlighted != reverse_on {
             canvas.set_reverse(reverse_highlighted)?;
             reverse_on = reverse_highlighted;
         }
-        let mut encoded = [0; 4];
-        canvas.write_str(ch.encode_utf8(&mut encoded))?;
-        painted_width += char_width;
-        previous_char_was_visible = true;
+
+        if source == "\t" || source_start < left_col {
+            let clipped_start = source_start.max(left_col);
+            let clipped_end = source_end.min(visible_end);
+            let clipped_width = clipped_end.saturating_sub(clipped_start);
+            canvas.write_str(&" ".repeat(clipped_width))?;
+            painted_width += clipped_width;
+        } else {
+            canvas.write_str(&rendered)?;
+            painted_width += source_width;
+        }
     }
     if reverse_on {
         canvas.set_reverse(false)?;
@@ -892,6 +895,7 @@ mod tests {
                 cursor_style,
                 selection_shape,
                 selection_face: FacePatch::default(),
+                tab_width: DEFAULT_TAB_WIDTH,
             }),
         }
     }
@@ -1687,11 +1691,140 @@ mod tests {
             &FacePatch::default(),
             &[],
             &PaintFace::default(),
+            DEFAULT_TAB_WIDTH,
         )
         .unwrap();
 
         let output = String::from_utf8(out.into_inner()).unwrap();
         assert_eq!(output, "中\x1b[7m文\x1b[27ma");
+    }
+
+    #[test]
+    fn grapheme_clusters_keep_cursor_and_cell_width_aligned() {
+        let (scene, editor) = editor_scene(10, 2, ViewId(0), ViewId(1));
+        let query = StubQuery {
+            editor_cid: ContentId(0),
+            lines: vec!["e\u{301}👩\u{200d}🔬中a".to_string()],
+            selections: Selections::single(Selection::collapsed(TextOffset { char_index: 6 })),
+        };
+        let mut renderer = SceneRenderer::new();
+        let mut out = Output::new(Vec::new());
+
+        renderer
+            .render(
+                &scene,
+                Revision(0),
+                &query,
+                editor,
+                &mut out as &mut dyn Canvas,
+            )
+            .unwrap();
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert!(
+            output.contains("e\u{301}👩\u{200d}🔬中a"),
+            "output: {output}"
+        );
+        assert!(output.contains("1;6H"), "output: {output}");
+    }
+
+    #[test]
+    fn hard_tabs_render_as_cells_and_keep_cursor_aligned() {
+        let (scene, editor) = editor_scene(5, 2, ViewId(0), ViewId(1));
+        let query = StubQuery {
+            editor_cid: ContentId(0),
+            lines: vec!["a\tb".to_string()],
+            selections: Selections::single(Selection::collapsed(TextOffset { char_index: 2 })),
+        };
+        let mut renderer = SceneRenderer::new();
+        let mut out = Output::new(Vec::new());
+
+        renderer
+            .render(
+                &scene,
+                Revision(0),
+                &query,
+                editor,
+                &mut out as &mut dyn Canvas,
+            )
+            .unwrap();
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert!(output.contains("a   b"), "output: {output}");
+        assert!(output.contains("1;5H"), "output: {output}");
+        assert!(!output.contains('�'), "output: {output}");
+    }
+
+    #[test]
+    fn hard_tab_can_be_selected_and_clipped_at_viewport_boundaries() {
+        let mut selected = Output::new(Vec::new());
+        paint_line_with_highlight(
+            &mut selected,
+            "a\tb",
+            0,
+            5,
+            Some((1, 2)),
+            &FacePatch::default(),
+            &[],
+            &PaintFace::default(),
+            4,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(selected.into_inner()).unwrap(),
+            "a\x1b[7m   \x1b[27mb"
+        );
+
+        let mut clipped = Output::new(Vec::new());
+        let painted = paint_line_with_highlight(
+            &mut clipped,
+            "a\tb",
+            2,
+            3,
+            None,
+            &FacePatch::default(),
+            &[],
+            &PaintFace::default(),
+            4,
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8(clipped.into_inner()).unwrap(), "  b");
+        assert_eq!(painted, 3);
+    }
+
+    #[test]
+    fn wide_graphemes_are_not_partially_painted_at_viewport_edges() {
+        let mut left_clipped = Output::new(Vec::new());
+        let painted = paint_line_with_highlight(
+            &mut left_clipped,
+            "中a",
+            1,
+            2,
+            None,
+            &FacePatch::default(),
+            &[],
+            &PaintFace::default(),
+            DEFAULT_TAB_WIDTH,
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8(left_clipped.into_inner()).unwrap(), " a");
+        assert_eq!(painted, 2);
+
+        let mut right_clipped = Output::new(Vec::new());
+        let painted = paint_line_with_highlight(
+            &mut right_clipped,
+            "a中",
+            0,
+            2,
+            None,
+            &FacePatch::default(),
+            &[],
+            &PaintFace::default(),
+            DEFAULT_TAB_WIDTH,
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8(right_clipped.into_inner()).unwrap(), "a");
+        assert_eq!(painted, 1);
     }
 
     #[test]
@@ -1808,6 +1941,7 @@ mod tests {
             &FacePatch::default(),
             &[],
             &PaintFace::default(),
+            DEFAULT_TAB_WIDTH,
         )
         .unwrap();
 
@@ -1836,6 +1970,7 @@ mod tests {
                 },
             }],
             &PaintFace::default(),
+            DEFAULT_TAB_WIDTH,
         )
         .unwrap();
 
@@ -1873,6 +2008,7 @@ mod tests {
                 },
             ],
             &PaintFace::default(),
+            DEFAULT_TAB_WIDTH,
         )
         .unwrap();
 
@@ -1897,6 +2033,7 @@ mod tests {
             },
             &[],
             &PaintFace::default(),
+            DEFAULT_TAB_WIDTH,
         )
         .unwrap();
 

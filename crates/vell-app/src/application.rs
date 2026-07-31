@@ -4,8 +4,9 @@ use std::time::Instant;
 #[cfg(test)]
 use crate::behavior::BehaviorRecorder;
 use crate::bootstrap::{bootstrap_editor, bootstrap_editor_with_theme};
+use crate::buffer_lifecycle::normalize_path;
 use crate::diagnostics::RuntimeDiagnostic;
-use crate::kernel::Kernel;
+use crate::kernel::{FileBaseline, Kernel};
 use crate::mode::{Mode, ModeAttachmentError, ModeBackground};
 use crate::mode_name::ModeName;
 use crate::session::ClientSession;
@@ -136,10 +137,24 @@ impl<F: Frontend> App<F> {
         face_overrides: Vec<FaceOverride>,
     ) -> io::Result<Self> {
         let display_profile = frontend.display_profile();
-        let mut buffer = Buffer::new();
-        if let Some(p) = path {
-            buffer.open_path(p)?;
-        }
+        let opened_path = path
+            .map(|path| normalize_path(std::path::Path::new(path)))
+            .transpose()?;
+        let (buffer, baseline) = if let Some((path, _)) = &opened_path {
+            match std::fs::read_to_string(path) {
+                Ok(text) => (
+                    Buffer::from_file(path.clone(), text.clone()),
+                    Some(FileBaseline::Materialized(text)),
+                ),
+                Err(source) if source.kind() == io::ErrorKind::NotFound => (
+                    Buffer::for_new_file(path.clone()),
+                    Some(FileBaseline::Missing),
+                ),
+                Err(source) => return Err(source),
+            }
+        } else {
+            (Buffer::new(), None)
+        };
         let mut bootstrap = match theme {
             Some(theme) => bootstrap_editor_with_theme(
                 buffer,
@@ -161,14 +176,20 @@ impl<F: Frontend> App<F> {
             .session
             .faces_mut()
             .set_display_profile(display_profile);
-        Ok(Self {
+        let mut app = Self {
             kernel: bootstrap.kernel,
             session: bootstrap.session,
             frontend,
             runtime_diagnostics: Vec::new(),
             #[cfg(test)]
             behavior: BehaviorRecorder::default(),
-        })
+        };
+        if let Some(((path, identity), baseline)) = opened_path.zip(baseline) {
+            app.kernel
+                .register_buffer_path(ContentId(0), identity, path, baseline)
+                .expect("bootstrap contains only one editor buffer");
+        }
+        Ok(app)
     }
 
     #[cfg_attr(

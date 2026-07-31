@@ -294,6 +294,17 @@ impl SessionFaces {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn has_content_remaps_for_test(
+        &self,
+        content: vell_protocol::ids::ContentId,
+    ) -> bool {
+        self.remaps
+            .entries
+            .keys()
+            .any(|(scope, _)| *scope == FaceRemapScope::Content(content))
+    }
+
     pub(super) fn remove_content_remaps(&mut self, content: vell_protocol::ids::ContentId) {
         if self.remaps.remove_scope(FaceRemapScope::Content(content)) {
             self.environment.bump_revision();

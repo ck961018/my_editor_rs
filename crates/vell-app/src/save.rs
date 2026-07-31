@@ -9,6 +9,15 @@ use vell_protocol::ids::ContentId;
 impl<F: Frontend> App<F> {
     pub(super) fn handle_app_message(&mut self, message: AppMessage) -> io::Result<bool> {
         let changed = match message {
+            AppMessage::OpenCompleted { content, result } => {
+                match self.complete_async_open(content, result) {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        self.record_recoverable_error(error);
+                        true
+                    }
+                }
+            }
             AppMessage::SaveCompleted {
                 content,
                 revision,
@@ -25,12 +34,12 @@ impl<F: Frontend> App<F> {
                 if content_changed {
                     self.session.touch_content_views(content);
                 }
-                if let Some(snapshot) = queued {
-                    self.kernel.queue_save(content, snapshot);
+                if let Some((snapshot, force)) = queued {
+                    self.kernel.queue_save(content, snapshot, force);
                 }
                 true
             }
-            AppMessage::ModeJobCompleted {
+            AppMessage::ModeJobFinished {
                 key,
                 version,
                 result,
@@ -53,7 +62,7 @@ impl<F: Frontend> App<F> {
         if let ContentResult::Handled(outcome) = result
             && let ContentEffect::Save(snapshot) = outcome.effect
         {
-            self.kernel.queue_save(content, snapshot);
+            self.kernel.queue_save(content, snapshot, false);
         }
     }
 }

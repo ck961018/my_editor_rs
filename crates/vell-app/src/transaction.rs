@@ -120,6 +120,10 @@ struct TransactionFlowSnapshot {
 }
 
 impl TransactionManager {
+    pub fn remove(&mut self, target: ContentId) -> bool {
+        self.flows.remove(&target).is_some()
+    }
+
     pub fn snapshot(&self, target: ContentId) -> TransactionSnapshot {
         let flow = self.flows.get(&target).map(|flow| TransactionFlowSnapshot {
             active: flow.active.clone(),
@@ -391,6 +395,21 @@ mod tests {
         assert!(manager.undo(target).is_none());
         assert!(manager.redo(target).is_some());
         assert!(manager.redo(target).is_none());
+    }
+
+    #[test]
+    fn remove_drops_the_complete_content_flow() {
+        let target = ContentId(7);
+        let mut manager = TransactionManager::default();
+        manager.begin(target, Some(ViewId(3)));
+        manager
+            .record(record(target, Some(ViewId(3)), 0, "x", 0))
+            .unwrap();
+        manager.commit(target);
+
+        assert!(manager.remove(target));
+        assert!(!manager.remove(target));
+        assert_eq!(manager.behavior_for_test(target), (false, None, 0, 0));
     }
 
     #[test]

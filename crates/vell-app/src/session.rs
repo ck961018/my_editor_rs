@@ -32,6 +32,8 @@ pub(super) struct ClientSession {
     scene_revision: Revision,
     views: HashMap<ViewId, View>,
     mode_profiles: HashMap<ContentId, Vec<crate::mode_name::ModeName>>,
+    default_mode_profiles:
+        HashMap<vell_core::content::ContentKind, Vec<crate::mode_name::ModeName>>,
     view_modes: ModeViewStore,
     faces: SessionFaces,
     presentation: PresentationLayerStore,
@@ -74,6 +76,16 @@ impl ClientSession {
             init.editor.view,
             init.editor.content,
         );
+        let default_mode_profiles = HashMap::from([
+            (
+                vell_core::content::ContentKind::Buffer,
+                init.editor.modes.clone(),
+            ),
+            (
+                vell_core::content::ContentKind::StatusBar,
+                init.status.modes.clone(),
+            ),
+        ]);
         let mode_profiles = HashMap::from([
             (init.editor.content, init.editor.modes),
             (init.status.content, init.status.modes),
@@ -152,6 +164,7 @@ impl ClientSession {
             scene_revision: Revision::default(),
             views,
             mode_profiles,
+            default_mode_profiles,
             view_modes,
             faces: SessionFaces::new(faces, face_environment),
             presentation: PresentationLayerStore::default(),
@@ -358,6 +371,24 @@ impl ClientSession {
         &mut self.view_modes
     }
 
+    pub(super) fn register_content_profile(
+        &mut self,
+        content: ContentId,
+        kind: vell_core::content::ContentKind,
+    ) {
+        let profile = self
+            .default_mode_profiles
+            .get(&kind)
+            .cloned()
+            .unwrap_or_default();
+        self.mode_profiles.insert(content, profile);
+    }
+
+    pub(super) fn forget_content(&mut self, content: ContentId) {
+        self.mode_profiles.remove(&content);
+        self.faces.remove_content_remaps(content);
+    }
+
     pub(super) fn mode_chain_for_new_view(
         &self,
         content: ContentId,
@@ -488,6 +519,11 @@ impl ClientSession {
 
     pub(super) fn restore_input(&mut self, snapshot: DispatcherInputSnapshot) {
         self.dispatcher.restore_input(snapshot);
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_content_face_remaps_for_test(&self, content: ContentId) -> bool {
+        self.faces.has_content_remaps_for_test(content)
     }
 
     #[cfg(test)]

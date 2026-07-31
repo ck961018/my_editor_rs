@@ -52,6 +52,8 @@ pub enum KeyCode {
     Char(char),
     Arrow(ArrowKey),
     Backspace,
+    Tab,
+    BackTab,
     Enter,
     Escape,
     Function(u8),

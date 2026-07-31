@@ -10,6 +10,7 @@ futures = "0.3"
 vell-frontend = { path = "../vell-frontend" }
 vell-protocol = { path = "../vell-protocol" }
 taffy = "0.11"
+unicode-segmentation = "1"
 unicode-width = "0.2"
 
 [dev-dependencies]

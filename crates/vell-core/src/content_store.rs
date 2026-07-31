@@ -54,6 +54,10 @@ impl ContentStore {
         self.entries.contains_key(&id)
     }
 
+    pub fn remove(&mut self, id: ContentId) -> bool {
+        self.entries.remove(&id).is_some()
+    }
+
     pub fn ids(&self) -> impl Iterator<Item = ContentId> + '_ {
         self.entries.keys().copied()
     }
@@ -310,6 +314,24 @@ mod tests {
                 char_count: 0,
             })
         );
+    }
+
+    #[test]
+    fn remove_drops_only_the_requested_content() {
+        let mut store = ContentStore::default();
+        let removed = ContentId(4);
+        let retained = ContentId(5);
+        store
+            .insert(removed, Content::empty(ContentKind::Buffer))
+            .unwrap();
+        store
+            .insert(retained, Content::empty(ContentKind::Buffer))
+            .unwrap();
+
+        assert!(store.remove(removed));
+        assert!(!store.remove(removed));
+        assert!(!store.contains(removed));
+        assert!(store.contains(retained));
     }
 
     #[test]

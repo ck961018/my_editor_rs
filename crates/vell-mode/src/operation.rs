@@ -65,6 +65,7 @@ pub enum OperationRequest {
         input: ModeInputCommand,
     },
     Face(FaceOperation),
+    Buffer(BufferOperation),
     App(AppOperation),
 }
 
@@ -90,6 +91,35 @@ pub enum FaceOperation {
     },
     RemoveRelative {
         token: FaceRemapToken,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BufferOperation {
+    New,
+    Open {
+        path: String,
+    },
+    List,
+    Switch {
+        content: ContentId,
+    },
+    Close {
+        target: ContentTarget,
+        force: bool,
+    },
+    Save {
+        target: ContentTarget,
+        force: bool,
+    },
+    SaveAs {
+        target: ContentTarget,
+        path: String,
+        force: bool,
+    },
+    Reload {
+        target: ContentTarget,
+        force: bool,
     },
 }
 

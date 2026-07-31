@@ -14,13 +14,15 @@ use super::layout::{
     LayoutError, NewView, StatusBarPlacement, focusable_view_count, resolve_focus, space_for_view,
     view_for_space,
 };
-use super::message::AppMessage;
+use super::message::{AppMessage, OpenedBuffer, OpenedPath};
 use super::query::AppQuery;
 use super::view::View;
 use crate::action::{TransactionIntent, ViewAction};
+use crate::buffer_lifecycle::normalize_path;
 use crate::command::{
     AppCommand, Command, ContentCommand, ModeCommand, ModeValue, TransactionCommand,
 };
+use crate::kernel::FileBaseline;
 use crate::mode::{
     Mode, ModeActionScope, ModeAdapters, ModeAttachmentError, ModeContentContext, ModeContextError,
     ModeError, ModeFaultPhase, ModeResult, ModeState, ModeViewContext, ModeViewInstance,
@@ -28,14 +30,17 @@ use crate::mode::{
 };
 use crate::mode_name::{ModeActionName, ModeName};
 use crate::operation::{
-    AppOperation, ContentOperation, ContentTarget, ModeFlowPropagation, ModeInvocation, ModeTarget,
-    OperationRequest, ViewEditPlan, ViewOperation, ViewPrecondition, ViewTarget,
+    AppOperation, BufferOperation, ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget,
+    ModeFlowPropagation, ModeInvocation, ModeTarget, OperationRequest, ViewEditPlan, ViewOperation,
+    ViewPrecondition, ViewTarget,
 };
 use std::collections::VecDeque;
 use vell_core::action::ContentAction;
 use vell_core::buffer::Buffer;
 use vell_core::command::EditCommand;
-use vell_core::content::{Content, ContentChange, ContentKind};
+use vell_core::content::{
+    Content, ContentChange, ContentEffect, ContentInput, ContentKind, ContentResult,
+};
 use vell_core::content_view_state::ContentViewState;
 use vell_core::keymap::Keymap;
 use vell_core::transaction::{TextChangeSet, TextEdit};
@@ -43,8 +48,8 @@ use vell_frontend::Frontend;
 use vell_plugin_v8::ScriptHost;
 use vell_protocol::content_query::{
     BufferBackingState, Color, ContentData, ContentQuery, ContentQueryKind, CursorStyle,
-    DirtyState, Face, FaceName, NamedTextDecoration, RenderQuery, RenderQueryError, RowRange,
-    SaveState, StatusBarPresentation, TextPresentation, ViewData, ViewPresentation,
+    DirtyState, Face, FaceExpr, FaceName, NamedTextDecoration, RenderQuery, RenderQueryError,
+    RowRange, SaveState, StatusBarPresentation, TextPresentation, ViewData, ViewPresentation,
 };
 use vell_protocol::frontend_event::{FrontendEvent, ResizeEvent};
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
@@ -292,6 +297,7 @@ impl Mode for HighlightMode {
     ) -> ModeViewPolicy {
         ModeViewPolicy {
             selection_face: Some(FaceName::new("selection.test")),
+            tab_width: Some(8),
             ..ModeViewPolicy::default()
         }
     }
@@ -1416,6 +1422,15 @@ editor.modes.define({
         runtime_diagnostics: Vec::new(),
         behavior: BehaviorRecorder::default(),
     };
+    let (_, identity) = normalize_path(&path).unwrap();
+    app.kernel
+        .register_buffer_path(
+            editor_cid(),
+            identity,
+            path.clone(),
+            FileBaseline::Materialized("before".to_owned()),
+        )
+        .unwrap();
     let view = view_id(&app, app.session.focused());
 
     let error = app
@@ -1447,6 +1462,52 @@ editor.modes.define({
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "native-before");
     app.execute_command(DispatchCommand::App(AppCommand::Quit))
         .unwrap();
+}
+
+#[test]
+fn dirty_last_buffer_blocks_quit_and_last_pane_close_until_forced() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("dirty".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert!(
+        app.execute_command(DispatchCommand::App(AppCommand::Quit))
+            .is_err()
+    );
+    assert!(
+        app.execute_command(DispatchCommand::App(AppCommand::Close))
+            .is_err()
+    );
+    assert!(!app.kernel.is_cancelled());
+
+    app.execute_command(DispatchCommand::App(AppCommand::ForceQuit))
+        .unwrap();
+    assert!(app.kernel.is_cancelled());
+}
+
+#[tokio::test]
+async fn frontend_quit_request_respects_dirty_guard() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("dirty".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    let error = app
+        .handle_event(FrontendEvent::QuitRequest)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("unsaved changes"));
+    assert!(!app.kernel.is_cancelled());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2080,6 +2141,17 @@ fn dirty_state(app: &App<ScriptedFrontend>, content: ContentId) -> DirtyState {
     {
         ContentData::DirtyState(state) => state,
         data => panic!("expected dirty state, got {data:?}"),
+    }
+}
+
+fn resource_path(app: &App<ScriptedFrontend>, content: ContentId) -> Option<String> {
+    match app
+        .kernel
+        .contents()
+        .query(content, ContentQuery::ResourcePath)
+    {
+        ContentData::ResourcePath(path) => path,
+        data => panic!("expected resource path, got {data:?}"),
     }
 }
 
@@ -3483,6 +3555,736 @@ async fn content_mode_binding_is_shared_and_coexists_with_view_modes() {
 }
 
 #[test]
+fn new_buffers_have_unique_ids_and_the_default_mode_profile() {
+    let mut app = make_app(vec![], None);
+    let expected_modes = app.session.mode_chain_for_new_view(editor_cid());
+
+    let first = app.new_buffer();
+    let second = app.new_buffer();
+
+    assert_ne!(first, second);
+    assert!(app.kernel.contents().contains(first));
+    assert!(app.kernel.contents().contains(second));
+    assert_eq!(app.kernel.contents().kind(first), Some(ContentKind::Buffer));
+    assert_eq!(app.session.mode_chain_for_new_view(first), expected_modes);
+    assert_eq!(app.session.mode_chain_for_new_view(second), expected_modes);
+    let info = app
+        .buffers()
+        .into_iter()
+        .find(|buffer| buffer.content == first)
+        .unwrap();
+    assert_eq!(info.resource_name, None);
+    assert_eq!(info.resource_path, None);
+    assert_eq!(info.backing_state, BufferBackingState::Untitled);
+    assert_eq!(info.dirty_state, DirtyState::Clean);
+    assert_eq!(info.save_state, SaveState::Idle);
+}
+
+#[tokio::test]
+async fn typed_buffer_open_switches_the_focused_view() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("typed-open.txt");
+    std::fs::write(&path, "opened").unwrap();
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::Buffer(BufferOperation::Open {
+            path: path.to_string_lossy().into_owned(),
+        })],
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    let message = app.kernel.receive_message().await.unwrap();
+    app.handle_app_message(message).unwrap();
+
+    let content = app
+        .buffers()
+        .into_iter()
+        .find(|buffer| buffer.resource_name.as_deref() == Some("typed-open.txt"))
+        .unwrap()
+        .content;
+    let focused_view = view_id(&app, app.session.focused());
+    assert_eq!(app.session.view(focused_view).unwrap().content(), content);
+    assert_eq!(text_rows(&app, content), vec!["opened"]);
+}
+
+#[tokio::test]
+async fn typed_buffer_operations_cover_the_lifecycle() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("typed-lifecycle.txt");
+    let mut app = make_app(vec![], None);
+    let original = editor_cid();
+    let view = view_id(&app, app.session.focused());
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::Buffer(BufferOperation::New)],
+        view,
+        content: original,
+    })
+    .unwrap();
+    let created = app.session.views()[&view_id(&app, app.session.focused())].content();
+    assert_ne!(created, original);
+
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::Buffer(BufferOperation::Switch {
+            content: original,
+        })],
+        view,
+        content: created,
+    })
+    .unwrap();
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("local".to_owned())),
+        view,
+        content: original,
+    })
+    .unwrap();
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::Buffer(BufferOperation::SaveAs {
+            target: ContentTarget::Current,
+            path: path.to_string_lossy().into_owned(),
+            force: false,
+        })],
+        view,
+        content: original,
+    })
+    .unwrap();
+    while app.kernel.has_pending_save(original) {
+        let message = app.kernel.receive_message().await.unwrap();
+        app.handle_app_message(message).unwrap();
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "local");
+
+    std::fs::write(&path, "external").unwrap();
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::Buffer(BufferOperation::Reload {
+            target: ContentTarget::Current,
+            force: true,
+        })],
+        view,
+        content: original,
+    })
+    .unwrap();
+    assert_eq!(text_rows(&app, original), vec!["external"]);
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("!".to_owned())),
+        view,
+        content: original,
+    })
+    .unwrap();
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::Buffer(BufferOperation::Save {
+            target: ContentTarget::Current,
+            force: false,
+        })],
+        view,
+        content: original,
+    })
+    .unwrap();
+    while app.kernel.has_pending_save(original) {
+        let message = app.kernel.receive_message().await.unwrap();
+        app.handle_app_message(message).unwrap();
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "external!");
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::Buffer(BufferOperation::Close {
+            target: ContentTarget::Id(created),
+            force: false,
+        })],
+        view,
+        content: original,
+    })
+    .unwrap();
+    assert!(!app.kernel.contents().contains(created));
+}
+
+#[tokio::test]
+async fn typed_cross_buffer_save_and_reload_use_the_target_frame() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cross-target.txt");
+    std::fs::write(&path, "before").unwrap();
+    let mut app = make_app(vec![], None);
+    let origin = editor_cid();
+    let target = app.open_buffer(&path).unwrap();
+    std::fs::write(&path, "after").unwrap();
+    let view = view_id(&app, app.session.focused());
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::Buffer(BufferOperation::Reload {
+            target: ContentTarget::Id(target),
+            force: true,
+        })],
+        view,
+        content: origin,
+    })
+    .unwrap();
+    assert_eq!(text_rows(&app, target), vec!["after"]);
+
+    let target_view = app.switch_buffer(target).unwrap();
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("!".to_owned())),
+        view: target_view,
+        content: target,
+    })
+    .unwrap();
+    app.switch_buffer(origin).unwrap();
+    let origin_view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::Buffer(BufferOperation::Save {
+            target: ContentTarget::Id(target),
+            force: false,
+        })],
+        view: origin_view,
+        content: origin,
+    })
+    .unwrap();
+    while app.kernel.has_pending_save(target) {
+        let message = app.kernel.receive_message().await.unwrap();
+        app.handle_app_message(message).unwrap();
+    }
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "!after");
+}
+
+#[tokio::test]
+async fn mode_input_can_save_and_reload_an_explicit_buffer_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mode-target.txt");
+    std::fs::write(&path, "before").unwrap();
+    let mut app = make_app(vec![], None);
+    let target = app.open_buffer(&path).unwrap();
+    let target_view = app.switch_buffer(target).unwrap();
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("!".to_owned())),
+        view: target_view,
+        content: target,
+    })
+    .unwrap();
+    app.switch_buffer(editor_cid()).unwrap();
+
+    let save_mode = ModeName::new("cross-save-probe");
+    app.kernel
+        .modes_mut()
+        .register(ChainProbeMode::with_sequence(
+            save_mode.as_str(),
+            vec![KeyEvent::char('q')],
+            vec![OperationRequest::Buffer(BufferOperation::Save {
+                target: ContentTarget::Id(target),
+                force: false,
+            })],
+            false,
+        ))
+        .unwrap();
+    app.attach_mode_to_content(editor_cid(), &save_mode)
+        .unwrap();
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('q')))
+        .await
+        .unwrap();
+    while app.kernel.has_pending_save(target) {
+        let message = app.kernel.receive_message().await.unwrap();
+        app.handle_app_message(message).unwrap();
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "!before");
+
+    std::fs::write(&path, "after").unwrap();
+    let reload_mode = ModeName::new("cross-reload-probe");
+    app.kernel
+        .modes_mut()
+        .register(ChainProbeMode::with_sequence(
+            reload_mode.as_str(),
+            vec![KeyEvent::char('r')],
+            vec![OperationRequest::Buffer(BufferOperation::Reload {
+                target: ContentTarget::Id(target),
+                force: true,
+            })],
+            false,
+        ))
+        .unwrap();
+    app.attach_mode_to_content(editor_cid(), &reload_mode)
+        .unwrap();
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('r')))
+        .await
+        .unwrap();
+    assert_eq!(text_rows(&app, target), vec!["after"]);
+}
+
+#[test]
+fn typed_buffer_list_surfaces_metadata() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    app.new_buffer();
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::Buffer(BufferOperation::List)],
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    let listing = &app.runtime_diagnostics.last().unwrap().message;
+    assert!(listing.contains("0: [untitled]"), "{listing}");
+    assert!(listing.contains("2: [untitled]"), "{listing}");
+}
+
+#[tokio::test]
+async fn async_open_ignores_superseded_and_stale_target_results() {
+    let directory = tempfile::tempdir().unwrap();
+    let first_path = directory.path().join("first.txt");
+    let second_path = directory.path().join("second.txt");
+    let mut app = make_app(vec![], None);
+    let target = app.session.focused();
+    let expected_view = app.session.view_for_space(target);
+    let first = app
+        .kernel
+        .queue_open(target, expected_view, first_path.clone());
+    let second = app
+        .kernel
+        .queue_open(target, expected_view, second_path.clone());
+    let opened = |path: &std::path::Path, text: &str| OpenedPath {
+        path: path.to_owned(),
+        identity: normalize_path(path).unwrap().1,
+        buffer: OpenedBuffer {
+            content: Content::buffer_from_file(path.to_owned(), text.to_owned()),
+            baseline: FileBaseline::Materialized(text.to_owned()),
+        },
+    };
+
+    assert!(
+        !app.complete_async_open(first, Ok(opened(&first_path, "first")))
+            .unwrap()
+    );
+    assert!(
+        app.complete_async_open(second, Ok(opened(&second_path, "second")))
+            .unwrap()
+    );
+    let focused_view = view_id(&app, target);
+    let focused_content = app.session.view(focused_view).unwrap().content();
+    assert_eq!(text_rows(&app, focused_content), vec!["second"]);
+
+    let third_path = directory.path().join("third.txt");
+    let expected_view = app.session.view_for_space(target);
+    let third = app
+        .kernel
+        .queue_open(target, expected_view, third_path.clone());
+    let replacement = app.new_buffer();
+    app.switch_buffer_at(target, replacement).unwrap();
+
+    assert!(
+        app.complete_async_open(third, Ok(opened(&third_path, "third")))
+            .unwrap()
+    );
+    assert_eq!(
+        app.session
+            .view_for_space(target)
+            .and_then(|view| app.session.view(view))
+            .unwrap()
+            .content(),
+        replacement
+    );
+    assert!(!app.kernel.contents().contains(third));
+    app.kernel.cancel();
+}
+
+#[test]
+fn typed_buffer_operation_rejects_a_mixed_frame_before_mutating() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    let before = app.buffers().len();
+
+    let error = app
+        .execute_command(DispatchCommand::ModeOperations {
+            operations: vec![
+                OperationRequest::Buffer(BufferOperation::New),
+                view_edit(EditCommand::InsertText("unexpected".to_owned())),
+            ],
+            view,
+            content: editor_cid(),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("only operation"));
+    assert_eq!(app.buffers().len(), before);
+    assert_eq!(text_rows(&app, editor_cid()), vec![""]);
+
+    let error = app
+        .execute_command(DispatchCommand::ModeOperations {
+            operations: vec![
+                view_edit(EditCommand::InsertText("unexpected".to_owned())),
+                OperationRequest::Buffer(BufferOperation::New),
+            ],
+            view,
+            content: editor_cid(),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("only operation"));
+    assert_eq!(app.buffers().len(), before);
+    assert_eq!(text_rows(&app, editor_cid()), vec![""]);
+}
+
+#[test]
+fn open_buffer_deduplicates_normalized_paths_and_loads_text() {
+    let directory = tempfile::tempdir().unwrap();
+    let nested = directory.path().join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let path = directory.path().join("open.txt");
+    std::fs::write(&path, "loaded\n").unwrap();
+    let alias = nested.join("..").join("open.txt");
+    let mut app = make_app(vec![], None);
+
+    let content = app.open_buffer(&path).unwrap();
+    let duplicate = app.open_buffer(&alias).unwrap();
+
+    assert_eq!(duplicate, content);
+    assert_eq!(
+        app.kernel
+            .contents()
+            .text_snapshot(content)
+            .unwrap()
+            .to_owned_string(),
+        "loaded\n"
+    );
+    let info = app
+        .buffers()
+        .into_iter()
+        .find(|buffer| buffer.content == content)
+        .unwrap();
+    assert_eq!(info.backing_state, BufferBackingState::Materialized);
+    assert_eq!(info.dirty_state, DirtyState::Clean);
+}
+
+#[cfg(windows)]
+#[test]
+fn missing_windows_paths_use_case_insensitive_identity_by_default() {
+    let directory = tempfile::tempdir().unwrap();
+    let lower = directory.path().join("missing.rs");
+    let upper = directory.path().join("MISSING.RS");
+
+    let lower_identity = normalize_path(&lower).unwrap().1;
+    let upper_identity = normalize_path(&upper).unwrap().1;
+
+    assert_eq!(lower_identity, upper_identity);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_path_separators_share_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let native = directory.path().join("same.rs");
+    std::fs::write(&native, "text").unwrap();
+    let forward = std::path::PathBuf::from(
+        native
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/"),
+    );
+
+    assert_eq!(
+        normalize_path(&native).unwrap().1,
+        normalize_path(&forward).unwrap().1
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn open_buffer_preserves_symlink_parent_semantics() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("root");
+    let outside = directory.path().join("outside");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir_all(outside.join("dir")).unwrap();
+    std::fs::write(root.join("file.txt"), "wrong").unwrap();
+    std::fs::write(outside.join("file.txt"), "outside").unwrap();
+    symlink(outside.join("dir"), root.join("link")).unwrap();
+    let requested = root.join("link").join("..").join("file.txt");
+    let mut app = make_app(vec![], None);
+
+    let content = app.open_buffer(requested).unwrap();
+
+    assert_eq!(text_rows(&app, content), vec!["outside"]);
+}
+
+#[test]
+fn open_buffer_tracks_a_missing_path_as_unmaterialized() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("new.txt");
+    let mut app = make_app(vec![], None);
+
+    let content = app.open_buffer(&path).unwrap();
+
+    let info = app
+        .buffers()
+        .into_iter()
+        .find(|buffer| buffer.content == content)
+        .unwrap();
+    assert_eq!(info.backing_state, BufferBackingState::Unmaterialized);
+    let expected_path = super::buffer_lifecycle::normalize_path(&path)
+        .unwrap()
+        .0
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(info.resource_path.as_deref(), Some(expected_path.as_str()));
+    assert!(matches!(
+        app.kernel.buffer_path_record(content),
+        Some((_, super::kernel::FileBaseline::Missing))
+    ));
+}
+
+#[test]
+fn reload_buffer_guards_dirty_text_and_force_installs_disk_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("reload.txt");
+    std::fs::write(&path, "before").unwrap();
+    let mut app = make_app(vec![], None);
+    let content = app.open_buffer(&path).unwrap();
+    let view = app.switch_buffer(content).unwrap();
+    app.split_space(
+        app.session.focused(),
+        content,
+        true,
+        SplitDirection::Right,
+        true,
+    )
+    .unwrap();
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("local ".to_owned())),
+        view,
+        content,
+    })
+    .unwrap();
+    let other_view = *app
+        .session
+        .views()
+        .iter()
+        .find(|(candidate, state)| **candidate != view && state.content() == content)
+        .unwrap()
+        .0;
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![view_action(ViewAction::SetSelections(Selections::single(
+            Selection::collapsed(TextOffset::origin()),
+        )))],
+        view: other_view,
+        content,
+    })
+    .unwrap();
+    let mut before_heads = app
+        .session
+        .views()
+        .values()
+        .filter(|view| view.content() == content)
+        .map(|view| view.selections().unwrap().primary().head().char_index)
+        .collect::<Vec<_>>();
+    before_heads.sort_unstable();
+    assert_eq!(before_heads, vec![0, "local ".chars().count()]);
+    std::fs::write(&path, "external").unwrap();
+
+    assert!(matches!(
+        app.reload_buffer(content, false),
+        Err(super::BufferLifecycleError::Dirty(target)) if target == content
+    ));
+    assert_eq!(text_rows(&app, content), vec!["local before"]);
+
+    app.reload_buffer(content, true).unwrap();
+
+    assert_eq!(text_rows(&app, content), vec!["external"]);
+    let mut reloaded_heads = app
+        .session
+        .views()
+        .values()
+        .filter(|view| view.content() == content)
+        .map(|view| view.selections().unwrap().primary().head().char_index)
+        .collect::<Vec<_>>();
+    reloaded_heads.sort_unstable();
+    assert_eq!(
+        reloaded_heads,
+        vec!["external".chars().count(), "external".chars().count()]
+    );
+    assert_eq!(dirty_state(&app, content), DirtyState::Clean);
+    assert_eq!(
+        app.kernel.history_behavior_for_test(content),
+        (false, None, 0, 0)
+    );
+}
+
+#[test]
+fn reload_buffer_marks_a_deleted_file_unmaterialized() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("deleted.txt");
+    std::fs::write(&path, "before").unwrap();
+    let mut app = make_app(vec![], None);
+    let content = app.open_buffer(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+
+    app.reload_buffer(content, false).unwrap();
+
+    assert_eq!(text_rows(&app, content), vec![""]);
+    let info = app
+        .buffers()
+        .into_iter()
+        .find(|buffer| buffer.content == content)
+        .unwrap();
+    assert_eq!(info.backing_state, BufferBackingState::Unmaterialized);
+}
+
+#[test]
+fn reload_buffer_rejects_an_untitled_buffer() {
+    let mut app = make_app(vec![], None);
+    let content = app.new_buffer();
+
+    assert!(matches!(
+        app.reload_buffer(content, true),
+        Err(super::BufferLifecycleError::NoPath(target)) if target == content
+    ));
+}
+
+#[test]
+fn switch_buffer_replaces_the_focused_view_and_is_idempotent() {
+    let mut app = make_app(vec![], None);
+    let original = view_id(&app, app.session.focused());
+    let content = app.new_buffer();
+
+    let switched = app.switch_buffer(content).unwrap();
+
+    assert_ne!(switched, original);
+    assert_eq!(view_id(&app, app.session.focused()), switched);
+    assert_eq!(app.session.view(switched).unwrap().content(), content);
+    assert_eq!(app.switch_buffer(content).unwrap(), switched);
+}
+
+#[test]
+fn close_buffer_rejects_dirty_content_and_force_replaces_its_last_view() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    let content_modes = app
+        .session
+        .mode_chain_for_new_view(editor_cid())
+        .iter()
+        .map(|name| app.kernel.modes().resolve_mode(name).unwrap())
+        .collect::<Vec<_>>();
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::Face(FaceOperation::SetBase {
+            target: FaceRemapTarget::CurrentContent,
+            face: FaceName::new("ui.text"),
+            expressions: Some(vec![FaceExpr::Named(FaceName::new("ui.selection"))]),
+        })],
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    assert!(app.session.has_content_face_remaps_for_test(editor_cid()));
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("dirty".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    let job_cancellation = app
+        .kernel
+        .track_mode_job_for_test(content_modes[0], editor_cid());
+    assert!(!job_cancellation.is_cancelled());
+
+    assert!(matches!(
+        app.close_buffer(editor_cid(), false),
+        Err(super::BufferLifecycleError::Dirty(content)) if content == editor_cid()
+    ));
+    assert!(app.kernel.contents().contains(editor_cid()));
+
+    app.close_buffer(editor_cid(), true).unwrap();
+
+    assert!(!app.kernel.contents().contains(editor_cid()));
+    assert!(
+        app.session
+            .views()
+            .values()
+            .all(|view| view.content() != editor_cid())
+    );
+    assert_eq!(
+        app.kernel.history_behavior_for_test(editor_cid()),
+        (false, None, 0, 0)
+    );
+    assert!(app.session.mode_chain_for_new_view(editor_cid()).is_empty());
+    assert!(content_modes.into_iter().all(|mode| {
+        app.kernel
+            .content_modes()
+            .revision(mode, editor_cid())
+            .is_none()
+    }));
+    assert!(!app.kernel.has_mode_jobs_for_content_for_test(editor_cid()));
+    assert!(job_cancellation.is_cancelled());
+    assert!(!app.session.has_content_face_remaps_for_test(editor_cid()));
+    assert_eq!(app.buffers().len(), 1);
+}
+
+#[test]
+fn close_buffer_removes_all_views_of_shared_content() {
+    let mut app = make_app(vec![], None);
+    let left = app.session.focused();
+    app.split_space(left, editor_cid(), true, SplitDirection::Right, true)
+        .unwrap();
+
+    app.close_buffer(editor_cid(), false).unwrap();
+
+    assert!(!app.kernel.contents().contains(editor_cid()));
+    assert!(
+        app.session
+            .views()
+            .values()
+            .all(|view| view.content() != editor_cid())
+    );
+    assert_eq!(focusable_view_count(app.session.scene()), 1);
+}
+
+#[test]
+fn close_buffer_rejects_a_pending_save_even_when_forced() {
+    let mut app = make_app(vec![], None);
+    app.kernel.track_pending_save_for_test(
+        editor_cid(),
+        1,
+        vell_core::transaction::TextStateId(1),
+        None,
+    );
+
+    assert!(matches!(
+        app.close_buffer(editor_cid(), true),
+        Err(super::BufferLifecycleError::PendingSave(content)) if content == editor_cid()
+    ));
+    assert!(app.kernel.contents().contains(editor_cid()));
+    let directory = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        app.save_buffer_as(editor_cid(), directory.path().join("pending.txt"), false),
+        Err(super::BufferLifecycleError::PendingSave(content)) if content == editor_cid()
+    ));
+}
+
+#[test]
+fn switch_buffer_rejects_missing_and_non_buffer_content() {
+    let mut app = make_app(vec![], None);
+    let status = app
+        .kernel
+        .contents()
+        .ids()
+        .find(|content| app.kernel.contents().kind(*content) == Some(ContentKind::StatusBar))
+        .unwrap();
+
+    assert!(matches!(
+        app.switch_buffer(ContentId(u64::MAX)),
+        Err(super::BufferLifecycleError::MissingContent(_))
+    ));
+    assert!(matches!(
+        app.switch_buffer(status),
+        Err(super::BufferLifecycleError::UnsupportedContent(_))
+    ));
+}
+
+#[test]
 fn dynamic_attachment_profiles_content_before_its_first_view() {
     let mut app = make_app(vec![], None);
     let mode = ModeName::new("shared-content");
@@ -3845,6 +4647,7 @@ fn mode_decorations_are_resolved_through_named_faces() {
         })
     );
     assert_eq!(presentation.selection_face.background, Some(Color::Ansi(4)));
+    assert_eq!(presentation.tab_width, 8);
 }
 
 #[test]
@@ -3892,6 +4695,7 @@ fn mode_diagnostics_report_policy_decorations_and_face_conflicts() {
         diagnostics.policy_sources.selection_face,
         Some(first.clone())
     );
+    assert_eq!(diagnostics.policy_sources.tab_width, Some(first.clone()));
     assert_eq!(
         diagnostics
             .decorations
@@ -5609,6 +6413,116 @@ fn save_without_a_path_invalidates_custom_status_policy() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn save_rejects_external_changes_and_force_save_overwrites_explicitly() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("conflict.txt");
+    std::fs::write(&path, "before").unwrap();
+    let mut app = make_app(vec![], Some(path.to_str().unwrap()));
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("local ".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    std::fs::write(&path, "external").unwrap();
+
+    assert!(
+        app.execute_command(DispatchCommand::Content {
+            command: ContentCommand::Save,
+            content: editor_cid(),
+        })
+        .is_err()
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "external");
+    assert!(!app.kernel.has_pending_save(editor_cid()));
+
+    assert!(app.save_buffer(editor_cid(), true).unwrap());
+    app.shutdown_tasks().await.unwrap();
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "local before");
+    assert_eq!(dirty_state(&app, editor_cid()), DirtyState::Clean);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn save_as_updates_the_path_only_after_success() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("saved-as.txt");
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("text".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert!(app.save_buffer_as(editor_cid(), &path, false).unwrap());
+    assert_eq!(resource_path(&app, editor_cid()), None);
+    let (_, identity) = normalize_path(&path).unwrap();
+    assert_eq!(app.kernel.content_for_path(&identity), None);
+    assert_eq!(app.kernel.path_owner(&identity), Some(editor_cid()));
+    assert!(matches!(
+        app.open_buffer(&path),
+        Err(crate::buffer_lifecycle::BufferLifecycleError::PathOccupied {
+            content,
+            ..
+        }) if content == editor_cid()
+    ));
+    let other = app.new_buffer();
+    let view = view_id(&app, app.session.focused());
+    let error = app
+        .execute_command(DispatchCommand::ModeOperations {
+            operations: vec![OperationRequest::Buffer(BufferOperation::SaveAs {
+                target: ContentTarget::Id(other),
+                path: path.to_string_lossy().into_owned(),
+                force: false,
+            })],
+            view,
+            content: editor_cid(),
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("already open"), "{error}");
+
+    app.shutdown_tasks().await.unwrap();
+
+    let expected_path = super::buffer_lifecycle::normalize_path(&path)
+        .unwrap()
+        .0
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "text");
+    assert_eq!(
+        resource_path(&app, editor_cid()).as_deref(),
+        Some(expected_path.as_str())
+    );
+    assert_eq!(dirty_state(&app, editor_cid()), DirtyState::Clean);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_save_as_keeps_the_old_path_and_releases_the_reservation() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("missing").join("failed.txt");
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("dirty".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert!(app.save_buffer_as(editor_cid(), &path, false).unwrap());
+    app.shutdown_tasks().await.unwrap();
+
+    assert_eq!(resource_path(&app, editor_cid()), None);
+    assert_eq!(save_state(&app, editor_cid()), SaveState::Failed);
+    assert_eq!(dirty_state(&app, editor_cid()), DirtyState::Modified);
+    let opened = app.open_buffer(&path).unwrap();
+    assert_ne!(opened, editor_cid());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn stale_save_completion_keeps_newer_edits_modified() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("stale-save.txt");
@@ -5672,6 +6586,37 @@ async fn stale_new_file_save_invalidates_backing_state_presentation() {
         BufferBackingState::Materialized
     );
     assert_eq!(custom_status_center(&app), "Materialized/Idle");
+}
+
+#[test]
+fn same_revision_force_save_queues_a_forced_retry() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("force-retry.txt");
+    std::fs::write(&path, "text").unwrap();
+    let path = path.to_string_lossy().into_owned();
+    let mut app = make_app(vec![], Some(&path));
+    let snapshot = match app.kernel.execute(editor_cid(), ContentInput::Save) {
+        ContentResult::Handled(outcome) => match outcome.effect {
+            ContentEffect::Save(snapshot) => snapshot,
+            ContentEffect::None => panic!("save must prepare a snapshot"),
+        },
+        ContentResult::NotHandled => panic!("buffer must handle save"),
+    };
+    let revision = snapshot.revision;
+    let state = snapshot.state;
+    app.kernel
+        .track_pending_save_for_test(editor_cid(), revision, state, None);
+
+    assert!(!app.kernel.queue_save(editor_cid(), snapshot, true));
+    let completion = app.kernel.complete_save(
+        editor_cid(),
+        revision,
+        state,
+        Err(io::Error::other("conflict")),
+    );
+    let (_, queued) = completion.into_parts();
+
+    assert!(matches!(queued, Some((_, true))));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -5741,6 +6686,15 @@ async fn execute_save_uses_resolved_content_target() {
     app.kernel
         .contents_mut()
         .insert(other_cid, Content::Buffer(other))
+        .unwrap();
+    let (_, identity) = normalize_path(&other_path).unwrap();
+    app.kernel
+        .register_buffer_path(
+            other_cid,
+            identity,
+            other_path.clone(),
+            FileBaseline::Materialized("other".to_owned()),
+        )
         .unwrap();
 
     app.execute_command(DispatchCommand::Content {
@@ -6949,6 +7903,77 @@ fn shared_view_positions_follow_undo_and_redo_changes() {
                 .char_index,
             3
         );
+    }
+}
+
+#[test]
+fn shared_view_positions_remain_grapheme_boundaries_through_history() {
+    let mut app = make_app(vec![], None);
+    let left = app.session.focused();
+    let left_view = view_id(&app, left);
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("e\u{301}x".to_owned())),
+        view: left_view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    let right = app
+        .split_space(left, editor_cid(), true, SplitDirection::Right, false)
+        .unwrap()
+        .new_space;
+    let right_view = view_id(&app, right);
+    for view in [left_view, right_view] {
+        app.session
+            .view_mut(view)
+            .unwrap()
+            .state_mut()
+            .replace_selections(Selections::single(Selection::collapsed(TextOffset {
+                char_index: 2,
+            })))
+            .unwrap();
+    }
+
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("\u{302}".to_owned())),
+        view: left_view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    assert_eq!(text_rows(&app, editor_cid()), vec!["e\u{301}\u{302}x"]);
+    for view in [left_view, right_view] {
+        assert_eq!(
+            app.session.views()[&view]
+                .selections()
+                .unwrap()
+                .primary()
+                .head()
+                .char_index,
+            3
+        );
+    }
+
+    for (command, text, expected) in [
+        (ContentCommand::Undo, "e\u{301}x", 2),
+        (ContentCommand::Redo, "e\u{301}\u{302}x", 3),
+    ] {
+        app.execute_command(DispatchCommand::ContentWithView {
+            command,
+            view: left_view,
+            content: editor_cid(),
+        })
+        .unwrap();
+        assert_eq!(text_rows(&app, editor_cid()), vec![text]);
+        for view in [left_view, right_view] {
+            assert_eq!(
+                app.session.views()[&view]
+                    .selections()
+                    .unwrap()
+                    .primary()
+                    .head()
+                    .char_index,
+                expected
+            );
+        }
     }
 }
 

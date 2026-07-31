@@ -2,6 +2,8 @@ use std::ops::Range;
 
 use ropey::Rope;
 
+use crate::core::grapheme::{boundary_at_or_after, next_boundary};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextMotion {
     WordForward,
@@ -42,47 +44,48 @@ pub struct OperatorCommand {
 
 pub(crate) fn forward_word_start(rope: &Rope, char_index: usize) -> usize {
     let len = rope.len_chars();
-    let mut pos = char_index.min(len);
+    let mut pos = boundary_at_or_after(rope, char_index);
     if pos >= len {
         return len;
     }
     let start_class = char_class(rope.char(pos));
     if start_class == 0 {
-        pos = next_char(rope, pos);
+        pos = next_boundary(rope, pos);
     } else {
         while pos < len && char_class(rope.char(pos)) == start_class {
-            pos += 1;
+            pos = next_boundary(rope, pos);
         }
     }
     while pos < len && rope.char(pos).is_whitespace() {
         if is_empty_line_start(rope, pos) {
             break;
         }
-        pos = next_char(rope, pos);
+        pos = next_boundary(rope, pos);
     }
     pos
 }
 
 pub(crate) fn forward_word_end(rope: &Rope, char_index: usize) -> usize {
     let len = rope.len_chars();
-    let mut pos = char_index.min(len);
+    let mut pos = boundary_at_or_after(rope, char_index);
     if pos >= len {
         return len;
     }
 
     if rope.char(pos).is_whitespace() {
         while pos < len && rope.char(pos).is_whitespace() {
-            pos = next_char(rope, pos);
+            pos = next_boundary(rope, pos);
         }
         if pos >= len {
             return len;
         }
     } else {
         let start_class = char_class(rope.char(pos));
-        if pos + 1 < len && char_class(rope.char(pos + 1)) != start_class {
-            pos = next_char(rope, pos);
+        let next = next_boundary(rope, pos);
+        if next < len && char_class(rope.char(next)) != start_class {
+            pos = next;
             while pos < len && rope.char(pos).is_whitespace() {
-                pos = next_char(rope, pos);
+                pos = next_boundary(rope, pos);
             }
             if pos >= len {
                 return len;
@@ -91,17 +94,12 @@ pub(crate) fn forward_word_end(rope: &Rope, char_index: usize) -> usize {
     }
 
     let end_class = char_class(rope.char(pos));
-    while pos + 1 < len && char_class(rope.char(pos + 1)) == end_class {
-        pos += 1;
-    }
-    pos
-}
-
-fn next_char(rope: &Rope, pos: usize) -> usize {
-    if pos + 1 < rope.len_chars() && rope.char(pos) == '\r' && rope.char(pos + 1) == '\n' {
-        pos + 2
-    } else {
-        pos + 1
+    loop {
+        let next = next_boundary(rope, pos);
+        if next >= len || char_class(rope.char(next)) != end_class {
+            return pos;
+        }
+        pos = next;
     }
 }
 
@@ -188,7 +186,11 @@ pub fn resolve_motion(
         || motion == TextMotion::ChangeWordForward
             && origin < rope.len_chars()
             && !rope.char(origin).is_whitespace();
-    let covered_end = usize::from(inclusive && destination < rope.len_chars()) + destination;
+    let covered_end = if inclusive && destination < rope.len_chars() {
+        next_boundary(rope, destination)
+    } else {
+        destination
+    };
     MotionOutcome {
         destination,
         covered: TextRange::Charwise(origin.min(destination)..origin.max(covered_end)),
@@ -248,9 +250,11 @@ fn exclusive_word_range_end(rope: &Rope, boundary: usize, destination: usize) ->
 }
 
 fn is_unit_end(rope: &Rope, position: usize) -> bool {
-    position < rope.len_chars()
-        && (position + 1 >= rope.len_chars()
-            || char_class(rope.char(position + 1)) != char_class(rope.char(position)))
+    if position >= rope.len_chars() {
+        return false;
+    }
+    let next = next_boundary(rope, position);
+    next >= rope.len_chars() || char_class(rope.char(next)) != char_class(rope.char(position))
 }
 
 fn is_blank_line(rope: &Rope, row: usize) -> bool {

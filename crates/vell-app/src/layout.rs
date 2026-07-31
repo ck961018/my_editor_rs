@@ -113,13 +113,6 @@ impl<F: Frontend> App<F> {
         Ok(result)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "layout mutation is exposed as an application backend operation"
-        )
-    )]
     pub(super) fn replace_space_content(
         &mut self,
         target: SpaceId,

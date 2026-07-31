@@ -16,16 +16,19 @@ use crate::execution::{ExecutionFrame, InputCheckpoint, PreparedEffect, StateRol
 use crate::layout::LayoutError;
 use crate::mode::{CursorDomain, InputFlow};
 use crate::operation::{
-    AppOperation, ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget,
+    AppOperation, BufferOperation, ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget,
     ModeFlowPropagation, ModeTarget, OperationError, OperationOrigin, OperationOriginScope,
-    OperationRequest, QueuedOperation, ResolvedModeScope, ResolvedOperation, ViewEditPlan,
-    ViewOperation, ViewPrecondition, ViewTarget, adapt_dispatch_command, prepend_operations,
+    OperationRequest, QueuedOperation, ResolvedBufferOperation, ResolvedModeScope,
+    ResolvedOperation, ViewEditPlan, ViewOperation, ViewPrecondition, ViewTarget,
+    adapt_dispatch_command, prepend_operations,
 };
 use crate::query::AppQuery;
 use crate::theme::{FaceRemapOwner, ResolvedFaceOperation};
 use crate::transaction::{TransactionData, TransactionRecord, ViewTransactionData};
 use vell_core::command::EditCommand;
-use vell_core::content::{ContentActionResult, ContentEffect, ContentInput, ContentResult};
+use vell_core::content::{
+    ContentActionResult, ContentEffect, ContentInput, ContentKind, ContentResult,
+};
 use vell_core::transaction::TransactionDirection;
 use vell_frontend::Frontend;
 use vell_protocol::content_query::{ContentData, ContentQuery, RenderQuery};
@@ -42,7 +45,12 @@ impl PreparedEffect {
     fn behavior(&self) -> EffectBehavior {
         match self {
             Self::HistoryCommit { content } => EffectBehavior::HistoryCommit { content: *content },
-            Self::Save { content, snapshot } => EffectBehavior::Save {
+            Self::Save {
+                content, snapshot, ..
+            }
+            | Self::SaveAs {
+                content, snapshot, ..
+            } => EffectBehavior::Save {
                 content: *content,
                 bytes: snapshot.bytes.clone(),
                 revision: snapshot.revision,
@@ -64,6 +72,13 @@ impl PreparedEffect {
             Self::Close { target } => EffectBehavior::Close { target: *target },
             Self::Focus { target } => EffectBehavior::Focus { target: *target },
             Self::Face(_) => EffectBehavior::Face,
+            Self::ReloadCommit { .. }
+            | Self::AsyncOpenCommit(_)
+            | Self::BufferList(_)
+            | Self::BufferNew
+            | Self::BufferOpen(_)
+            | Self::BufferSwitch { .. }
+            | Self::BufferClose { .. } => EffectBehavior::BufferLifecycle,
             Self::Quit => EffectBehavior::Quit,
         }
     }
@@ -124,13 +139,37 @@ fn recoverable_message(kind: io::ErrorKind, message: impl Into<String>) -> io::E
 }
 
 impl<F: Frontend> App<F> {
-    fn record_recoverable_error(&mut self, error: io::Error) {
+    pub(super) fn complete_async_open(
+        &mut self,
+        content: ContentId,
+        result: io::Result<crate::message::OpenedPath>,
+    ) -> io::Result<bool> {
+        let Some(mut completion) = self.kernel.complete_open(content, result)? else {
+            return Ok(false);
+        };
+        completion.targets.retain(|target| {
+            self.session.is_focusable_space(target.space)
+                && self.session.view_for_space(target.space) == target.expected_view
+        });
+        if completion.targets.is_empty() {
+            return Ok(true);
+        }
+        let mut frame = self.begin_execution_frame(None, None);
+        let result =
+            self.prepare_topology_effect(&mut frame, PreparedEffect::AsyncOpenCommit(completion));
+        self.finish_execution_frame(frame, result)?;
+        Ok(true)
+    }
+
+    fn record_runtime_message(&mut self, message: String) {
         if self.runtime_diagnostics.len() >= MAX_RUNTIME_DIAGNOSTICS {
             self.runtime_diagnostics.remove(0);
         }
-        self.runtime_diagnostics.push(RuntimeDiagnostic {
-            message: error.to_string(),
-        });
+        self.runtime_diagnostics.push(RuntimeDiagnostic { message });
+    }
+
+    pub(super) fn record_recoverable_error(&mut self, error: io::Error) {
+        self.record_runtime_message(error.to_string());
         self.session
             .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
     }
@@ -282,7 +321,7 @@ impl<F: Frontend> App<F> {
                 true
             }
             FrontendEvent::QuitRequest => {
-                self.kernel.cancel();
+                self.execute_command(DispatchCommand::App(AppCommand::Quit))?;
                 false
             }
         };
@@ -442,6 +481,7 @@ impl<F: Frontend> App<F> {
 
         if result.is_ok()
             && let (Some(view), Some(content)) = (view, content)
+            && frame.targets(content)
             && self.session.cursor_domain_in_draft(
                 view,
                 self.kernel.content_modes(),
@@ -471,8 +511,87 @@ impl<F: Frontend> App<F> {
                 PreparedEffect::HistoryCommit { content } => {
                     self.kernel.commit_transaction(content);
                 }
-                PreparedEffect::Save { content, snapshot } => {
-                    self.kernel.queue_save(content, snapshot);
+                PreparedEffect::Save {
+                    content,
+                    snapshot,
+                    force,
+                } => {
+                    self.kernel.queue_save(content, snapshot, force);
+                }
+                PreparedEffect::SaveAs {
+                    content,
+                    snapshot,
+                    identity,
+                    force,
+                } => {
+                    self.kernel
+                        .queue_save_as(content, snapshot, identity, force)
+                        .expect("validated Save As target remains available");
+                }
+                PreparedEffect::ReloadCommit {
+                    content,
+                    path,
+                    baseline,
+                } => {
+                    self.kernel.clear_history(content);
+                    self.kernel.update_buffer_baseline(content, path, baseline);
+                }
+                PreparedEffect::AsyncOpenCommit(completion) => {
+                    let targets = completion
+                        .targets
+                        .iter()
+                        .map(|target| target.space)
+                        .collect::<Vec<_>>();
+                    let (content, installed) = self
+                        .kernel
+                        .install_open(completion)
+                        .expect("validated async open installs once");
+                    if installed {
+                        self.session
+                            .register_content_profile(content, ContentKind::Buffer);
+                    }
+                    for target in targets {
+                        self.switch_buffer_at(target, content)
+                            .expect("validated async open target remains available");
+                    }
+                }
+                PreparedEffect::BufferList(buffers) => {
+                    let listing = buffers
+                        .into_iter()
+                        .map(|buffer| {
+                            let name = buffer
+                                .resource_name
+                                .unwrap_or_else(|| "[untitled]".to_owned());
+                            let dirty = if buffer.dirty_state
+                                == vell_protocol::content_query::DirtyState::Modified
+                            {
+                                " *"
+                            } else {
+                                Default::default()
+                            };
+                            format!("{}: {name}{dirty}", buffer.content.0)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    self.record_runtime_message(listing);
+                }
+                PreparedEffect::BufferNew => {
+                    let content = self.new_buffer();
+                    self.switch_buffer(content)
+                        .expect("new buffer remains switchable until frame commit");
+                }
+                PreparedEffect::BufferOpen(path) => {
+                    let target = self.session.focused();
+                    let expected_view = self.session.view_for_space(target);
+                    self.kernel.queue_open(target, expected_view, path);
+                }
+                PreparedEffect::BufferSwitch { content } => {
+                    self.switch_buffer(content)
+                        .expect("validated buffer remains switchable until frame commit");
+                }
+                PreparedEffect::BufferClose { content, force } => {
+                    self.close_buffer(content, force)
+                        .expect("validated buffer remains closeable until frame commit");
                 }
                 PreparedEffect::Viewport { view, command } => {
                     self.frontend.apply_viewport_command(view, command);
@@ -585,12 +704,91 @@ impl<F: Frontend> App<F> {
         }
     }
 
-    #[cfg(test)]
+    pub(super) fn reload_content_in_frame(
+        &mut self,
+        content: ContentId,
+        path: std::path::PathBuf,
+        text: String,
+        backing_state: vell_protocol::content_query::BufferBackingState,
+    ) -> io::Result<()> {
+        let mut frame = self.begin_execution_frame(Some(content), None);
+        self.checkpoint_target(&mut frame, content);
+        let result = (|| {
+            let result = self.kernel.execute(
+                content,
+                ContentInput::Event(vell_core::content::ContentEvent::Reload {
+                    path,
+                    text,
+                    backing_state,
+                }),
+            );
+            let ContentResult::Handled(outcome) = result else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "reload target is not a buffer",
+                ));
+            };
+            if let Some(change) = &outcome.change {
+                self.session
+                    .transform_content_views(self.kernel.contents(), content, None, change)
+                    .map_err(invalid_content_view_state)?;
+                self.notify_mode_content_changed(content, change, &mut frame);
+            }
+            self.session.touch_content_views(content);
+            Ok(())
+        })();
+        let result = self.finish_execution_frame(frame, result);
+        if result.is_ok() {
+            self.kernel.clear_history(content);
+        }
+        result
+    }
+
     pub(super) fn execute_command(&mut self, command: DispatchCommand) -> io::Result<()> {
-        let content = command.content();
+        let content = self.command_frame_content(&command);
         let mut frame = self.begin_execution_frame(content, None);
         let result = self.execute_command_in_frame(command, false, &mut frame);
         self.finish_execution_frame(frame, result).map(|_| ())
+    }
+
+    fn retarget_execution_frame(
+        &mut self,
+        frame: &mut ExecutionFrame,
+        content: ContentId,
+    ) -> io::Result<()> {
+        frame.retarget(content).map_err(operation_error)?;
+        if !self.kernel.retarget_command_transaction(content) {
+            return Err(invalid_operation(
+                "execution frame cannot change target after mutating history",
+            ));
+        }
+        Ok(())
+    }
+
+    fn command_frame_content(&self, command: &DispatchCommand) -> Option<ContentId> {
+        let origin = command.content();
+        let operations = match command {
+            DispatchCommand::ModeContentOperations { operations, .. }
+            | DispatchCommand::ModeOperations { operations, .. } => operations,
+            _ => return origin,
+        };
+        let [OperationRequest::Buffer(operation)] = operations.as_slice() else {
+            return origin;
+        };
+        let target = match operation {
+            BufferOperation::Switch { content } => Some(*content),
+            BufferOperation::Close { target, .. }
+            | BufferOperation::Save { target, .. }
+            | BufferOperation::SaveAs { target, .. }
+            | BufferOperation::Reload { target, .. } => match target {
+                ContentTarget::Current => origin,
+                ContentTarget::Id(content) => Some(*content),
+            },
+            BufferOperation::New | BufferOperation::Open { .. } | BufferOperation::List => None,
+        };
+        target
+            .filter(|content| self.kernel.contents().contains(*content))
+            .or(origin)
     }
 
     fn execute_command_in_frame(
@@ -605,6 +803,7 @@ impl<F: Frontend> App<F> {
         if enforce_cursor_domain
             && result.is_ok()
             && let (Some(view), Some(content)) = (view, content)
+            && frame.targets(content)
             && self.session.cursor_domain_in_draft(
                 view,
                 self.kernel.content_modes(),
@@ -643,7 +842,15 @@ impl<F: Frontend> App<F> {
             let result = match operation {
                 ResolvedOperation::App(AppOperation::Command(command)) => {
                     match command {
-                        AppCommand::Quit => self.prepare_effect(frame, PreparedEffect::Quit),
+                        AppCommand::Quit => {
+                            self.preflight_quit(false).map_err(|error| {
+                                recoverable_message(io::ErrorKind::Other, error.to_string())
+                            })?;
+                            self.prepare_effect(frame, PreparedEffect::Quit);
+                        }
+                        AppCommand::ForceQuit => {
+                            self.prepare_effect(frame, PreparedEffect::Quit);
+                        }
                         AppCommand::Close => {
                             let target = self.session.focused();
                             match self.session.validate_close_space(target) {
@@ -652,6 +859,9 @@ impl<F: Frontend> App<F> {
                                     PreparedEffect::Close { target },
                                 )?,
                                 Err(LayoutError::WouldRemoveLastFocusable(_)) => {
+                                    self.preflight_quit(false).map_err(|error| {
+                                        recoverable_message(io::ErrorKind::Other, error.to_string())
+                                    })?;
                                     self.prepare_topology_effect(frame, PreparedEffect::Quit)?
                                 }
                                 Err(error) => {
@@ -704,6 +914,74 @@ impl<F: Frontend> App<F> {
                         }
                     }
                     Ok(())
+                }
+                ResolvedOperation::Buffer(operation) => {
+                    if !frame.can_prepare_buffer_lifecycle() || !queue.is_empty() {
+                        return Err(invalid_operation(
+                            "a buffer lifecycle operation must be the only operation in its frame",
+                        ));
+                    }
+                    let target = match &operation {
+                        ResolvedBufferOperation::Switch { content }
+                        | ResolvedBufferOperation::Close { content, .. }
+                        | ResolvedBufferOperation::Save { content, .. }
+                        | ResolvedBufferOperation::SaveAs { content, .. }
+                        | ResolvedBufferOperation::Reload { content, .. } => Some(*content),
+                        ResolvedBufferOperation::New
+                        | ResolvedBufferOperation::Open { .. }
+                        | ResolvedBufferOperation::List => None,
+                    };
+                    if let Some(content) = target {
+                        self.retarget_execution_frame(frame, content)?;
+                    }
+                    match operation {
+                        ResolvedBufferOperation::New => self
+                            .prepare_topology_effect(frame, PreparedEffect::BufferNew)
+                            .map(|_| ()),
+                        ResolvedBufferOperation::Open { path } => self
+                            .prepare_topology_effect(
+                                frame,
+                                PreparedEffect::BufferOpen(std::path::PathBuf::from(path)),
+                            )
+                            .map(|_| ()),
+                        ResolvedBufferOperation::List => {
+                            let buffers = self.buffers();
+                            self.prepare_effect(frame, PreparedEffect::BufferList(buffers));
+                            Ok(())
+                        }
+                        ResolvedBufferOperation::Switch { content } => {
+                            self.validate_switch_buffer(content).map_err(|error| {
+                                recoverable_message(io::ErrorKind::Other, error.to_string())
+                            })?;
+                            self.prepare_topology_effect(
+                                frame,
+                                PreparedEffect::BufferSwitch { content },
+                            )
+                            .map(|_| ())
+                        }
+                        ResolvedBufferOperation::Close { content, force } => {
+                            self.validate_close_buffer(content, force)
+                                .map_err(|error| {
+                                    recoverable_message(io::ErrorKind::Other, error.to_string())
+                                })?;
+                            self.prepare_topology_effect(
+                                frame,
+                                PreparedEffect::BufferClose { content, force },
+                            )
+                            .map(|_| ())
+                        }
+                        ResolvedBufferOperation::Save { content, force } => {
+                            self.execute_save_with_force(content, force, frame)
+                        }
+                        ResolvedBufferOperation::SaveAs {
+                            content,
+                            path,
+                            force,
+                        } => self.execute_save_as(content, path, force, frame),
+                        ResolvedBufferOperation::Reload { content, force } => {
+                            self.execute_reload(content, force, frame)
+                        }
+                    }
                 }
                 ResolvedOperation::Content { content, operation } => match operation {
                     ContentOperation::Apply(action) => {
@@ -947,6 +1225,43 @@ impl<F: Frontend> App<F> {
         let QueuedOperation { request, origin } = queued;
         match request {
             OperationRequest::App(operation) => Ok(ResolvedOperation::App(operation)),
+            OperationRequest::Buffer(operation) => {
+                let operation = match operation {
+                    BufferOperation::New => ResolvedBufferOperation::New,
+                    BufferOperation::Open { path } => ResolvedBufferOperation::Open { path },
+                    BufferOperation::List => ResolvedBufferOperation::List,
+                    BufferOperation::Switch { content } => {
+                        let content =
+                            self.resolve_content_target(ContentTarget::Id(content), origin)?;
+                        ResolvedBufferOperation::Switch { content }
+                    }
+                    BufferOperation::Close { target, force } => {
+                        let content = self.resolve_content_target(target, origin)?;
+                        ResolvedBufferOperation::Close { content, force }
+                    }
+                    BufferOperation::Save { target, force } => {
+                        let content = self.resolve_content_target(target, origin)?;
+                        ResolvedBufferOperation::Save { content, force }
+                    }
+                    BufferOperation::SaveAs {
+                        target,
+                        path,
+                        force,
+                    } => {
+                        let content = self.resolve_content_target(target, origin)?;
+                        ResolvedBufferOperation::SaveAs {
+                            content,
+                            path,
+                            force,
+                        }
+                    }
+                    BufferOperation::Reload { target, force } => {
+                        let content = self.resolve_content_target(target, origin)?;
+                        ResolvedBufferOperation::Reload { content, force }
+                    }
+                };
+                Ok(ResolvedOperation::Buffer(operation))
+            }
             OperationRequest::Face(operation) => {
                 let owner = origin
                     .mode
@@ -1163,7 +1478,86 @@ impl<F: Frontend> App<F> {
         Ok((view, content))
     }
 
+    fn execute_reload(
+        &mut self,
+        content: ContentId,
+        force: bool,
+        frame: &mut ExecutionFrame,
+    ) -> io::Result<()> {
+        let prepared = self
+            .prepare_reload_buffer(content, force)
+            .map_err(|error| recoverable_message(io::ErrorKind::Other, error.to_string()))?;
+        self.checkpoint_target(frame, content);
+        for (view, revision) in self.session.content_view_revisions(content) {
+            frame.record_view_touch(view, revision);
+        }
+        let result = self.kernel.execute(
+            content,
+            ContentInput::Event(vell_core::content::ContentEvent::Reload {
+                path: prepared.path.clone(),
+                text: prepared.text,
+                backing_state: prepared.backing_state,
+            }),
+        );
+        let ContentResult::Handled(outcome) = result else {
+            return Err(invalid_operation("reload target is not a buffer"));
+        };
+        if let Some(change) = &outcome.change {
+            self.session
+                .transform_content_views(self.kernel.contents(), content, None, change)
+                .map_err(invalid_content_view_state)?;
+            self.notify_mode_content_changed(content, change, frame);
+        }
+        self.prepare_effect(
+            frame,
+            PreparedEffect::ReloadCommit {
+                content,
+                path: prepared.path,
+                baseline: prepared.baseline,
+            },
+        );
+        Ok(())
+    }
+
+    fn execute_save_as(
+        &mut self,
+        content: ContentId,
+        path: String,
+        force: bool,
+        frame: &mut ExecutionFrame,
+    ) -> io::Result<()> {
+        let prepared = self
+            .prepare_save_buffer_as(content, std::path::Path::new(&path), force)
+            .map_err(|error| recoverable_message(io::ErrorKind::Other, error.to_string()))?;
+        self.prepare_effect(
+            frame,
+            PreparedEffect::SaveAs {
+                content,
+                snapshot: prepared.snapshot,
+                identity: prepared.identity,
+                force: prepared.force,
+            },
+        );
+        Ok(())
+    }
+
     fn execute_save(&mut self, content: ContentId, frame: &mut ExecutionFrame) -> io::Result<()> {
+        self.execute_save_with_force(content, false, frame)
+    }
+
+    fn execute_save_with_force(
+        &mut self,
+        content: ContentId,
+        force: bool,
+        frame: &mut ExecutionFrame,
+    ) -> io::Result<()> {
+        if !self.kernel.has_pending_save(content)
+            && let Some((path, _)) = self.kernel.buffer_path_record(content)
+        {
+            let path = path.clone();
+            self.preflight_registered_save(content, &path, force)
+                .map_err(|error| recoverable_message(io::ErrorKind::Other, error.to_string()))?;
+        }
         let active_owner = self.kernel.active_transaction_owner(content);
         if active_owner.is_some() {
             self.kernel.commit_transaction(content);
@@ -1177,7 +1571,14 @@ impl<F: Frontend> App<F> {
                 }
             }
             if let ContentEffect::Save(snapshot) = outcome.effect {
-                self.prepare_effect(frame, PreparedEffect::Save { content, snapshot });
+                self.prepare_effect(
+                    frame,
+                    PreparedEffect::Save {
+                        content,
+                        snapshot,
+                        force,
+                    },
+                );
             }
         }
         if let Some(owner) = active_owner {

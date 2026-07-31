@@ -21,8 +21,8 @@ use vell_core::input::{InputDecision, InputStatus};
 use vell_core::keymap::Keymap;
 use vell_protocol::content_query::{
     BufferBackingState, ContentData, ContentQuery, CursorStyle, DirtyState, Face, FaceDefinition,
-    FaceName, FacePatch, NamedTextDecoration, RowRange, SaveState, SelectionShape, TextMetrics,
-    is_host_face_name,
+    FaceName, FacePatch, MAX_TAB_WIDTH, NamedTextDecoration, RowRange, SaveState, SelectionShape,
+    TextMetrics, is_host_face_name,
 };
 use vell_protocol::ids::{ContentId, ViewId};
 use vell_protocol::key_event::KeyEvent;
@@ -1222,6 +1222,7 @@ pub struct ModeViewPolicy {
     pub cursor_domain: Option<CursorDomain>,
     pub selection_shape: Option<SelectionShape>,
     pub selection_face: Option<FaceName>,
+    pub tab_width: Option<usize>,
     pub status_bar: Option<NamedStatusBarPresentation>,
 }
 
@@ -1244,6 +1245,13 @@ impl ModeViewPolicy {
         self.cursor_domain = self.cursor_domain.or(next.cursor_domain);
         self.selection_shape = self.selection_shape.or(next.selection_shape);
         self.selection_face = self.selection_face.take().or(next.selection_face);
+        self.tab_width = self
+            .tab_width
+            .filter(|value| (1..=MAX_TAB_WIDTH).contains(value))
+            .or_else(|| {
+                next.tab_width
+                    .filter(|value| (1..=MAX_TAB_WIDTH).contains(value))
+            });
         self.status_bar = self.status_bar.take().or(next.status_bar);
     }
 }
@@ -3309,6 +3317,40 @@ mod tests {
             content_modes.state_for_test::<u8>(mode_id, content),
             Some(&0)
         );
+    }
+
+    #[test]
+    fn view_policy_keeps_the_first_tab_width() {
+        let mut policy = ModeViewPolicy {
+            tab_width: Some(8),
+            ..ModeViewPolicy::default()
+        };
+
+        policy.merge_missing(ModeViewPolicy {
+            tab_width: Some(2),
+            ..ModeViewPolicy::default()
+        });
+
+        assert_eq!(policy.tab_width, Some(8));
+    }
+
+    #[test]
+    fn view_policy_ignores_invalid_tab_widths() {
+        let mut policy = ModeViewPolicy::default();
+        policy.merge_missing(ModeViewPolicy {
+            tab_width: Some(0),
+            ..ModeViewPolicy::default()
+        });
+        policy.merge_missing(ModeViewPolicy {
+            tab_width: Some(MAX_TAB_WIDTH + 1),
+            ..ModeViewPolicy::default()
+        });
+        policy.merge_missing(ModeViewPolicy {
+            tab_width: Some(2),
+            ..ModeViewPolicy::default()
+        });
+
+        assert_eq!(policy.tab_width, Some(2));
     }
 
     #[test]

@@ -1,5 +1,7 @@
 use ropey::Rope;
 
+use crate::core::grapheme::{boundary_at_or_after, boundary_at_or_before, previous_boundary};
+
 pub(super) fn line_content_len(rope: &Rope, row: usize) -> usize {
     let line = rope.line(row);
     let len = line.len_chars();
@@ -22,19 +24,29 @@ pub(super) fn line_break_width_before(rope: &Rope, row: usize) -> usize {
 }
 
 pub(super) fn backward_word_start(rope: &Rope, char_index: usize) -> usize {
-    let mut start = char_index.min(rope.len_chars());
-    while start > 0 && rope.char(start - 1).is_whitespace() {
-        start -= 1;
+    let mut start = boundary_at_or_after(rope, char_index);
+    while start > 0 {
+        let previous = previous_boundary(rope, start);
+        if !rope.char(previous).is_whitespace() {
+            break;
+        }
+        start = previous;
     }
     if start == 0 {
         return 0;
     }
-    if is_word_char(rope.char(start - 1)) {
-        while start > 0 && is_word_char(rope.char(start - 1)) {
-            start -= 1;
+
+    let previous = previous_boundary(rope, start);
+    if !is_word_char(rope.char(previous)) {
+        return previous;
+    }
+    start = previous;
+    while start > 0 {
+        let previous = previous_boundary(rope, start);
+        if !is_word_char(rope.char(previous)) {
+            break;
         }
-    } else {
-        start -= 1;
+        start = previous;
     }
     start
 }
@@ -47,7 +59,7 @@ pub(super) fn first_non_blank_in_line(rope: &Rope, row: usize) -> usize {
             break;
         }
         if !ch.is_whitespace() {
-            return line_start + i;
+            return boundary_at_or_before(rope, line_start + i);
         }
     }
     line_start
@@ -55,11 +67,11 @@ pub(super) fn first_non_blank_in_line(rope: &Rope, row: usize) -> usize {
 
 pub(super) fn line_end_char(rope: &Rope, row: usize) -> usize {
     let line_start = rope.line_to_char(row);
-    let content_len = line_content_len(rope, row);
-    if content_len == 0 {
+    let content_end = line_start + line_content_len(rope, row);
+    if content_end == line_start {
         line_start
     } else {
-        line_start + content_len - 1
+        previous_boundary(rope, content_end)
     }
 }
 

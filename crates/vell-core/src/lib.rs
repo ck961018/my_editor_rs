@@ -8,6 +8,7 @@ pub mod content;
 pub mod content_store;
 pub mod content_view_state;
 pub mod edit;
+pub(crate) mod grapheme;
 pub mod input;
 pub mod keymap;
 pub mod motion;

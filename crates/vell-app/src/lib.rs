@@ -8,6 +8,7 @@ mod application;
 #[cfg(test)]
 mod behavior;
 mod bootstrap;
+mod buffer_lifecycle;
 mod command_resolver;
 mod diagnostics;
 mod dispatcher;
@@ -31,6 +32,7 @@ pub(crate) use vell_mode as mode;
 pub(crate) use vell_mode::{action, command, mode_name, presentation};
 
 pub use application::App;
+pub use buffer_lifecycle::{BufferInfo, BufferLifecycleError};
 pub use diagnostics::{
     ModeDecorationDiagnostics, NamedPolicySources, RuntimeDiagnostic, ViewModeDiagnostics,
 };

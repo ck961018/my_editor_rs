@@ -53,7 +53,37 @@ pub enum ResolvedOperation {
         input: ModeInputCommand,
     },
     Face(ResolvedFaceOperation),
+    Buffer(ResolvedBufferOperation),
     App(AppOperation),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResolvedBufferOperation {
+    New,
+    Open {
+        path: String,
+    },
+    List,
+    Switch {
+        content: ContentId,
+    },
+    Close {
+        content: ContentId,
+        force: bool,
+    },
+    Save {
+        content: ContentId,
+        force: bool,
+    },
+    SaveAs {
+        content: ContentId,
+        path: String,
+        force: bool,
+    },
+    Reload {
+        content: ContentId,
+        force: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -301,10 +331,8 @@ mod tests {
 
     #[test]
     fn noop_dispatch_has_no_operations() {
-        assert!(
-            adapt_dispatch_command(DispatchCommand::Noop)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(adapt_dispatch_command(DispatchCommand::Noop)
+            .unwrap()
+            .is_empty());
     }
 }

@@ -5,6 +5,10 @@ use std::path::PathBuf;
 
 use crate::core::action::{ContentAction, ContentEditPlan};
 use crate::core::command::{CharSearchDirection, EditCommand};
+use crate::core::grapheme::{
+    at_column, boundary_at_or_after, boundary_at_or_before, column, next_boundary,
+    previous_boundary,
+};
 use crate::core::motion::{
     OperatorCommand, TextOperator, TextRange, TextTarget, forward_word_end, forward_word_start,
     line_end_insert, resolve_operator,
@@ -54,6 +58,32 @@ impl Buffer {
             next_state: 1,
             last_change: None,
             backing_state: BufferBackingState::Untitled,
+            save_state: SaveState::Idle,
+        }
+    }
+
+    pub fn from_file(path: PathBuf, text: String) -> Self {
+        Self::from_path(
+            path,
+            Rope::from_str(&text),
+            BufferBackingState::Materialized,
+        )
+    }
+
+    pub fn for_new_file(path: PathBuf) -> Self {
+        Self::from_path(path, Rope::new(), BufferBackingState::Unmaterialized)
+    }
+
+    fn from_path(path: PathBuf, rope: Rope, backing_state: BufferBackingState) -> Self {
+        Self {
+            rope,
+            path: Some(path),
+            revision: 1,
+            current_state: TextStateId(1),
+            saved_state: TextStateId(1),
+            next_state: 2,
+            last_change: None,
+            backing_state,
             save_state: SaveState::Idle,
         }
     }
@@ -117,6 +147,38 @@ impl Buffer {
         self.saved_state = state;
         self.backing_state = BufferBackingState::Materialized;
         self.current_state == state
+    }
+
+    pub(crate) fn set_path(&mut self, path: PathBuf) {
+        self.path = Some(path);
+    }
+
+    pub(crate) fn reload(
+        &mut self,
+        path: PathBuf,
+        text: String,
+        backing_state: BufferBackingState,
+    ) -> Option<TextChangeSet> {
+        let change = (self.rope != text).then(|| {
+            TextChangeSet::from_edits(
+                self.rope.len_chars(),
+                vec![TextEdit::new(0..self.rope.len_chars(), text)],
+            )
+            .expect("full-buffer replacement is always valid")
+        });
+        if let Some(change) = &change {
+            change
+                .apply(&mut self.rope)
+                .expect("validated full-buffer replacement must apply");
+        }
+        self.path = Some(path);
+        self.current_state = self.allocate_state();
+        self.saved_state = self.current_state;
+        self.last_change = None;
+        self.backing_state = backing_state;
+        self.save_state = SaveState::Idle;
+        self.advance_revision();
+        change
     }
 
     fn advance_revision(&mut self) {
@@ -196,7 +258,7 @@ impl Buffer {
             self.last_change = None;
             return Ok(false);
         }
-        self.validate_crlf_boundaries(&changes)?;
+        self.validate_edit_boundaries(&changes)?;
         changes.apply(&mut self.rope)?;
         self.current_state = self.allocate_state();
         self.advance_revision();
@@ -212,7 +274,7 @@ impl Buffer {
             self.last_change = None;
             return Ok(None);
         }
-        self.validate_crlf_boundaries(&change)?;
+        self.validate_edit_boundaries(&change)?;
         let before_state = self.current_state;
         let inverse = change.invert(&self.rope)?;
         change.apply(&mut self.rope)?;
@@ -260,17 +322,17 @@ impl Buffer {
         Ok(change.clone())
     }
 
-    fn validate_crlf_boundaries(
+    fn validate_edit_boundaries(
         &self,
         changes: &TextChangeSet,
     ) -> Result<(), TextTransactionError> {
         for edit in changes.to_edits()? {
             for offset in [edit.range.start, edit.range.end] {
-                if offset > 0
+                let splits_crlf = offset > 0
                     && offset < self.rope.len_chars()
                     && self.rope.char(offset - 1) == '\r'
-                    && self.rope.char(offset) == '\n'
-                {
+                    && self.rope.char(offset) == '\n';
+                if splits_crlf {
                     return Err(TextTransactionError::InvalidRange {
                         start: edit.range.start,
                         end: edit.range.end,
@@ -305,17 +367,11 @@ impl Buffer {
         reason = "direct backward deletion is retained as a buffer test primitive"
     )]
     pub(crate) fn delete_backward(&mut self, char_idx: usize) -> bool {
+        let char_idx = boundary_at_or_after(&self.rope, char_idx);
         if char_idx == 0 {
             return false;
         }
-        let start = if char_idx >= 2
-            && self.rope.char(char_idx - 2) == '\r'
-            && self.rope.char(char_idx - 1) == '\n'
-        {
-            char_idx - 2
-        } else {
-            char_idx - 1
-        };
+        let start = previous_boundary(&self.rope, char_idx);
         self.apply_text_edits(vec![TextEdit::new(start..char_idx, "")])
             .expect("valid backward deletion");
         true
@@ -352,14 +408,21 @@ impl Buffer {
     // ——编辑原语：底层点操作（pub(crate)，操作 head）——
 
     pub fn clamp_offset(&self, cur: &mut TextOffset) {
-        cur.char_index = cur.char_index.min(self.rope.len_chars());
-        if cur.char_index > 0
-            && cur.char_index < self.rope.len_chars()
-            && self.rope.char(cur.char_index - 1) == '\r'
-            && self.rope.char(cur.char_index) == '\n'
-        {
-            cur.char_index += 1;
-        }
+        cur.char_index = boundary_at_or_after(&self.rope, cur.char_index);
+    }
+
+    fn grapheme_column(&self, offset: TextOffset) -> (usize, usize) {
+        let mut offset = offset;
+        self.clamp_offset(&mut offset);
+        let row = self.rope.char_to_line(offset.char_index);
+        let line_start = self.rope.line_to_char(row);
+        (row, column(&self.rope, line_start, offset.char_index))
+    }
+
+    fn at_grapheme_column(&self, row: usize, target_column: usize) -> usize {
+        let line_start = self.rope.line_to_char(row);
+        let line_end = line_start + line_content_len(&self.rope, row);
+        at_column(&self.rope, line_start, line_end, target_column)
     }
 
     pub fn text_point(&self, offset: TextOffset) -> TextPoint {
@@ -382,61 +445,37 @@ impl Buffer {
             }
         }
         if lines != 0 {
-            let point = self.text_point(*cur);
+            let (row, column) = self.grapheme_column(*cur);
             let max_row = self.rope.len_lines().saturating_sub(1);
-            let target_row = (point.row as isize + lines).clamp(0, max_row as isize) as usize;
-            let line_len = line_content_len(&self.rope, target_row);
-            let new_col = point.col.min(line_len);
-            cur.char_index = self.rope.line_to_char(target_row) + new_col;
+            let target_row = (row as isize + lines).clamp(0, max_row as isize) as usize;
+            cur.char_index = self.at_grapheme_column(target_row, column);
         }
         self.clamp_offset(cur);
     }
 
     pub(crate) fn move_cursor_left(&self, cur: &mut TextOffset, n: usize) {
-        for _ in 0..n {
-            cur.char_index = if cur.char_index >= 2
-                && self.rope.char(cur.char_index - 2) == '\r'
-                && self.rope.char(cur.char_index - 1) == '\n'
-            {
-                cur.char_index - 2
-            } else {
-                cur.char_index.saturating_sub(1)
-            };
-        }
         self.clamp_offset(cur);
+        for _ in 0..n {
+            cur.char_index = previous_boundary(&self.rope, cur.char_index);
+        }
     }
 
     pub(crate) fn move_cursor_right(&self, cur: &mut TextOffset, n: usize) {
-        for _ in 0..n {
-            cur.char_index = if cur.char_index + 1 < self.rope.len_chars()
-                && self.rope.char(cur.char_index) == '\r'
-                && self.rope.char(cur.char_index + 1) == '\n'
-            {
-                cur.char_index + 2
-            } else {
-                cur.char_index.saturating_add(1).min(self.rope.len_chars())
-            };
-        }
         self.clamp_offset(cur);
+        for _ in 0..n {
+            cur.char_index = next_boundary(&self.rope, cur.char_index);
+        }
     }
 
     pub(crate) fn move_cursor_up(&self, cur: &mut TextOffset, n: usize) {
-        let point = self.text_point(*cur);
-        let target_row = point.row.saturating_sub(n);
-        let line_len = line_content_len(&self.rope, target_row);
-        let new_col = point.col.min(line_len);
-        cur.char_index = self.rope.line_to_char(target_row) + new_col;
-        self.clamp_offset(cur);
+        let (row, column) = self.grapheme_column(*cur);
+        cur.char_index = self.at_grapheme_column(row.saturating_sub(n), column);
     }
 
     pub(crate) fn move_cursor_down(&self, cur: &mut TextOffset, n: usize) {
-        let point = self.text_point(*cur);
+        let (row, column) = self.grapheme_column(*cur);
         let max_row = self.rope.len_lines().saturating_sub(1);
-        let target_row = point.row.saturating_add(n).min(max_row);
-        let line_len = line_content_len(&self.rope, target_row);
-        let new_col = point.col.min(line_len);
-        cur.char_index = self.rope.line_to_char(target_row) + new_col;
-        self.clamp_offset(cur);
+        cur.char_index = self.at_grapheme_column(row.saturating_add(n).min(max_row), column);
     }
 
     pub(crate) fn set_cursor(&self, cur: &mut TextOffset, char_idx: usize, _line_idx: usize) {
@@ -489,17 +528,22 @@ impl Buffer {
     }
 
     pub fn move_head_within_line_left(&self, sel: &mut Selection, n: usize) {
-        let point = self.text_point(sel.head);
-        let line_start = self.rope.line_to_char(point.row);
-        sel.head.char_index = sel.head.char_index.saturating_sub(n).max(line_start);
         self.clamp_offset(&mut sel.head);
+        let row = self.rope.char_to_line(sel.head.char_index);
+        let line_start = self.rope.line_to_char(row);
+        for _ in 0..n {
+            sel.head.char_index =
+                previous_boundary(&self.rope, sel.head.char_index).max(line_start);
+        }
     }
 
     pub fn move_head_within_line_right(&self, sel: &mut Selection, n: usize) {
-        let point = self.text_point(sel.head);
-        let line_end = line_end_char(&self.rope, point.row);
-        sel.head.char_index = sel.head.char_index.saturating_add(n).min(line_end);
         self.clamp_offset(&mut sel.head);
+        let row = self.rope.char_to_line(sel.head.char_index);
+        let line_end = line_end_char(&self.rope, row);
+        for _ in 0..n {
+            sel.head.char_index = next_boundary(&self.rope, sel.head.char_index).min(line_end);
+        }
     }
 
     pub fn move_head_up(&self, sel: &mut Selection, n: usize) {
@@ -517,11 +561,9 @@ impl Buffer {
     }
 
     pub fn move_head_to_line_preserving_column(&self, sel: &mut Selection, line_index: usize) {
-        let column = self.text_point(sel.head).col;
+        let (_, column) = self.grapheme_column(sel.head);
         let row = line_index.min(self.rope.len_lines().saturating_sub(1));
-        sel.head.char_index =
-            self.rope.line_to_char(row) + column.min(line_content_len(&self.rope, row));
-        self.clamp_offset(&mut sel.head);
+        sel.head.char_index = self.at_grapheme_column(row, column);
     }
 
     pub fn move_head_to_char(
@@ -538,7 +580,7 @@ impl Buffer {
         let line_end = line_start + line_content_len(&self.rope, row);
         let found = match direction {
             CharSearchDirection::Forward => {
-                let start = head.saturating_add(1).min(line_end);
+                let start = next_boundary(&self.rope, head).min(line_end);
                 (start..line_end)
                     .filter(|index| self.rope.char(*index) == target)
                     .nth(occurrence - 1)
@@ -551,8 +593,7 @@ impl Buffer {
         let Some(found) = found else {
             return false;
         };
-        sel.head.char_index = found;
-        self.clamp_offset(&mut sel.head);
+        sel.head.char_index = boundary_at_or_before(&self.rope, found);
         true
     }
 
@@ -968,18 +1009,12 @@ impl Buffer {
                 let newline_pos = self.rope.line_to_char(row) + line_content_len(&self.rope, row);
                 let next_line_start = self.rope.line_to_char(row + 1);
                 let next_row = row + 1;
-                let next_content_len = line_content_len(&self.rope, next_row);
-                let next_content_start = next_line_start;
-                // Count leading whitespace on next line
-                let mut ws_len = 0;
-                for i in 0..next_content_len {
-                    if self.rope.char(next_content_start + i).is_whitespace() {
-                        ws_len += 1;
-                    } else {
-                        break;
-                    }
+                let next_content_end = next_line_start + line_content_len(&self.rope, next_row);
+                let mut strip_end = next_line_start;
+                while strip_end < next_content_end && self.rope.char(strip_end).is_whitespace() {
+                    strip_end = next_boundary(&self.rope, strip_end);
                 }
-                Some((newline_pos, next_content_start + ws_len, next_line_start))
+                Some((newline_pos, strip_end, next_line_start))
             })
             .collect::<Vec<_>>();
         joins.retain(|j| j.is_some());
@@ -1018,7 +1053,7 @@ impl Buffer {
                     let row = self.rope.char_to_line(ci);
                     let at_line_end = ci >= line_end_char(&self.rope, row);
                     if ci < len {
-                        (ci, ci + 1, true, at_line_end)
+                        (ci, next_boundary(&self.rope, ci), true, at_line_end)
                     } else {
                         (ci, ci, true, true)
                     }
@@ -1026,23 +1061,33 @@ impl Buffer {
             })
             .collect();
         let mut replacements = Vec::new();
-        let mut targeted_chars: Vec<usize> = ranges
-            .iter()
-            .flat_map(|(start, end, _, _)| *start..*end)
-            .collect();
-        targeted_chars.sort_unstable();
-        targeted_chars.dedup();
-        for index in targeted_chars {
-            let original = self.rope.char(index);
-            let flipped: String = if original.is_uppercase() {
-                original.to_lowercase().collect()
-            } else if original.is_lowercase() {
-                original.to_uppercase().collect()
-            } else {
-                original.to_string()
-            };
-            if flipped != original.to_string() {
-                replacements.push((index, index + 1, flipped));
+        let mut targeted_graphemes = Vec::new();
+        for (start, end, _, _) in &ranges {
+            let mut index = *start;
+            while index < *end {
+                targeted_graphemes.push(index);
+                index = next_boundary(&self.rope, index);
+            }
+        }
+        targeted_graphemes.sort_unstable();
+        targeted_graphemes.dedup();
+        for index in targeted_graphemes {
+            let end = next_boundary(&self.rope, index);
+            let original = self.rope.slice(index..end).to_string();
+            let flipped: String = original
+                .chars()
+                .flat_map(|character| {
+                    if character.is_uppercase() {
+                        character.to_lowercase().collect::<Vec<_>>()
+                    } else if character.is_lowercase() {
+                        character.to_uppercase().collect()
+                    } else {
+                        vec![character]
+                    }
+                })
+                .collect();
+            if flipped != original {
+                replacements.push((index, end, flipped));
             }
         }
         let rebase = |offset: usize| {
@@ -1056,17 +1101,12 @@ impl Buffer {
         let new_heads: Vec<usize> = ranges
             .iter()
             .map(|(start, end, collapsed, at_line_end)| {
-                let replacement = replacements.iter().find(|(r_start, _, _)| r_start == start);
                 let new_start = rebase(*start);
                 if *collapsed {
-                    let new_end = replacement.map_or_else(
-                        || rebase(*end),
-                        |(_, _, text)| new_start + text.chars().count(),
-                    );
-                    if *at_line_end && new_end > new_start {
-                        new_end - 1
+                    if *at_line_end {
+                        new_start
                     } else {
-                        new_end
+                        rebase(*end)
                     }
                 } else {
                     rebase(*end)
@@ -2250,6 +2290,18 @@ mod tests {
     }
 
     #[test]
+    fn join_lines_removes_complete_leading_whitespace_graphemes() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "a\n \u{301}b");
+        let mut selection = selection_at(&buffer, 0);
+
+        buffer.join_lines_at_selections(&mut selection);
+
+        assert_eq!(buffer.slice().to_string(), "a b");
+        assert_eq!(selection.primary().head().char_index, 1);
+    }
+
+    #[test]
     fn toggle_case_keeps_all_scalars_from_unicode_mapping() {
         let mut buffer = Buffer::new();
         buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "ßx");
@@ -2259,5 +2311,101 @@ mod tests {
 
         assert_eq!(buffer.slice().to_string(), "SSx");
         assert_eq!(selection.primary().head().char_index, 2);
+    }
+
+    #[test]
+    fn toggle_case_replaces_a_complete_grapheme() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "e\u{301}x");
+        let mut selection = selection_at(&buffer, 0);
+
+        buffer.toggle_case_at_selections(&mut selection);
+
+        assert_eq!(buffer.slice().to_string(), "E\u{301}x");
+        assert_eq!(selection.primary().head().char_index, 2);
+    }
+
+    #[test]
+    fn cursor_moves_only_between_extended_graphemes() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(
+            &mut single_sel(TextOffset::origin()),
+            "e\u{301}👩\u{200d}🔬🇨🇳👍🏽x",
+        );
+        let mut selection = selection_at(&buffer, 0);
+
+        for expected in [2, 5, 7, 9, 10] {
+            buffer.move_head_right(selection.primary_mut(), 1);
+            assert_eq!(selection.primary().head().char_index, expected);
+        }
+        for expected in [9, 7, 5, 2, 0] {
+            buffer.move_head_left(selection.primary_mut(), 1);
+            assert_eq!(selection.primary().head().char_index, expected);
+        }
+    }
+
+    #[test]
+    fn delete_removes_a_whole_extended_grapheme() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "e\u{301}x");
+        let mut forward = selection_at(&buffer, 0);
+
+        buffer.delete_at_selections(&mut forward, 1);
+
+        assert_eq!(buffer.slice().to_string(), "x");
+        assert_eq!(forward.primary().head().char_index, 0);
+
+        let mut backward = selection_at(&buffer, 1);
+        buffer.delete_at_selections(&mut backward, -1);
+        assert_eq!(buffer.slice().len_chars(), 0);
+        assert_eq!(backward.primary().head().char_index, 0);
+    }
+
+    #[test]
+    fn vertical_motion_preserves_grapheme_column() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(
+            &mut single_sel(TextOffset::origin()),
+            "e\u{301}x\na\u{301}b",
+        );
+        let mut selection = selection_at(&buffer, 2);
+
+        buffer.move_head_down(selection.primary_mut(), 1);
+        assert_eq!(selection.primary().head().char_index, 6);
+        buffer.move_head_up(selection.primary_mut(), 1);
+        assert_eq!(selection.primary().head().char_index, 2);
+    }
+
+    #[test]
+    fn content_changes_may_change_grapheme_composition() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "e\u{301}x");
+        let change = TextChangeSet::from_edits(3, vec![TextEdit::new(1..1, "z")]).unwrap();
+
+        buffer.apply_content_change(change).unwrap();
+
+        assert_eq!(buffer.slice().to_string(), "ez\u{301}x");
+    }
+
+    #[test]
+    fn first_non_blank_motion_stays_on_a_grapheme_boundary() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), " \u{301}x");
+        let mut selection = selection_at(&buffer, 2);
+
+        buffer.move_head_to_first_non_blank(selection.primary_mut());
+
+        assert_eq!(selection.primary().head().char_index, 0);
+    }
+
+    #[test]
+    fn selection_reconciliation_snaps_to_the_next_grapheme_boundary() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "e\u{301}x");
+        let mut selection = single_sel(cur(1));
+
+        assert!(buffer.reconcile_selections(&mut selection));
+        assert_eq!(selection.primary().head().char_index, 2);
+        assert_eq!(selection.primary().anchor.char_index, 2);
     }
 }

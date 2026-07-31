@@ -2412,6 +2412,7 @@ dependencies = [
  "vell-plugin-v8",
  "vell-protocol",
  "vell-theme",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2420,6 +2421,7 @@ version = "0.1.0"
 dependencies = [
  "ropey",
  "tempfile",
+ "unicode-segmentation",
  "vell-protocol",
 ]
 
@@ -2472,6 +2474,7 @@ dependencies = [
  "futures",
  "taffy",
  "tokio",
+ "unicode-segmentation",
  "unicode-width 0.2.2",
  "vell-frontend",
  "vell-protocol",

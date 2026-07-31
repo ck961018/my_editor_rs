@@ -508,6 +508,9 @@ pub enum SelectionShape {
     Line,
 }
 
+pub const DEFAULT_TAB_WIDTH: usize = 4;
+pub const MAX_TAB_WIDTH: usize = 256;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TextPresentation {
     pub base_face: PaintFace,
@@ -515,6 +518,7 @@ pub struct TextPresentation {
     pub cursor_style: CursorStyle,
     pub selection_shape: SelectionShape,
     pub selection_face: FacePatch,
+    pub tab_width: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

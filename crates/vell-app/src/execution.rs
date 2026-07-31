@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
+use crate::buffer_lifecycle::BufferInfo;
 use crate::dispatcher::DispatcherInputSnapshot;
+use crate::kernel::{FileBaseline, OpenCompletion};
 use crate::mode::ModeDraftJournal;
 use crate::operation::OperationError;
 use crate::theme::{FaceRemapOwner, ResolvedFaceOperation};
@@ -56,6 +59,29 @@ pub(super) enum PreparedEffect {
     Save {
         content: ContentId,
         snapshot: SaveSnapshot,
+        force: bool,
+    },
+    SaveAs {
+        content: ContentId,
+        snapshot: SaveSnapshot,
+        identity: PathBuf,
+        force: bool,
+    },
+    ReloadCommit {
+        content: ContentId,
+        path: PathBuf,
+        baseline: FileBaseline,
+    },
+    AsyncOpenCommit(OpenCompletion),
+    BufferList(Vec<BufferInfo>),
+    BufferNew,
+    BufferOpen(PathBuf),
+    BufferSwitch {
+        content: ContentId,
+    },
+    BufferClose {
+        content: ContentId,
+        force: bool,
     },
     Viewport {
         view: ViewId,
@@ -172,6 +198,26 @@ impl ExecutionFrame {
         self.checkpoints.state_rollbacks.push(rollback);
     }
 
+    pub(super) fn retarget(&mut self, content: ContentId) -> Result<(), OperationError> {
+        if self.checkpoints.target == Some(content) {
+            return Ok(());
+        }
+        if self.checkpoints.content.is_some()
+            || self.checkpoints.selections.is_some()
+            || !self.prepared_effects.is_empty()
+        {
+            return Err(OperationError::new(
+                "execution frame cannot change target after preparing content or effects",
+            ));
+        }
+        self.checkpoints.target = Some(content);
+        Ok(())
+    }
+
+    pub(super) fn targets(&self, content: ContentId) -> bool {
+        self.checkpoints.target == Some(content)
+    }
+
     pub(super) fn needs_target_checkpoint(&self, content: ContentId) -> bool {
         assert_eq!(
             self.checkpoints.target,
@@ -194,6 +240,12 @@ impl ExecutionFrame {
 
     pub(super) fn consume_operation(&mut self) -> Result<(), OperationError> {
         self.budget.consume_operation()
+    }
+
+    pub(super) fn can_prepare_buffer_lifecycle(&self) -> bool {
+        self.checkpoints.content.is_none()
+            && self.checkpoints.selections.is_none()
+            && self.prepared_effects.is_empty()
     }
 
     pub(super) fn consume_nested_mode_call(&mut self) -> Result<(), OperationError> {
