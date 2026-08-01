@@ -23,10 +23,17 @@ editor.modes.define({
 			commands: {
 				quote(ctx) {
 					if (!ctx.state.enabled) return ctx.pass();
+					void ctx.text;
+					void ctx.selections[0]?.anchor.character;
+					void ctx.primarySelection.head.line;
 					// @ts-expect-error Buffer adapters do not expose StatusBar targets.
 					void ctx.targetContentId;
-					ctx.edit.insert('""');
-					ctx.cursor.moveLeft();
+					ctx.edit.insertPair({ open: '"', close: '"' });
+					ctx.edit.insertClosingPair({ open: '"', close: '"' });
+					ctx.edit.deletePairBackward({ open: '"', close: '"' });
+					ctx.edit.insertNewline({ indent: "  ", closingIndent: "" });
+					ctx.edit.toggleLineComment({ delimiter: "//" });
+					ctx.edit.toggleBlockComment({ open: "/*", close: "*/" });
 					const token = ctx.faces.addRelative(
 						"plugin.pairs.match",
 						["syntax.string", { underline: true }],

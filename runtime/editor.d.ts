@@ -95,6 +95,11 @@ interface EditorPosition {
 	character: number;
 }
 
+interface EditorSelection {
+	anchor: EditorPosition;
+	head: EditorPosition;
+}
+
 interface EditorRange {
 	start: EditorPosition;
 	end: EditorPosition;
@@ -103,6 +108,25 @@ interface EditorRange {
 interface ContentEdit {
 	range: EditorRange;
 	text: string;
+}
+
+interface IndentationDecision {
+	indent: string;
+	closingIndent?: string;
+}
+
+interface LineCommentStrategy {
+	delimiter: string;
+}
+
+interface BlockCommentStrategy {
+	open: string;
+	close: string;
+}
+
+interface OpenClosePair {
+	open: string;
+	close: string;
 }
 
 interface TextDecorationSpan {
@@ -271,6 +295,12 @@ interface TextPrimitives {
 	deleteToLineEndMotion(count?: number): void;
 	deleteLines(count?: number): void;
 	changeLines(count?: number): void;
+	insertNewline(decision: IndentationDecision): void;
+	toggleLineComment(strategy: LineCommentStrategy): void;
+	toggleBlockComment(strategy: BlockCommentStrategy): void;
+	insertPair(pair: OpenClosePair): void;
+	insertClosingPair(pair: OpenClosePair): void;
+	deletePairBackward(pair: OpenClosePair): void;
 	applyEdits(edits: ContentEdit[]): void;
 }
 
@@ -352,6 +382,9 @@ interface StatusBarContentContext {
 interface BufferCommandContext<ContentState, ViewState, Arguments = ScriptData>
 	extends BufferContentContext {
 	readonly viewId: number;
+	readonly text: string;
+	readonly selections: readonly EditorSelection[];
+	readonly primarySelection: EditorSelection;
 	readonly arguments: Arguments;
 	readonly cursor: CursorPrimitives;
 	readonly edit: TextPrimitives;

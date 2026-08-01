@@ -106,6 +106,28 @@ pub enum EditCommand {
     DuplicateLines,
     MoveLinesUp,
     MoveLinesDown,
+    InsertNewline {
+        indent: String,
+        closing_indent: Option<String>,
+    },
+    ToggleLineComment {
+        delimiter: String,
+    },
+    ToggleBlockComment {
+        open: String,
+        close: String,
+    },
+    InsertPair {
+        open: String,
+        close: String,
+    },
+    InsertClosingPair {
+        close: String,
+    },
+    DeletePairBackward {
+        open: String,
+        close: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

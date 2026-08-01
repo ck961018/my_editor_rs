@@ -70,6 +70,22 @@ impl TextSnapshot {
         (utf16_offset == character).then_some(char_offset)
     }
 
+    /// Converts a character offset to a zero-based UTF-16 line/character position.
+    pub fn char_to_utf16_position(&self, char_offset: usize) -> Option<(usize, usize)> {
+        if char_offset > self.rope.len_chars() {
+            return None;
+        }
+        let line = self.rope.char_to_line(char_offset);
+        let line_start = self.rope.line_to_char(line);
+        let character = self
+            .rope
+            .slice(line_start..char_offset)
+            .chars()
+            .map(char::len_utf16)
+            .sum();
+        Some((line, character))
+    }
+
     pub fn apply(&self, change: &TextChangeSet) -> Result<Self, TextTransactionError> {
         let mut rope = self.rope.clone();
         change.apply(&mut rope)?;
@@ -95,6 +111,10 @@ mod tests {
         assert_eq!(snapshot.utf16_position_to_char(0, 3), Some(2));
         assert_eq!(snapshot.utf16_position_to_char(1, 1), Some(5));
         assert_eq!(snapshot.utf16_position_to_char(2, 0), None);
+        assert_eq!(snapshot.char_to_utf16_position(0), Some((0, 0)));
+        assert_eq!(snapshot.char_to_utf16_position(2), Some((0, 3)));
+        assert_eq!(snapshot.char_to_utf16_position(5), Some((1, 1)));
+        assert_eq!(snapshot.char_to_utf16_position(6), None);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 pub mod action;
 pub mod command;
+pub mod editing;
 pub mod mode_name;
 pub mod operation;
 pub mod presentation;

@@ -394,6 +394,7 @@ impl ScriptHost {
                 }
                 if version == ScriptApiVersion::V2 {
                     if let Some(buffer) = context.buffer() {
+                        set_buffer_editing_facts(scope, argument, buffer)?;
                         set_resource_facts(
                             scope,
                             argument,
@@ -641,4 +642,58 @@ impl ScriptHost {
             Ok(value.to_rust_string_lossy(scope))
         })
     }
+}
+
+fn set_buffer_editing_facts(
+    scope: &mut v8::PinScope,
+    argument: v8::Local<v8::Object>,
+    buffer: &vell_mode::BufferModeViewContext<'_>,
+) -> Result<(), ScriptError> {
+    let snapshot = buffer
+        .text_snapshot()
+        .ok_or_else(|| ScriptError::new("buffer text snapshot is unavailable"))?;
+    let text = snapshot.to_owned_string();
+    ensure_size("buffer text", text.len(), MAX_SCRIPT_INPUT_BYTES)?;
+    set_string(scope, argument, "text", &text);
+
+    let selections = buffer.selections().all().collect::<Vec<_>>();
+    let values = v8::Array::new(
+        scope,
+        i32::try_from(selections.len()).map_err(|_| ScriptError::new("too many selections"))?,
+    );
+    for (index, selection) in selections.into_iter().enumerate() {
+        let value = v8::Object::new(scope);
+        let anchor = position_object(scope, &snapshot, selection.anchor.char_index)?;
+        let head = position_object(scope, &snapshot, selection.head.char_index)?;
+        set_object(scope, value, "anchor", anchor);
+        set_object(scope, value, "head", head);
+        values.set_index(
+            scope,
+            u32::try_from(index).map_err(|_| ScriptError::new("too many selections"))?,
+            value.into(),
+        );
+    }
+    set_value(scope, argument, "selections", values.into());
+    let primary = buffer.selections().primary();
+    let primary_value = v8::Object::new(scope);
+    let anchor = position_object(scope, &snapshot, primary.anchor.char_index)?;
+    let head = position_object(scope, &snapshot, primary.head.char_index)?;
+    set_object(scope, primary_value, "anchor", anchor);
+    set_object(scope, primary_value, "head", head);
+    set_object(scope, argument, "primarySelection", primary_value);
+    Ok(())
+}
+
+fn position_object<'scope>(
+    scope: &mut v8::PinScope<'scope, '_>,
+    snapshot: &vell_core::text_snapshot::TextSnapshot,
+    char_offset: usize,
+) -> Result<v8::Local<'scope, v8::Object>, ScriptError> {
+    let (line, character) = snapshot
+        .char_to_utf16_position(char_offset)
+        .ok_or_else(|| ScriptError::new("selection is outside the buffer snapshot"))?;
+    let value = v8::Object::new(scope);
+    set_number(scope, value, "line", line as f64);
+    set_number(scope, value, "character", character as f64);
+    Ok(value)
 }

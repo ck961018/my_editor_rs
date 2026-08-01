@@ -350,6 +350,27 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
         EditCommand::MoveLinesDown => {
             buffer.move_lines_down_at_selections(selections);
         }
+        EditCommand::InsertNewline {
+            indent,
+            closing_indent,
+        } => {
+            buffer.insert_newline_at_selections(selections, &indent, closing_indent.as_deref());
+        }
+        EditCommand::ToggleLineComment { delimiter } => {
+            buffer.toggle_line_comment_at_selections(selections, &delimiter);
+        }
+        EditCommand::ToggleBlockComment { open, close } => {
+            buffer.toggle_block_comment_at_selections(selections, &open, &close);
+        }
+        EditCommand::InsertPair { open, close } => {
+            buffer.insert_pair_at_selections(selections, &open, &close);
+        }
+        EditCommand::InsertClosingPair { close } => {
+            buffer.insert_closing_pair_at_selections(selections, &close);
+        }
+        EditCommand::DeletePairBackward { open, close } => {
+            buffer.delete_pair_backward_at_selections(selections, &open, &close);
+        }
     }
 }
 

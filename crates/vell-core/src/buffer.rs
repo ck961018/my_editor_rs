@@ -71,6 +71,26 @@ fn merge_line_blocks(mut blocks: Vec<LineBlock>) -> Vec<LineBlock> {
     merged
 }
 
+fn ordered_selection_range(selection: &Selection) -> (usize, usize) {
+    let anchor = selection.anchor.char_index;
+    let head = selection.head.char_index;
+    (anchor.min(head), anchor.max(head))
+}
+
+fn containing_range(ranges: &[(usize, usize)], start: usize, end: usize) -> &(usize, usize) {
+    ranges
+        .iter()
+        .find(|&&(range_start, range_end)| range_start <= start && range_end >= end)
+        .expect("each selection belongs to one normalized range")
+}
+
+fn valid_pair(open: &str, close: &str) -> bool {
+    !open.is_empty()
+        && !close.is_empty()
+        && !open.contains(['\r', '\n'])
+        && !close.contains(['\r', '\n'])
+}
+
 impl Buffer {
     pub fn new() -> Self {
         Self {
@@ -1449,6 +1469,247 @@ impl Buffer {
         self.retarget_line_selections(selections, &selection_blocks, &targets);
     }
 
+    pub fn insert_newline_at_selections(
+        &mut self,
+        selections: &mut Selections,
+        indent: &str,
+        closing_indent: Option<&str>,
+    ) {
+        self.reconcile_selections(selections);
+        let ranges = self.selection_ranges(selections);
+        let newline = self.preferred_line_ending();
+        let mut insert = format!("{newline}{indent}");
+        if let Some(closing_indent) = closing_indent {
+            insert.push_str(newline);
+            insert.push_str(closing_indent);
+        }
+        let cursor = newline.chars().count() + indent.chars().count();
+        self.apply_text_edits(
+            ranges
+                .iter()
+                .map(|&(start, end)| TextEdit::new(start..end, insert.clone()))
+                .collect(),
+        )
+        .expect("valid newline edits");
+        let Some(change) = self.last_change.clone() else {
+            return;
+        };
+        for selection in selections.all_mut() {
+            let (start, end) = ordered_selection_range(selection);
+            let &(range_start, _) = containing_range(&ranges, start, end);
+            let target = change.map_position(range_start, Affinity::Before) + cursor;
+            selection.anchor.char_index = target;
+            selection.head.char_index = target;
+        }
+        self.reconcile_selections(selections);
+    }
+
+    pub fn toggle_line_comment_at_selections(
+        &mut self,
+        selections: &mut Selections,
+        delimiter: &str,
+    ) {
+        if delimiter.is_empty() || delimiter.contains(['\r', '\n']) {
+            return;
+        }
+        self.reconcile_selections(selections);
+        let blocks = self.selected_line_blocks(selections);
+        let delimiter_len = delimiter.chars().count();
+        let rows = blocks
+            .iter()
+            .flat_map(|block| block.start_row..=block.end_row)
+            .collect::<Vec<_>>();
+        let positions = rows
+            .iter()
+            .map(|&row| self.first_nonblank_offset(row))
+            .collect::<Vec<_>>();
+        let uncomment = positions
+            .iter()
+            .all(|&position| self.slice_equals(position, position + delimiter_len, delimiter));
+        let edits = positions
+            .into_iter()
+            .map(|position| {
+                if uncomment {
+                    let mut end = position + delimiter_len;
+                    if self.slice_equals(end, end + 1, " ") {
+                        end += 1;
+                    }
+                    TextEdit::new(position..end, "")
+                } else {
+                    TextEdit::new(position..position, format!("{delimiter} "))
+                }
+            })
+            .collect();
+        self.apply_line_edits_and_map_selections(selections, edits);
+    }
+
+    pub fn toggle_block_comment_at_selections(
+        &mut self,
+        selections: &mut Selections,
+        open: &str,
+        close: &str,
+    ) {
+        if !valid_pair(open, close) {
+            return;
+        }
+        self.reconcile_selections(selections);
+        let ranges = self.selection_ranges(selections);
+        let open_len = open.chars().count();
+        let close_len = close.chars().count();
+        let replacements = ranges
+            .iter()
+            .map(|&(start, end)| {
+                let unwrap = end.saturating_sub(start) >= open_len + close_len
+                    && self.slice_equals(start, start + open_len, open)
+                    && self.slice_equals(end - close_len, end, close);
+                if unwrap {
+                    let text = self
+                        .rope
+                        .slice(start + open_len..end - close_len)
+                        .to_string();
+                    (text, 0, end - start - open_len - close_len)
+                } else {
+                    let content = self.rope.slice(start..end).to_string();
+                    (
+                        format!("{open}{content}{close}"),
+                        open_len,
+                        open_len + end - start,
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        self.apply_replacements(selections, &ranges, replacements);
+    }
+
+    pub fn insert_pair_at_selections(
+        &mut self,
+        selections: &mut Selections,
+        open: &str,
+        close: &str,
+    ) {
+        if !valid_pair(open, close) {
+            return;
+        }
+        self.reconcile_selections(selections);
+        let ranges = self.selection_ranges(selections);
+        let open_len = open.chars().count();
+        let replacements = ranges
+            .iter()
+            .map(|&(start, end)| {
+                let content = self.rope.slice(start..end).to_string();
+                (
+                    format!("{open}{content}{close}"),
+                    open_len,
+                    open_len + end - start,
+                )
+            })
+            .collect();
+        self.apply_replacements(selections, &ranges, replacements);
+    }
+
+    pub fn insert_closing_pair_at_selections(&mut self, selections: &mut Selections, close: &str) {
+        if close.is_empty() || close.contains(['\r', '\n']) {
+            return;
+        }
+        self.reconcile_selections(selections);
+        let ranges = self.selection_ranges(selections);
+        let close_len = close.chars().count();
+        let actions = ranges
+            .iter()
+            .map(|&(start, end)| {
+                let skip = start == end
+                    && self.slice_equals(start, start + close_len, close)
+                    && boundary_at_or_after(&self.rope, start + close_len) == start + close_len;
+                (skip, start, end)
+            })
+            .collect::<Vec<_>>();
+        let edits = actions
+            .iter()
+            .filter(|(skip, _, _)| !skip)
+            .map(|&(_, start, end)| TextEdit::new(start..end, close))
+            .collect::<Vec<_>>();
+        if !edits.is_empty() {
+            self.apply_text_edits(edits)
+                .expect("valid closing-pair edits");
+        } else {
+            self.last_change = None;
+        }
+        let change = self.last_change.clone();
+        for selection in selections.all_mut() {
+            let (start, end) = ordered_selection_range(selection);
+            let &(skip, range_start, _) = actions
+                .iter()
+                .find(|&&(_, candidate_start, candidate_end)| {
+                    candidate_start <= start && candidate_end >= end
+                })
+                .expect("each selection belongs to one normalized range");
+            let target = if skip {
+                change.as_ref().map_or(range_start + close_len, |change| {
+                    change.map_position(range_start + close_len, Affinity::After)
+                })
+            } else {
+                change.as_ref().map_or(range_start + close_len, |change| {
+                    change.map_position(range_start, Affinity::Before) + close_len
+                })
+            };
+            selection.anchor.char_index = target;
+            selection.head.char_index = target;
+        }
+        self.reconcile_selections(selections);
+    }
+
+    pub fn delete_pair_backward_at_selections(
+        &mut self,
+        selections: &mut Selections,
+        open: &str,
+        close: &str,
+    ) {
+        if !valid_pair(open, close) {
+            self.delete_at_selections(selections, -1);
+            return;
+        }
+        self.reconcile_selections(selections);
+        let open_len = open.chars().count();
+        let close_len = close.chars().count();
+        let deletion_ranges = selections
+            .all()
+            .map(|selection| {
+                let (start, end) = ordered_selection_range(selection);
+                if start != end {
+                    return (start, end);
+                }
+                let paired = start >= open_len
+                    && self.slice_equals(start - open_len, start, open)
+                    && self.slice_equals(start, start + close_len, close)
+                    && boundary_at_or_before(&self.rope, start - open_len) == start - open_len
+                    && boundary_at_or_after(&self.rope, start + close_len) == start + close_len;
+                if paired {
+                    (start - open_len, start + close_len)
+                } else {
+                    (previous_boundary(&self.rope, start), start)
+                }
+            })
+            .collect::<Vec<_>>();
+        let ranges = merge_ranges(deletion_ranges.clone());
+        self.apply_text_edits(
+            ranges
+                .iter()
+                .map(|&(start, end)| TextEdit::new(start..end, ""))
+                .collect(),
+        )
+        .expect("valid paired-backspace edits");
+        let change = self.last_change.clone();
+        for (selection, (start, end)) in selections.all_mut().zip(deletion_ranges) {
+            let &(range_start, _) = containing_range(&ranges, start, end);
+            let target = change.as_ref().map_or(range_start, |change| {
+                change.map_position(range_start, Affinity::Before)
+            });
+            selection.anchor.char_index = target;
+            selection.head.char_index = target;
+        }
+        self.reconcile_selections(selections);
+    }
+
     fn selection_line_blocks(&self, selections: &Selections) -> Vec<LineBlock> {
         selections
             .all()
@@ -1464,6 +1725,62 @@ impl Buffer {
 
     fn selected_line_blocks(&self, selections: &Selections) -> Vec<LineBlock> {
         merge_line_blocks(self.selection_line_blocks(selections))
+    }
+
+    fn selection_ranges(&self, selections: &Selections) -> Vec<(usize, usize)> {
+        merge_ranges(selections.all().map(ordered_selection_range).collect())
+    }
+
+    fn apply_replacements(
+        &mut self,
+        selections: &mut Selections,
+        ranges: &[(usize, usize)],
+        replacements: Vec<(String, usize, usize)>,
+    ) {
+        self.apply_text_edits(
+            ranges
+                .iter()
+                .zip(&replacements)
+                .map(|(&(start, end), (text, _, _))| TextEdit::new(start..end, text.clone()))
+                .collect(),
+        )
+        .expect("valid selection replacement edits");
+        let Some(change) = self.last_change.clone() else {
+            return;
+        };
+        for selection in selections.all_mut() {
+            let forward = selection.anchor.char_index <= selection.head.char_index;
+            let (start, end) = ordered_selection_range(selection);
+            let index = ranges
+                .iter()
+                .position(|&(range_start, range_end)| range_start <= start && range_end >= end)
+                .expect("each selection belongs to one normalized range");
+            let range_start = ranges[index].0;
+            let (_, relative_start, relative_end) = &replacements[index];
+            let mapped = change.map_position(range_start, Affinity::Before);
+            let (anchor, head) = if forward {
+                (mapped + relative_start, mapped + relative_end)
+            } else {
+                (mapped + relative_end, mapped + relative_start)
+            };
+            selection.anchor.char_index = anchor;
+            selection.head.char_index = head;
+        }
+        self.reconcile_selections(selections);
+    }
+
+    fn first_nonblank_offset(&self, row: usize) -> usize {
+        let start = self.rope.line_to_char(row);
+        let end = line_end_insert(&self.rope, row);
+        (start..end)
+            .find(|&offset| !matches!(self.rope.char(offset), ' ' | '\t'))
+            .unwrap_or(end)
+    }
+
+    fn slice_equals(&self, start: usize, end: usize, expected: &str) -> bool {
+        end <= self.rope.len_chars()
+            && end.saturating_sub(start) == expected.chars().count()
+            && self.rope.slice(start..end).chars().eq(expected.chars())
     }
 
     fn line_block(&self, start_row: usize, end_row: usize) -> LineBlock {
@@ -2717,6 +3034,85 @@ mod tests {
 
         assert_eq!(buffer.slice().to_string(), "a\r\nb\r\n");
         assert_eq!(selection.primary().head().char_index, 6);
+    }
+
+    #[test]
+    fn strategy_newline_preserves_crlf_and_places_cursor_inside_rust_block() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "fn main() {}\r\n");
+        let mut selections = single_sel(TextOffset { char_index: 11 });
+
+        buffer.insert_newline_at_selections(&mut selections, "    ", Some(""));
+
+        assert_eq!(buffer.slice().to_string(), "fn main() {\r\n    \r\n}\r\n");
+        assert_eq!(selections.primary().head.char_index, 17);
+    }
+
+    #[test]
+    fn line_comment_toggle_handles_partial_lines_and_empty_lines() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "  alpha\n\n  beta");
+        let mut selections = Selections::single(Selection {
+            anchor: TextOffset { char_index: 3 },
+            head: TextOffset { char_index: 8 },
+        });
+
+        buffer.toggle_line_comment_at_selections(&mut selections, "//");
+        assert_eq!(buffer.slice().to_string(), "  // alpha\n// \n  beta");
+
+        buffer.toggle_line_comment_at_selections(&mut selections, "//");
+        assert_eq!(buffer.slice().to_string(), "  alpha\n\n  beta");
+    }
+
+    #[test]
+    fn pair_primitives_wrap_skip_and_delete_as_one_change() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "name");
+        let mut selected = Selections::single(Selection {
+            anchor: TextOffset { char_index: 4 },
+            head: TextOffset::origin(),
+        });
+
+        buffer.insert_pair_at_selections(&mut selected, "(", ")");
+        assert_eq!(buffer.slice().to_string(), "(name)");
+        assert_eq!(selected.primary().anchor.char_index, 5);
+        assert_eq!(selected.primary().head.char_index, 1);
+
+        let mut cursor = single_sel(TextOffset { char_index: 5 });
+        buffer.insert_closing_pair_at_selections(&mut cursor, ")");
+        assert_eq!(buffer.slice().to_string(), "(name)");
+        assert_eq!(cursor.primary().head.char_index, 6);
+        assert!(buffer.take_last_change().is_none());
+
+        let mut empty = single_sel(TextOffset { char_index: 6 });
+        buffer.insert_pair_at_selections(&mut empty, "\"", "\"");
+        assert_eq!(buffer.slice().to_string(), "(name)\"\"");
+        buffer.delete_pair_backward_at_selections(&mut empty, "\"", "\"");
+        assert_eq!(buffer.slice().to_string(), "(name)");
+        assert_eq!(empty.primary().head.char_index, 6);
+    }
+
+    #[test]
+    fn block_comment_toggle_wraps_and_unwraps_selection() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "value");
+        let mut selections = Selections::single(Selection {
+            anchor: TextOffset::origin(),
+            head: TextOffset { char_index: 5 },
+        });
+
+        buffer.toggle_block_comment_at_selections(&mut selections, "/*", "*/");
+        assert_eq!(buffer.slice().to_string(), "/*value*/");
+        assert_eq!(selections.primary().anchor.char_index, 2);
+        assert_eq!(selections.primary().head.char_index, 7);
+
+        selections = Selections::single(Selection {
+            anchor: TextOffset::origin(),
+            head: TextOffset { char_index: 9 },
+        });
+        buffer.toggle_block_comment_at_selections(&mut selections, "/*", "*/");
+        assert_eq!(buffer.slice().to_string(), "value");
+        assert_eq!(selections.primary().head.char_index, 5);
     }
 
     #[test]

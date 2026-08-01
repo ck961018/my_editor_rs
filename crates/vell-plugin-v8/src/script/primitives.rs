@@ -9,6 +9,9 @@ use vell_core::text_snapshot::TextSnapshot;
 use vell_core::transaction::{TextChangeSet, TextEdit};
 use vell_mode::ModeViewContext;
 use vell_mode::command::{AppCommand, ModeCommand, ModeValue};
+use vell_mode::editing::{
+    BlockCommentStrategy, IndentationDecision, LineCommentStrategy, OpenClosePair,
+};
 use vell_mode::mode_name::{ModeActionName, ModeName};
 use vell_mode::operation::{
     AppOperation, ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget,
@@ -22,8 +25,9 @@ use vell_protocol::viewport::{
 };
 
 use super::{
-    MAX_SCRIPT_OPERATIONS, ScriptError, ensure_count, json_to_mode_value, parse_position, property,
-    required_object, required_string, set_number, set_object, throw_script_error, v8_to_json,
+    MAX_SCRIPT_OPERATIONS, ScriptError, ensure_count, json_to_mode_value, optional_string,
+    parse_position, property, required_object, required_string, set_number, set_object,
+    throw_script_error, v8_to_json,
 };
 
 const OPCODE_BITS: u32 = 8;
@@ -115,6 +119,12 @@ primitives! {
     DeleteToLineEndMotion => ("text", "deleteToLineEndMotion"),
     DeleteLines => ("text", "deleteLines"),
     ChangeLines => ("text", "changeLines"),
+    InsertNewline => ("text", "insertNewline"),
+    ToggleLineComment => ("text", "toggleLineComment"),
+    ToggleBlockComment => ("text", "toggleBlockComment"),
+    InsertPair => ("text", "insertPair"),
+    InsertClosingPair => ("text", "insertClosingPair"),
+    DeletePairBackward => ("text", "deletePairBackward"),
     ApplyEdits => ("text", "applyEdits"),
     Begin => ("history", "begin"),
     Commit => ("history", "commit"),
@@ -569,6 +579,44 @@ fn primitive_effects(
         ChangeLines => deferred(EditCommand::ChangeLines {
             lines: count(scope, arguments, 0)?,
         }),
+        InsertNewline => {
+            let decision = indentation_decision(scope, arguments)?;
+            deferred(EditCommand::InsertNewline {
+                indent: decision.indent,
+                closing_indent: decision.closing_indent,
+            })
+        }
+        ToggleLineComment => {
+            let strategy = line_comment_strategy(scope, arguments)?;
+            deferred(EditCommand::ToggleLineComment {
+                delimiter: strategy.delimiter,
+            })
+        }
+        ToggleBlockComment => {
+            let strategy = block_comment_strategy(scope, arguments)?;
+            deferred(EditCommand::ToggleBlockComment {
+                open: strategy.open,
+                close: strategy.close,
+            })
+        }
+        InsertPair => {
+            let pair = open_close_pair(scope, arguments)?;
+            deferred(EditCommand::InsertPair {
+                open: pair.open,
+                close: pair.close,
+            })
+        }
+        InsertClosingPair => {
+            let pair = open_close_pair(scope, arguments)?;
+            deferred(EditCommand::InsertClosingPair { close: pair.close })
+        }
+        DeletePairBackward => {
+            let pair = open_close_pair(scope, arguments)?;
+            deferred(EditCommand::DeletePairBackward {
+                open: pair.open,
+                close: pair.close,
+            })
+        }
         ApplyEdits => vec![OperationRequest::View {
             target: ViewTarget::Current,
             operation: ViewOperation::ApplyContent(apply_edits(scope, arguments, runtime)?),
@@ -713,6 +761,64 @@ fn face_name(
         return Err(ScriptError::new("face must not be empty"));
     }
     Ok(FaceName::new(name))
+}
+
+fn strategy_object<'scope>(
+    arguments: &v8::FunctionCallbackArguments<'scope>,
+) -> Result<v8::Local<'scope, v8::Object>, ScriptError> {
+    v8::Local::<v8::Object>::try_from(arguments.get(0))
+        .map_err(|_| ScriptError::new("editing strategy must be an object"))
+}
+
+fn indentation_decision(
+    scope: &mut v8::PinScope,
+    arguments: &v8::FunctionCallbackArguments,
+) -> Result<IndentationDecision, ScriptError> {
+    let value = strategy_object(arguments)?;
+    IndentationDecision {
+        indent: required_string(scope, value, "indent")?,
+        closing_indent: optional_string(scope, value, "closingIndent")?,
+    }
+    .validated()
+    .map_err(|error| ScriptError::new(format!("invalid indentation decision: {error}")))
+}
+
+fn line_comment_strategy(
+    scope: &mut v8::PinScope,
+    arguments: &v8::FunctionCallbackArguments,
+) -> Result<LineCommentStrategy, ScriptError> {
+    let value = strategy_object(arguments)?;
+    LineCommentStrategy {
+        delimiter: required_string(scope, value, "delimiter")?,
+    }
+    .validated()
+    .map_err(|error| ScriptError::new(format!("invalid line comment strategy: {error}")))
+}
+
+fn block_comment_strategy(
+    scope: &mut v8::PinScope,
+    arguments: &v8::FunctionCallbackArguments,
+) -> Result<BlockCommentStrategy, ScriptError> {
+    let value = strategy_object(arguments)?;
+    BlockCommentStrategy {
+        open: required_string(scope, value, "open")?,
+        close: required_string(scope, value, "close")?,
+    }
+    .validated()
+    .map_err(|error| ScriptError::new(format!("invalid block comment strategy: {error}")))
+}
+
+fn open_close_pair(
+    scope: &mut v8::PinScope,
+    arguments: &v8::FunctionCallbackArguments,
+) -> Result<OpenClosePair, ScriptError> {
+    let value = strategy_object(arguments)?;
+    OpenClosePair {
+        open: required_string(scope, value, "open")?,
+        close: required_string(scope, value, "close")?,
+    }
+    .validated()
+    .map_err(|error| ScriptError::new(format!("invalid open/close pair: {error}")))
 }
 
 fn face_expressions(

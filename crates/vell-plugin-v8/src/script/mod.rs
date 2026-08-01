@@ -38,7 +38,7 @@ mod worker_quota;
 use bridge::{
     content_change_to_v8, content_context_object, json_to_mode_value, json_to_v8, optional_string,
     parse_position, property, required_object, required_string, required_usize, set_number,
-    set_object, set_resource_facts, set_save_state, set_value, throw_dom_exception,
+    set_object, set_resource_facts, set_save_state, set_string, set_value, throw_dom_exception,
     throw_script_error, throw_type_error, v8_to_json, view_policy_from_json,
 };
 pub use host::ScriptHost;
@@ -1506,6 +1506,113 @@ editor.modes.define({
                 }
             )] if face.as_str() == "plugin.pairs.match" && expressions.len() == 2
         ));
+    }
+
+    #[test]
+    fn v2_editing_strategies_receive_snapshot_and_validate_before_publish() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.ts");
+        fs::write(
+            &config,
+            r#"
+editor.modes.define({
+  name: "editing-strategies",
+  on: {
+    buffer: {
+      state: () => null,
+      viewState: () => ({ calls: 0 }),
+      commands: {
+        probe(ctx) {
+          if (ctx.text !== "a\u{1F600}b") throw new Error("missing text snapshot");
+          if (ctx.primarySelection.head.character !== 3) {
+            throw new Error("selection must use UTF-16 positions");
+          }
+          ctx.edit.insertNewline({ indent: "  ", closingIndent: "" });
+          ctx.edit.toggleLineComment({ delimiter: "//" });
+          ctx.edit.toggleBlockComment({ open: "/*", close: "*/" });
+          ctx.edit.insertPair({ open: "(", close: ")" });
+          ctx.edit.insertClosingPair({ open: "(", close: ")" });
+          ctx.edit.deletePairBackward({ open: "(", close: ")" });
+        },
+        invalid(ctx) {
+          ctx.viewState.calls++;
+          ctx.edit.insertPair({ open: "", close: ")" });
+        },
+      },
+    },
+  },
+});
+"#,
+        )
+        .unwrap();
+
+        let mut host = ScriptHost::new();
+        host.execute_module(&config).unwrap();
+        let host = Rc::new(RefCell::new(host));
+        let mode = ScriptHost::script_modes(&host).pop().unwrap();
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(
+            &mut vell_protocol::selection::Selections::single(
+                vell_protocol::selection::Selection::collapsed(
+                    vell_protocol::selection::TextOffset::origin(),
+                ),
+            ),
+            "a\u{1F600}b",
+        );
+        let content_id = ContentId(0);
+        let mut contents = ContentStore::default();
+        contents
+            .insert(content_id, Content::Buffer(buffer))
+            .unwrap();
+        let mut view_data = contents.create_view_state(content_id).unwrap();
+        view_data.replace_selections(vell_protocol::selection::Selections::single(
+            vell_protocol::selection::Selection::collapsed(vell_protocol::selection::TextOffset {
+                char_index: 2,
+            }),
+        ));
+        let context = ModeViewContext::new(ViewId(0), content_id, &view_data, &contents).unwrap();
+        let content_context = ModeContentContext::new(content_id, &contents);
+        let mut content_state = mode.create_content_state(&content_context).unwrap();
+        let mut view_state = mode
+            .create_view_state(content_state.as_ref(), &context)
+            .unwrap();
+
+        let (_, operations) = mode
+            .execute_view_with_arguments(
+                content_state.as_mut(),
+                view_state.as_mut(),
+                &context,
+                &ModeActionName::new("probe"),
+                &ModeValue::Null,
+            )
+            .unwrap()
+            .into_parts();
+        assert_eq!(operations.len(), 6);
+        assert!(matches!(
+            &operations[0],
+            vell_mode::operation::OperationRequest::View {
+                operation: vell_mode::operation::ViewOperation::Edit(
+                    EditCommand::InsertNewline { indent, closing_indent }
+                ),
+                ..
+            } if indent == "  " && closing_indent.as_deref() == Some("")
+        ));
+
+        let error = mode
+            .execute_view_with_arguments(
+                content_state.as_mut(),
+                view_state.as_mut(),
+                &context,
+                &ModeActionName::new("invalid"),
+                &ModeValue::Null,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("open must not be empty"), "{error}");
+        assert_eq!(
+            script_state(view_state.as_ref(), mode.name()).unwrap().data,
+            serde_json::json!({ "calls": 0 })
+        );
     }
 
     #[test]

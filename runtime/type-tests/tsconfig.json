@@ -9,6 +9,7 @@
   },
   "files": [
     "../plugins/tree-sitter/plugin.ts",
+    "../plugins/vim/editing.ts",
     "../plugins/vim/plugin.ts",
     "../examples/v1-migration.ts",
     "../examples/worker-platform.ts",
