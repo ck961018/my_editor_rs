@@ -96,6 +96,7 @@ pub(super) enum EffectBehavior {
         target: SpaceId,
     },
     Face,
+    Clipboard,
     BufferLifecycle,
     Quit,
 }

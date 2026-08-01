@@ -22,6 +22,17 @@ pub trait Frontend {
 
     async fn next_event(&mut self) -> io::Result<Option<FrontendEvent>>;
 
+    fn read_clipboard(&mut self) -> io::Result<Option<String>> {
+        Ok(None)
+    }
+
+    fn write_clipboard(&mut self, _text: &str) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "system clipboard is unavailable",
+        ))
+    }
+
     fn render(
         &mut self,
         scene: &Scene,

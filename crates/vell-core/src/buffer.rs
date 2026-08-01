@@ -4,6 +4,7 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::core::action::{ContentAction, ContentEditPlan};
+use crate::core::clipboard::{ClipboardKind, ClipboardPayload, PastePlacement};
 use crate::core::command::{CharSearchDirection, EditCommand, IndentationConfig};
 use crate::core::grapheme::{
     at_column, boundary_at_or_after, boundary_at_or_before, column, next_boundary,
@@ -91,6 +92,29 @@ fn valid_pair(open: &str, close: &str) -> bool {
         && !close.contains(['\r', '\n'])
 }
 
+fn distributed_fragments(fragments: &[String], count: usize) -> Vec<String> {
+    if fragments.len() == count {
+        return fragments.to_vec();
+    }
+    vec![fragments.concat(); count]
+}
+
+fn with_trailing_line_ending(mut text: String, line_ending: &str) -> String {
+    if !text.ends_with('\n') {
+        text.push_str(line_ending);
+    }
+    text
+}
+
+fn without_trailing_line_ending(mut text: String) -> String {
+    if text.ends_with("\r\n") {
+        text.truncate(text.len() - 2);
+    } else if text.ends_with('\n') {
+        text.pop();
+    }
+    text
+}
+
 impl Buffer {
     pub fn new() -> Self {
         Self {
@@ -146,6 +170,79 @@ impl Buffer {
         };
         let mut selections = selections.clone();
         crate::core::edit::apply_edit(command, &mut scratch, &mut selections);
+        ContentEditPlan {
+            action: scratch.take_last_change().map(ContentAction::Text),
+            selections,
+        }
+    }
+
+    pub fn copy_selections(
+        &self,
+        selections: &Selections,
+        kind: ClipboardKind,
+    ) -> ClipboardPayload {
+        let mut selections = selections.clone();
+        self.reconcile_selections(&mut selections);
+        let fragments = match kind {
+            ClipboardKind::CharacterWise => selections
+                .all()
+                .map(|selection| {
+                    let (start, end) = ordered_selection_range(selection);
+                    self.rope.slice(start..end).to_string()
+                })
+                .collect(),
+            ClipboardKind::LineWise => self
+                .selected_line_blocks(&selections)
+                .into_iter()
+                .map(|block| self.rope.slice(block.start..block.end).to_string())
+                .collect(),
+        };
+        ClipboardPayload { kind, fragments }
+    }
+
+    pub fn plan_cut(
+        &self,
+        selections: &Selections,
+        kind: ClipboardKind,
+    ) -> (ClipboardPayload, ContentEditPlan) {
+        let payload = self.copy_selections(selections, kind);
+        let mut scratch = self.clone();
+        scratch.last_change = None;
+        let mut selections = selections.clone();
+        match kind {
+            ClipboardKind::CharacterWise => {
+                scratch.delete_at_selections(&mut selections, 0);
+            }
+            ClipboardKind::LineWise => {
+                scratch.delete_selected_lines_at_selections(&mut selections);
+            }
+        }
+        (
+            payload,
+            ContentEditPlan {
+                action: scratch.take_last_change().map(ContentAction::Text),
+                selections,
+            },
+        )
+    }
+
+    pub fn plan_paste(
+        &self,
+        selections: &Selections,
+        payload: &ClipboardPayload,
+        placement: PastePlacement,
+    ) -> ContentEditPlan {
+        let mut scratch = self.clone();
+        scratch.last_change = None;
+        let mut selections = selections.clone();
+        match payload.kind {
+            ClipboardKind::CharacterWise => {
+                scratch.paste_charwise(&mut selections, payload, placement);
+            }
+            ClipboardKind::LineWise => {
+                scratch.paste_linewise(&mut selections, payload, placement);
+            }
+        }
         ContentEditPlan {
             action: scratch.take_last_change().map(ContentAction::Text),
             selections,
@@ -1710,6 +1807,122 @@ impl Buffer {
         self.reconcile_selections(selections);
     }
 
+    fn paste_charwise(
+        &mut self,
+        selections: &mut Selections,
+        payload: &ClipboardPayload,
+        placement: PastePlacement,
+    ) {
+        if payload.fragments.iter().all(String::is_empty) {
+            self.last_change = None;
+            return;
+        }
+        self.reconcile_selections(selections);
+        let selection_ranges = selections
+            .all()
+            .map(|selection| {
+                let (start, end) = ordered_selection_range(selection);
+                if start != end || placement == PastePlacement::Before {
+                    (start, end)
+                } else {
+                    let after = next_boundary(&self.rope, end);
+                    (after, after)
+                }
+            })
+            .collect::<Vec<_>>();
+        let ranges = merge_ranges(selection_ranges.clone());
+        let fragments = distributed_fragments(&payload.fragments, ranges.len())
+            .into_iter()
+            .map(|fragment| self.normalize_insert_text(&fragment))
+            .collect::<Vec<_>>();
+        self.apply_text_edits(
+            ranges
+                .iter()
+                .zip(&fragments)
+                .map(|(&(start, end), text)| TextEdit::new(start..end, text.clone()))
+                .collect(),
+        )
+        .expect("valid character-wise paste edits");
+        let Some(change) = self.last_change.clone() else {
+            return;
+        };
+        for (selection, (start, end)) in selections.all_mut().zip(selection_ranges) {
+            let index = ranges
+                .iter()
+                .position(|&(range_start, range_end)| range_start <= start && range_end >= end)
+                .expect("each selection belongs to one paste range");
+            let target = change.map_position(ranges[index].0, Affinity::Before)
+                + fragments[index].chars().count();
+            selection.anchor.char_index = target;
+            selection.head.char_index = target;
+        }
+        self.reconcile_selections(selections);
+    }
+
+    fn paste_linewise(
+        &mut self,
+        selections: &mut Selections,
+        payload: &ClipboardPayload,
+        placement: PastePlacement,
+    ) {
+        self.reconcile_selections(selections);
+        let selected = self.selection_line_blocks(selections);
+        let blocks = merge_line_blocks(selected.clone());
+        let fragments = distributed_fragments(&payload.fragments, blocks.len());
+        let max_row = self.rope.len_lines().saturating_sub(1);
+        let newline = self.preferred_line_ending();
+        let insertions = blocks
+            .iter()
+            .zip(fragments)
+            .map(|(block, fragment)| {
+                let fragment = self.normalize_insert_text(&fragment);
+                match placement {
+                    PastePlacement::Before => {
+                        let text = with_trailing_line_ending(fragment, newline);
+                        (block.start, text, 0)
+                    }
+                    PastePlacement::After if block.end_row < max_row => {
+                        let text = with_trailing_line_ending(fragment, newline);
+                        (block.end, text, 0)
+                    }
+                    PastePlacement::After if self.rope.len_chars() == 0 => {
+                        let text = without_trailing_line_ending(fragment);
+                        (0, text, 0)
+                    }
+                    PastePlacement::After => {
+                        let fragment = without_trailing_line_ending(fragment);
+                        let prefix = newline.chars().count();
+                        (block.end, format!("{newline}{fragment}"), prefix)
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        self.apply_text_edits(
+            insertions
+                .iter()
+                .map(|(at, text, _)| TextEdit::new(*at..*at, text.clone()))
+                .collect(),
+        )
+        .expect("valid line-wise paste edits");
+        let Some(change) = self.last_change.clone() else {
+            return;
+        };
+        for (selection, selected_block) in selections.all_mut().zip(selected) {
+            let index = blocks
+                .iter()
+                .position(|block| {
+                    block.start_row <= selected_block.start_row
+                        && block.end_row >= selected_block.end_row
+                })
+                .expect("each selection belongs to one paste line block");
+            let (at, _, relative) = &insertions[index];
+            let target = change.map_position(*at, Affinity::Before) + relative;
+            selection.anchor.char_index = target;
+            selection.head.char_index = target;
+        }
+        self.reconcile_selections(selections);
+    }
+
     fn selection_line_blocks(&self, selections: &Selections) -> Vec<LineBlock> {
         selections
             .all()
@@ -3113,6 +3326,127 @@ mod tests {
         buffer.toggle_block_comment_at_selections(&mut selections, "/*", "*/");
         assert_eq!(buffer.slice().to_string(), "value");
         assert_eq!(selections.primary().head.char_index, 5);
+    }
+
+    #[test]
+    fn character_clipboard_cuts_and_distributes_matching_fragments() {
+        let mut source = Buffer::new();
+        source.insert_at_selections(&mut single_sel(TextOffset::origin()), "alpha beta");
+        let source_selections = Selections::from_parts(
+            vec![
+                Selection {
+                    anchor: cur(0),
+                    head: cur(5),
+                },
+                Selection {
+                    anchor: cur(6),
+                    head: cur(10),
+                },
+            ],
+            0,
+        );
+
+        let (payload, cut) = source.plan_cut(&source_selections, ClipboardKind::CharacterWise);
+        assert_eq!(payload.fragments, vec!["alpha", "beta"]);
+        let ContentAction::Text(change) = cut.action.unwrap();
+        source.apply_content_change(change).unwrap();
+        assert_eq!(source.slice().to_string(), " ");
+
+        let mut target = Buffer::new();
+        target.insert_at_selections(&mut single_sel(TextOffset::origin()), "--");
+        let target_selections = Selections::from_parts(
+            vec![Selection::collapsed(cur(0)), Selection::collapsed(cur(2))],
+            0,
+        );
+        let paste = target.plan_paste(&target_selections, &payload, PastePlacement::Before);
+        let ContentAction::Text(change) = paste.action.unwrap();
+        target.apply_content_change(change).unwrap();
+
+        assert_eq!(target.slice().to_string(), "alpha--beta");
+        assert_eq!(
+            paste
+                .selections
+                .all()
+                .map(|selection| selection.head.char_index)
+                .collect::<Vec<_>>(),
+            vec![5, 11]
+        );
+    }
+
+    #[test]
+    fn character_paste_repeats_joined_payload_when_counts_differ() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "x");
+        let payload = ClipboardPayload {
+            kind: ClipboardKind::CharacterWise,
+            fragments: vec!["a".into(), "b".into()],
+        };
+
+        let paste = buffer.plan_paste(
+            &single_sel(TextOffset::origin()),
+            &payload,
+            PastePlacement::Before,
+        );
+        let ContentAction::Text(change) = paste.action.unwrap();
+        buffer.apply_content_change(change).unwrap();
+
+        assert_eq!(buffer.slice().to_string(), "abx");
+        assert_eq!(paste.selections.primary().head.char_index, 2);
+
+        let after = buffer.plan_paste(
+            &single_sel(TextOffset::origin()),
+            &ClipboardPayload::character("z"),
+            PastePlacement::After,
+        );
+        let ContentAction::Text(change) = after.action.unwrap();
+        buffer.apply_content_change(change).unwrap();
+        assert_eq!(buffer.slice().to_string(), "azbx");
+        assert_eq!(after.selections.primary().head.char_index, 2);
+    }
+
+    #[test]
+    fn linewise_clipboard_preserves_target_line_endings_and_unterminated_eof() {
+        let mut source = Buffer::new();
+        source.insert_at_selections(&mut single_sel(TextOffset::origin()), "one\ntwo");
+        let payload =
+            source.copy_selections(&single_sel(TextOffset::origin()), ClipboardKind::LineWise);
+        let (_, cut) = source.plan_cut(&single_sel(TextOffset::origin()), ClipboardKind::LineWise);
+        let ContentAction::Text(change) = cut.action.unwrap();
+        source.apply_content_change(change).unwrap();
+        assert_eq!(source.slice().to_string(), "two");
+
+        let mut target = Buffer::new();
+        target.insert_at_selections(&mut single_sel(TextOffset::origin()), "x\r\nz");
+        let paste = target.plan_paste(
+            &single_sel(TextOffset::origin()),
+            &payload,
+            PastePlacement::After,
+        );
+        let ContentAction::Text(change) = paste.action.unwrap();
+        target.apply_content_change(change).unwrap();
+        assert_eq!(target.slice().to_string(), "x\r\none\r\nz");
+
+        let last = target.copy_selections(&single_sel(cur(8)), ClipboardKind::LineWise);
+        let paste = target.plan_paste(&single_sel(cur(8)), &last, PastePlacement::After);
+        let ContentAction::Text(change) = paste.action.unwrap();
+        target.apply_content_change(change).unwrap();
+        assert_eq!(target.slice().to_string(), "x\r\none\r\nz\r\nz");
+    }
+
+    #[test]
+    fn empty_character_clipboard_is_a_safe_no_op() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "text");
+        let payload = ClipboardPayload::character("");
+
+        let plan = buffer.plan_paste(
+            &single_sel(TextOffset::origin()),
+            &payload,
+            PastePlacement::Before,
+        );
+
+        assert!(plan.action.is_none());
+        assert_eq!(buffer.slice().to_string(), "text");
     }
 
     #[test]

@@ -2,6 +2,7 @@ use std::io;
 
 use crossterm::{
     cursor::{self, SetCursorStyle},
+    event::{DisableBracketedPaste, EnableBracketedPaste},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -12,7 +13,7 @@ pub struct TerminalGuard;
 impl TerminalGuard {
     pub fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
-        if let Err(error) = execute!(io::stdout(), EnterAlternateScreen) {
+        if let Err(error) = execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste) {
             let _ = disable_raw_mode();
             return Err(error);
         }
@@ -26,6 +27,7 @@ impl Drop for TerminalGuard {
             io::stdout(),
             cursor::Show,
             SetCursorStyle::DefaultUserShape,
+            DisableBracketedPaste,
             LeaveAlternateScreen
         );
         let _ = disable_raw_mode();

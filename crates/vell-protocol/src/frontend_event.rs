@@ -9,6 +9,7 @@ pub struct ResizeEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrontendEvent {
     Key(KeyEvent),
+    Paste(String),
     Resize(ResizeEvent),
     /// 前端请求退出，例如窗口式前端的关闭按钮。
     QuitRequest,

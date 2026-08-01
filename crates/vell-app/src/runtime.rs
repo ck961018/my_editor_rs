@@ -9,22 +9,23 @@ use crate::action::{TransactionIntent, ViewAction};
 use crate::application::App;
 #[cfg(test)]
 use crate::behavior::EffectBehavior;
-use crate::command::AppCommand;
+use crate::command::{AppCommand, ContentCommand};
 use crate::diagnostics::RuntimeDiagnostic;
 use crate::dispatcher::{DispatchCommand, DispatchInput, DispatchOutcome};
 use crate::execution::{ExecutionFrame, InputCheckpoint, PreparedEffect, StateRollback};
 use crate::layout::LayoutError;
 use crate::mode::{CursorDomain, InputFlow};
 use crate::operation::{
-    AppOperation, BufferOperation, ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget,
-    ModeFlowPropagation, ModeTarget, OperationError, OperationOrigin, OperationOriginScope,
-    OperationRequest, QueuedOperation, ResolvedBufferOperation, ResolvedModeScope,
-    ResolvedOperation, ViewEditPlan, ViewOperation, ViewPrecondition, ViewTarget,
-    adapt_dispatch_command, prepend_operations,
+    AppOperation, BufferOperation, ClipboardDestination, ClipboardOperation, ClipboardSource,
+    ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget, ModeFlowPropagation,
+    ModeTarget, OperationError, OperationOrigin, OperationOriginScope, OperationRequest,
+    QueuedOperation, ResolvedBufferOperation, ResolvedModeScope, ResolvedOperation, ViewEditPlan,
+    ViewOperation, ViewPrecondition, ViewTarget, adapt_dispatch_command, prepend_operations,
 };
 use crate::query::AppQuery;
 use crate::theme::{FaceRemapOwner, ResolvedFaceOperation};
 use crate::transaction::{TransactionData, TransactionRecord, ViewTransactionData};
+use vell_core::clipboard::ClipboardPayload;
 use vell_core::command::EditCommand;
 use vell_core::content::{
     ContentActionResult, ContentEffect, ContentInput, ContentKind, ContentResult,
@@ -72,6 +73,7 @@ impl PreparedEffect {
             Self::Close { target } => EffectBehavior::Close { target: *target },
             Self::Focus { target } => EffectBehavior::Focus { target: *target },
             Self::Face(_) => EffectBehavior::Face,
+            Self::ClipboardStore { .. } => EffectBehavior::Clipboard,
             Self::ReloadCommit { .. }
             | Self::AsyncOpenCommit(_)
             | Self::BufferList(_)
@@ -318,6 +320,23 @@ impl<F: Frontend> App<F> {
             }
             FrontendEvent::Key(k) => {
                 self.process_input_queue(VecDeque::from([DispatchInput::Normal(k)]))?;
+                true
+            }
+            FrontendEvent::Paste(text) => {
+                let view = self
+                    .session
+                    .view_for_space(self.session.focused())
+                    .ok_or_else(|| invalid_operation("focused space has no view"))?;
+                let content = self
+                    .session
+                    .view(view)
+                    .ok_or_else(|| invalid_operation("focused view does not exist"))?
+                    .content();
+                self.execute_command(DispatchCommand::ContentWithView {
+                    command: ContentCommand::Edit(EditCommand::InsertText(text)),
+                    view,
+                    content,
+                })?;
                 true
             }
             FrontendEvent::QuitRequest => {
@@ -619,6 +638,20 @@ impl<F: Frontend> App<F> {
                         .faces_mut()
                         .apply_operation(operation)
                         .expect("validated face operation remains valid until frame commit");
+                }
+                PreparedEffect::ClipboardStore {
+                    payload,
+                    write_system,
+                } => {
+                    let text = write_system.then(|| payload.system_text());
+                    self.kernel.set_clipboard(payload);
+                    if let Some(text) = text
+                        && let Err(error) = self.frontend.write_clipboard(&text)
+                    {
+                        self.record_runtime_message(format!(
+                            "system clipboard write failed: {error}"
+                        ));
+                    }
                 }
                 PreparedEffect::Quit => self.kernel.cancel(),
             }
@@ -1102,6 +1135,11 @@ impl<F: Frontend> App<F> {
                         .map_err(|error| invalid_operation(error.to_string()))?;
                     self.prepare_face_effect(frame, operation)
                 }
+                ResolvedOperation::Clipboard {
+                    view,
+                    content,
+                    operation,
+                } => self.execute_clipboard(operation, view, content, frame),
                 ResolvedOperation::Mode {
                     mode,
                     scope,
@@ -1305,6 +1343,19 @@ impl<F: Frontend> App<F> {
                     }
                 };
                 Ok(ResolvedOperation::Face(operation))
+            }
+            OperationRequest::Clipboard { target, operation } => {
+                if origin.scope != OperationOriginScope::View {
+                    return Err(invalid_operation(
+                        "clipboard operation requires a view-scoped origin",
+                    ));
+                }
+                let (view, content) = self.resolve_view_target(target, origin)?;
+                Ok(ResolvedOperation::Clipboard {
+                    view,
+                    content,
+                    operation,
+                })
             }
             OperationRequest::Content { target, operation } => {
                 let content = self.resolve_content_target(target, origin)?;
@@ -1614,6 +1665,106 @@ impl<F: Frontend> App<F> {
             content,
             frame,
         )
+    }
+
+    fn execute_clipboard(
+        &mut self,
+        operation: ClipboardOperation,
+        view: ViewId,
+        content: ContentId,
+        frame: &mut ExecutionFrame,
+    ) -> io::Result<()> {
+        let selections = self
+            .session
+            .view(view)
+            .and_then(|view| view.selections())
+            .ok_or_else(|| invalid_operation("clipboard operation requires buffer view state"))?
+            .clone();
+        match operation {
+            ClipboardOperation::Copy { kind, destination } => {
+                let payload = self
+                    .kernel
+                    .copy_selections(content, &selections, kind)
+                    .ok_or_else(|| invalid_operation("content does not support clipboard copy"))?;
+                self.prepare_effect(
+                    frame,
+                    PreparedEffect::ClipboardStore {
+                        payload,
+                        write_system: destination == ClipboardDestination::InternalAndSystem,
+                    },
+                );
+                Ok(())
+            }
+            ClipboardOperation::Cut { kind, destination } => {
+                let (payload, plan) = self
+                    .kernel
+                    .plan_cut(content, &selections, kind)
+                    .ok_or_else(|| invalid_operation("content does not support clipboard cut"))?;
+                self.apply_view_edit_plan(
+                    ViewEditPlan {
+                        expected: ViewPrecondition::Selections(selections),
+                        content: plan.action,
+                        view: Some(ViewAction::SetSelections(plan.selections)),
+                    },
+                    view,
+                    content,
+                    frame,
+                )?;
+                self.prepare_effect(
+                    frame,
+                    PreparedEffect::ClipboardStore {
+                        payload,
+                        write_system: destination == ClipboardDestination::InternalAndSystem,
+                    },
+                );
+                Ok(())
+            }
+            ClipboardOperation::Paste { source, placement } => {
+                let payload = match source {
+                    ClipboardSource::Internal => self.kernel.clipboard().clone(),
+                    ClipboardSource::System => match self.frontend.read_clipboard() {
+                        Ok(Some(text)) => {
+                            let payload = ClipboardPayload::character(text);
+                            self.prepare_effect(
+                                frame,
+                                PreparedEffect::ClipboardStore {
+                                    payload: payload.clone(),
+                                    write_system: false,
+                                },
+                            );
+                            payload
+                        }
+                        Ok(None) => {
+                            self.record_runtime_message(
+                                "system clipboard is unavailable; using internal clipboard"
+                                    .to_owned(),
+                            );
+                            self.kernel.clipboard().clone()
+                        }
+                        Err(error) => {
+                            self.record_runtime_message(format!(
+                                "system clipboard read failed; using internal clipboard: {error}"
+                            ));
+                            self.kernel.clipboard().clone()
+                        }
+                    },
+                };
+                let plan = self
+                    .kernel
+                    .plan_paste(content, &selections, &payload, placement)
+                    .ok_or_else(|| invalid_operation("content does not support clipboard paste"))?;
+                self.apply_view_edit_plan(
+                    ViewEditPlan {
+                        expected: ViewPrecondition::Selections(selections),
+                        content: plan.action,
+                        view: Some(ViewAction::SetSelections(plan.selections)),
+                    },
+                    view,
+                    content,
+                    frame,
+                )
+            }
+        }
     }
 
     fn apply_view_edit_plan(

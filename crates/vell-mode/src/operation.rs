@@ -1,6 +1,7 @@
 use crate::action::{TransactionIntent, ViewAction};
 use crate::command::{AppCommand, ModeCommand, ModeInputCommand};
 use vell_core::action::ContentAction;
+use vell_core::clipboard::{ClipboardKind, PastePlacement};
 use vell_core::command::EditCommand;
 use vell_protocol::content_query::{FaceExpr, FaceName, FaceRemapToken};
 use vell_protocol::ids::{ContentId, ViewId};
@@ -65,8 +66,40 @@ pub enum OperationRequest {
         input: ModeInputCommand,
     },
     Face(FaceOperation),
+    Clipboard {
+        target: ViewTarget,
+        operation: ClipboardOperation,
+    },
     Buffer(BufferOperation),
     App(AppOperation),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipboardSource {
+    Internal,
+    System,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipboardDestination {
+    Internal,
+    InternalAndSystem,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipboardOperation {
+    Copy {
+        kind: ClipboardKind,
+        destination: ClipboardDestination,
+    },
+    Cut {
+        kind: ClipboardKind,
+        destination: ClipboardDestination,
+    },
+    Paste {
+        source: ClipboardSource,
+        placement: PastePlacement,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

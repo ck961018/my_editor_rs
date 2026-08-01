@@ -70,6 +70,7 @@ fn map_event(ev: Event) -> Option<FrontendEvent> {
             width: w,
             height: h,
         })),
+        Event::Paste(text) => Some(FrontendEvent::Paste(text)),
         _ => None, // mouse / focus 等忽略
     }
 }
@@ -113,6 +114,15 @@ mod tests {
                 width: 80,
                 height: 24
             }))
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_keeps_multiline_text_owned() {
+        let text = "one\r\ntwo".to_owned();
+        assert_eq!(
+            map_event(Event::Paste(text.clone())),
+            Some(FrontendEvent::Paste(text))
         );
     }
 

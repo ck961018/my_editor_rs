@@ -8,6 +8,7 @@ use crate::mode::ModeDraftJournal;
 use crate::operation::OperationError;
 use crate::theme::{FaceRemapOwner, ResolvedFaceOperation};
 use crate::transaction::TransactionRecord;
+use vell_core::clipboard::ClipboardPayload;
 use vell_core::content::SaveSnapshot;
 use vell_core::content_store::ContentSnapshot;
 use vell_core::transaction::TransactionDirection;
@@ -99,6 +100,10 @@ pub(super) enum PreparedEffect {
         target: SpaceId,
     },
     Face(ResolvedFaceOperation),
+    ClipboardStore {
+        payload: ClipboardPayload,
+        write_system: bool,
+    },
     Quit,
 }
 

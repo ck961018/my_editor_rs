@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::core::action::{ContentAction, ContentEditPlan};
+use crate::core::clipboard::{ClipboardKind, ClipboardPayload, PastePlacement};
 use crate::core::command::EditCommand;
 use crate::core::content::{
     Content, ContentActionResult, ContentChange, ContentKind, ContentResult, ContentTransaction,
@@ -111,6 +112,40 @@ impl ContentStore {
         self.entries
             .get(&id)
             .and_then(|entry| entry.content.plan_edit(command, selections))
+    }
+
+    pub fn copy_selections(
+        &self,
+        id: ContentId,
+        selections: &Selections,
+        kind: ClipboardKind,
+    ) -> Option<ClipboardPayload> {
+        self.entries
+            .get(&id)
+            .and_then(|entry| entry.content.copy_selections(selections, kind))
+    }
+
+    pub fn plan_cut(
+        &self,
+        id: ContentId,
+        selections: &Selections,
+        kind: ClipboardKind,
+    ) -> Option<(ClipboardPayload, ContentEditPlan)> {
+        self.entries
+            .get(&id)
+            .and_then(|entry| entry.content.plan_cut(selections, kind))
+    }
+
+    pub fn plan_paste(
+        &self,
+        id: ContentId,
+        selections: &Selections,
+        payload: &ClipboardPayload,
+        placement: PastePlacement,
+    ) -> Option<ContentEditPlan> {
+        self.entries
+            .get(&id)
+            .and_then(|entry| entry.content.plan_paste(selections, payload, placement))
     }
 
     pub fn apply(&mut self, id: ContentId, action: ContentAction) -> ContentActionResult {

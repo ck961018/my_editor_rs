@@ -17,6 +17,7 @@ use crate::transaction::{
     TransactionManager, TransactionManagerError, TransactionRecord, TransactionSnapshot,
 };
 use vell_core::action::{ContentAction, ContentEditPlan};
+use vell_core::clipboard::{ClipboardKind, ClipboardPayload, PastePlacement};
 use vell_core::content::{
     Content, ContentActionResult, ContentChange, ContentEvent, ContentInput, ContentKind,
     ContentResult, ContentTransactionError, SaveSnapshot,
@@ -62,6 +63,7 @@ pub(super) struct Kernel {
     mode_jobs: HashMap<ModeJobKey, ModeJobSlot>,
     pending_saves: HashMap<ContentId, PendingSave>,
     command_transaction: Option<CommandTransaction>,
+    clipboard: ClipboardPayload,
     next_content_id: u64,
 }
 
@@ -89,6 +91,7 @@ impl Kernel {
             mode_jobs: HashMap::new(),
             pending_saves: HashMap::new(),
             command_transaction: None,
+            clipboard: ClipboardPayload::character(""),
             next_content_id,
         }
     }
@@ -283,6 +286,43 @@ impl Kernel {
         selections: &Selections,
     ) -> Option<ContentEditPlan> {
         self.contents.plan_edit(content, command, selections)
+    }
+
+    pub(super) fn copy_selections(
+        &self,
+        content: ContentId,
+        selections: &Selections,
+        kind: ClipboardKind,
+    ) -> Option<ClipboardPayload> {
+        self.contents.copy_selections(content, selections, kind)
+    }
+
+    pub(super) fn plan_cut(
+        &self,
+        content: ContentId,
+        selections: &Selections,
+        kind: ClipboardKind,
+    ) -> Option<(ClipboardPayload, ContentEditPlan)> {
+        self.contents.plan_cut(content, selections, kind)
+    }
+
+    pub(super) fn plan_paste(
+        &self,
+        content: ContentId,
+        selections: &Selections,
+        payload: &ClipboardPayload,
+        placement: PastePlacement,
+    ) -> Option<ContentEditPlan> {
+        self.contents
+            .plan_paste(content, selections, payload, placement)
+    }
+
+    pub(super) fn clipboard(&self) -> &ClipboardPayload {
+        &self.clipboard
+    }
+
+    pub(super) fn set_clipboard(&mut self, payload: ClipboardPayload) {
+        self.clipboard = payload;
     }
 
     pub(super) fn apply_content_action(

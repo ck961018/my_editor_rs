@@ -3,6 +3,7 @@ use vell_protocol as protocol;
 
 pub mod action;
 pub mod buffer;
+pub mod clipboard;
 pub mod command;
 pub mod content;
 pub mod content_store;

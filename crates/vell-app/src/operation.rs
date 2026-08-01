@@ -53,6 +53,11 @@ pub enum ResolvedOperation {
         input: ModeInputCommand,
     },
     Face(ResolvedFaceOperation),
+    Clipboard {
+        view: ViewId,
+        content: ContentId,
+        operation: ClipboardOperation,
+    },
     Buffer(ResolvedBufferOperation),
     App(AppOperation),
 }

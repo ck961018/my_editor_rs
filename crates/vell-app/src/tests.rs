@@ -30,13 +30,15 @@ use crate::mode::{
 };
 use crate::mode_name::{ModeActionName, ModeName};
 use crate::operation::{
-    AppOperation, BufferOperation, ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget,
-    ModeFlowPropagation, ModeInvocation, ModeTarget, OperationRequest, ViewEditPlan, ViewOperation,
-    ViewPrecondition, ViewTarget,
+    AppOperation, BufferOperation, ClipboardDestination, ClipboardOperation, ClipboardSource,
+    ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget, ModeFlowPropagation,
+    ModeInvocation, ModeTarget, OperationRequest, ViewEditPlan, ViewOperation, ViewPrecondition,
+    ViewTarget,
 };
 use std::collections::VecDeque;
 use vell_core::action::ContentAction;
 use vell_core::buffer::Buffer;
+use vell_core::clipboard::{ClipboardKind, PastePlacement};
 use vell_core::command::EditCommand;
 use vell_core::content::{
     Content, ContentChange, ContentEffect, ContentInput, ContentKind, ContentResult,
@@ -77,6 +79,10 @@ struct ScriptedFrontend {
     viewport_commands: Vec<(ViewId, ResolvedViewportCommand)>,
     focus_targets: VecDeque<Option<SpaceId>>,
     focus_directions: Vec<SplitDirection>,
+    system_clipboard: Option<String>,
+    clipboard_writes: Vec<String>,
+    fail_clipboard_read: bool,
+    fail_clipboard_write: bool,
 }
 
 struct LoopMode {
@@ -196,6 +202,13 @@ fn view_action(action: ViewAction) -> OperationRequest {
     OperationRequest::View {
         target: ViewTarget::Current,
         operation: ViewOperation::Apply(action),
+    }
+}
+
+fn clipboard(operation: ClipboardOperation) -> OperationRequest {
+    OperationRequest::Clipboard {
+        target: ViewTarget::Current,
+        operation,
     }
 }
 
@@ -1276,6 +1289,10 @@ impl ScriptedFrontend {
             viewport_commands: Vec::new(),
             focus_targets: VecDeque::new(),
             focus_directions: Vec::new(),
+            system_clipboard: None,
+            clipboard_writes: Vec::new(),
+            fail_clipboard_read: false,
+            fail_clipboard_write: false,
         }
     }
 }
@@ -1290,6 +1307,22 @@ impl Frontend for ScriptedFrontend {
             return Err(io::Error::other("scripted frontend failure"));
         }
         Ok(self.events.pop_front())
+    }
+
+    fn read_clipboard(&mut self) -> io::Result<Option<String>> {
+        if self.fail_clipboard_read {
+            return Err(io::Error::other("scripted clipboard read failure"));
+        }
+        Ok(self.system_clipboard.clone())
+    }
+
+    fn write_clipboard(&mut self, text: &str) -> io::Result<()> {
+        if self.fail_clipboard_write {
+            return Err(io::Error::other("scripted clipboard write failure"));
+        }
+        self.system_clipboard = Some(text.to_owned());
+        self.clipboard_writes.push(text.to_owned());
+        Ok(())
     }
 
     fn render(
@@ -8486,5 +8519,219 @@ async fn cancellation_discards_frontend_events_after_quit() {
 
     app.run().await.unwrap();
 
+    assert_eq!(text_rows(&app, editor_cid()), vec![""]);
+}
+
+#[test]
+fn clipboard_cut_paste_crosses_buffers_and_is_undoable() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![
+            view_edit(EditCommand::InsertText("alpha".into())),
+            view_action(ViewAction::SetSelections(Selections::single(Selection {
+                anchor: TextOffset::origin(),
+                head: TextOffset { char_index: 5 },
+            }))),
+            clipboard(ClipboardOperation::Copy {
+                kind: ClipboardKind::CharacterWise,
+                destination: ClipboardDestination::Internal,
+            }),
+        ],
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    let other = app.new_buffer();
+    let other_view = app.switch_buffer(other).unwrap();
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![clipboard(ClipboardOperation::Paste {
+            source: ClipboardSource::Internal,
+            placement: PastePlacement::Before,
+        })],
+        view: other_view,
+        content: other,
+    })
+    .unwrap();
+    assert_eq!(
+        app.kernel
+            .contents()
+            .text_snapshot(other)
+            .unwrap()
+            .to_owned_string(),
+        "alpha"
+    );
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![
+            view_action(ViewAction::SetSelections(Selections::single(Selection {
+                anchor: TextOffset::origin(),
+                head: TextOffset { char_index: 5 },
+            }))),
+            clipboard(ClipboardOperation::Cut {
+                kind: ClipboardKind::CharacterWise,
+                destination: ClipboardDestination::Internal,
+            }),
+        ],
+        view: other_view,
+        content: other,
+    })
+    .unwrap();
+    assert_eq!(text_rows(&app, other), vec![""]);
+
+    for (intent, expected) in [
+        (TransactionIntent::Undo, "alpha"),
+        (TransactionIntent::Redo, ""),
+    ] {
+        app.execute_command(DispatchCommand::ModeOperations {
+            operations: vec![history(intent)],
+            view: other_view,
+            content: other,
+        })
+        .unwrap();
+        assert_eq!(
+            app.kernel
+                .contents()
+                .text_snapshot(other)
+                .unwrap()
+                .to_owned_string(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn clipboard_write_failure_keeps_internal_payload_available() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    app.frontend.fail_clipboard_write = true;
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![
+            view_edit(EditCommand::InsertText("safe".into())),
+            view_action(ViewAction::SetSelections(Selections::single(Selection {
+                anchor: TextOffset::origin(),
+                head: TextOffset { char_index: 4 },
+            }))),
+            clipboard(ClipboardOperation::Cut {
+                kind: ClipboardKind::CharacterWise,
+                destination: ClipboardDestination::InternalAndSystem,
+            }),
+        ],
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec![""]);
+    assert!(app.frontend.clipboard_writes.is_empty());
+    assert!(
+        app.runtime_diagnostics()
+            .last()
+            .unwrap()
+            .message
+            .contains("clipboard write failed")
+    );
+    let other = app.new_buffer();
+    let other_view = app.switch_buffer(other).unwrap();
+    app.frontend.fail_clipboard_read = true;
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![clipboard(ClipboardOperation::Paste {
+            source: ClipboardSource::System,
+            placement: PastePlacement::Before,
+        })],
+        view: other_view,
+        content: other,
+    })
+    .unwrap();
+    assert_eq!(text_rows(&app, other), vec!["safe"]);
+    assert!(
+        app.runtime_diagnostics()
+            .last()
+            .unwrap()
+            .message
+            .contains("using internal clipboard")
+    );
+}
+
+#[test]
+fn failed_frame_rolls_back_cut_and_discards_clipboard_effects() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![
+            view_edit(EditCommand::InsertText("old new".into())),
+            view_action(ViewAction::SetSelections(Selections::single(Selection {
+                anchor: TextOffset::origin(),
+                head: TextOffset { char_index: 3 },
+            }))),
+            clipboard(ClipboardOperation::Copy {
+                kind: ClipboardKind::CharacterWise,
+                destination: ClipboardDestination::Internal,
+            }),
+        ],
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    let result = app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![
+            view_action(ViewAction::SetSelections(Selections::single(Selection {
+                anchor: TextOffset { char_index: 4 },
+                head: TextOffset { char_index: 7 },
+            }))),
+            clipboard(ClipboardOperation::Cut {
+                kind: ClipboardKind::CharacterWise,
+                destination: ClipboardDestination::InternalAndSystem,
+            }),
+            nested_mode(ModeCommand::new(
+                ModeName::new("missing"),
+                ModeActionName::new("run"),
+            )),
+        ],
+        view,
+        content: editor_cid(),
+    });
+    assert!(result.is_err());
+    assert_eq!(text_rows(&app, editor_cid()), vec!["old new"]);
+    assert!(app.frontend.clipboard_writes.is_empty());
+
+    let other = app.new_buffer();
+    let other_view = app.switch_buffer(other).unwrap();
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![clipboard(ClipboardOperation::Paste {
+            source: ClipboardSource::Internal,
+            placement: PastePlacement::Before,
+        })],
+        view: other_view,
+        content: other,
+    })
+    .unwrap();
+    assert_eq!(text_rows(&app, other), vec!["old"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bracketed_multiline_paste_is_one_undoable_edit() {
+    let mut app = make_app(vec![], None);
+    app.handle_event(FrontendEvent::Paste("one\r\ntwo".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        app.kernel
+            .contents()
+            .text_snapshot(editor_cid())
+            .unwrap()
+            .to_owned_string(),
+        "one\r\ntwo"
+    );
+
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![history(TransactionIntent::Undo)],
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
     assert_eq!(text_rows(&app, editor_cid()), vec![""]);
 }

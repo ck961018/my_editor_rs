@@ -49,6 +49,14 @@ impl<W: io::Write> Frontend for TuiFrontend<W> {
     async fn next_event(&mut self) -> io::Result<Option<FrontendEvent>> {
         self.input.next_event().await
     }
+
+    fn read_clipboard(&mut self) -> io::Result<Option<String>> {
+        system_clipboard::read().map(Some)
+    }
+
+    fn write_clipboard(&mut self, text: &str) -> io::Result<()> {
+        system_clipboard::write(text)
+    }
     fn render(
         &mut self,
         scene: &Scene,
@@ -92,6 +100,71 @@ impl<W: io::Write> Frontend for TuiFrontend<W> {
         Ok(self
             .renderer
             .resolve_focus_direction(scene, scene_revision, focused, direction))
+    }
+}
+
+#[cfg(windows)]
+mod system_clipboard {
+    use std::io::{self, Write};
+    use std::process::{Command, Stdio};
+
+    pub(super) fn read() -> io::Result<String> {
+        let output = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-STA",
+                "-Command",
+                "[Console]::Out.Write((Get-Clipboard -Raw))",
+            ])
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other("PowerShell clipboard read failed"));
+        }
+        String::from_utf8(output.stdout)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    }
+
+    pub(super) fn write(text: &str) -> io::Result<()> {
+        let mut child = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-STA",
+                "-Command",
+                "Set-Clipboard -Value ([Console]::In.ReadToEnd())",
+            ])
+            .stdin(Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .expect("piped clipboard stdin")
+            .write_all(text.as_bytes())?;
+        let status = child.wait()?;
+        status
+            .success()
+            .then_some(())
+            .ok_or_else(|| io::Error::other("PowerShell clipboard write failed"))
+    }
+}
+
+#[cfg(not(windows))]
+mod system_clipboard {
+    use std::io;
+
+    pub(super) fn read() -> io::Result<String> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "system clipboard provider is unavailable on this platform",
+        ))
+    }
+
+    pub(super) fn write(_text: &str) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "system clipboard provider is unavailable on this platform",
+        ))
     }
 }
 

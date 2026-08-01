@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::core::action::{ContentAction, ContentEditPlan};
 use crate::core::buffer::{Buffer, BufferTransactionData};
+use crate::core::clipboard::{ClipboardKind, ClipboardPayload, PastePlacement};
 use crate::core::command::EditCommand;
 use crate::core::content_view_state::ContentViewState;
 use crate::core::status_bar::StatusBar;
@@ -210,6 +211,40 @@ impl Content {
     ) -> Option<ContentEditPlan> {
         match self {
             Self::Buffer(buffer) => Some(buffer.plan_edit(command, selections)),
+            Self::StatusBar(_) => None,
+        }
+    }
+
+    pub fn copy_selections(
+        &self,
+        selections: &Selections,
+        kind: ClipboardKind,
+    ) -> Option<ClipboardPayload> {
+        match self {
+            Self::Buffer(buffer) => Some(buffer.copy_selections(selections, kind)),
+            Self::StatusBar(_) => None,
+        }
+    }
+
+    pub fn plan_cut(
+        &self,
+        selections: &Selections,
+        kind: ClipboardKind,
+    ) -> Option<(ClipboardPayload, ContentEditPlan)> {
+        match self {
+            Self::Buffer(buffer) => Some(buffer.plan_cut(selections, kind)),
+            Self::StatusBar(_) => None,
+        }
+    }
+
+    pub fn plan_paste(
+        &self,
+        selections: &Selections,
+        payload: &ClipboardPayload,
+        placement: PastePlacement,
+    ) -> Option<ContentEditPlan> {
+        match self {
+            Self::Buffer(buffer) => Some(buffer.plan_paste(selections, payload, placement)),
             Self::StatusBar(_) => None,
         }
     }

@@ -1,6 +1,6 @@
 # 基础代码编辑器 Roadmap
 
-**状态：** 实施中（M1 至 M4 已完成）
+**状态：** 实施中（M1 至 M5 已完成）
 
 **更新日期：** 2026-08-02
 
@@ -459,6 +459,8 @@ TypeScript 根据以下信息选择策略：
 
 ## 10. 里程碑 M5：Clipboard
 
+**状态：** 已完成（2026-08-02）
+
 ### 目标
 
 提供可靠的跨 buffer 内部 clipboard，
@@ -482,6 +484,10 @@ core 提供：
 `Kernel` 持有唯一内部 clipboard。
 clipboard 不属于 Buffer、View 或 Mode state。
 
+多 selection paste 先合并重叠或相邻目标。
+payload fragment 数量与合并后的目标数相同时逐项配对；
+否则先连接全部 fragment，再向每个目标粘贴同一文本。
+
 ### 系统 clipboard
 
 `vell-frontend::Frontend` 增加字符串级、fallible 的读写 seam。
@@ -490,6 +496,10 @@ clipboard 不属于 Buffer、View 或 Mode state。
 `FrontendEvent` 增加 owned paste event。
 `vell-tui` 映射 bracketed paste，
 并提供选定平台的 clipboard provider。
+
+首个平台 provider 使用 Windows PowerShell 的 `Get-Clipboard` 和
+`Set-Clipboard`。其他平台通过同一 fallible seam 明确报告不可用，
+并回退到内部 clipboard。
 
 ### 安全规则
 
