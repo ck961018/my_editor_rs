@@ -200,6 +200,27 @@ impl Buffer {
         ClipboardPayload { kind, fragments }
     }
 
+    pub fn copy_for_edit(
+        &self,
+        selections: &Selections,
+        command: EditCommand,
+        kind: ClipboardKind,
+    ) -> ClipboardPayload {
+        let fragments = self
+            .plan_edit(command, selections)
+            .action
+            .into_iter()
+            .flat_map(|action| match action {
+                ContentAction::Text(change) => change
+                    .to_edits()
+                    .expect("buffer edit plans contain valid change sets"),
+            })
+            .filter(|edit| !edit.range.is_empty())
+            .map(|edit| self.rope.slice(edit.range).to_string())
+            .collect();
+        ClipboardPayload { kind, fragments }
+    }
+
     pub fn plan_cut(
         &self,
         selections: &Selections,
@@ -2139,6 +2160,7 @@ impl Default for Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::motion::TextMotion;
     use crate::protocol::selection::{Selection, Selections};
     use tempfile::tempdir;
 
@@ -3371,6 +3393,27 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![5, 11]
         );
+    }
+
+    #[test]
+    fn copy_for_edit_uses_the_exact_operator_ranges_without_mutating() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "alpha beta");
+
+        let payload = buffer.copy_for_edit(
+            &single_sel(TextOffset::origin()),
+            EditCommand::Operate(OperatorCommand {
+                operator: TextOperator::Delete,
+                target: TextTarget::Motion {
+                    motion: TextMotion::WordForward,
+                    count: 1,
+                },
+            }),
+            ClipboardKind::CharacterWise,
+        );
+
+        assert_eq!(payload.fragments, vec!["alpha "]);
+        assert_eq!(buffer.slice().to_string(), "alpha beta");
     }
 
     #[test]

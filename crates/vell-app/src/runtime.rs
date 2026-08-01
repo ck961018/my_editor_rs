@@ -181,6 +181,7 @@ impl<F: Frontend> App<F> {
         if self.runtime_diagnostics.len() >= MAX_RUNTIME_DIAGNOSTICS {
             self.runtime_diagnostics.remove(0);
         }
+        self.session.set_status_message(message.clone());
         self.runtime_diagnostics.push(RuntimeDiagnostic { message });
     }
 
@@ -327,6 +328,7 @@ impl<F: Frontend> App<F> {
     }
 
     pub(super) async fn handle_event(&mut self, event: FrontendEvent) -> io::Result<bool> {
+        self.session.clear_status_message();
         let render = match event {
             FrontendEvent::Resize(r) => {
                 self.session.resize(r.width, r.height);
@@ -1718,6 +1720,26 @@ impl<F: Frontend> App<F> {
                     .kernel
                     .copy_selections(content, &selections, kind)
                     .ok_or_else(|| invalid_operation("content does not support clipboard copy"))?;
+                self.prepare_effect(
+                    frame,
+                    PreparedEffect::ClipboardStore {
+                        payload,
+                        write_system: destination == ClipboardDestination::InternalAndSystem,
+                    },
+                );
+                Ok(())
+            }
+            ClipboardOperation::CopyForEdit {
+                command,
+                kind,
+                destination,
+            } => {
+                let payload = self
+                    .kernel
+                    .copy_for_edit(content, &selections, command, kind)
+                    .ok_or_else(|| {
+                        invalid_operation("content does not support clipboard edit copy")
+                    })?;
                 self.prepare_effect(
                     frame,
                     PreparedEffect::ClipboardStore {

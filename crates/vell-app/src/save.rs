@@ -32,6 +32,7 @@ impl<F: Frontend> App<F> {
                 );
                 self.handle_content_result(content, result);
                 if content_changed {
+                    self.session.clear_status_message();
                     self.session.touch_content_views(content);
                 }
                 if let Some((snapshot, force)) = queued {

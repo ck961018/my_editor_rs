@@ -2,7 +2,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use vell_core::action::ContentAction;
-use vell_core::command::{CharSearchDirection, EditCommand};
+use vell_core::clipboard::{ClipboardKind, PastePlacement};
+use vell_core::command::{CharSearchDirection, EditCommand, IndentationConfig};
 use vell_core::content::ContentKind;
 use vell_core::motion::{OperatorCommand, TextMotion, TextOperator, TextTarget};
 use vell_core::search::{CaseSensitivity, SearchDirection, SearchOptions, SearchPattern};
@@ -15,11 +16,12 @@ use vell_mode::editing::{
 };
 use vell_mode::mode_name::{ModeActionName, ModeName};
 use vell_mode::operation::{
-    AppOperation, ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget,
-    ModeFlowPropagation, ModeInvocation, ModeTarget, OperationRequest, SearchOperation,
-    ViewOperation, ViewTarget,
+    AppOperation, BufferOperation, ClipboardDestination, ClipboardOperation, ClipboardSource,
+    ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget, ModeFlowPropagation,
+    ModeInvocation, ModeTarget, OperationRequest, SearchOperation, ViewOperation, ViewTarget,
 };
 use vell_protocol::content_query::{FaceExpr, FaceName, FaceRemapToken};
+use vell_protocol::ids::ContentId;
 use vell_protocol::revision::Revision;
 use vell_protocol::space::SplitDirection;
 use vell_protocol::viewport::{
@@ -128,7 +130,16 @@ primitives! {
     InsertPair => ("text", "insertPair"),
     InsertClosingPair => ("text", "insertClosingPair"),
     DeletePairBackward => ("text", "deletePairBackward"),
+    IndentLines => ("text", "indentLines"),
+    OutdentLines => ("text", "outdentLines"),
+    DuplicateLines => ("text", "duplicateLines"),
+    MoveLinesUp => ("text", "moveLinesUp"),
+    MoveLinesDown => ("text", "moveLinesDown"),
     ApplyEdits => ("text", "applyEdits"),
+    ClipboardCopy => ("clipboard", "copy"),
+    ClipboardCopyForEdit => ("clipboard", "copyForEdit"),
+    ClipboardCut => ("clipboard", "cut"),
+    ClipboardPaste => ("clipboard", "paste"),
     Find => ("search", "find"),
     ReplaceNext => ("search", "replaceNext"),
     ReplaceAll => ("search", "replaceAll"),
@@ -158,6 +169,14 @@ primitives! {
     FocusDown => ("app", "focusDown"),
     FocusUp => ("app", "focusUp"),
     FocusRight => ("app", "focusRight"),
+    BufferCreate => ("buffers", "create"),
+    BufferOpen => ("buffers", "open"),
+    BufferList => ("buffers", "list"),
+    BufferSwitch => ("buffers", "switch"),
+    BufferClose => ("buffers", "close"),
+    BufferSave => ("buffers", "save"),
+    BufferSaveAs => ("buffers", "saveAs"),
+    BufferReload => ("buffers", "reload"),
 }
 
 struct PrimitiveInvocation {
@@ -261,11 +280,13 @@ pub(super) fn install_v2(
             ("cursor", "cursor"),
             ("text", "edit"),
             ("search", "search"),
+            ("clipboard", "clipboard"),
             ("history", "history"),
             ("viewport", "viewport"),
             ("commands", "commands"),
             ("faces", "faces"),
             ("app", "app"),
+            ("buffers", "buffers"),
         ],
         ContentKind::StatusBar => &[("commands", "commands"), ("faces", "faces")],
     };
@@ -568,29 +589,29 @@ fn primitive_effects(
         DeleteSelectedLines => deferred(EditCommand::DeleteSelectedLines),
         DeleteWordMotion => deferred(delete_operator(TextTarget::Motion {
             motion: TextMotion::WordForward,
-            count: count(scope, arguments, 0)?,
+            count: bounded_count(scope, arguments, 0)?,
         })),
         DeleteWordEndMotion => deferred(delete_operator(TextTarget::Motion {
             motion: TextMotion::WordEnd,
-            count: count(scope, arguments, 0)?,
+            count: bounded_count(scope, arguments, 0)?,
         })),
         ChangeWordMotion => deferred(delete_operator(TextTarget::Motion {
             motion: TextMotion::ChangeWordForward,
-            count: count(scope, arguments, 0)?,
+            count: bounded_count(scope, arguments, 0)?,
         })),
         DeleteToLineStartMotion => deferred(delete_operator(TextTarget::Motion {
             motion: TextMotion::LineStart,
-            count: count(scope, arguments, 0)?,
+            count: bounded_count(scope, arguments, 0)?,
         })),
         DeleteToLineEndMotion => deferred(delete_operator(TextTarget::Motion {
             motion: TextMotion::LineEnd,
-            count: count(scope, arguments, 0)?,
+            count: bounded_count(scope, arguments, 0)?,
         })),
         DeleteLines => deferred(delete_operator(TextTarget::Lines {
-            count: count(scope, arguments, 0)?,
+            count: bounded_count(scope, arguments, 0)?,
         })),
         ChangeLines => deferred(EditCommand::ChangeLines {
-            lines: count(scope, arguments, 0)?,
+            lines: bounded_count(scope, arguments, 0)?,
         }),
         InsertNewline => {
             let decision = indentation_decision(scope, arguments)?;
@@ -630,9 +651,49 @@ fn primitive_effects(
                 close: pair.close,
             })
         }
+        IndentLines => deferred(EditCommand::IndentLines(indentation_config(
+            scope,
+            arguments.get(0),
+        )?)),
+        OutdentLines => deferred(EditCommand::OutdentLines(indentation_config(
+            scope,
+            arguments.get(0),
+        )?)),
+        DuplicateLines => deferred(EditCommand::DuplicateLines),
+        MoveLinesUp => deferred(EditCommand::MoveLinesUp),
+        MoveLinesDown => deferred(EditCommand::MoveLinesDown),
         ApplyEdits => vec![OperationRequest::View {
             target: ViewTarget::Current,
             operation: ViewOperation::ApplyContent(apply_edits(scope, arguments, runtime)?),
+        }],
+        ClipboardCopy => vec![OperationRequest::Clipboard {
+            target: ViewTarget::Current,
+            operation: ClipboardOperation::Copy {
+                kind: clipboard_kind(scope, arguments.get(0))?,
+                destination: clipboard_destination(scope, arguments.get(1))?,
+            },
+        }],
+        ClipboardCopyForEdit => vec![OperationRequest::Clipboard {
+            target: ViewTarget::Current,
+            operation: ClipboardOperation::CopyForEdit {
+                command: clipboard_edit(scope, arguments)?,
+                kind: clipboard_kind(scope, arguments.get(0))?,
+                destination: clipboard_destination(scope, arguments.get(3))?,
+            },
+        }],
+        ClipboardCut => vec![OperationRequest::Clipboard {
+            target: ViewTarget::Current,
+            operation: ClipboardOperation::Cut {
+                kind: clipboard_kind(scope, arguments.get(0))?,
+                destination: clipboard_destination(scope, arguments.get(1))?,
+            },
+        }],
+        ClipboardPaste => vec![OperationRequest::Clipboard {
+            target: ViewTarget::Current,
+            operation: ClipboardOperation::Paste {
+                source: clipboard_source(scope, arguments.get(0))?,
+                placement: paste_placement(scope, arguments.get(1))?,
+            },
         }],
         Find => {
             let (expected_revision, start) = search_origin(runtime)?;
@@ -798,6 +859,31 @@ fn primitive_effects(
         FocusRight => nested(OperationRequest::App(AppOperation::Command(
             AppCommand::Focus(SplitDirection::Right),
         ))),
+        BufferCreate => nested(OperationRequest::Buffer(BufferOperation::New)),
+        BufferOpen => nested(OperationRequest::Buffer(BufferOperation::Open {
+            path: non_empty_string(scope, arguments.get(0), "path")?,
+        })),
+        BufferList => nested(OperationRequest::Buffer(BufferOperation::List)),
+        BufferSwitch => nested(OperationRequest::Buffer(BufferOperation::Switch {
+            content: content_id(scope, arguments.get(0))?,
+        })),
+        BufferClose => nested(OperationRequest::Buffer(BufferOperation::Close {
+            target: optional_content_target(scope, arguments.get(0))?,
+            force: optional_bool_argument(scope, arguments.get(1), "force")?,
+        })),
+        BufferSave => nested(OperationRequest::Buffer(BufferOperation::Save {
+            target: optional_content_target(scope, arguments.get(0))?,
+            force: optional_bool_argument(scope, arguments.get(1), "force")?,
+        })),
+        BufferSaveAs => nested(OperationRequest::Buffer(BufferOperation::SaveAs {
+            target: ContentTarget::Current,
+            path: non_empty_string(scope, arguments.get(0), "path")?,
+            force: optional_bool_argument(scope, arguments.get(1), "force")?,
+        })),
+        BufferReload => nested(OperationRequest::Buffer(BufferOperation::Reload {
+            target: optional_content_target(scope, arguments.get(0))?,
+            force: optional_bool_argument(scope, arguments.get(1), "force")?,
+        })),
     };
     Ok((effects, result))
 }
@@ -869,6 +955,185 @@ fn open_close_pair(
     }
     .validated()
     .map_err(|error| ScriptError::new(format!("invalid open/close pair: {error}")))
+}
+
+fn indentation_config(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<IndentationConfig, ScriptError> {
+    let object = v8::Local::<v8::Object>::try_from(value)
+        .map_err(|_| ScriptError::new("indentation config must be an object"))?;
+    let width = property(scope, object, "indentWidth")
+        .ok_or_else(|| ScriptError::new("indentWidth is required"))?;
+    let insert_spaces = property(scope, object, "insertSpaces")
+        .ok_or_else(|| ScriptError::new("insertSpaces is required"))?;
+    let config = IndentationConfig {
+        indent_width: non_negative_integer(scope, width, "indentWidth")?,
+        insert_spaces: required_boolean(scope, insert_spaces, "insertSpaces")?,
+    };
+    config
+        .validated()
+        .ok_or_else(|| ScriptError::new("indentWidth must be between 1 and 256"))
+}
+
+fn clipboard_kind(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<ClipboardKind, ScriptError> {
+    match string(scope, value, "clipboard kind")?.as_str() {
+        "character" => Ok(ClipboardKind::CharacterWise),
+        "line" => Ok(ClipboardKind::LineWise),
+        _ => Err(ScriptError::new(
+            "clipboard kind must be 'character' or 'line'",
+        )),
+    }
+}
+
+fn clipboard_edit(
+    scope: &mut v8::PinScope,
+    arguments: &v8::FunctionCallbackArguments,
+) -> Result<EditCommand, ScriptError> {
+    let count = bounded_count(scope, arguments, 2)?;
+    match string(scope, arguments.get(1), "clipboard edit")?.as_str() {
+        "delete-forward" => isize::try_from(count)
+            .map(EditCommand::Delete)
+            .map_err(|_| ScriptError::new("count is too large")),
+        "delete-backward" => isize::try_from(count)
+            .ok()
+            .and_then(isize::checked_neg)
+            .map(EditCommand::Delete)
+            .ok_or_else(|| ScriptError::new("count is too large")),
+        "word" => Ok(delete_operator(TextTarget::Motion {
+            motion: TextMotion::WordForward,
+            count,
+        })),
+        "word-end" => Ok(delete_operator(TextTarget::Motion {
+            motion: TextMotion::WordEnd,
+            count,
+        })),
+        "change-word" => Ok(delete_operator(TextTarget::Motion {
+            motion: TextMotion::ChangeWordForward,
+            count,
+        })),
+        "line-start" => Ok(delete_operator(TextTarget::Motion {
+            motion: TextMotion::LineStart,
+            count,
+        })),
+        "line-end" => Ok(delete_operator(TextTarget::Motion {
+            motion: TextMotion::LineEnd,
+            count,
+        })),
+        "lines" => Ok(delete_operator(TextTarget::Lines { count })),
+        "change-lines" => Ok(EditCommand::ChangeLines { lines: count }),
+        "line-content" => Ok(EditCommand::DeleteLineContent),
+        "selection-inclusive" => Ok(EditCommand::DeleteInclusiveSelection),
+        "selected-lines" => Ok(EditCommand::DeleteSelectedLines),
+        _ => Err(ScriptError::new("unsupported clipboard edit")),
+    }
+}
+
+fn clipboard_destination(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<ClipboardDestination, ScriptError> {
+    if value.is_null_or_undefined() {
+        return Ok(ClipboardDestination::Internal);
+    }
+    match string(scope, value, "clipboard destination")?.as_str() {
+        "internal" => Ok(ClipboardDestination::Internal),
+        "system" => Ok(ClipboardDestination::InternalAndSystem),
+        _ => Err(ScriptError::new(
+            "clipboard destination must be 'internal' or 'system'",
+        )),
+    }
+}
+
+fn clipboard_source(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<ClipboardSource, ScriptError> {
+    if value.is_null_or_undefined() {
+        return Ok(ClipboardSource::Internal);
+    }
+    match string(scope, value, "clipboard source")?.as_str() {
+        "internal" => Ok(ClipboardSource::Internal),
+        "system" => Ok(ClipboardSource::System),
+        _ => Err(ScriptError::new(
+            "clipboard source must be 'internal' or 'system'",
+        )),
+    }
+}
+
+fn paste_placement(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<PastePlacement, ScriptError> {
+    if value.is_null_or_undefined() {
+        return Ok(PastePlacement::After);
+    }
+    match string(scope, value, "paste placement")?.as_str() {
+        "before" => Ok(PastePlacement::Before),
+        "after" => Ok(PastePlacement::After),
+        _ => Err(ScriptError::new(
+            "paste placement must be 'before' or 'after'",
+        )),
+    }
+}
+
+fn non_empty_string(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+    name: &str,
+) -> Result<String, ScriptError> {
+    let value = string(scope, value, name)?;
+    if value.is_empty() {
+        return Err(ScriptError::new(format!("{name} must not be empty")));
+    }
+    Ok(value)
+}
+
+fn content_id(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<ContentId, ScriptError> {
+    let value = non_negative_integer(scope, value, "contentId")?;
+    u64::try_from(value)
+        .map(ContentId)
+        .map_err(|_| ScriptError::new("contentId is too large"))
+}
+
+fn optional_content_target(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<ContentTarget, ScriptError> {
+    if value.is_null_or_undefined() {
+        Ok(ContentTarget::Current)
+    } else {
+        content_id(scope, value).map(ContentTarget::Id)
+    }
+}
+
+fn optional_bool_argument(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+    name: &str,
+) -> Result<bool, ScriptError> {
+    if value.is_null_or_undefined() {
+        Ok(false)
+    } else {
+        required_boolean(scope, value, name)
+    }
+}
+
+fn required_boolean(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+    name: &str,
+) -> Result<bool, ScriptError> {
+    if !value.is_boolean() {
+        return Err(ScriptError::new(format!("{name} must be a boolean")));
+    }
+    Ok(value.boolean_value(scope))
 }
 
 fn search_origin(

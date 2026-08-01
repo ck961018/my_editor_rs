@@ -1419,6 +1419,32 @@ fn make_app(events: Vec<FrontendEvent>, path: Option<&str>) -> App<ScriptedFront
     .unwrap()
 }
 
+async fn send_key(app: &mut App<ScriptedFrontend>, key: KeyEvent) {
+    app.handle_event(FrontendEvent::Key(key)).await.unwrap();
+}
+
+async fn send_text(app: &mut App<ScriptedFrontend>, text: &str) {
+    for character in text.chars() {
+        send_key(app, KeyEvent::char(character)).await;
+    }
+}
+
+async fn send_vim_command(app: &mut App<ScriptedFrontend>, command: &str) {
+    send_key(app, KeyEvent::char(':')).await;
+    send_text(app, command).await;
+    send_key(app, KeyEvent::plain(KeyCode::Enter)).await;
+}
+
+fn vim_command_events(command: &str) -> Vec<FrontendEvent> {
+    std::iter::once(':')
+        .chain(command.chars())
+        .map(|character| FrontendEvent::Key(KeyEvent::char(character)))
+        .chain(std::iter::once(FrontendEvent::Key(KeyEvent::plain(
+            KeyCode::Enter,
+        ))))
+        .collect()
+}
+
 fn make_script_app(source: &str) -> App<ScriptedFrontend> {
     let mut host = ScriptHost::new();
     host.execute_typescript("file:///test-config.ts", source)
@@ -3309,6 +3335,14 @@ fn attach_save_status_mode(app: &mut App<ScriptedFrontend>) {
 }
 
 fn custom_status_center(app: &App<ScriptedFrontend>) -> String {
+    status_center(app)
+}
+
+fn status_center(app: &App<ScriptedFrontend>) -> String {
+    status_texts(app).1.concat()
+}
+
+fn status_texts(app: &App<ScriptedFrontend>) -> (Vec<String>, Vec<String>, Vec<String>) {
     let editor = view_id(app, app.session.focused());
     let status = app.status_bar_for_view(editor).unwrap();
     let query = AppQuery {
@@ -3321,7 +3355,24 @@ fn custom_status_center(app: &App<ScriptedFrontend>) -> String {
     else {
         panic!("expected status-bar presentation");
     };
-    presentation.center[0].text.clone()
+    status_region_texts(&presentation)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_status_message_clears_on_the_next_frontend_event() {
+    let mut app = make_app(vec![], None);
+    app.session
+        .set_status_message("temporary failure".to_owned());
+    assert_eq!(status_center(&app), "temporary failure");
+
+    app.handle_event(FrontendEvent::Resize(ResizeEvent {
+        width: 41,
+        height: 6,
+    }))
+    .await
+    .unwrap();
+
+    assert_ne!(status_center(&app), "temporary failure");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -8959,4 +9010,204 @@ fn search_rejects_stale_content_revision_without_mutation() {
 
     assert!(result.is_err());
     assert_eq!(text_rows(&app, editor_cid()), vec!["current"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_product_editing_uses_language_and_line_primitives() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("editing.rs");
+    let mut app = make_app(vec![], path.to_str());
+
+    send_key(&mut app, KeyEvent::char('i')).await;
+    send_text(&mut app, "fn main() {").await;
+    send_key(&mut app, KeyEvent::plain(KeyCode::Enter)).await;
+    send_key(&mut app, KeyEvent::plain(KeyCode::Tab)).await;
+    send_key(&mut app, KeyEvent::plain(KeyCode::BackTab)).await;
+    send_text(&mut app, "(x)").await;
+    send_key(&mut app, KeyEvent::plain(KeyCode::Escape)).await;
+    send_text(&mut app, "gc>><<").await;
+
+    assert_eq!(
+        text_rows(&app, editor_cid()),
+        vec!["fn main() {", "    // (x)", "}"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_duplicate_and_move_commands_compose_line_primitives() {
+    let mut app = make_app(vec![], None);
+    send_key(&mut app, KeyEvent::char('i')).await;
+    send_text(&mut app, "one").await;
+    send_key(&mut app, KeyEvent::plain(KeyCode::Enter)).await;
+    send_text(&mut app, "two").await;
+    send_key(&mut app, KeyEvent::plain(KeyCode::Escape)).await;
+    send_text(&mut app, "gggdgj").await;
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["one", "two", "one"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_register_yank_delete_and_paste_use_the_clipboard_path() {
+    let mut app = make_app(vec![], None);
+    send_key(&mut app, KeyEvent::char('i')).await;
+    send_text(&mut app, "one").await;
+    send_key(&mut app, KeyEvent::plain(KeyCode::Enter)).await;
+    send_text(&mut app, "two").await;
+    send_key(&mut app, KeyEvent::plain(KeyCode::Escape)).await;
+    send_text(&mut app, "gg\"+yypddP").await;
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["one", "one", "two"]);
+    assert_eq!(app.frontend.clipboard_writes, vec!["one\n"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_search_repeat_word_and_replace_commands_use_search_primitives() {
+    let mut app = make_app(vec![], None);
+    send_key(&mut app, KeyEvent::char('i')).await;
+    send_text(&mut app, "one two one").await;
+    send_key(&mut app, KeyEvent::plain(KeyCode::Escape)).await;
+    send_text(&mut app, "gg/one").await;
+    send_key(&mut app, KeyEvent::plain(KeyCode::Enter)).await;
+    send_key(&mut app, KeyEvent::char('n')).await;
+    assert_eq!(
+        app.session.views()[&view_id(&app, app.session.focused())]
+            .selections()
+            .unwrap()
+            .primary(),
+        &Selection {
+            anchor: TextOffset { char_index: 8 },
+            head: TextOffset { char_index: 10 },
+        }
+    );
+
+    send_vim_command(&mut app, "%s/one/ONE/g").await;
+    assert_eq!(text_rows(&app, editor_cid()), vec!["ONE two ONE"]);
+
+    send_text(&mut app, "gg*").await;
+    assert_eq!(
+        app.session.views()[&view_id(&app, app.session.focused())]
+            .selections()
+            .unwrap()
+            .primary(),
+        &Selection {
+            anchor: TextOffset::origin(),
+            head: TextOffset { char_index: 3 },
+        }
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_commands_drive_buffer_lifecycle_and_save_as() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("command-save.txt");
+    let mut app = make_app(vec![], None);
+
+    send_key(&mut app, KeyEvent::char('i')).await;
+    send_text(&mut app, "saved").await;
+    send_key(&mut app, KeyEvent::plain(KeyCode::Escape)).await;
+    send_vim_command(&mut app, &format!("saveas {}", path.to_string_lossy())).await;
+    while app.kernel.has_pending_save(editor_cid()) {
+        let message = app.kernel.receive_message().await.unwrap();
+        app.handle_app_message(message).unwrap();
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "saved");
+
+    send_vim_command(&mut app, "new").await;
+    let created = app.session.views()[&view_id(&app, app.session.focused())].content();
+    assert_ne!(created, editor_cid());
+    send_vim_command(&mut app, "buffers").await;
+    send_vim_command(&mut app, "b 0").await;
+    send_vim_command(&mut app, &format!("bd! {}", created.0)).await;
+
+    assert!(!app.kernel.contents().contains(created));
+    assert!(
+        app.runtime_diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("command-save.txt"))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_open_and_force_reload_commands_use_async_file_lifecycle() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("command-open.txt");
+    std::fs::write(&path, "opened").unwrap();
+    let mut app = make_app(vec![], None);
+
+    send_vim_command(&mut app, &format!("e {}", path.to_string_lossy())).await;
+    let message = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        app.kernel.receive_message(),
+    )
+    .await
+    .expect("open command queued a completion")
+    .unwrap();
+    app.handle_app_message(message).unwrap();
+    let view = view_id(&app, app.session.focused());
+    let opened = app.session.views()[&view].content();
+    assert_eq!(text_rows(&app, opened), vec!["opened"]);
+
+    std::fs::write(&path, "reloaded").unwrap();
+    send_vim_command(&mut app, "reload!").await;
+    assert_eq!(text_rows(&app, opened), vec!["reloaded"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_invalid_regex_is_reported_in_the_status_bar() {
+    let mut app = make_app(vim_command_events("%s/(/x/g"), None);
+
+    app.run().await.unwrap();
+
+    let message = &app.runtime_diagnostics().last().unwrap().message;
+    assert!(message.contains("invalid regex"), "{message}");
+    assert_eq!(status_center(&app), *message);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_command_parse_errors_are_reported_in_the_status_bar() {
+    let mut app = make_app(vec![], None);
+
+    send_key(&mut app, KeyEvent::char(':')).await;
+    send_text(&mut app, "%s/a/b/z").await;
+    assert_eq!(status_texts(&app).0.concat(), ":%s/a/b/z");
+    send_key(&mut app, KeyEvent::plain(KeyCode::Enter)).await;
+
+    assert!(status_texts(&app).0.concat().contains("E488"));
+    assert!(app.runtime_diagnostics().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_dirty_buffer_close_is_rejected_without_losing_text() {
+    let mut app = make_app(vec![], None);
+    send_key(&mut app, KeyEvent::char('i')).await;
+    send_text(&mut app, "keep me").await;
+    send_key(&mut app, KeyEvent::plain(KeyCode::Escape)).await;
+    app.frontend.events.extend(vim_command_events("bd"));
+
+    app.run().await.unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["keep me"]);
+    let message = &app.runtime_diagnostics().last().unwrap().message;
+    assert!(message.contains("unsaved changes"), "{message}");
+    assert_eq!(status_center(&app), *message);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_save_conflict_preserves_external_file_and_reports_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("vim-save-conflict.txt");
+    std::fs::write(&path, "base").unwrap();
+    let mut app = make_app(vec![], path.to_str());
+    send_key(&mut app, KeyEvent::char('i')).await;
+    send_text(&mut app, "local ").await;
+    send_key(&mut app, KeyEvent::plain(KeyCode::Escape)).await;
+    std::fs::write(&path, "external").unwrap();
+    app.frontend.events.extend(vim_command_events("w"));
+
+    app.run().await.unwrap();
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "external");
+    let message = &app.runtime_diagnostics().last().unwrap().message;
+    assert!(message.contains("external changes"), "{message}");
+    assert_eq!(status_center(&app), *message);
 }

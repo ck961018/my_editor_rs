@@ -429,6 +429,14 @@ impl ClientSession {
         &self.presentation
     }
 
+    pub(super) fn set_status_message(&mut self, message: String) {
+        self.presentation.set_status_message(message);
+    }
+
+    pub(super) fn clear_status_message(&mut self) {
+        self.presentation.clear_status_message();
+    }
+
     pub(super) fn refresh_presentation(
         &mut self,
         contents: &ContentStore,

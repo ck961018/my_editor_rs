@@ -34,6 +34,15 @@ editor.modes.define({
 					ctx.edit.insertNewline({ indent: "  ", closingIndent: "" });
 					ctx.edit.toggleLineComment({ delimiter: "//" });
 					ctx.edit.toggleBlockComment({ open: "/*", close: "*/" });
+					ctx.edit.indentLines({ indentWidth: 2, insertSpaces: true });
+					ctx.edit.outdentLines({ indentWidth: 2, insertSpaces: true });
+					ctx.edit.duplicateLines();
+					ctx.edit.moveLinesUp();
+					ctx.edit.moveLinesDown();
+					ctx.clipboard.copy("character");
+					ctx.clipboard.copyForEdit("character", "word", 2);
+					ctx.clipboard.cut("line", "system");
+					ctx.clipboard.paste("internal", "after");
 					ctx.search.find(
 						{ kind: "literal", value: "needle" },
 						{ caseSensitive: false, direction: "forward", wrap: true },
@@ -46,6 +55,14 @@ editor.modes.define({
 						{ kind: "literal", value: "needle" },
 						"replacement",
 					);
+					ctx.buffers.create();
+					ctx.buffers.open("file.rs");
+					ctx.buffers.list();
+					ctx.buffers.switch(1);
+					ctx.buffers.close(undefined, true);
+					ctx.buffers.save();
+					ctx.buffers.saveAs("other.rs", true);
+					ctx.buffers.reload();
 					const token = ctx.faces.addRelative(
 						"plugin.pairs.match",
 						["syntax.string", { underline: true }],

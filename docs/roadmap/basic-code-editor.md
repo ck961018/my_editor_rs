@@ -1,6 +1,6 @@
 # 基础代码编辑器 Roadmap
 
-**状态：** 实施中（M1 至 M6 已完成）
+**状态：** 已完成（M1 至 M7 已完成）
 
 **更新日期：** 2026-08-02
 
@@ -89,7 +89,7 @@ Vell 已有以下可复用能力：
 - 事务化 `applyEdits`；
 - revision-safe Worker 结果发布。
 
-当前主要缺口如下：
+路线图交付状态如下：
 
 | 能力 | 状态 | 优先级 |
 | --- | --- | --- |
@@ -97,9 +97,9 @@ Vell 已有以下可复用能力：
 | Tab 输入和显示 | M1 已完成 | P0 |
 | 多 buffer 生命周期 | M2 已完成 | P0 |
 | 文件安全 | M2 已完成 | P0 |
-| Clipboard | 内部与系统能力均缺失 | P0 |
-| Search/replace | 只有当前行单字符查找 | P1 |
-| 语言编辑策略 | 有 `applyEdits` 底座，无正式契约 | P1 |
+| Clipboard | M5 已完成 | P0 |
+| Search/replace | M6 已完成 | P1 |
+| 语言编辑策略 | M4 已完成 | P1 |
 | Duplicate/move line | M3 已完成 | P2 |
 
 ## 4. 架构约束
@@ -585,11 +585,13 @@ Regex replacement 使用 Rust regex crate 的 capture replacement 语义。
 
 ## 12. 里程碑 M7：TypeScript 与产品接线
 
+**状态：** 已完成（2026-08-02）
+
 本里程碑依赖前述 Rust/宿主语义稳定。
 
 ### Vim 接线
 
-后续内建 Vim Mode 应接入：
+内建 Vim Mode 已接入：
 
 - Tab/Shift-Tab；
 - Enter、`o/O` autoindent；
@@ -604,7 +606,7 @@ Regex replacement 使用 Rust regex crate 的 capture replacement 语义。
 
 ### 命令系统接线
 
-命令系统实现后再提供：
+轻量命令输入通过现有状态栏呈现参数和错误，并已提供：
 
 - open/edit path；
 - buffer list 和 switch；
@@ -615,6 +617,7 @@ Regex replacement 使用 Rust regex crate 的 capture replacement 语义。
 - search/replace 参数输入；
 - dirty、conflict 和 invalid regex 错误展示。
 
+该输入只负责捕获本里程碑所需参数，不新增独立 Ex 输入栏。
 命令 palette、历史和补全不属于本路线图。
 
 ## 13. 完成定义

@@ -52,9 +52,22 @@ pub struct PresentationLayerStore {
     view_layers: HashMap<(ModeId, ViewId), ViewPresentationLayer>,
     view_contents: HashMap<ViewId, ContentId>,
     view_order: HashMap<ViewId, Vec<ModeId>>,
+    status_message: Option<String>,
 }
 
 impl PresentationLayerStore {
+    pub fn set_status_message(&mut self, message: String) {
+        self.status_message = Some(message);
+    }
+
+    pub fn clear_status_message(&mut self) {
+        self.status_message = None;
+    }
+
+    pub fn status_message(&self) -> Option<&str> {
+        self.status_message.as_deref()
+    }
+
     pub fn begin_refresh(&mut self) {
         self.view_contents.clear();
         self.view_order.clear();

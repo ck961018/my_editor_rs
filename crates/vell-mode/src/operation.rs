@@ -91,9 +91,14 @@ pub enum ClipboardDestination {
     InternalAndSystem,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClipboardOperation {
     Copy {
+        kind: ClipboardKind,
+        destination: ClipboardDestination,
+    },
+    CopyForEdit {
+        command: EditCommand,
         kind: ClipboardKind,
         destination: ClipboardDestination,
     },

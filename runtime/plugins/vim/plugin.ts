@@ -1,4 +1,19 @@
+import { editingStrategyFor } from "./editing.ts";
+
 type VimEditorState = "normal" | "insert" | "visual" | "visual-line";
+type VimRegister = "internal" | "system";
+
+interface VimSearchState {
+  [key: string]: ScriptData;
+  pattern: EditorSearchPattern;
+  direction: "forward" | "backward";
+  caseSensitive: boolean;
+}
+
+interface VimContentState {
+  [key: string]: ScriptData;
+  search: VimSearchState | null;
+}
 
 type KeyInput = EditorKeyEvent;
 
@@ -6,11 +21,15 @@ type VimPending =
   | { kind: "count"; count: number }
   | { kind: "find"; direction: "forward" | "backward"; count: number }
   | { kind: "goto"; count: number }
+  | { kind: "indent"; direction: "indent" | "outdent"; count: number }
+  | { kind: "register" }
+  | { kind: "search"; direction: "forward" | "backward"; value: string }
+  | { kind: "command"; value: string }
   | { kind: "viewport"; line?: number }
   | { kind: "window" }
   | {
     kind: "operator";
-    operator: "delete" | "change";
+    operator: "delete" | "change" | "yank";
     operatorCount: number;
     motionCount?: number;
   };
@@ -18,14 +37,19 @@ type VimPending =
 interface VimViewState {
   state: VimEditorState;
   pending: VimPending | null;
+  register: VimRegister;
+  indentWidth: number;
+  insertSpaces: boolean;
   viewPolicy: {
     cursorStyle: "block" | "bar";
     cursorDomain: "character" | "insertion-point";
     selectionShape: "character" | "character-inclusive" | "line";
+    tabWidth?: number;
+    statusBar?: StatusBarPresentation;
   };
 }
 
-type VimContext = BufferCommandContext<null, VimViewState, KeyInput>;
+type VimContext = BufferCommandContext<VimContentState, VimViewState, KeyInput>;
 type Effect = (context: VimContext) => void;
 
 function isVisual(state: VimViewState): boolean {
@@ -43,6 +67,28 @@ function setEditorState(state: VimViewState, next: VimEditorState): void {
       : next === "visual-line"
       ? "line"
       : "character",
+    tabWidth: state.viewPolicy.tabWidth,
+  };
+}
+
+function showPrompt(state: VimViewState, prefix: string, value: string): void {
+  state.viewPolicy.statusBar = { left: [{ text: prefix + value }] };
+}
+
+function clearPrompt(state: VimViewState): void {
+  state.viewPolicy.statusBar = undefined;
+}
+
+function takeRegister(state: VimViewState): VimRegister {
+  const register = state.register;
+  state.register = "internal";
+  return register;
+}
+
+function indentation(state: VimViewState): EditorIndentationConfig {
+  return {
+    indentWidth: state.indentWidth,
+    insertSpaces: state.insertSpaces,
   };
 }
 
@@ -69,12 +115,27 @@ function isCtrl(key: KeyInput, character: string): boolean {
     key.modifiers.ctrl && !key.modifiers.alt;
 }
 
+function operatorEffect(
+  state: VimViewState,
+  operator: "delete" | "change" | "yank",
+  kind: EditorClipboardKind,
+  edit: EditorClipboardEdit,
+  count: number,
+  apply: Effect,
+): Effect {
+  const destination = takeRegister(state);
+  return (context) => {
+    context.clipboard.copyForEdit(kind, edit, count, destination);
+    if (operator !== "yank") apply(context);
+  };
+}
+
 function completeOperator(
   state: VimViewState,
-  operator: "delete" | "change",
+  operator: "delete" | "change" | "yank",
   effect: Effect,
 ): Effect[] {
-  if (operator === "delete") {
+  if (operator !== "change") {
     state.pending = null;
     return [effect];
   }
@@ -90,7 +151,88 @@ function handlePending(state: VimViewState, key: KeyInput): Effect[] | null {
   if (!pending) return null;
   if (key.code === "escape" && isPlain(key)) {
     state.pending = null;
+    clearPrompt(state);
     return [];
+  }
+
+  if (pending.kind === "register") {
+    state.pending = null;
+    if (
+      key.code === "character" && !key.modifiers.alt && !key.modifiers.ctrl &&
+      (key.character === "+" || key.character === "*")
+    ) {
+      state.register = "system";
+    }
+    return [];
+  }
+
+  if (pending.kind === "search") {
+    if (key.code === "enter" && isPlain(key)) {
+      state.pending = null;
+      clearPrompt(state);
+      if (pending.value.length === 0) return [];
+      const search = {
+        pattern: { kind: "regex", value: pending.value } as const,
+        direction: pending.direction,
+        caseSensitive: true,
+      };
+      return [(context) => {
+        context.state.search = search;
+        context.search.find(search.pattern, {
+          caseSensitive: search.caseSensitive,
+          direction: search.direction,
+          wrap: true,
+        });
+      }];
+    }
+    if (key.code === "backspace" && isPlain(key) || isCtrl(key, "h")) {
+      pending.value = pending.value.slice(0, -1);
+      showPrompt(state, pending.direction === "forward" ? "/" : "?", pending.value);
+      return [];
+    }
+    if (
+      key.code === "character" && !key.modifiers.alt && !key.modifiers.ctrl &&
+      key.character !== undefined
+    ) {
+      pending.value += key.character;
+      showPrompt(state, pending.direction === "forward" ? "/" : "?", pending.value);
+    }
+    return [];
+  }
+
+  if (pending.kind === "command") {
+    if (key.code === "enter" && isPlain(key)) {
+      state.pending = null;
+      clearPrompt(state);
+      const command = pending.value;
+      return [(context) => executeCommand(context, command)];
+    }
+    if (key.code === "backspace" && isPlain(key) || isCtrl(key, "h")) {
+      pending.value = pending.value.slice(0, -1);
+      showPrompt(state, ":", pending.value);
+      return [];
+    }
+    if (
+      key.code === "character" && !key.modifiers.alt && !key.modifiers.ctrl &&
+      key.character !== undefined
+    ) {
+      pending.value += key.character;
+      showPrompt(state, ":", pending.value);
+    }
+    return [];
+  }
+
+  if (pending.kind === "indent") {
+    state.pending = null;
+    const expected = pending.direction === "indent" ? ">" : "<";
+    if (key.code !== "character" || key.character !== expected || !isPlain(key)) {
+      return [];
+    }
+    const config = indentation(state);
+    return Array.from({ length: pending.count }, () =>
+      pending.direction === "indent"
+        ? (context: VimContext) => context.edit.indentLines(config)
+        : (context: VimContext) => context.edit.outdentLines(config));
   }
 
   if (pending.kind === "find") {
@@ -114,13 +256,40 @@ function handlePending(state: VimViewState, key: KeyInput): Effect[] | null {
 
   if (pending.kind === "goto") {
     state.pending = null;
-    if (key.code !== "character" || key.character !== "g" || !isPlain(key)) {
+    if (key.code !== "character" || !key.character || !isPlain(key)) {
       return [];
     }
-    const line = Math.max(1, pending.count) - 1;
-    return [(context) => isVisual(state)
-      ? context.cursor.extendToLine(line)
-      : context.cursor.moveToLine(line)];
+    if (key.character === "g") {
+      const line = Math.max(1, pending.count) - 1;
+      return [(context) => isVisual(state)
+        ? context.cursor.extendToLine(line)
+        : context.cursor.moveToLine(line)];
+    }
+    if (key.character === "c") {
+      return [(context) => {
+        const strategy = editingStrategyFor(context);
+        if (strategy.lineComment) {
+          context.edit.toggleLineComment(strategy.lineComment);
+        }
+      }];
+    }
+    if (key.character === "b") {
+      return [(context) => {
+        const strategy = editingStrategyFor(context);
+        if (strategy.blockComment) {
+          context.edit.toggleBlockComment(strategy.blockComment);
+        }
+      }];
+    }
+    if (key.character === "d") {
+      return [(context) => context.edit.duplicateLines()];
+    }
+    if (key.character === "k" || key.character === "j") {
+      return [(context) => key.character === "k"
+        ? context.edit.moveLinesUp()
+        : context.edit.moveLinesDown()];
+    }
+    return [];
   }
 
   if (pending.kind === "viewport") {
@@ -174,8 +343,15 @@ function handlePending(state: VimViewState, key: KeyInput): Effect[] | null {
         return completeOperator(
           state,
           pending.operator,
-          (context) =>
-            context.edit.deleteToLineStartMotion(pending.operatorCount),
+          operatorEffect(
+            state,
+            pending.operator,
+            "character",
+            "line-start",
+            pending.operatorCount,
+            (context) =>
+              context.edit.deleteToLineStartMotion(pending.operatorCount),
+          ),
         );
       }
       pending.motionCount = (pending.motionCount ?? 0) * 10 +
@@ -187,32 +363,60 @@ function handlePending(state: VimViewState, key: KeyInput): Effect[] | null {
       return completeOperator(
         state,
         pending.operator,
-        (context) => pending.operator === "change"
-          ? context.edit.changeLines(count)
-          : context.edit.deleteLines(count),
+        operatorEffect(
+          state,
+          pending.operator,
+          "line",
+          "lines",
+          count,
+          (context) => pending.operator === "change"
+            ? context.edit.changeLines(count)
+            : context.edit.deleteLines(count),
+        ),
       );
     }
     if (key.character === "w") {
       return completeOperator(
         state,
         pending.operator,
-        (context) => pending.operator === "change"
-          ? context.edit.changeWordMotion(count)
-          : context.edit.deleteWordMotion(count),
+        operatorEffect(
+          state,
+          pending.operator,
+          "character",
+          pending.operator === "change" ? "change-word" : "word",
+          count,
+          (context) => pending.operator === "change"
+            ? context.edit.changeWordMotion(count)
+            : context.edit.deleteWordMotion(count),
+        ),
       );
     }
     if (key.character === "e") {
       return completeOperator(
         state,
         pending.operator,
-        (context) => context.edit.deleteWordEndMotion(count),
+        operatorEffect(
+          state,
+          pending.operator,
+          "character",
+          "word-end",
+          count,
+          (context) => context.edit.deleteWordEndMotion(count),
+        ),
       );
     }
     if (key.character === "$") {
       return completeOperator(
         state,
         pending.operator,
-        (context) => context.edit.deleteToLineEndMotion(count),
+        operatorEffect(
+          state,
+          pending.operator,
+          "character",
+          "line-end",
+          count,
+          (context) => context.edit.deleteToLineEndMotion(count),
+        ),
       );
     }
     state.pending = null;
@@ -246,13 +450,36 @@ function handleInsert(state: VimViewState, key: KeyInput): Effect[] | null {
     ];
   }
   if (key.code === "character" && isPlain(key) && key.character !== undefined) {
-    return [(context) => context.edit.insert(key.character!)];
+    return [(context) => {
+      const character = key.character!;
+      const strategy = editingStrategyFor(context);
+      const opening = strategy.pairs.find((pair) => pair.open === character);
+      const closing = strategy.pairs.find((pair) => pair.close === character);
+      if (opening && (!closing || characterAtCursor(context) !== character)) {
+        context.edit.insertPair(opening);
+      } else if (closing) {
+        context.edit.insertClosingPair(closing);
+      } else {
+        context.edit.insert(character);
+      }
+    }];
   }
   if (key.code === "enter" && isPlain(key) || isCtrl(key, "j") || isCtrl(key, "m")) {
-    return [(context) => context.edit.insert("\n")];
+    return [(context) =>
+      context.edit.insertNewline(editingStrategyFor(context).newline(context))];
   }
   if (key.code === "backspace" && isPlain(key) || isCtrl(key, "h")) {
-    return [(context) => context.edit.deleteBackward()];
+    return [(context) => {
+      const pair = pairAroundCursor(context, editingStrategyFor(context).pairs);
+      if (pair) context.edit.deletePairBackward(pair);
+      else context.edit.deleteBackward();
+    }];
+  }
+  if (key.code === "tab" && !key.modifiers.alt && !key.modifiers.ctrl) {
+    return [(context) => context.edit.indentLines(indentation(state))];
+  }
+  if (key.code === "backtab" && !key.modifiers.alt && !key.modifiers.ctrl) {
+    return [(context) => context.edit.outdentLines(indentation(state))];
   }
   if (isCtrl(key, "w")) return [(context) => context.edit.deleteWordBackward()];
   if (isCtrl(key, "u")) return [(context) => context.edit.deleteToLineStart()];
@@ -281,6 +508,42 @@ function moveArrow(
   } else {
     extend ? context.cursor.extendRight() : context.cursor.moveRight();
   }
+}
+
+function cursorOffset(context: VimContext): number {
+  const position = context.primarySelection.head;
+  let offset = 0;
+  for (let line = 0; line < position.line; line++) {
+    const next = context.text.indexOf("\n", offset);
+    if (next < 0) return context.text.length;
+    offset = next + 1;
+  }
+  return Math.min(context.text.length, offset + position.character);
+}
+
+function characterAtCursor(context: VimContext): string | undefined {
+  return context.text[cursorOffset(context)];
+}
+
+function pairAroundCursor(
+  context: VimContext,
+  pairs: readonly OpenClosePair[],
+): OpenClosePair | undefined {
+  const offset = cursorOffset(context);
+  return pairs.find((pair) =>
+    context.text.slice(0, offset).endsWith(pair.open) &&
+    context.text.slice(offset).startsWith(pair.close)
+  );
+}
+
+function wordAtCursor(context: VimContext): string | undefined {
+  const offset = cursorOffset(context);
+  for (const match of context.text.matchAll(/[\p{Alphabetic}\p{Number}_]+/gu)) {
+    const start = match.index;
+    const end = start + match[0].length;
+    if (start <= offset && offset < end) return match[0];
+  }
+  return undefined;
 }
 
 function handleMotion(state: VimViewState, character: string): Effect[] | null {
@@ -375,6 +638,10 @@ function handleVisual(state: VimViewState, key: KeyInput): Effect[] | null {
   if (key.code !== "character" || !isPlain(key) || !key.character) return null;
   const motion = handleMotion(state, key.character);
   if (motion) return motion;
+  if (key.character === '"') {
+    state.pending = { kind: "register" };
+    return [];
+  }
   if (key.character === "v") return enterVisual(state, "visual");
   if (key.character === "V") return enterVisual(state, "visual-line");
   if (key.character === "f" || key.character === "F") {
@@ -394,22 +661,58 @@ function handleVisual(state: VimViewState, key: KeyInput): Effect[] | null {
     beginViewport(state);
     return [];
   }
+  if (key.character === "y") {
+    const linewise = state.state === "visual-line";
+    const destination = takeRegister(state);
+    setEditorState(state, "normal");
+    return [
+      (context) => context.clipboard.copyForEdit(
+        linewise ? "line" : "character",
+        linewise ? "selected-lines" : "selection-inclusive",
+        1,
+        destination,
+      ),
+      (context) => context.cursor.collapseSelections(),
+    ];
+  }
   if (["d", "x", "D", "X"].includes(key.character)) {
     const linewise = state.state === "visual-line";
+    const destination = takeRegister(state);
     setEditorState(state, "normal");
-    return [(context) => linewise
-      ? context.edit.deleteSelectedLines()
-      : context.edit.deleteSelectionInclusive()];
+    return [(context) => {
+      context.clipboard.copyForEdit(
+        linewise ? "line" : "character",
+        linewise ? "selected-lines" : "selection-inclusive",
+        1,
+        destination,
+      );
+      if (linewise) context.edit.deleteSelectedLines();
+      else context.edit.deleteSelectionInclusive();
+    }];
   }
   if (key.character === "c" || key.character === "s") {
     const linewise = state.state === "visual-line";
+    const destination = takeRegister(state);
     setEditorState(state, "insert");
     return [
       (context) => context.history.begin(),
-      (context) => linewise
-        ? context.edit.deleteSelectedLines()
-        : context.edit.deleteSelectionInclusive(),
+      (context) => {
+        context.clipboard.copyForEdit(
+          linewise ? "line" : "character",
+          linewise ? "selected-lines" : "selection-inclusive",
+          1,
+          destination,
+        );
+        if (linewise) context.edit.deleteSelectedLines();
+        else context.edit.deleteSelectionInclusive();
+      },
     ];
+  }
+  if (key.character === ">" || key.character === "<") {
+    const config = indentation(state);
+    return [(context) => key.character === ">"
+      ? context.edit.indentLines(config)
+      : context.edit.outdentLines(config)];
   }
   if (key.character >= "1" && key.character <= "9") {
     state.pending = { kind: "count", count: Number(key.character) };
@@ -429,6 +732,19 @@ function handleNormal(state: VimViewState, key: KeyInput): Effect[] | null {
   if (isCtrl(key, "d")) return [(context) => context.viewport.halfPageDown()];
   if (isCtrl(key, "b")) return [(context) => context.viewport.fullPageUp()];
   if (isCtrl(key, "f")) return [(context) => context.viewport.fullPageDown()];
+  if (
+    key.code === "arrow" && key.modifiers.alt && !key.modifiers.ctrl &&
+    (key.direction === "up" || key.direction === "down")
+  ) {
+    if (key.modifiers.shift && key.direction === "down") {
+      return [(context) => context.edit.duplicateLines()];
+    }
+    if (!key.modifiers.shift) {
+      return [(context) => key.direction === "up"
+        ? context.edit.moveLinesUp()
+        : context.edit.moveLinesDown()];
+    }
+  }
   if (key.code !== "character" || !isPlain(key) || !key.character) return null;
 
   const motion = handleMotion(state, key.character);
@@ -437,11 +753,90 @@ function handleNormal(state: VimViewState, key: KeyInput): Effect[] | null {
     state.pending = { kind: "count", count: Number(key.character) };
     return [];
   }
+  if (key.character === '"') {
+    state.pending = { kind: "register" };
+    return [];
+  }
+  if (key.character === "/" || key.character === "?") {
+    const direction = key.character === "/" ? "forward" : "backward";
+    state.pending = { kind: "search", direction, value: "" };
+    showPrompt(state, key.character, "");
+    return [];
+  }
+  if (key.character === ":") {
+    state.pending = { kind: "command", value: "" };
+    showPrompt(state, ":", "");
+    return [];
+  }
+  if (key.character === "n" || key.character === "N") {
+    return [(context) => {
+      const search = context.state.search;
+      if (!search) return;
+      const direction = key.character === "n"
+        ? search.direction
+        : search.direction === "forward"
+        ? "backward"
+        : "forward";
+      context.search.find(search.pattern, {
+        caseSensitive: search.caseSensitive,
+        direction,
+        wrap: true,
+      });
+    }];
+  }
+  if (key.character === "*" || key.character === "#") {
+    const direction = key.character === "*" ? "forward" : "backward";
+    return [(context) => {
+      const word = wordAtCursor(context);
+      if (!word) return;
+      const search: VimSearchState = {
+        pattern: { kind: "literal", value: word },
+        direction,
+        caseSensitive: true,
+      };
+      context.state.search = search;
+      context.search.find(search.pattern, {
+        caseSensitive: true,
+        direction,
+        wrap: true,
+      });
+    }];
+  }
+  if (key.character === "p" || key.character === "P") {
+    const source = takeRegister(state);
+    return [(context) => context.clipboard.paste(
+      source,
+      key.character === "P" ? "before" : "after",
+    )];
+  }
   if (key.character === "u") return [(context) => context.history.undo()];
-  if (key.character === "x") return [(context) => context.edit.deleteForward()];
-  if (key.character === "X") return [(context) => context.edit.deleteBackward()];
+  if (key.character === "x" || key.character === "X") {
+    const destination = takeRegister(state);
+    const backward = key.character === "X";
+    return [(context) => {
+      context.clipboard.copyForEdit(
+        "character",
+        backward ? "delete-backward" : "delete-forward",
+        1,
+        destination,
+      );
+      if (backward) context.edit.deleteBackward();
+      else context.edit.deleteForward();
+    }];
+  }
   if (key.character === "J") return [(context) => context.edit.joinLines()];
-  if (key.character === "D") return [(context) => context.edit.deleteToLineEnd()];
+  if (key.character === "D") {
+    const destination = takeRegister(state);
+    return [(context) => {
+      context.clipboard.copyForEdit(
+        "character",
+        "line-end",
+        1,
+        destination,
+      );
+      context.edit.deleteToLineEnd();
+    }];
+  }
   if (key.character === "~") return [(context) => context.edit.toggleCase()];
   if (key.character === "i") {
     setEditorState(state, "insert");
@@ -459,9 +854,12 @@ function handleNormal(state: VimViewState, key: KeyInput): Effect[] | null {
     setEditorState(state, "insert");
     return [
       (context) => context.history.begin(),
-      (context) => below
-        ? context.edit.insertLineBelow()
-        : context.edit.insertLineAbove(),
+      (context) => {
+        const decision = editingStrategyFor(context).newline(context);
+        if (below) context.edit.insertLineBelow();
+        else context.edit.insertLineAbove();
+        if (decision.indent.length > 0) context.edit.insert(decision.indent);
+      },
     ];
   }
   if (key.character === "I") {
@@ -479,24 +877,51 @@ function handleNormal(state: VimViewState, key: KeyInput): Effect[] | null {
     ];
   }
   if (key.character === "s") {
+    const destination = takeRegister(state);
     setEditorState(state, "insert");
     return [
       (context) => context.history.begin(),
-      (context) => context.edit.deleteForward(),
+      (context) => {
+        context.clipboard.copyForEdit(
+          "character",
+          "delete-forward",
+          1,
+          destination,
+        );
+        context.edit.deleteForward();
+      },
     ];
   }
   if (key.character === "C") {
+    const destination = takeRegister(state);
     setEditorState(state, "insert");
     return [
       (context) => context.history.begin(),
-      (context) => context.edit.deleteToLineEnd(),
+      (context) => {
+        context.clipboard.copyForEdit(
+          "character",
+          "line-end",
+          1,
+          destination,
+        );
+        context.edit.deleteToLineEnd();
+      },
     ];
   }
   if (key.character === "S") {
+    const destination = takeRegister(state);
     setEditorState(state, "insert");
     return [
       (context) => context.history.begin(),
-      (context) => context.edit.deleteLineContent(),
+      (context) => {
+        context.clipboard.copyForEdit(
+          "line",
+          "line-content",
+          1,
+          destination,
+        );
+        context.edit.deleteLineContent();
+      },
     ];
   }
   if (key.character === "v") return enterVisual(state, "visual");
@@ -518,10 +943,22 @@ function handleNormal(state: VimViewState, key: KeyInput): Effect[] | null {
     beginViewport(state);
     return [];
   }
-  if (key.character === "d" || key.character === "c") {
+  if (key.character === ">" || key.character === "<") {
+    state.pending = {
+      kind: "indent",
+      direction: key.character === ">" ? "indent" : "outdent",
+      count: takeCount(state),
+    };
+    return [];
+  }
+  if (["d", "c", "y"].includes(key.character)) {
     state.pending = {
       kind: "operator",
-      operator: key.character === "d" ? "delete" : "change",
+      operator: key.character === "d"
+        ? "delete"
+        : key.character === "c"
+        ? "change"
+        : "yank",
       operatorCount: takeCount(state),
     };
     return [];
@@ -529,23 +966,187 @@ function handleNormal(state: VimViewState, key: KeyInput): Effect[] | null {
   return null;
 }
 
+function executeCommand(context: VimContext, raw: string): void {
+  const command = raw.trim();
+  const substitution = parseSubstitution(command);
+  if (substitution) {
+    if (!/^[gi]*$/.test(substitution.flags)) {
+      commandError(context, `E488: trailing characters: ${substitution.flags}`);
+      return;
+    }
+    const search: VimSearchState = {
+      pattern: { kind: "regex", value: substitution.pattern },
+      direction: "forward",
+      caseSensitive: !substitution.flags.includes("i"),
+    };
+    context.state.search = search;
+    const options = { caseSensitive: search.caseSensitive };
+    if (substitution.all) {
+      context.search.replaceAll(
+        search.pattern,
+        substitution.replacement,
+        options,
+      );
+    } else {
+      context.search.replaceNext(search.pattern, substitution.replacement, {
+        ...options,
+        direction: "forward",
+        wrap: false,
+      });
+    }
+    return;
+  }
+
+  const match = /^(\S+)(?:\s+(.*))?$/.exec(command);
+  if (!match) return;
+  const name = match[1];
+  const argument = match[2]?.trim();
+  const force = name.endsWith("!");
+  const base = force ? name.slice(0, -1) : name;
+  if (base === "e" || base === "edit") {
+    if (force && !argument) context.buffers.reload(undefined, true);
+    else if (argument) context.buffers.open(argument);
+    else commandError(context, "E471: path required");
+  } else if (base === "enew" || base === "new") {
+    context.buffers.create();
+  } else if (base === "buffers" || base === "ls") {
+    context.buffers.list();
+  } else if (base === "b" || base === "buffer") {
+    const id = parseContentId(argument);
+    if (id === undefined) commandError(context, "E86: buffer id required");
+    else context.buffers.switch(id);
+  } else if (base === "bd" || base === "bdelete") {
+    const id = argument ? parseContentId(argument) : undefined;
+    if (argument && id === undefined) commandError(context, "E86: invalid buffer id");
+    else context.buffers.close(id, force);
+  } else if (base === "w" || base === "write") {
+    if (argument) context.buffers.saveAs(argument, force);
+    else context.buffers.save(undefined, force);
+  } else if (base === "saveas") {
+    if (argument) context.buffers.saveAs(argument, force);
+    else commandError(context, "E471: path required");
+  } else if (base === "reload") {
+    context.buffers.reload(undefined, force);
+  } else if (base === "duplicate") {
+    context.edit.duplicateLines();
+  } else if (base === "moveup") {
+    context.edit.moveLinesUp();
+  } else if (base === "movedown") {
+    context.edit.moveLinesDown();
+  } else if (base === "comment") {
+    const strategy = editingStrategyFor(context);
+    if (strategy.lineComment) context.edit.toggleLineComment(strategy.lineComment);
+  } else if (base === "blockcomment") {
+    const strategy = editingStrategyFor(context);
+    if (strategy.blockComment) context.edit.toggleBlockComment(strategy.blockComment);
+  } else if (base === "set") {
+    applySetCommand(context, argument ?? "");
+  } else {
+    commandError(context, `E492: not an editor command: ${command}`);
+  }
+}
+
+function commandError(context: VimContext, message: string): void {
+  context.viewState.viewPolicy.statusBar = { left: [{ text: message }] };
+}
+
+function parseContentId(value: string | undefined): number | undefined {
+  if (!value || !/^\d+$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+function applySetCommand(context: VimContext, argument: string): void {
+  if (argument === "expandtab") {
+    context.viewState.insertSpaces = true;
+    return;
+  }
+  if (argument === "noexpandtab") {
+    context.viewState.insertSpaces = false;
+    return;
+  }
+  const width = /^(?:tabstop|ts|shiftwidth|sw)=(\d+)$/.exec(argument);
+  if (!width) {
+    commandError(context, `E518: unknown option: ${argument}`);
+    return;
+  }
+  const value = Number(width[1]);
+  if (value < 1 || value > 256) {
+    commandError(context, "E487: option value out of range");
+    return;
+  }
+  if (argument.startsWith("tabstop") || argument.startsWith("ts=")) {
+    context.viewState.viewPolicy.tabWidth = value;
+  } else {
+    context.viewState.indentWidth = value;
+  }
+}
+
+interface Substitution {
+  pattern: string;
+  replacement: string;
+  flags: string;
+  all: boolean;
+}
+
+function parseSubstitution(command: string): Substitution | undefined {
+  const all = command.startsWith("%s");
+  const start = all ? 2 : command.startsWith("s") ? 1 : -1;
+  if (start < 0 || start >= command.length) return undefined;
+  const delimiter = command[start];
+  if (/[\s\p{Alphabetic}\p{Number}_]/u.test(delimiter)) return undefined;
+  const pattern = takeDelimited(command, start + 1, delimiter);
+  if (!pattern) return undefined;
+  const replacement = takeDelimited(command, pattern.next, delimiter);
+  if (!replacement) return undefined;
+  return {
+    pattern: pattern.value,
+    replacement: replacement.value,
+    flags: command.slice(replacement.next),
+    all,
+  };
+}
+
+function takeDelimited(
+  text: string,
+  start: number,
+  delimiter: string,
+): { value: string; next: number } | undefined {
+  let value = "";
+  for (let index = start; index < text.length; index++) {
+    const character = text[index];
+    if (character === delimiter) return { value, next: index + 1 };
+    if (character === "\\" && text[index + 1] === delimiter) {
+      value += delimiter;
+      index++;
+    } else {
+      value += character;
+    }
+  }
+  return undefined;
+}
+
 editor.modes.define({
   name: "vim",
   on: {
     buffer: {
-      state: () => null,
+      state: (): VimContentState => ({ search: null }),
       viewState: (): VimViewState => ({
-      state: "normal",
-      pending: null,
-      viewPolicy: {
-        cursorStyle: "block",
-        cursorDomain: "character",
-        selectionShape: "character",
-      },
+        state: "normal",
+        pending: null,
+        register: "internal",
+        indentWidth: 4,
+        insertSpaces: true,
+        viewPolicy: {
+          cursorStyle: "block",
+          cursorDomain: "character",
+          selectionShape: "character",
+        },
       }),
       input(context) {
         const state = context.viewState;
         const key = context.arguments;
+        if (!state.pending && state.viewPolicy.statusBar) clearPrompt(state);
         const pending = handlePending(state, key);
         const effects = pending ?? (state.state === "insert"
           ? handleInsert(state, key)

@@ -298,6 +298,17 @@ impl Kernel {
         self.contents.copy_selections(content, selections, kind)
     }
 
+    pub(super) fn copy_for_edit(
+        &self,
+        content: ContentId,
+        selections: &Selections,
+        command: vell_core::command::EditCommand,
+        kind: ClipboardKind,
+    ) -> Option<ClipboardPayload> {
+        self.contents
+            .copy_for_edit(content, selections, command, kind)
+    }
+
     pub(super) fn plan_cut(
         &self,
         content: ContentId,

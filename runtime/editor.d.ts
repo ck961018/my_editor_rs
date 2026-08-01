@@ -129,6 +129,11 @@ interface OpenClosePair {
 	close: string;
 }
 
+interface EditorIndentationConfig {
+	indentWidth: number;
+	insertSpaces: boolean;
+}
+
 type EditorSearchPattern =
 	| { kind: "literal"; value: string }
 	| { kind: "regex"; value: string };
@@ -315,7 +320,49 @@ interface TextPrimitives {
 	insertPair(pair: OpenClosePair): void;
 	insertClosingPair(pair: OpenClosePair): void;
 	deletePairBackward(pair: OpenClosePair): void;
+	indentLines(config: EditorIndentationConfig): void;
+	outdentLines(config: EditorIndentationConfig): void;
+	duplicateLines(): void;
+	moveLinesUp(): void;
+	moveLinesDown(): void;
 	applyEdits(edits: ContentEdit[]): void;
+}
+
+type EditorClipboardKind = "character" | "line";
+type EditorClipboardEndpoint = "internal" | "system";
+type EditorClipboardEdit =
+	| "delete-forward"
+	| "delete-backward"
+	| "word"
+	| "word-end"
+	| "change-word"
+	| "line-start"
+	| "line-end"
+	| "lines"
+	| "change-lines"
+	| "line-content"
+	| "selection-inclusive"
+	| "selected-lines";
+
+interface ClipboardPrimitives {
+	copy(
+		kind: EditorClipboardKind,
+		destination?: EditorClipboardEndpoint,
+	): void;
+	copyForEdit(
+		kind: EditorClipboardKind,
+		edit: EditorClipboardEdit,
+		count?: number,
+		destination?: EditorClipboardEndpoint,
+	): void;
+	cut(
+		kind: EditorClipboardKind,
+		destination?: EditorClipboardEndpoint,
+	): void;
+	paste(
+		source?: EditorClipboardEndpoint,
+		placement?: "before" | "after",
+	): void;
 }
 
 interface HistoryPrimitives {
@@ -387,6 +434,17 @@ interface AppPrimitives {
 	focusRight(): void;
 }
 
+interface BufferPrimitives {
+	create(): void;
+	open(path: string): void;
+	list(): void;
+	switch(contentId: number): void;
+	close(contentId?: number, force?: boolean): void;
+	save(contentId?: number, force?: boolean): void;
+	saveAs(path: string, force?: boolean): void;
+	reload(contentId?: number, force?: boolean): void;
+}
+
 interface BufferContentContext {
 	readonly contentId: number;
 	readonly revision?: number;
@@ -417,11 +475,13 @@ interface BufferCommandContext<ContentState, ViewState, Arguments = ScriptData>
 	readonly cursor: CursorPrimitives;
 	readonly edit: TextPrimitives;
 	readonly search: SearchPrimitives;
+	readonly clipboard: ClipboardPrimitives;
 	readonly history: HistoryPrimitives;
 	readonly viewport: ViewportPrimitives;
 	readonly commands: CommandPrimitives;
 	readonly faces: FacePrimitives;
 	readonly app: AppPrimitives;
+	readonly buffers: BufferPrimitives;
 	state: ContentState;
 	viewState: ViewState;
 	pass(): Pass;

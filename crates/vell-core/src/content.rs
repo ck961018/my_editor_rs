@@ -226,6 +226,18 @@ impl Content {
         }
     }
 
+    pub fn copy_for_edit(
+        &self,
+        selections: &Selections,
+        command: EditCommand,
+        kind: ClipboardKind,
+    ) -> Option<ClipboardPayload> {
+        match self {
+            Self::Buffer(buffer) => Some(buffer.copy_for_edit(selections, command, kind)),
+            Self::StatusBar(_) => None,
+        }
+    }
+
     pub fn plan_cut(
         &self,
         selections: &Selections,

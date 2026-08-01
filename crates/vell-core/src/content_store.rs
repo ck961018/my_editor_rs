@@ -126,6 +126,18 @@ impl ContentStore {
             .and_then(|entry| entry.content.copy_selections(selections, kind))
     }
 
+    pub fn copy_for_edit(
+        &self,
+        id: ContentId,
+        selections: &Selections,
+        command: EditCommand,
+        kind: ClipboardKind,
+    ) -> Option<ClipboardPayload> {
+        self.entries
+            .get(&id)
+            .and_then(|entry| entry.content.copy_for_edit(selections, command, kind))
+    }
+
     pub fn plan_cut(
         &self,
         id: ContentId,

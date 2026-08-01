@@ -96,7 +96,17 @@ impl RenderQuery for AppQuery<'_> {
                 let policy = self
                     .presentation
                     .policy(id, content_revision, view.revision());
-                let presentation = policy.status_bar.as_ref().map_or_else(
+                let target_status_bar = self.views.get(&target_view).and_then(|view| {
+                    if view.content() != target_content {
+                        return None;
+                    }
+                    let revision = self.contents.revision(target_content)?;
+                    self.presentation
+                        .policy(target_view, revision, view.revision())
+                        .status_bar
+                });
+                let status_bar = policy.status_bar.as_ref().or(target_status_bar.as_ref());
+                let mut presentation = status_bar.map_or_else(
                     || {
                         default_status_bar_presentation(
                             target_view,
@@ -125,6 +135,12 @@ impl RenderQuery for AppQuery<'_> {
                         ),
                     },
                 );
+                if let Some(message) = self.presentation.status_message() {
+                    presentation.center = vec![StatusBarSegment {
+                        text: message.to_owned(),
+                        face: FacePatch::default(),
+                    }];
+                }
                 ViewPresentation::StatusBar(presentation)
             }
             (ContentKind::Buffer, ContentViewState::StatusBar(_))
