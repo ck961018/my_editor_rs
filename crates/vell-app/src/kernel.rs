@@ -23,6 +23,7 @@ use vell_core::content::{
     ContentResult, ContentTransactionError, SaveSnapshot,
 };
 use vell_core::content_store::{ContentSnapshot, ContentStore};
+use vell_core::search::{SearchError, SearchSnapshot};
 use vell_core::transaction::{TextStateId, TransactionDirection};
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 use vell_protocol::selection::Selections;
@@ -323,6 +324,14 @@ impl Kernel {
 
     pub(super) fn set_clipboard(&mut self, payload: ClipboardPayload) {
         self.clipboard = payload;
+    }
+
+    pub(super) fn search_snapshot(
+        &self,
+        content: ContentId,
+        expected_revision: vell_protocol::revision::Revision,
+    ) -> Result<Option<SearchSnapshot>, SearchError> {
+        self.contents.search_snapshot(content, expected_revision)
     }
 
     pub(super) fn apply_content_action(

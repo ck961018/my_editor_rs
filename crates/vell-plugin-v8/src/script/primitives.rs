@@ -5,6 +5,7 @@ use vell_core::action::ContentAction;
 use vell_core::command::{CharSearchDirection, EditCommand};
 use vell_core::content::ContentKind;
 use vell_core::motion::{OperatorCommand, TextMotion, TextOperator, TextTarget};
+use vell_core::search::{CaseSensitivity, SearchDirection, SearchOptions, SearchPattern};
 use vell_core::text_snapshot::TextSnapshot;
 use vell_core::transaction::{TextChangeSet, TextEdit};
 use vell_mode::ModeViewContext;
@@ -15,9 +16,11 @@ use vell_mode::editing::{
 use vell_mode::mode_name::{ModeActionName, ModeName};
 use vell_mode::operation::{
     AppOperation, ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget,
-    ModeFlowPropagation, ModeInvocation, ModeTarget, OperationRequest, ViewOperation, ViewTarget,
+    ModeFlowPropagation, ModeInvocation, ModeTarget, OperationRequest, SearchOperation,
+    ViewOperation, ViewTarget,
 };
 use vell_protocol::content_query::{FaceExpr, FaceName, FaceRemapToken};
+use vell_protocol::revision::Revision;
 use vell_protocol::space::SplitDirection;
 use vell_protocol::viewport::{
     ViewportAlignment, ViewportCommand, ViewportCursorBehavior, ViewportMoveAmount,
@@ -126,6 +129,9 @@ primitives! {
     InsertClosingPair => ("text", "insertClosingPair"),
     DeletePairBackward => ("text", "deletePairBackward"),
     ApplyEdits => ("text", "applyEdits"),
+    Find => ("search", "find"),
+    ReplaceNext => ("search", "replaceNext"),
+    ReplaceAll => ("search", "replaceAll"),
     Begin => ("history", "begin"),
     Commit => ("history", "commit"),
     Rollback => ("history", "rollback"),
@@ -157,6 +163,8 @@ primitives! {
 struct PrimitiveInvocation {
     id: u64,
     snapshot: Option<TextSnapshot>,
+    revision: Option<Revision>,
+    primary_head: Option<usize>,
     effects: Vec<OperationRequest>,
 }
 
@@ -184,6 +192,10 @@ impl PrimitiveRuntime {
         self.current = Some(PrimitiveInvocation {
             id,
             snapshot: context.buffer().and_then(|context| context.text_snapshot()),
+            revision: context.content_revision(),
+            primary_head: context
+                .buffer()
+                .map(|context| context.selections().primary().head.char_index),
             effects: Vec::new(),
         });
         Ok(id)
@@ -248,6 +260,7 @@ pub(super) fn install_v2(
         ContentKind::Buffer => &[
             ("cursor", "cursor"),
             ("text", "edit"),
+            ("search", "search"),
             ("history", "history"),
             ("viewport", "viewport"),
             ("commands", "commands"),
@@ -621,6 +634,43 @@ fn primitive_effects(
             target: ViewTarget::Current,
             operation: ViewOperation::ApplyContent(apply_edits(scope, arguments, runtime)?),
         }],
+        Find => {
+            let (expected_revision, start) = search_origin(runtime)?;
+            vec![OperationRequest::Search {
+                target: ViewTarget::Current,
+                operation: SearchOperation::Find {
+                    expected_revision,
+                    start,
+                    pattern: search_pattern(scope, arguments.get(0))?,
+                    options: search_options(scope, arguments.get(1))?,
+                },
+            }]
+        }
+        ReplaceNext => {
+            let (expected_revision, start) = search_origin(runtime)?;
+            vec![OperationRequest::Search {
+                target: ViewTarget::Current,
+                operation: SearchOperation::ReplaceNext {
+                    expected_revision,
+                    start,
+                    pattern: search_pattern(scope, arguments.get(0))?,
+                    replacement: string(scope, arguments.get(1), "replacement")?,
+                    options: search_options(scope, arguments.get(2))?,
+                },
+            }]
+        }
+        ReplaceAll => {
+            let (expected_revision, _) = search_origin(runtime)?;
+            vec![OperationRequest::Search {
+                target: ViewTarget::Current,
+                operation: SearchOperation::ReplaceAll {
+                    expected_revision,
+                    pattern: search_pattern(scope, arguments.get(0))?,
+                    replacement: string(scope, arguments.get(1), "replacement")?,
+                    case: search_case(scope, arguments.get(2))?,
+                },
+            }]
+        }
         Begin => vec![history(vell_mode::action::TransactionIntent::Begin)],
         Commit => vec![history(vell_mode::action::TransactionIntent::Commit)],
         Rollback => vec![history(vell_mode::action::TransactionIntent::Rollback)],
@@ -819,6 +869,117 @@ fn open_close_pair(
     }
     .validated()
     .map_err(|error| ScriptError::new(format!("invalid open/close pair: {error}")))
+}
+
+fn search_origin(
+    runtime: &Rc<RefCell<PrimitiveRuntime>>,
+) -> Result<(Revision, usize), ScriptError> {
+    let runtime = runtime.borrow();
+    let invocation = runtime
+        .current
+        .as_ref()
+        .ok_or_else(|| ScriptError::new("search primitive invocation is not active"))?;
+    let revision = invocation
+        .revision
+        .ok_or_else(|| ScriptError::new("search content revision is unavailable"))?;
+    let start = invocation
+        .primary_head
+        .ok_or_else(|| ScriptError::new("search selection is unavailable"))?;
+    Ok((revision, start))
+}
+
+fn search_pattern(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<SearchPattern, ScriptError> {
+    let object = v8::Local::<v8::Object>::try_from(value)
+        .map_err(|_| ScriptError::new("search pattern must be an object"))?;
+    let kind = required_string(scope, object, "kind")?;
+    let value = required_string(scope, object, "value")?;
+    match kind.as_str() {
+        "literal" => Ok(SearchPattern::Literal(value)),
+        "regex" => Ok(SearchPattern::Regex(value)),
+        _ => Err(ScriptError::new(
+            "search pattern kind must be 'literal' or 'regex'",
+        )),
+    }
+}
+
+fn search_options(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<SearchOptions, ScriptError> {
+    let Some(object) = optional_search_options(value)? else {
+        return Ok(SearchOptions {
+            case: CaseSensitivity::Sensitive,
+            direction: SearchDirection::Forward,
+            wrap: true,
+        });
+    };
+    let direction = match optional_string(scope, object, "direction")?.as_deref() {
+        None | Some("forward") => SearchDirection::Forward,
+        Some("backward") => SearchDirection::Backward,
+        Some(_) => {
+            return Err(ScriptError::new(
+                "search direction must be 'forward' or 'backward'",
+            ));
+        }
+    };
+    Ok(SearchOptions {
+        case: search_case_from_object(scope, object)?,
+        direction,
+        wrap: optional_boolean(scope, object, "wrap")?.unwrap_or(true),
+    })
+}
+
+fn search_case(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<CaseSensitivity, ScriptError> {
+    optional_search_options(value)?
+        .map(|object| search_case_from_object(scope, object))
+        .unwrap_or(Ok(CaseSensitivity::Sensitive))
+}
+
+fn search_case_from_object(
+    scope: &mut v8::PinScope,
+    object: v8::Local<v8::Object>,
+) -> Result<CaseSensitivity, ScriptError> {
+    Ok(
+        if optional_boolean(scope, object, "caseSensitive")?.unwrap_or(true) {
+            CaseSensitivity::Sensitive
+        } else {
+            CaseSensitivity::Insensitive
+        },
+    )
+}
+
+fn optional_search_options(
+    value: v8::Local<v8::Value>,
+) -> Result<Option<v8::Local<v8::Object>>, ScriptError> {
+    if value.is_null_or_undefined() {
+        return Ok(None);
+    }
+    v8::Local::<v8::Object>::try_from(value)
+        .map(Some)
+        .map_err(|_| ScriptError::new("search options must be an object"))
+}
+
+fn optional_boolean(
+    scope: &mut v8::PinScope,
+    object: v8::Local<v8::Object>,
+    name: &str,
+) -> Result<Option<bool>, ScriptError> {
+    let Some(value) = property(scope, object, name) else {
+        return Ok(None);
+    };
+    if value.is_null_or_undefined() {
+        return Ok(None);
+    }
+    if !value.is_boolean() {
+        return Err(ScriptError::new(format!("search {name} must be a boolean")));
+    }
+    Ok(Some(value.boolean_value(scope)))
 }
 
 fn face_expressions(

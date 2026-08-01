@@ -13,6 +13,7 @@ pub(crate) mod grapheme;
 pub mod input;
 pub mod keymap;
 pub mod motion;
+pub mod search;
 pub mod status_bar;
 pub mod text_snapshot;
 pub mod transaction;

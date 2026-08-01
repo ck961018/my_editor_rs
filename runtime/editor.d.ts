@@ -129,6 +129,20 @@ interface OpenClosePair {
 	close: string;
 }
 
+type EditorSearchPattern =
+	| { kind: "literal"; value: string }
+	| { kind: "regex"; value: string };
+
+interface EditorSearchOptions {
+	caseSensitive?: boolean;
+	direction?: "forward" | "backward";
+	wrap?: boolean;
+}
+
+interface EditorReplaceAllOptions {
+	caseSensitive?: boolean;
+}
+
 interface TextDecorationSpan {
 	range: EditorRange;
 	face: string;
@@ -312,6 +326,20 @@ interface HistoryPrimitives {
 	redo(): void;
 }
 
+interface SearchPrimitives {
+	find(pattern: EditorSearchPattern, options?: EditorSearchOptions): void;
+	replaceNext(
+		pattern: EditorSearchPattern,
+		replacement: string,
+		options?: EditorSearchOptions,
+	): void;
+	replaceAll(
+		pattern: EditorSearchPattern,
+		replacement: string,
+		options?: EditorReplaceAllOptions,
+	): void;
+}
+
 interface ViewportPrimitives {
 	halfPageUp(extendSelection?: boolean): void;
 	halfPageDown(extendSelection?: boolean): void;
@@ -388,6 +416,7 @@ interface BufferCommandContext<ContentState, ViewState, Arguments = ScriptData>
 	readonly arguments: Arguments;
 	readonly cursor: CursorPrimitives;
 	readonly edit: TextPrimitives;
+	readonly search: SearchPrimitives;
 	readonly history: HistoryPrimitives;
 	readonly viewport: ViewportPrimitives;
 	readonly commands: CommandPrimitives;

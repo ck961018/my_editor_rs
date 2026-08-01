@@ -58,6 +58,11 @@ pub enum ResolvedOperation {
         content: ContentId,
         operation: ClipboardOperation,
     },
+    Search {
+        view: ViewId,
+        content: ContentId,
+        operation: SearchOperation,
+    },
     Buffer(ResolvedBufferOperation),
     App(AppOperation),
 }

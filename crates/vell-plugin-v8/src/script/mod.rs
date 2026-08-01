@@ -1533,6 +1533,19 @@ editor.modes.define({
           ctx.edit.insertPair({ open: "(", close: ")" });
           ctx.edit.insertClosingPair({ open: "(", close: ")" });
           ctx.edit.deletePairBackward({ open: "(", close: ")" });
+          ctx.search.find(
+            { kind: "literal", value: "b" },
+            { caseSensitive: false, direction: "backward", wrap: false },
+          );
+          ctx.search.replaceNext(
+            { kind: "regex", value: "(b)" },
+            "$1",
+          );
+          ctx.search.replaceAll(
+            { kind: "literal", value: "b" },
+            "c",
+            { caseSensitive: true },
+          );
         },
         invalid(ctx) {
           ctx.viewState.calls++;
@@ -1587,7 +1600,7 @@ editor.modes.define({
             )
             .unwrap()
             .into_parts();
-        assert_eq!(operations.len(), 6);
+        assert_eq!(operations.len(), 9);
         assert!(matches!(
             &operations[0],
             vell_mode::operation::OperationRequest::View {
@@ -1596,6 +1609,33 @@ editor.modes.define({
                 ),
                 ..
             } if indent == "  " && closing_indent.as_deref() == Some("")
+        ));
+        assert!(matches!(
+            &operations[6],
+            vell_mode::operation::OperationRequest::Search {
+                operation: vell_mode::operation::SearchOperation::Find {
+                    expected_revision: vell_protocol::revision::Revision(0),
+                    start: 2,
+                    pattern: vell_core::search::SearchPattern::Literal(pattern),
+                    options: vell_core::search::SearchOptions {
+                        case: vell_core::search::CaseSensitivity::Insensitive,
+                        direction: vell_core::search::SearchDirection::Backward,
+                        wrap: false,
+                    },
+                },
+                ..
+            } if pattern == "b"
+        ));
+        assert!(matches!(
+            &operations[8],
+            vell_mode::operation::OperationRequest::Search {
+                operation: vell_mode::operation::SearchOperation::ReplaceAll {
+                    replacement,
+                    case: vell_core::search::CaseSensitivity::Sensitive,
+                    ..
+                },
+                ..
+            } if replacement == "c"
         ));
 
         let error = mode

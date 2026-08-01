@@ -1,6 +1,6 @@
 # 基础代码编辑器 Roadmap
 
-**状态：** 实施中（M1 至 M5 已完成）
+**状态：** 实施中（M1 至 M6 已完成）
 
 **更新日期：** 2026-08-02
 
@@ -527,6 +527,8 @@ payload fragment 数量与合并后的目标数相同时逐项配对；
 
 ## 11. 里程碑 M6：当前 Buffer 查找替换
 
+**状态：** 已完成（2026-08-02）
+
 ### 目标
 
 提供与命令 UI 无关的当前 buffer 搜索服务。
@@ -550,6 +552,10 @@ Regex replacement 使用 Rust regex crate 的 capture replacement 语义。
 
 第一版允许从 `TextSnapshot` 生成 owned `String` 后搜索。
 没有性能数据前，不实现跨 Rope chunk 的自定义 regex engine。
+
+实现使用 Rust `regex` crate；literal pattern 先转义后复用同一搜索路径。
+`SearchSnapshot` 携带 content revision，typed operation 必须提交预期 revision。
+宿主只暴露无状态的 `search` primitive，pattern 和历史仍由 TypeScript 保存。
 
 ### 执行规则
 

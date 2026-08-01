@@ -32,8 +32,8 @@ use crate::mode_name::{ModeActionName, ModeName};
 use crate::operation::{
     AppOperation, BufferOperation, ClipboardDestination, ClipboardOperation, ClipboardSource,
     ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget, ModeFlowPropagation,
-    ModeInvocation, ModeTarget, OperationRequest, ViewEditPlan, ViewOperation, ViewPrecondition,
-    ViewTarget,
+    ModeInvocation, ModeTarget, OperationRequest, SearchOperation, ViewEditPlan, ViewOperation,
+    ViewPrecondition, ViewTarget,
 };
 use std::collections::VecDeque;
 use vell_core::action::ContentAction;
@@ -45,6 +45,7 @@ use vell_core::content::{
 };
 use vell_core::content_view_state::ContentViewState;
 use vell_core::keymap::Keymap;
+use vell_core::search::{CaseSensitivity, SearchDirection, SearchOptions, SearchPattern};
 use vell_core::transaction::{TextChangeSet, TextEdit};
 use vell_frontend::Frontend;
 use vell_plugin_v8::ScriptHost;
@@ -209,6 +210,21 @@ fn clipboard(operation: ClipboardOperation) -> OperationRequest {
     OperationRequest::Clipboard {
         target: ViewTarget::Current,
         operation,
+    }
+}
+
+fn search(operation: SearchOperation) -> OperationRequest {
+    OperationRequest::Search {
+        target: ViewTarget::Current,
+        operation,
+    }
+}
+
+fn search_options(direction: SearchDirection, wrap: bool) -> SearchOptions {
+    SearchOptions {
+        case: CaseSensitivity::Sensitive,
+        direction,
+        wrap,
     }
 }
 
@@ -8734,4 +8750,213 @@ async fn bracketed_multiline_paste_is_one_undoable_edit() {
     })
     .unwrap();
     assert_eq!(text_rows(&app, editor_cid()), vec![""]);
+}
+
+#[test]
+fn search_find_updates_only_the_view_and_expands_grapheme_matches() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("zero e\u{301} ONE".into())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    let revision = app.kernel.contents().revision(editor_cid()).unwrap();
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![search(SearchOperation::Find {
+            expected_revision: revision,
+            start: 0,
+            pattern: SearchPattern::Literal("\u{301}".into()),
+            options: search_options(SearchDirection::Forward, false),
+        })],
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    assert_eq!(
+        app.session.views()[&view].selections().unwrap().primary(),
+        &Selection {
+            anchor: TextOffset { char_index: 5 },
+            head: TextOffset { char_index: 7 },
+        }
+    );
+    assert_eq!(app.kernel.contents().revision(editor_cid()), Some(revision));
+
+    let mut options = search_options(SearchDirection::Backward, false);
+    options.case = CaseSensitivity::Insensitive;
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![search(SearchOperation::Find {
+            expected_revision: revision,
+            start: 11,
+            pattern: SearchPattern::Literal("one".into()),
+            options,
+        })],
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    assert_eq!(
+        app.session.views()[&view].selections().unwrap().primary(),
+        &Selection {
+            anchor: TextOffset { char_index: 11 },
+            head: TextOffset { char_index: 8 },
+        }
+    );
+}
+
+#[test]
+fn search_replace_next_and_all_are_undoable() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("a1 a2\r\na3".into())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    let revision = app.kernel.contents().revision(editor_cid()).unwrap();
+    let pattern = SearchPattern::Regex(r"a(\d)".into());
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![search(SearchOperation::ReplaceNext {
+            expected_revision: revision,
+            start: 0,
+            pattern: pattern.clone(),
+            replacement: "${1}a".into(),
+            options: search_options(SearchDirection::Forward, false),
+        })],
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    assert_eq!(
+        app.kernel
+            .contents()
+            .text_snapshot(editor_cid())
+            .unwrap()
+            .to_owned_string(),
+        "1a a2\r\na3"
+    );
+
+    for (intent, expected) in [
+        (TransactionIntent::Undo, "a1 a2\r\na3"),
+        (TransactionIntent::Redo, "1a a2\r\na3"),
+        (TransactionIntent::Undo, "a1 a2\r\na3"),
+    ] {
+        app.execute_command(DispatchCommand::ModeOperations {
+            operations: vec![history(intent)],
+            view,
+            content: editor_cid(),
+        })
+        .unwrap();
+        assert_eq!(
+            app.kernel
+                .contents()
+                .text_snapshot(editor_cid())
+                .unwrap()
+                .to_owned_string(),
+            expected
+        );
+    }
+
+    let revision = app.kernel.contents().revision(editor_cid()).unwrap();
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![search(SearchOperation::ReplaceAll {
+            expected_revision: revision,
+            pattern,
+            replacement: "${1}a".into(),
+            case: CaseSensitivity::Sensitive,
+        })],
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    assert_eq!(
+        app.kernel
+            .contents()
+            .text_snapshot(editor_cid())
+            .unwrap()
+            .to_owned_string(),
+        "1a 2a\r\n3a"
+    );
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![history(TransactionIntent::Undo)],
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    assert_eq!(
+        app.kernel
+            .contents()
+            .text_snapshot(editor_cid())
+            .unwrap()
+            .to_owned_string(),
+        "a1 a2\r\na3"
+    );
+}
+
+#[test]
+fn failed_search_frame_rolls_back_text_and_revision() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("aa".into())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    let revision = app.kernel.contents().revision(editor_cid()).unwrap();
+
+    let result = app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![
+            search(SearchOperation::ReplaceAll {
+                expected_revision: revision,
+                pattern: SearchPattern::Literal("a".into()),
+                replacement: "b".into(),
+                case: CaseSensitivity::Sensitive,
+            }),
+            search(SearchOperation::Find {
+                expected_revision: Revision(revision.0 + 1),
+                start: 0,
+                pattern: SearchPattern::Regex("(".into()),
+                options: search_options(SearchDirection::Forward, false),
+            }),
+        ],
+        view,
+        content: editor_cid(),
+    });
+
+    assert!(result.is_err());
+    assert_eq!(text_rows(&app, editor_cid()), vec!["aa"]);
+    assert_eq!(app.kernel.contents().revision(editor_cid()), Some(revision));
+}
+
+#[test]
+fn search_rejects_stale_content_revision_without_mutation() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    let stale = app.kernel.contents().revision(editor_cid()).unwrap();
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("current".into())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    let result = app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![search(SearchOperation::ReplaceAll {
+            expected_revision: stale,
+            pattern: SearchPattern::Literal("current".into()),
+            replacement: "stale".into(),
+            case: CaseSensitivity::Sensitive,
+        })],
+        view,
+        content: editor_cid(),
+    });
+
+    assert!(result.is_err());
+    assert_eq!(text_rows(&app, editor_cid()), vec!["current"]);
 }

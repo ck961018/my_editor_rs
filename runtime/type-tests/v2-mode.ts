@@ -34,6 +34,18 @@ editor.modes.define({
 					ctx.edit.insertNewline({ indent: "  ", closingIndent: "" });
 					ctx.edit.toggleLineComment({ delimiter: "//" });
 					ctx.edit.toggleBlockComment({ open: "/*", close: "*/" });
+					ctx.search.find(
+						{ kind: "literal", value: "needle" },
+						{ caseSensitive: false, direction: "forward", wrap: true },
+					);
+					ctx.search.replaceNext(
+						{ kind: "regex", value: "(needle)" },
+						"$1",
+					);
+					ctx.search.replaceAll(
+						{ kind: "literal", value: "needle" },
+						"replacement",
+					);
 					const token = ctx.faces.addRelative(
 						"plugin.pairs.match",
 						["syntax.string", { underline: true }],

@@ -3,6 +3,7 @@ use crate::command::{AppCommand, ModeCommand, ModeInputCommand};
 use vell_core::action::ContentAction;
 use vell_core::clipboard::{ClipboardKind, PastePlacement};
 use vell_core::command::EditCommand;
+use vell_core::search::{CaseSensitivity, SearchOptions, SearchPattern};
 use vell_protocol::content_query::{FaceExpr, FaceName, FaceRemapToken};
 use vell_protocol::ids::{ContentId, ViewId};
 use vell_protocol::revision::Revision;
@@ -70,6 +71,10 @@ pub enum OperationRequest {
         target: ViewTarget,
         operation: ClipboardOperation,
     },
+    Search {
+        target: ViewTarget,
+        operation: SearchOperation,
+    },
     Buffer(BufferOperation),
     App(AppOperation),
 }
@@ -99,6 +104,29 @@ pub enum ClipboardOperation {
     Paste {
         source: ClipboardSource,
         placement: PastePlacement,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SearchOperation {
+    Find {
+        expected_revision: Revision,
+        start: usize,
+        pattern: SearchPattern,
+        options: SearchOptions,
+    },
+    ReplaceNext {
+        expected_revision: Revision,
+        start: usize,
+        pattern: SearchPattern,
+        replacement: String,
+        options: SearchOptions,
+    },
+    ReplaceAll {
+        expected_revision: Revision,
+        pattern: SearchPattern,
+        replacement: String,
+        case: CaseSensitivity,
     },
 }
 

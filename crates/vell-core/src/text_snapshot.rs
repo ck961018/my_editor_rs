@@ -1,5 +1,6 @@
 use ropey::Rope;
 
+use crate::core::grapheme::{boundary_at_or_after, boundary_at_or_before};
 use crate::core::transaction::{TextChangeSet, TextTransactionError};
 
 /// A cheaply cloned, immutable text snapshot for background analyzers.
@@ -92,6 +93,14 @@ impl TextSnapshot {
         Ok(Self { rope })
     }
 
+    pub fn grapheme_range(&self, range: std::ops::Range<usize>) -> std::ops::Range<usize> {
+        if range.is_empty() {
+            let at = boundary_at_or_after(&self.rope, range.start);
+            return at..at;
+        }
+        boundary_at_or_before(&self.rope, range.start)..boundary_at_or_after(&self.rope, range.end)
+    }
+
     pub fn to_owned_string(&self) -> String {
         self.rope.to_string()
     }
@@ -124,5 +133,14 @@ mod tests {
         assert_eq!(snapshot.char_range_for_rows(1, 2), 3..5);
         assert_eq!(snapshot.char_range_for_rows(2, usize::MAX), 5..5);
         assert_eq!(snapshot.char_range_for_rows(99, 100), 5..5);
+    }
+
+    #[test]
+    fn search_ranges_expand_to_grapheme_boundaries() {
+        let snapshot = TextSnapshot::from_text("e\u{301}x");
+
+        assert_eq!(snapshot.grapheme_range(1..2), 0..2);
+        assert_eq!(snapshot.grapheme_range(1..1), 2..2);
+        assert_eq!(snapshot.grapheme_range(2..3), 2..3);
     }
 }

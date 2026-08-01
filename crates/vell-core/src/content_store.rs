@@ -9,6 +9,7 @@ use crate::core::content::{
     ContentTransactionError,
 };
 use crate::core::content_view_state::{ContentViewState, ContentViewStateError};
+use crate::core::search::{SearchError, SearchSnapshot};
 use crate::core::transaction::TransactionDirection;
 use crate::protocol::content_query::{ContentData, ContentQuery};
 use crate::protocol::ids::ContentId;
@@ -202,6 +203,26 @@ impl ContentStore {
         self.entries.get(&id)?.content.text_snapshot()
     }
 
+    pub fn search_snapshot(
+        &self,
+        id: ContentId,
+        expected_revision: Revision,
+    ) -> Result<Option<SearchSnapshot>, SearchError> {
+        let Some(entry) = self.entries.get(&id) else {
+            return Ok(None);
+        };
+        if entry.revision != expected_revision {
+            return Err(SearchError::StaleSnapshot {
+                expected: expected_revision,
+                actual: entry.revision,
+            });
+        }
+        Ok(entry
+            .content
+            .text_snapshot()
+            .map(|text| SearchSnapshot::new(entry.revision, text)))
+    }
+
     pub fn query(&self, id: ContentId, query: ContentQuery) -> ContentData {
         let Some(entry) = self.entries.get(&id) else {
             return ContentData::Unsupported;
@@ -283,6 +304,25 @@ mod tests {
             store.query(id, ContentQuery::TextRows(RowRange { start: 0, end: 1 })),
             ContentData::TextRows(vec!["x".to_string()])
         );
+    }
+
+    #[test]
+    fn search_snapshot_requires_the_current_content_revision() {
+        let id = ContentId(0);
+        let mut store = ContentStore::default();
+        store.insert(id, Content::Buffer(Buffer::new())).unwrap();
+        let revision = store.revision(id).unwrap();
+        let snapshot = store.search_snapshot(id, revision).unwrap().unwrap();
+
+        apply_planned_edit(&mut store, id, EditCommand::InsertText("x".into()));
+
+        assert!(matches!(
+            store.search_snapshot(id, snapshot.revision()),
+            Err(SearchError::StaleSnapshot {
+                expected,
+                actual: Revision(1),
+            }) if expected == revision
+        ));
     }
 
     #[test]

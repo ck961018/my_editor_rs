@@ -6,6 +6,7 @@ rust-version = "1.88"
 
 [dependencies]
 vell-protocol = { path = "../vell-protocol" }
+regex = "1"
 ropey = "1"
 unicode-segmentation = "1"
 

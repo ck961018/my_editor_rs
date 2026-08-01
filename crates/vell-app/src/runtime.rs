@@ -19,8 +19,9 @@ use crate::operation::{
     AppOperation, BufferOperation, ClipboardDestination, ClipboardOperation, ClipboardSource,
     ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget, ModeFlowPropagation,
     ModeTarget, OperationError, OperationOrigin, OperationOriginScope, OperationRequest,
-    QueuedOperation, ResolvedBufferOperation, ResolvedModeScope, ResolvedOperation, ViewEditPlan,
-    ViewOperation, ViewPrecondition, ViewTarget, adapt_dispatch_command, prepend_operations,
+    QueuedOperation, ResolvedBufferOperation, ResolvedModeScope, ResolvedOperation,
+    SearchOperation, ViewEditPlan, ViewOperation, ViewPrecondition, ViewTarget,
+    adapt_dispatch_command, prepend_operations,
 };
 use crate::query::AppQuery;
 use crate::theme::{FaceRemapOwner, ResolvedFaceOperation};
@@ -30,16 +31,29 @@ use vell_core::command::EditCommand;
 use vell_core::content::{
     ContentActionResult, ContentEffect, ContentInput, ContentKind, ContentResult,
 };
+use vell_core::search::SearchDirection;
 use vell_core::transaction::TransactionDirection;
 use vell_frontend::Frontend;
 use vell_protocol::content_query::{ContentData, ContentQuery, RenderQuery};
 use vell_protocol::frontend_event::FrontendEvent;
 use vell_protocol::ids::{ContentId, ViewId};
+use vell_protocol::selection::{Selection, Selections, TextOffset};
 use vell_protocol::viewport::{
     ResolvedViewportCommand, ViewportCommand, ViewportCursorBehavior, ViewportMoveDirection,
 };
 
 const MAX_RUNTIME_DIAGNOSTICS: usize = 128;
+
+fn selection_for_match(range: std::ops::Range<usize>, direction: SearchDirection) -> Selections {
+    let (anchor, head) = match direction {
+        SearchDirection::Forward => (range.start, range.end),
+        SearchDirection::Backward => (range.end, range.start),
+    };
+    Selections::single(Selection {
+        anchor: TextOffset { char_index: anchor },
+        head: TextOffset { char_index: head },
+    })
+}
 
 #[cfg(test)]
 impl PreparedEffect {
@@ -1140,6 +1154,11 @@ impl<F: Frontend> App<F> {
                     content,
                     operation,
                 } => self.execute_clipboard(operation, view, content, frame),
+                ResolvedOperation::Search {
+                    view,
+                    content,
+                    operation,
+                } => self.execute_search(operation, view, content, frame),
                 ResolvedOperation::Mode {
                     mode,
                     scope,
@@ -1352,6 +1371,19 @@ impl<F: Frontend> App<F> {
                 }
                 let (view, content) = self.resolve_view_target(target, origin)?;
                 Ok(ResolvedOperation::Clipboard {
+                    view,
+                    content,
+                    operation,
+                })
+            }
+            OperationRequest::Search { target, operation } => {
+                if origin.scope != OperationOriginScope::View {
+                    return Err(invalid_operation(
+                        "search operation requires a view-scoped origin",
+                    ));
+                }
+                let (view, content) = self.resolve_view_target(target, origin)?;
+                Ok(ResolvedOperation::Search {
                     view,
                     content,
                     operation,
@@ -1758,6 +1790,114 @@ impl<F: Frontend> App<F> {
                         expected: ViewPrecondition::Selections(selections),
                         content: plan.action,
                         view: Some(ViewAction::SetSelections(plan.selections)),
+                    },
+                    view,
+                    content,
+                    frame,
+                )
+            }
+        }
+    }
+
+    fn execute_search(
+        &mut self,
+        operation: SearchOperation,
+        view: ViewId,
+        content: ContentId,
+        frame: &mut ExecutionFrame,
+    ) -> io::Result<()> {
+        let expected_revision = match &operation {
+            SearchOperation::Find {
+                expected_revision, ..
+            }
+            | SearchOperation::ReplaceNext {
+                expected_revision, ..
+            }
+            | SearchOperation::ReplaceAll {
+                expected_revision, ..
+            } => *expected_revision,
+        };
+        let snapshot = self
+            .kernel
+            .search_snapshot(content, expected_revision)
+            .map_err(|error| recoverable_message(io::ErrorKind::InvalidData, error.to_string()))?
+            .ok_or_else(|| invalid_operation("content does not support search"))?;
+        let before = self
+            .session
+            .view(view)
+            .and_then(|view| view.selections())
+            .ok_or_else(|| invalid_operation("search requires buffer view state"))?
+            .clone();
+        let search_error = |error: vell_core::search::SearchError| {
+            recoverable_message(io::ErrorKind::InvalidInput, error.to_string())
+        };
+        match operation {
+            SearchOperation::Find {
+                expected_revision: _,
+                start,
+                pattern,
+                options,
+            } => {
+                let Some(found) = snapshot
+                    .find_from(&pattern, options, start)
+                    .map_err(search_error)?
+                else {
+                    return Ok(());
+                };
+                let selections = selection_for_match(
+                    snapshot.text().grapheme_range(found.range),
+                    options.direction,
+                );
+                self.apply_view_action(view, ViewAction::SetSelections(selections), frame)
+            }
+            SearchOperation::ReplaceNext {
+                expected_revision: _,
+                start,
+                pattern,
+                replacement,
+                options,
+            } => {
+                let Some(edit) = snapshot
+                    .replace_next(&pattern, &replacement, options, start)
+                    .map_err(search_error)?
+                else {
+                    return Ok(());
+                };
+                let after = snapshot.text().apply(&edit.change).map_err(|error| {
+                    recoverable_message(io::ErrorKind::InvalidData, format!("{error:?}"))
+                })?;
+                let selections = selection_for_match(
+                    after.grapheme_range(edit.selection.range),
+                    options.direction,
+                );
+                self.apply_view_edit_plan(
+                    ViewEditPlan {
+                        expected: ViewPrecondition::Selections(before),
+                        content: Some(vell_core::action::ContentAction::Text(edit.change)),
+                        view: Some(ViewAction::SetSelections(selections)),
+                    },
+                    view,
+                    content,
+                    frame,
+                )
+            }
+            SearchOperation::ReplaceAll {
+                expected_revision: _,
+                pattern,
+                replacement,
+                case,
+            } => {
+                let change = snapshot
+                    .replace_all(&pattern, &replacement, case)
+                    .map_err(search_error)?;
+                if change.is_empty() {
+                    return Ok(());
+                }
+                self.apply_view_edit_plan(
+                    ViewEditPlan {
+                        expected: ViewPrecondition::Selections(before),
+                        content: Some(vell_core::action::ContentAction::Text(change)),
+                        view: None,
                     },
                     view,
                     content,
