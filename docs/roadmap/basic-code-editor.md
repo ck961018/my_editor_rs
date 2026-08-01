@@ -95,8 +95,8 @@ Vell 已有以下可复用能力：
 | --- | --- | --- |
 | Grapheme 编辑 | M1 已完成 | P0 |
 | Tab 输入和显示 | M1 已完成 | P0 |
-| 多 buffer 生命周期 | 只有底层 Content 结构 | P0 |
-| 文件安全 | 缺 dirty guard 与外部冲突检测 | P0 |
+| 多 buffer 生命周期 | M2 已完成 | P0 |
+| 文件安全 | M2 已完成 | P0 |
 | Clipboard | 内部与系统能力均缺失 | P0 |
 | Search/replace | 只有当前行单字符查找 | P1 |
 | 语言编辑策略 | 有 `applyEdits` 底座，无正式契约 | P1 |

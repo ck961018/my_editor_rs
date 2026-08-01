@@ -331,8 +331,10 @@ mod tests {
 
     #[test]
     fn noop_dispatch_has_no_operations() {
-        assert!(adapt_dispatch_command(DispatchCommand::Noop)
-            .unwrap()
-            .is_empty());
+        assert!(
+            adapt_dispatch_command(DispatchCommand::Noop)
+                .unwrap()
+                .is_empty()
+        );
     }
 }
