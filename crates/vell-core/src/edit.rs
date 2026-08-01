@@ -335,6 +335,21 @@ pub(crate) fn apply_edit(command: EditCommand, buffer: &mut Buffer, selections: 
         EditCommand::DeleteSelectedLines => {
             buffer.delete_selected_lines_at_selections(selections);
         }
+        EditCommand::IndentLines(config) => {
+            buffer.indent_lines_at_selections(selections, config);
+        }
+        EditCommand::OutdentLines(config) => {
+            buffer.outdent_lines_at_selections(selections, config);
+        }
+        EditCommand::DuplicateLines => {
+            buffer.duplicate_lines_at_selections(selections);
+        }
+        EditCommand::MoveLinesUp => {
+            buffer.move_lines_up_at_selections(selections);
+        }
+        EditCommand::MoveLinesDown => {
+            buffer.move_lines_down_at_selections(selections);
+        }
     }
 }
 

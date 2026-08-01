@@ -8359,6 +8359,68 @@ fn no_op_edit_does_not_advance_content_or_view_revision() {
     );
 }
 
+#[test]
+fn line_edit_is_one_history_record_and_restores_target_selection() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("one\ntwo".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    let before = Selections::single(Selection {
+        anchor: TextOffset { char_index: 7 },
+        head: TextOffset { char_index: 4 },
+    });
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![view_action(ViewAction::SetSelections(before.clone()))],
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::MoveLinesUp),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), vec!["two", "one"]);
+    assert_eq!(
+        app.session.views()[&view].selections().unwrap().primary(),
+        &Selection {
+            anchor: TextOffset { char_index: 3 },
+            head: TextOffset { char_index: 0 },
+        }
+    );
+
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Undo,
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    assert_eq!(text_rows(&app, editor_cid()), vec!["one", "two"]);
+    assert_eq!(app.session.views()[&view].selections().unwrap(), &before);
+
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Redo,
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    assert_eq!(text_rows(&app, editor_cid()), vec!["two", "one"]);
+    assert_eq!(
+        app.session.views()[&view].selections().unwrap().primary(),
+        &Selection {
+            anchor: TextOffset { char_index: 3 },
+            head: TextOffset { char_index: 0 },
+        }
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn frontend_error_still_waits_for_pending_save() {
     let dir = tempfile::tempdir().unwrap();

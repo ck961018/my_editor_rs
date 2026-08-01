@@ -1,5 +1,21 @@
 use crate::core::motion::OperatorCommand;
 
+pub const MAX_INDENT_WIDTH: usize = 256;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IndentationConfig {
+    pub indent_width: usize,
+    pub insert_spaces: bool,
+}
+
+impl IndentationConfig {
+    pub fn validated(self) -> Option<Self> {
+        (1..=MAX_INDENT_WIDTH)
+            .contains(&self.indent_width)
+            .then_some(self)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EditCommand {
     Operate(OperatorCommand),
@@ -85,6 +101,11 @@ pub enum EditCommand {
     },
     DeleteInclusiveSelection,
     DeleteSelectedLines,
+    IndentLines(IndentationConfig),
+    OutdentLines(IndentationConfig),
+    DuplicateLines,
+    MoveLinesUp,
+    MoveLinesDown,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

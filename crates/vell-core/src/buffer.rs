@@ -4,7 +4,7 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::core::action::{ContentAction, ContentEditPlan};
-use crate::core::command::{CharSearchDirection, EditCommand};
+use crate::core::command::{CharSearchDirection, EditCommand, IndentationConfig};
 use crate::core::grapheme::{
     at_column, boundary_at_or_after, boundary_at_or_before, column, next_boundary,
     previous_boundary,
@@ -45,6 +45,30 @@ pub struct Buffer {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BufferTransactionData {
     pub text: TextTransactionData,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LineBlock {
+    start_row: usize,
+    end_row: usize,
+    start: usize,
+    end: usize,
+}
+
+fn merge_line_blocks(mut blocks: Vec<LineBlock>) -> Vec<LineBlock> {
+    blocks.sort_unstable_by_key(|block| (block.start_row, block.end_row));
+    let mut merged: Vec<LineBlock> = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        if let Some(previous) = merged.last_mut()
+            && block.start_row <= previous.end_row.saturating_add(1)
+        {
+            previous.end_row = previous.end_row.max(block.end_row);
+            previous.end = previous.end.max(block.end);
+        } else {
+            merged.push(block);
+        }
+    }
+    merged
 }
 
 impl Buffer {
@@ -1257,6 +1281,245 @@ impl Buffer {
         }
     }
 
+    pub fn indent_lines_at_selections(
+        &mut self,
+        selections: &mut Selections,
+        config: IndentationConfig,
+    ) {
+        self.reconcile_selections(selections);
+        let Some(config) = config.validated() else {
+            self.last_change = None;
+            return;
+        };
+        let indent = if config.insert_spaces {
+            " ".repeat(config.indent_width)
+        } else {
+            "\t".to_owned()
+        };
+        let edits = self
+            .selected_line_blocks(selections)
+            .into_iter()
+            .flat_map(|block| block.start_row..=block.end_row)
+            .map(|row| {
+                let start = self.rope.line_to_char(row);
+                TextEdit::new(start..start, indent.clone())
+            })
+            .collect();
+        self.apply_line_edits_and_map_selections(selections, edits);
+    }
+
+    pub fn outdent_lines_at_selections(
+        &mut self,
+        selections: &mut Selections,
+        config: IndentationConfig,
+    ) {
+        self.reconcile_selections(selections);
+        let Some(config) = config.validated() else {
+            self.last_change = None;
+            return;
+        };
+        let width = config.indent_width;
+        let edits = self
+            .selected_line_blocks(selections)
+            .into_iter()
+            .flat_map(|block| block.start_row..=block.end_row)
+            .filter_map(|row| {
+                let start = self.rope.line_to_char(row);
+                let end = start + line_content_len(&self.rope, row);
+                if start < end && self.rope.char(start) == '\t' {
+                    return Some(TextEdit::new(start..start + 1, ""));
+                }
+                let spaces = (start..end)
+                    .take(width)
+                    .take_while(|offset| self.rope.char(*offset) == ' ')
+                    .count();
+                (spaces > 0).then(|| TextEdit::new(start..start + spaces, ""))
+            })
+            .collect();
+        self.apply_line_edits_and_map_selections(selections, edits);
+    }
+
+    pub fn duplicate_lines_at_selections(&mut self, selections: &mut Selections) {
+        self.reconcile_selections(selections);
+        let selection_blocks = self.selection_line_blocks(selections);
+        let blocks = merge_line_blocks(selection_blocks.clone());
+        let max_row = self.rope.len_lines().saturating_sub(1);
+        let line_ending = self.preferred_line_ending();
+        let mut inserted_before = 0;
+        let mut targets = Vec::with_capacity(blocks.len());
+        let mut edits = Vec::with_capacity(blocks.len());
+        for block in blocks {
+            let source = self.rope.slice(block.start..block.end).to_string();
+            let (text, prefix) = if block.end_row == max_row {
+                (
+                    format!("{line_ending}{source}"),
+                    line_ending.chars().count(),
+                )
+            } else {
+                (source, 0)
+            };
+            let target = block.end + inserted_before + prefix;
+            inserted_before += text.chars().count();
+            edits.push(TextEdit::new(block.end..block.end, text));
+            targets.push((block, target));
+        }
+        self.apply_text_edits(edits)
+            .expect("valid line duplication");
+        self.retarget_line_selections(selections, &selection_blocks, &targets);
+    }
+
+    pub fn move_lines_up_at_selections(&mut self, selections: &mut Selections) {
+        self.reconcile_selections(selections);
+        let selection_blocks = self.selection_line_blocks(selections);
+        let blocks = merge_line_blocks(selection_blocks.clone());
+        let max_row = self.rope.len_lines().saturating_sub(1);
+        let mut targets = Vec::with_capacity(blocks.len());
+        let mut edits = Vec::new();
+        for block in blocks {
+            if block.start_row == 0 {
+                targets.push((block, block.start));
+                continue;
+            }
+            let previous_row = block.start_row - 1;
+            let previous_start = self.rope.line_to_char(previous_row);
+            let previous = self.rope.slice(previous_start..block.start).to_string();
+            let selected = self.rope.slice(block.start..block.end).to_string();
+            let replacement = if block.end_row == max_row {
+                let previous_content_end =
+                    previous_start + line_content_len(&self.rope, previous_row);
+                let previous_content = self
+                    .rope
+                    .slice(previous_start..previous_content_end)
+                    .to_string();
+                let separator = self
+                    .rope
+                    .slice(previous_content_end..block.start)
+                    .to_string();
+                format!("{selected}{separator}{previous_content}")
+            } else {
+                format!("{selected}{previous}")
+            };
+            edits.push(TextEdit::new(previous_start..block.end, replacement));
+            targets.push((block, previous_start));
+        }
+        self.apply_text_edits(edits)
+            .expect("valid upward line move");
+        self.retarget_line_selections(selections, &selection_blocks, &targets);
+    }
+
+    pub fn move_lines_down_at_selections(&mut self, selections: &mut Selections) {
+        self.reconcile_selections(selections);
+        let selection_blocks = self.selection_line_blocks(selections);
+        let blocks = merge_line_blocks(selection_blocks.clone());
+        let max_row = self.rope.len_lines().saturating_sub(1);
+        let mut targets = Vec::with_capacity(blocks.len());
+        let mut edits = Vec::new();
+        for block in blocks {
+            if block.end_row == max_row {
+                targets.push((block, block.start));
+                continue;
+            }
+            let next_row = block.end_row + 1;
+            let next_end = if next_row < max_row {
+                self.rope.line_to_char(next_row + 1)
+            } else {
+                self.rope.len_chars()
+            };
+            let selected = self.rope.slice(block.start..block.end).to_string();
+            let next = self.rope.slice(block.end..next_end).to_string();
+            let (replacement, target) = if next_row == max_row {
+                let selected_content_end = self.rope.line_to_char(block.end_row)
+                    + line_content_len(&self.rope, block.end_row);
+                let selected_content = self
+                    .rope
+                    .slice(block.start..selected_content_end)
+                    .to_string();
+                let separator = self.rope.slice(selected_content_end..block.end).to_string();
+                let target = block.start + next.chars().count() + separator.chars().count();
+                (format!("{next}{separator}{selected_content}"), target)
+            } else {
+                let target = block.start + next.chars().count();
+                (format!("{next}{selected}"), target)
+            };
+            edits.push(TextEdit::new(block.start..next_end, replacement));
+            targets.push((block, target));
+        }
+        self.apply_text_edits(edits)
+            .expect("valid downward line move");
+        self.retarget_line_selections(selections, &selection_blocks, &targets);
+    }
+
+    fn selection_line_blocks(&self, selections: &Selections) -> Vec<LineBlock> {
+        selections
+            .all()
+            .map(|selection| {
+                let anchor = selection.anchor.char_index.min(self.rope.len_chars());
+                let head = selection.head.char_index.min(self.rope.len_chars());
+                let anchor_row = self.rope.char_to_line(anchor);
+                let head_row = self.rope.char_to_line(head);
+                self.line_block(anchor_row.min(head_row), anchor_row.max(head_row))
+            })
+            .collect()
+    }
+
+    fn selected_line_blocks(&self, selections: &Selections) -> Vec<LineBlock> {
+        merge_line_blocks(self.selection_line_blocks(selections))
+    }
+
+    fn line_block(&self, start_row: usize, end_row: usize) -> LineBlock {
+        let max_row = self.rope.len_lines().saturating_sub(1);
+        LineBlock {
+            start_row,
+            end_row,
+            start: self.rope.line_to_char(start_row),
+            end: if end_row < max_row {
+                self.rope.line_to_char(end_row + 1)
+            } else {
+                self.rope.len_chars()
+            },
+        }
+    }
+
+    fn apply_line_edits_and_map_selections(
+        &mut self,
+        selections: &mut Selections,
+        edits: Vec<TextEdit>,
+    ) {
+        self.apply_text_edits(edits)
+            .expect("valid indentation edits");
+        let Some(change) = self.last_change.clone() else {
+            return;
+        };
+        for selection in selections.all_mut() {
+            selection.anchor.char_index =
+                change.map_position(selection.anchor.char_index, Affinity::After);
+            selection.head.char_index =
+                change.map_position(selection.head.char_index, Affinity::After);
+        }
+        self.reconcile_selections(selections);
+    }
+
+    fn retarget_line_selections(
+        &self,
+        selections: &mut Selections,
+        selection_blocks: &[LineBlock],
+        targets: &[(LineBlock, usize)],
+    ) {
+        for (selection, selected) in selections.all_mut().zip(selection_blocks) {
+            let (block, target) = targets
+                .iter()
+                .find(|(block, _)| {
+                    block.start_row <= selected.start_row && block.end_row >= selected.end_row
+                })
+                .expect("each selection belongs to one merged line block");
+            selection.anchor.char_index =
+                target + selection.anchor.char_index.saturating_sub(block.start);
+            selection.head.char_index =
+                target + selection.head.char_index.saturating_sub(block.start);
+        }
+        self.reconcile_selections(selections);
+    }
+
     fn preferred_line_ending(&self) -> &'static str {
         for row in 0..self.rope.len_lines().saturating_sub(1) {
             let line = self.rope.line(row);
@@ -2261,6 +2524,187 @@ mod tests {
         buffer.delete_at_selections(&mut selection, -1);
         assert_eq!(buffer.slice().to_string(), "ab");
         assert_eq!(selection.primary().head().char_index, 1);
+    }
+
+    #[test]
+    fn indent_merges_adjacent_and_overlapping_line_blocks() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "a\nb\nc\n");
+        let selections = Selections::from_parts(
+            vec![
+                Selection::collapsed(cur(0)),
+                Selection {
+                    anchor: cur(2),
+                    head: cur(3),
+                },
+                Selection {
+                    anchor: cur(4),
+                    head: cur(2),
+                },
+            ],
+            1,
+        );
+
+        let plan = buffer.plan_edit(
+            EditCommand::IndentLines(IndentationConfig {
+                indent_width: 2,
+                insert_spaces: true,
+            }),
+            &selections,
+        );
+        let ContentAction::Text(change) = plan.action.expect("indent changes text");
+
+        assert_eq!(change.to_edits().unwrap().len(), 3);
+        buffer.apply_content_change(change).unwrap();
+        assert_eq!(buffer.slice().to_string(), "  a\n  b\n  c\n");
+        assert_eq!(plan.selections.primary().anchor.char_index, 6);
+        assert_eq!(plan.selections.primary().head.char_index, 7);
+    }
+
+    #[test]
+    fn outdent_handles_tabs_spaces_empty_lines_and_crlf() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(
+            &mut single_sel(TextOffset::origin()),
+            "\tfoo\r\n  bar\r\n\r\nbaz",
+        );
+        let mut selections = Selections::single(Selection {
+            anchor: cur(0),
+            head: cur(13),
+        });
+
+        buffer.outdent_lines_at_selections(
+            &mut selections,
+            IndentationConfig {
+                indent_width: 4,
+                insert_spaces: true,
+            },
+        );
+
+        assert_eq!(buffer.slice().to_string(), "foo\r\nbar\r\n\r\nbaz");
+        assert_eq!(selections.primary().anchor.char_index, 0);
+        assert_eq!(selections.primary().head.char_index, 10);
+    }
+
+    #[test]
+    fn duplicate_last_line_preserves_crlf_and_targets_the_copy() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "one\r\ntwo");
+        let mut selections = single_sel(cur(6));
+
+        buffer.duplicate_lines_at_selections(&mut selections);
+
+        assert_eq!(buffer.slice().to_string(), "one\r\ntwo\r\ntwo");
+        assert_eq!(selections.primary().head.char_index, 11);
+        assert_eq!(selections.primary().anchor, selections.primary().head);
+    }
+
+    #[test]
+    fn duplicate_empty_final_line_creates_one_more_line() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "one\n");
+        let mut selections = single_sel(cur(4));
+
+        buffer.duplicate_lines_at_selections(&mut selections);
+
+        assert_eq!(buffer.slice().to_string(), "one\n\n");
+        assert_eq!(selections.primary().head.char_index, 5);
+    }
+
+    #[test]
+    fn duplicate_disjoint_blocks_accounts_for_earlier_insertions() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "0\n1\n2\n3");
+        let mut selections = Selections::from_parts(
+            vec![Selection::collapsed(cur(0)), Selection::collapsed(cur(4))],
+            1,
+        );
+
+        buffer.duplicate_lines_at_selections(&mut selections);
+
+        assert_eq!(buffer.slice().to_string(), "0\n0\n1\n2\n2\n3");
+        assert_eq!(
+            selections
+                .all()
+                .map(|selection| selection.head.char_index)
+                .collect::<Vec<_>>(),
+            vec![2, 8]
+        );
+    }
+
+    #[test]
+    fn invalid_indentation_config_is_a_safe_no_op() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "text");
+        let mut selections = single_sel(cur(2));
+
+        buffer.indent_lines_at_selections(
+            &mut selections,
+            IndentationConfig {
+                indent_width: usize::MAX,
+                insert_spaces: true,
+            },
+        );
+
+        assert_eq!(buffer.slice().to_string(), "text");
+        assert_eq!(selections.primary().head.char_index, 2);
+        assert!(buffer.take_last_change().is_none());
+    }
+
+    #[test]
+    fn move_lines_across_unterminated_last_line_preserves_separators() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "one\r\ntwo\r\nthree");
+        let mut selections = Selections::single(Selection {
+            anchor: cur(5),
+            head: cur(7),
+        });
+
+        buffer.move_lines_down_at_selections(&mut selections);
+        assert_eq!(buffer.slice().to_string(), "one\r\nthree\r\ntwo");
+        assert_eq!(selections.primary().anchor.char_index, 12);
+        assert_eq!(selections.primary().head.char_index, 14);
+
+        buffer.move_lines_up_at_selections(&mut selections);
+        assert_eq!(buffer.slice().to_string(), "one\r\ntwo\r\nthree");
+        assert_eq!(selections.primary().anchor.char_index, 5);
+        assert_eq!(selections.primary().head.char_index, 7);
+    }
+
+    #[test]
+    fn move_line_edges_are_no_ops() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "one\ntwo");
+        let mut top = single_sel(cur(1));
+        buffer.move_lines_up_at_selections(&mut top);
+        assert_eq!(buffer.slice().to_string(), "one\ntwo");
+        assert!(buffer.take_last_change().is_none());
+
+        let mut bottom = single_sel(cur(5));
+        buffer.move_lines_down_at_selections(&mut bottom);
+        assert_eq!(buffer.slice().to_string(), "one\ntwo");
+        assert!(buffer.take_last_change().is_none());
+    }
+
+    #[test]
+    fn disjoint_line_blocks_move_independently() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "0\n1\n2\n3\n4");
+        let mut selections = Selections::from_parts(
+            vec![Selection::collapsed(cur(2)), Selection::collapsed(cur(6))],
+            0,
+        );
+
+        buffer.move_lines_up_at_selections(&mut selections);
+
+        assert_eq!(buffer.slice().to_string(), "1\n0\n3\n2\n4");
+        assert_eq!(
+            selections
+                .all()
+                .map(|selection| selection.head.char_index)
+                .collect::<Vec<_>>(),
+            vec![0, 4]
+        );
     }
 
     #[test]

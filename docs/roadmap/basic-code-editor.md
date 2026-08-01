@@ -1,8 +1,8 @@
 # 基础代码编辑器 Roadmap
 
-**状态：** 实施中（M1、M2 已完成）
+**状态：** 实施中（M1 至 M3 已完成）
 
-**更新日期：** 2026-07-31
+**更新日期：** 2026-08-02
 
 ## 1. 目标
 
@@ -100,7 +100,7 @@ Vell 已有以下可复用能力：
 | Clipboard | 内部与系统能力均缺失 | P0 |
 | Search/replace | 只有当前行单字符查找 | P1 |
 | 语言编辑策略 | 有 `applyEdits` 底座，无正式契约 | P1 |
-| Duplicate/move line | 缺失 | P2 |
+| Duplicate/move line | M3 已完成 | P2 |
 
 ## 4. 架构约束
 
@@ -344,6 +344,8 @@ Buffer manager
 - symlink 与 normalized path 策略。
 
 ## 8. 里程碑 M3：通用代码编辑原语
+
+**状态：** 已完成（2026-08-02）
 
 ### 目标
 
