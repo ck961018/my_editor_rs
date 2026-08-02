@@ -48,6 +48,10 @@ use vell_core::keymap::Keymap;
 use vell_core::search::{CaseSensitivity, SearchDirection, SearchOptions, SearchPattern};
 use vell_core::transaction::{TextChangeSet, TextEdit};
 use vell_frontend::Frontend;
+use vell_mode::command_registry::{
+    CommandCompletion, CommandEntry, CommandError, CommandHost, CommandId, CommandInvocation,
+    CommandQuery, CommandRequest, CommandValue,
+};
 use vell_plugin_v8::ScriptHost;
 use vell_protocol::content_query::{
     BufferBackingState, Color, ContentData, ContentQuery, ContentQueryKind, CursorStyle,
@@ -9210,4 +9214,220 @@ async fn vim_save_conflict_preserves_external_file_and_reports_it() {
     let message = &app.runtime_diagnostics().last().unwrap().message;
     assert!(message.contains("external changes"), "{message}");
     assert_eq!(status_center(&app), *message);
+}
+
+#[test]
+fn registered_new_buffer_result_can_feed_nested_switch() {
+    let mut app = make_app(vec![], None);
+    let test_id = CommandId::new("test.newAndSwitch").unwrap();
+    app.register_command(CommandEntry::new(
+        test_id.clone(),
+        |host: &mut dyn CommandHost, arguments: Vec<CommandValue>| {
+            if !arguments.is_empty() {
+                return Err(CommandError::InvalidArguments(
+                    "expected no arguments".to_owned(),
+                ));
+            }
+            let created = host.invoke_command(CommandInvocation::new(
+                CommandId::new("newBuffer").unwrap(),
+                Vec::new(),
+            ))?;
+            let CommandCompletion::Ready(content) = created else {
+                return Ok(CommandCompletion::Pending);
+            };
+            host.invoke_command(CommandInvocation::new(
+                CommandId::new("switchBuffer").unwrap(),
+                vec![content],
+            ))
+        },
+    ));
+    let view = view_id(&app, app.session.focused());
+
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(test_id, Vec::new()),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    let focused_view = view_id(&app, app.session.focused());
+    let focused_content = app.session.view(focused_view).unwrap().content();
+    assert_ne!(focused_content, editor_cid());
+    assert_eq!(app.buffers().len(), 2);
+}
+
+#[test]
+fn failed_registered_command_removes_provisional_content() {
+    let mut app = make_app(vec![], None);
+    let test_id = CommandId::new("test.createThenFail").unwrap();
+    app.register_command(CommandEntry::new(
+        test_id.clone(),
+        |host: &mut dyn CommandHost, _arguments: Vec<CommandValue>| {
+            host.invoke_command(CommandInvocation::new(
+                CommandId::new("newBuffer").unwrap(),
+                Vec::new(),
+            ))?;
+            host.invoke_command(CommandInvocation::new(
+                CommandId::new("missing").unwrap(),
+                Vec::new(),
+            ))
+        },
+    ));
+    let view = view_id(&app, app.session.focused());
+
+    let error = app
+        .execute_command(DispatchCommand::Registered {
+            invocation: CommandInvocation::new(test_id, Vec::new()),
+            view,
+            content: editor_cid(),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("unknown command 'missing'"));
+    assert_eq!(app.buffers().len(), 1);
+    assert_eq!(app.buffers()[0].content, editor_cid());
+}
+
+#[test]
+fn registered_query_observes_an_earlier_edit_in_the_same_frame() {
+    let mut app = make_app(vec![], None);
+    let test_id = CommandId::new("test.editThenRead").unwrap();
+    app.register_command(CommandEntry::new(
+        test_id.clone(),
+        |host: &mut dyn CommandHost, _arguments: Vec<CommandValue>| {
+            host.request(CommandRequest::Execute(OperationRequest::View {
+                target: ViewTarget::Current,
+                operation: ViewOperation::Edit(EditCommand::InsertText("visible".to_owned())),
+            }))?;
+            match host.request(CommandRequest::Query(CommandQuery::CurrentText))? {
+                CommandCompletion::Ready(CommandValue::String(text)) if text == "visible" => {
+                    Ok(CommandValue::Null.into())
+                }
+                _ => Err(CommandError::Failed(
+                    "query did not observe the earlier edit".to_owned(),
+                )),
+            }
+        },
+    ));
+    let view = view_id(&app, app.session.focused());
+
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(test_id, Vec::new()),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), ["visible"]);
+}
+
+#[test]
+fn nested_registered_failure_rolls_back_host_mutations_and_effects() {
+    let mut app = make_app(vec![], None);
+    let test_id = CommandId::new("test.mutateThenFail").unwrap();
+    app.register_command(CommandEntry::new(
+        test_id.clone(),
+        |host: &mut dyn CommandHost, _arguments: Vec<CommandValue>| {
+            host.request(CommandRequest::Execute(OperationRequest::View {
+                target: ViewTarget::Current,
+                operation: ViewOperation::Edit(EditCommand::InsertText("rollback".to_owned())),
+            }))?;
+            host.invoke_command(CommandInvocation::new(
+                CommandId::new("forceQuit").unwrap(),
+                Vec::new(),
+            ))?;
+            host.invoke_command(CommandInvocation::new(
+                CommandId::new("missing").unwrap(),
+                Vec::new(),
+            ))
+        },
+    ));
+    let view = view_id(&app, app.session.focused());
+
+    assert!(
+        app.execute_command(DispatchCommand::Registered {
+            invocation: CommandInvocation::new(test_id, Vec::new()),
+            view,
+            content: editor_cid(),
+        })
+        .is_err()
+    );
+
+    assert_eq!(text_rows(&app, editor_cid()), [""]);
+    assert!(!app.kernel.is_cancelled());
+}
+
+#[test]
+fn registered_command_depth_budget_stops_recursive_adapters() {
+    let mut app = make_app(vec![], None);
+    let test_id = CommandId::new("test.recurse").unwrap();
+    let recursive_id = test_id.clone();
+    app.register_command(CommandEntry::new(
+        test_id.clone(),
+        move |host: &mut dyn CommandHost, _arguments: Vec<CommandValue>| {
+            host.invoke_command(CommandInvocation::new(recursive_id.clone(), Vec::new()))
+        },
+    ));
+    let view = view_id(&app, app.session.focused());
+
+    let error = app
+        .execute_command(DispatchCommand::Registered {
+            invocation: CommandInvocation::new(test_id, Vec::new()),
+            view,
+            content: editor_cid(),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("recursion limit of 256"));
+}
+
+#[test]
+fn registered_host_requests_share_the_frame_operation_budget() {
+    let mut app = make_app(vec![], None);
+    let test_id = CommandId::new("test.exhaustRequests").unwrap();
+    app.register_command(CommandEntry::new(
+        test_id.clone(),
+        |host: &mut dyn CommandHost, _arguments: Vec<CommandValue>| {
+            for _ in 0..=vell_mode::operation::MAX_OPERATIONS_PER_FRAME {
+                host.invoke_command(CommandInvocation::new(
+                    CommandId::new("newBuffer").unwrap(),
+                    Vec::new(),
+                ))?;
+            }
+            Ok(CommandValue::Null.into())
+        },
+    ));
+    let view = view_id(&app, app.session.focused());
+
+    let error = app
+        .execute_command(DispatchCommand::Registered {
+            invocation: CommandInvocation::new(test_id, Vec::new()),
+            view,
+            content: editor_cid(),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("command chain exceeded"));
+    assert_eq!(app.buffers().len(), 1);
+}
+
+#[test]
+fn native_history_command_uses_the_registered_execution_path() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("undo me".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(CommandId::new("undo").unwrap(), Vec::new()),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), [""]);
 }

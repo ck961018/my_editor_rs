@@ -12,6 +12,7 @@ use crate::mode::{
     ModeBackground, ModeContentStore, ModeDraftJournal, ModeError, ModeId, ModeJobKey,
     ModeJobRequest, ModeJobResult, ModeJobRunner, ModeRegistry, ModeResult,
 };
+use crate::native_commands::native_command_registry;
 use crate::tasks::AppTasks;
 use crate::transaction::{
     TransactionManager, TransactionManagerError, TransactionRecord, TransactionSnapshot,
@@ -25,6 +26,7 @@ use vell_core::content::{
 use vell_core::content_store::{ContentSnapshot, ContentStore};
 use vell_core::search::{SearchError, SearchSnapshot};
 use vell_core::transaction::{TextStateId, TransactionDirection};
+use vell_mode::command_registry::CommandRegistry;
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 use vell_protocol::selection::Selections;
 
@@ -56,6 +58,7 @@ pub(super) struct Kernel {
     pending_opens: HashMap<ContentId, PendingOpen>,
     latest_opens: HashMap<SpaceId, ContentId>,
     modes: ModeRegistry,
+    commands: CommandRegistry,
     content_modes: ModeContentStore,
     transactions: TransactionManager,
     message_tx: mpsc::UnboundedSender<AppMessage>,
@@ -84,6 +87,7 @@ impl Kernel {
             pending_opens: HashMap::new(),
             latest_opens: HashMap::new(),
             modes,
+            commands: native_command_registry(),
             content_modes: ModeContentStore::default(),
             transactions: TransactionManager::default(),
             message_tx,
@@ -223,6 +227,14 @@ impl Kernel {
 
     pub(super) fn modes(&self) -> &ModeRegistry {
         &self.modes
+    }
+
+    pub(super) fn commands(&self) -> &CommandRegistry {
+        &self.commands
+    }
+
+    pub(super) fn commands_mut(&mut self) -> &mut CommandRegistry {
+        &mut self.commands
     }
 
     pub(super) fn content_modes(&self) -> &ModeContentStore {

@@ -26,6 +26,7 @@ const DEFAULT_REPLAYED_INPUT_BUDGET: usize = 256;
 pub(super) struct ExecutionFrame {
     checkpoints: CheckpointJournal,
     mode_drafts: ModeDraftJournal,
+    provisional_contents: Vec<ContentId>,
     view_touches: HashMap<ViewId, Revision>,
     prepared_effects: Vec<PreparedEffect>,
     prepared_face_bases: HashMap<(FaceRemapScope, FaceName), FaceRemapOwner>,
@@ -124,6 +125,7 @@ impl ExecutionFrame {
                 state_rollbacks: Vec::new(),
             },
             mode_drafts: ModeDraftJournal::default(),
+            provisional_contents: Vec::new(),
             view_touches: HashMap::new(),
             prepared_effects: Vec::new(),
             prepared_face_bases: HashMap::new(),
@@ -203,6 +205,10 @@ impl ExecutionFrame {
         self.checkpoints.state_rollbacks.push(rollback);
     }
 
+    pub(super) fn record_provisional_content(&mut self, content: ContentId) {
+        self.provisional_contents.push(content);
+    }
+
     pub(super) fn retarget(&mut self, content: ContentId) -> Result<(), OperationError> {
         if self.checkpoints.target == Some(content) {
             return Ok(());
@@ -274,12 +280,14 @@ impl ExecutionFrame {
     ) -> (
         CheckpointJournal,
         ModeDraftJournal,
+        Vec<ContentId>,
         HashMap<ViewId, Revision>,
         Vec<PreparedEffect>,
     ) {
         (
             self.checkpoints,
             self.mode_drafts,
+            self.provisional_contents,
             self.view_touches,
             self.prepared_effects,
         )
@@ -392,7 +400,7 @@ mod tests {
         frame.prepare_face(first.clone()).unwrap();
 
         assert!(frame.prepare_face(first).is_err());
-        let (_, _, _, effects) = frame.into_parts();
+        let (_, _, _, _, effects) = frame.into_parts();
         assert_eq!(effects.len(), 1);
     }
 }

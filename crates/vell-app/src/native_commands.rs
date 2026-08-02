@@ -1,0 +1,114 @@
+use crate::action::TransactionIntent;
+use crate::command::AppCommand;
+use crate::operation::{
+    AppOperation, BufferOperation, ContentOperation, ContentTarget, OperationRequest,
+};
+use vell_mode::command_registry::{
+    CommandEntry, CommandError, CommandHost, CommandId, CommandRegistry, CommandRequest,
+    CommandValue,
+};
+use vell_protocol::ids::ContentId;
+use vell_protocol::space::SplitDirection;
+
+pub(super) fn native_command_registry() -> CommandRegistry {
+    let mut registry = CommandRegistry::new();
+    register_no_args(&mut registry, "newBuffer", CommandRequest::CreateBuffer);
+    registry.register(CommandEntry::new(
+        command_id("switchBuffer"),
+        |host: &mut dyn CommandHost, arguments: Vec<CommandValue>| {
+            let content = one_content_id(arguments)?;
+            host.request(CommandRequest::Execute(OperationRequest::Buffer(
+                BufferOperation::Switch { content },
+            )))
+        },
+    ));
+    register_no_args(
+        &mut registry,
+        "save",
+        execute(OperationRequest::Content {
+            target: ContentTarget::Current,
+            operation: ContentOperation::Save,
+        }),
+    );
+    register_no_args(&mut registry, "undo", history(TransactionIntent::Undo));
+    register_no_args(&mut registry, "redo", history(TransactionIntent::Redo));
+    register_no_args(&mut registry, "quit", app(AppCommand::Quit));
+    register_no_args(&mut registry, "forceQuit", app(AppCommand::ForceQuit));
+    register_no_args(&mut registry, "closePane", app(AppCommand::Close));
+    register_no_args(
+        &mut registry,
+        "splitHorizontal",
+        app(AppCommand::Split(SplitDirection::Down)),
+    );
+    register_no_args(
+        &mut registry,
+        "splitVertical",
+        app(AppCommand::Split(SplitDirection::Right)),
+    );
+    register_no_args(
+        &mut registry,
+        "focusLeft",
+        app(AppCommand::Focus(SplitDirection::Left)),
+    );
+    register_no_args(
+        &mut registry,
+        "focusDown",
+        app(AppCommand::Focus(SplitDirection::Down)),
+    );
+    register_no_args(
+        &mut registry,
+        "focusUp",
+        app(AppCommand::Focus(SplitDirection::Up)),
+    );
+    register_no_args(
+        &mut registry,
+        "focusRight",
+        app(AppCommand::Focus(SplitDirection::Right)),
+    );
+    registry
+}
+
+fn register_no_args(registry: &mut CommandRegistry, id: &str, request: CommandRequest) {
+    registry.register(CommandEntry::new(
+        command_id(id),
+        move |host: &mut dyn CommandHost, arguments: Vec<CommandValue>| {
+            if arguments.is_empty() {
+                host.request(request.clone())
+            } else {
+                Err(CommandError::InvalidArguments(
+                    "expected no arguments".to_owned(),
+                ))
+            }
+        },
+    ));
+}
+
+fn execute(operation: OperationRequest) -> CommandRequest {
+    CommandRequest::Execute(operation)
+}
+
+fn history(operation: TransactionIntent) -> CommandRequest {
+    execute(OperationRequest::History {
+        target: ContentTarget::Current,
+        operation,
+    })
+}
+
+fn app(command: AppCommand) -> CommandRequest {
+    execute(OperationRequest::App(AppOperation::Command(command)))
+}
+
+fn command_id(value: &str) -> CommandId {
+    CommandId::new(value).expect("native command ids are static and valid")
+}
+
+fn one_content_id(arguments: Vec<CommandValue>) -> Result<ContentId, CommandError> {
+    let [value] = arguments.as_slice() else {
+        return Err(CommandError::InvalidArguments(
+            "expected one content id".to_owned(),
+        ));
+    };
+    value.as_u64().map(ContentId).ok_or_else(|| {
+        CommandError::InvalidArguments("content id must be a non-negative integer".to_owned())
+    })
+}

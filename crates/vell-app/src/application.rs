@@ -12,6 +12,7 @@ use crate::mode_name::ModeName;
 use crate::session::ClientSession;
 use vell_core::buffer::Buffer;
 use vell_frontend::Frontend;
+use vell_mode::command_registry::CommandEntry;
 use vell_protocol::content_query::{FaceOverride, ThemeName};
 use vell_protocol::ids::ContentId;
 
@@ -25,6 +26,10 @@ pub struct App<F: Frontend> {
 }
 
 impl<F: Frontend> App<F> {
+    pub fn register_command(&mut self, command: CommandEntry) -> Option<CommandEntry> {
+        self.kernel.commands_mut().register(command)
+    }
+
     #[allow(dead_code, reason = "unconfigured application constructor")]
     pub fn new(path: Option<&str>, width: usize, height: usize, frontend: F) -> io::Result<Self> {
         Self::build(

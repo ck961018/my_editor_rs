@@ -16,6 +16,7 @@ mod execution;
 mod kernel;
 mod layout;
 mod message;
+mod native_commands;
 mod operation;
 mod query;
 mod remote;

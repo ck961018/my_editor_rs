@@ -34,6 +34,10 @@ use vell_core::content::{
 use vell_core::search::SearchDirection;
 use vell_core::transaction::TransactionDirection;
 use vell_frontend::Frontend;
+use vell_mode::command_registry::{
+    CommandCompletion, CommandError, CommandHost, CommandInvocation, CommandQuery, CommandRequest,
+    CommandResult, CommandValue,
+};
 use vell_protocol::content_query::{ContentData, ContentQuery, RenderQuery};
 use vell_protocol::frontend_event::FrontendEvent;
 use vell_protocol::ids::{ContentId, ViewId};
@@ -43,6 +47,101 @@ use vell_protocol::viewport::{
 };
 
 const MAX_RUNTIME_DIAGNOSTICS: usize = 128;
+const MAX_REGISTERED_COMMAND_DEPTH: usize = 256;
+
+struct ScopedCommandHost<'a, F: Frontend> {
+    app: &'a mut App<F>,
+    frame: &'a mut ExecutionFrame,
+    origin: OperationOrigin,
+    depth: usize,
+}
+
+impl<F: Frontend> CommandHost for ScopedCommandHost<'_, F> {
+    fn invoke_command(&mut self, invocation: CommandInvocation) -> CommandResult {
+        if self.depth == MAX_REGISTERED_COMMAND_DEPTH {
+            return Err(CommandError::RecursionLimit {
+                limit: MAX_REGISTERED_COMMAND_DEPTH,
+            });
+        }
+        self.depth += 1;
+        let entry = self.app.kernel.commands().resolve(&invocation.command);
+        let result = entry
+            .ok_or(CommandError::UnknownCommand(invocation.command))
+            .and_then(|entry| entry.invoke(self, invocation.arguments));
+        self.depth -= 1;
+        result
+    }
+
+    fn request(&mut self, request: CommandRequest) -> CommandResult {
+        match request {
+            CommandRequest::CreateBuffer => {
+                self.consume_request()?;
+                let content = self.app.new_buffer();
+                self.frame.record_provisional_content(content);
+                Ok(CommandValue::from(content.0).into())
+            }
+            CommandRequest::Query(query) => {
+                self.consume_request()?;
+                self.query(query).map(CommandCompletion::from)
+            }
+            CommandRequest::Execute(operation) => {
+                let switched_content = match &operation {
+                    OperationRequest::Buffer(BufferOperation::Switch { content }) => Some(*content),
+                    _ => None,
+                };
+                let queued = QueuedOperation {
+                    request: operation,
+                    origin: self.origin,
+                };
+                self.app
+                    .execute_operation_queue(VecDeque::from([queued]), self.frame)
+                    .map_err(|error| CommandError::Failed(error.to_string()))?;
+                if let Some(content) = switched_content {
+                    self.origin.content = Some(content);
+                    self.origin.view = None;
+                    self.origin.scope = OperationOriginScope::Content;
+                }
+                Ok(CommandValue::Null.into())
+            }
+        }
+    }
+}
+
+impl<F: Frontend> ScopedCommandHost<'_, F> {
+    fn consume_request(&mut self) -> Result<(), CommandError> {
+        self.frame
+            .consume_operation()
+            .map_err(|error| CommandError::Failed(error.to_string()))
+    }
+
+    fn query(&self, query: CommandQuery) -> Result<CommandValue, CommandError> {
+        match query {
+            CommandQuery::CurrentContent => self
+                .origin
+                .content
+                .map(|content| CommandValue::from(content.0))
+                .ok_or_else(|| CommandError::Failed("command has no current content".to_owned())),
+            CommandQuery::CurrentView => self
+                .origin
+                .view
+                .map(|view| CommandValue::from(view.0))
+                .ok_or_else(|| CommandError::Failed("command has no current view".to_owned())),
+            CommandQuery::CurrentText => {
+                let content = self.origin.content.ok_or_else(|| {
+                    CommandError::Failed("command has no current content".to_owned())
+                })?;
+                self.app
+                    .kernel
+                    .contents()
+                    .text_snapshot(content)
+                    .map(|snapshot| CommandValue::from(snapshot.to_owned_string()))
+                    .ok_or_else(|| {
+                        CommandError::Failed("current content has no text snapshot".to_owned())
+                    })
+            }
+        }
+    }
+}
 
 fn selection_for_match(range: std::ops::Range<usize>, direction: SearchDirection) -> Selections {
     let (anchor, head) = match direction {
@@ -400,7 +499,8 @@ impl<F: Frontend> App<F> {
         result: io::Result<T>,
     ) -> io::Result<T> {
         let success = result.is_ok();
-        let (checkpoints, mut mode_drafts, view_touches, effects) = frame.into_parts();
+        let (checkpoints, mut mode_drafts, provisional_contents, view_touches, effects) =
+            frame.into_parts();
         if !success {
             let (content, selections, input, state_rollbacks) = checkpoints.into_parts();
             for rollback in state_rollbacks.into_iter().rev() {
@@ -424,6 +524,13 @@ impl<F: Frontend> App<F> {
             }
             if let Some(input) = input {
                 self.session.restore_input(input.dispatcher);
+            }
+            for content in provisional_contents.into_iter().rev() {
+                self.session.forget_content(content);
+                assert!(
+                    self.kernel.remove_content(content),
+                    "provisional content remains owned by its execution frame"
+                );
             }
         }
         if success {
@@ -873,6 +980,31 @@ impl<F: Frontend> App<F> {
         command: DispatchCommand,
         frame: &mut ExecutionFrame,
     ) -> io::Result<InputFlow> {
+        let command = match command {
+            DispatchCommand::Registered {
+                invocation,
+                view,
+                content,
+            } => {
+                let mut host = ScopedCommandHost {
+                    app: self,
+                    frame,
+                    origin: OperationOrigin::view(view, content),
+                    depth: 0,
+                };
+                return match host.invoke_command(invocation) {
+                    Ok(CommandCompletion::Ready(_)) => Ok(InputFlow::Stop),
+                    Ok(CommandCompletion::Pending) => Err(invalid_operation(
+                        "pending command completion is not supported yet",
+                    )),
+                    Err(error) => Err(recoverable_message(
+                        io::ErrorKind::InvalidInput,
+                        error.to_string(),
+                    )),
+                };
+            }
+            command => command,
+        };
         let operations = adapt_dispatch_command(command).map_err(operation_error)?;
         self.execute_operation_queue(VecDeque::from(operations), frame)
     }

@@ -4,6 +4,8 @@ use std::rc::Rc;
 
 use unicode_id_start::{is_id_continue, is_id_start};
 
+use crate::operation::OperationRequest;
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CommandId(String);
 
@@ -140,8 +142,24 @@ impl From<CommandValue> for CommandCompletion {
 
 pub type CommandResult = Result<CommandCompletion, CommandError>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandQuery {
+    CurrentContent,
+    CurrentView,
+    CurrentText,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommandRequest {
+    Execute(OperationRequest),
+    CreateBuffer,
+    Query(CommandQuery),
+}
+
 pub trait CommandHost {
     fn invoke_command(&mut self, invocation: CommandInvocation) -> CommandResult;
+
+    fn request(&mut self, request: CommandRequest) -> CommandResult;
 }
 
 pub trait CommandAdapter {
@@ -434,6 +452,12 @@ mod tests {
                 .and_then(|entry| entry.invoke(self, invocation.arguments));
             self.depth -= 1;
             result
+        }
+
+        fn request(&mut self, _request: CommandRequest) -> CommandResult {
+            Err(CommandError::Failed(
+                "test host does not support requests".to_owned(),
+            ))
         }
     }
 }
