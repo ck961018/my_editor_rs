@@ -23,7 +23,7 @@ use super::{
     ensure_file_size, ensure_size, perform_microtask_checkpoint,
 };
 
-enum EvaluationRequest {
+pub(super) enum EvaluationRequest {
     Interactive(String),
     Buffer {
         content: ContentId,
@@ -64,7 +64,7 @@ pub(super) fn entry(host: &Rc<RefCell<ScriptHost>>) -> CommandEntry {
 }
 
 impl ScriptHost {
-    fn execute_global_script(
+    pub(super) fn execute_global_script(
         &mut self,
         request: EvaluationRequest,
         host: &mut dyn CommandHost,

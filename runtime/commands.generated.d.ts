@@ -13,6 +13,10 @@ interface EditorCommands {
 	readonly focusDown: () => void;
 	readonly focusUp: () => void;
 	readonly focusRight: () => void;
+	readonly invokeMode: (
+		command: `${string}.${string}`,
+		arguments?: ScriptData,
+	) => void;
 }
 
 declare const newBuffer: () => number;
@@ -29,3 +33,7 @@ declare const focusLeft: () => void;
 declare const focusDown: () => void;
 declare const focusUp: () => void;
 declare const focusRight: () => void;
+declare const invokeMode: (
+	command: `${string}.${string}`,
+	arguments?: ScriptData,
+) => void;

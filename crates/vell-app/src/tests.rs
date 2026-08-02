@@ -1409,8 +1409,11 @@ impl Frontend for ScriptedFrontend {
 }
 
 fn make_app(events: Vec<FrontendEvent>, path: Option<&str>) -> App<ScriptedFrontend> {
-    let configuration = vell_plugin_v8::load_default_configuration().unwrap();
-    App::with_modes_visuals_and_backgrounds(
+    let mut configuration = vell_plugin_v8::load_default_configuration().unwrap();
+    let commands = configuration
+        .prepare_commands(&crate::native_command_ids())
+        .unwrap();
+    let mut app = App::with_modes_visuals_and_backgrounds(
         path,
         40,
         5,
@@ -1420,7 +1423,11 @@ fn make_app(events: Vec<FrontendEvent>, path: Option<&str>) -> App<ScriptedFront
         configuration.theme,
         configuration.face_overrides,
     )
-    .unwrap()
+    .unwrap();
+    for command in commands {
+        app.register_command(command);
+    }
+    app
 }
 
 async fn send_key(app: &mut App<ScriptedFrontend>, key: KeyEvent) {
@@ -9103,6 +9110,142 @@ async fn vim_search_repeat_word_and_replace_commands_use_search_primitives() {
             anchor: TextOffset::origin(),
             head: TextOffset { char_index: 3 },
         }
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_command_line_calls_formal_commands_and_registered_shortcuts() {
+    let mut app = make_app(vec![], None);
+
+    send_vim_command(
+        &mut app,
+        "ts function createBuffer() { return newBuffer(); }\
+         editor.commands.shortcut('make-buffer', tail => {\
+         if (tail !== 'one two') throw new Error('wrong tail'); newBuffer(); })",
+    )
+    .await;
+    send_vim_command(&mut app, "make-buffer   one two  ").await;
+
+    assert_eq!(app.buffers().len(), 2);
+    assert!(app.runtime_diagnostics().is_empty());
+
+    send_vim_command(&mut app, "switchBuffer(createBuffer())").await;
+
+    assert_eq!(app.buffers().len(), 3);
+    let view = view_id(&app, app.session.focused());
+    assert_ne!(app.session.view(view).unwrap().content(), editor_cid());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_save_call_uses_the_formal_async_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("vim-save-call.txt");
+    std::fs::write(&path, "before").unwrap();
+    let mut app = make_app(vec![], path.to_str());
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("after ".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    send_vim_command(&mut app, "save()").await;
+
+    assert_eq!(app.pending_commands.len(), 1);
+    let message = app.kernel.receive_message().await.unwrap();
+    app.handle_app_message(message).unwrap();
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "after before");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_ts_without_a_tail_executes_the_current_top_level_statement() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText(
+            "const made = newBuffer();\n".to_owned(),
+        )),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    app.session
+        .view_mut(view)
+        .unwrap()
+        .set_selections(Selections::single(Selection::collapsed(TextOffset {
+            char_index: 8,
+        })));
+
+    send_vim_command(&mut app, "ts").await;
+
+    assert_eq!(app.buffers().len(), 2);
+    assert!(app.runtime_diagnostics().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_command_line_rejects_plain_typescript_without_ts() {
+    let mut events = vim_command_events("const hidden = 1");
+    events.push(FrontendEvent::Key(KeyEvent::ctrl('q')));
+    let mut app = make_app(events, None);
+
+    app.run().await.unwrap();
+
+    let message = &app.runtime_diagnostics().last().unwrap().message;
+    assert!(message.contains("use ':ts'"), "{message}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_wq_waits_for_save_before_quitting() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("vim-wq.txt");
+    std::fs::write(&path, "before").unwrap();
+    let mut app = make_app(vec![], path.to_str());
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("saved ".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    send_vim_command(&mut app, "wq").await;
+
+    assert!(!app.kernel.is_cancelled());
+    assert_eq!(app.pending_commands.len(), 1);
+    let message = app.kernel.receive_message().await.unwrap();
+    app.handle_app_message(message).unwrap();
+
+    assert!(app.kernel.is_cancelled());
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "saved before");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vim_q_dispatches_the_registered_quit_shortcut() {
+    let mut app = make_app(vec![], None);
+
+    send_vim_command(&mut app, "q").await;
+
+    assert!(app.kernel.is_cancelled());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_shortcut_discards_its_deferred_mode_operation() {
+    let mut events = vim_command_events(
+        "ts editor.commands.shortcut('fail-new', () => {\
+         invokeMode('vim.new'); throw new Error('shortcut failed'); })",
+    );
+    events.extend(vim_command_events("fail-new"));
+    events.push(FrontendEvent::Key(KeyEvent::ctrl('q')));
+    let mut app = make_app(events, None);
+
+    app.run().await.unwrap();
+
+    assert_eq!(app.buffers().len(), 1);
+    assert!(
+        app.runtime_diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("shortcut failed"))
     );
 }
 

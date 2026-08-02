@@ -6,6 +6,8 @@ use unicode_id_start::{is_id_continue, is_id_start};
 
 use crate::operation::OperationRequest;
 
+pub const COMMAND_LINE_COMMAND_ID: &str = "$commandLine.execute";
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CommandId(String);
 
@@ -301,11 +303,13 @@ impl From<CommandValue> for CommandCompletion {
 
 pub type CommandResult = Result<CommandCompletion, CommandError>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandQuery {
     CurrentContent,
     CurrentView,
     CurrentText,
+    CurrentTextDocument,
+    CommandExists(CommandId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

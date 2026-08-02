@@ -405,6 +405,7 @@ interface ModePrimitives {
 
 interface CommandPrimitives {
 	invoke(command: `${string}.${string}`, arguments?: ScriptData): void;
+	executeLine(source: string): void;
 }
 
 type EditorCommand = (...arguments: any[]) => unknown;

@@ -157,6 +157,7 @@ primitives! {
     AlignBottom => ("viewport", "alignBottom"),
     InvokeMode => ("mode", "invoke"),
     InvokeCommand => ("commands", "invoke"),
+    ExecuteCommandLine => ("commands", "executeLine"),
     SetFaceBase => ("faces", "setBase"),
     AddRelativeFace => ("faces", "addRelative"),
     RemoveRelativeFace => ("faces", "removeRelative"),
@@ -804,6 +805,13 @@ fn primitive_effects(
                 },
             })
         }
+        ExecuteCommandLine => vec![OperationRequest::ExecuteCommandLine(
+            vell_mode::operation::ExecuteCommandLine::new(string(
+                scope,
+                arguments.get(0),
+                "command line",
+            )?),
+        )],
         SetFaceBase => {
             let face = face_name(scope, arguments.get(0))?;
             let value = arguments.get(1);

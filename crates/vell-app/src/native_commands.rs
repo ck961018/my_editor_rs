@@ -1,12 +1,15 @@
 use crate::action::TransactionIntent;
 use crate::command::AppCommand;
 use crate::operation::{
-    AppOperation, BufferOperation, ContentOperation, ContentTarget, OperationRequest,
+    AppOperation, BufferOperation, ContentOperation, ContentTarget, ModeFlowPropagation,
+    ModeInvocation, ModeTarget, OperationRequest,
 };
+use vell_mode::command::{ModeCommand, ModeValue};
 use vell_mode::command_registry::{
     CommandEntry, CommandError, CommandHost, CommandId, CommandRegistry, CommandRequest,
     CommandValue,
 };
+use vell_mode::mode_name::{ModeActionName, ModeName};
 use vell_protocol::ids::ContentId;
 use vell_protocol::space::SplitDirection;
 
@@ -25,6 +28,7 @@ pub const NATIVE_COMMAND_IDS: &[&str] = &[
     "focusDown",
     "focusUp",
     "focusRight",
+    "invokeMode",
 ];
 
 pub(super) fn native_command_registry() -> CommandRegistry {
@@ -82,6 +86,42 @@ pub(super) fn native_command_registry() -> CommandRegistry {
         "focusRight",
         app(AppCommand::Focus(SplitDirection::Right)),
     );
+    registry.register(CommandEntry::new(
+        command_id("invokeMode"),
+        |host: &mut dyn CommandHost, arguments: Vec<CommandValue>| {
+            let (qualified, arguments) = match arguments.as_slice() {
+                [qualified] => (qualified, ModeValue::Null),
+                [qualified, arguments] => (qualified, command_value_to_mode(arguments)?),
+                _ => {
+                    return Err(CommandError::InvalidArguments(
+                        "expected a qualified mode command and optional arguments".to_owned(),
+                    ));
+                }
+            };
+            let qualified = qualified.as_str().ok_or_else(|| {
+                CommandError::InvalidArguments("mode command must be a string".to_owned())
+            })?;
+            let (mode, action) = qualified.rsplit_once('.').ok_or_else(|| {
+                CommandError::InvalidArguments(
+                    "mode command must use the qualified name 'mode.command'".to_owned(),
+                )
+            })?;
+            if mode.is_empty() || action.is_empty() {
+                return Err(CommandError::InvalidArguments(
+                    "mode command must use the qualified name 'mode.command'".to_owned(),
+                ));
+            }
+            host.request(CommandRequest::Execute(OperationRequest::Mode {
+                target: ModeTarget::CurrentView,
+                invocation: ModeInvocation {
+                    command: ModeCommand::new(ModeName::new(mode), ModeActionName::new(action))
+                        .with_arguments(arguments),
+                    nested: true,
+                    flow: ModeFlowPropagation::Isolate,
+                },
+            }))
+        },
+    ));
     registry
 }
 
@@ -132,6 +172,27 @@ fn one_content_id(arguments: Vec<CommandValue>) -> Result<ContentId, CommandErro
     value.as_u64().map(ContentId).ok_or_else(|| {
         CommandError::InvalidArguments("content id must be a non-negative integer".to_owned())
     })
+}
+
+fn command_value_to_mode(value: &CommandValue) -> Result<ModeValue, CommandError> {
+    match value {
+        CommandValue::Null => Ok(ModeValue::Null),
+        CommandValue::Bool(value) => Ok(ModeValue::Bool(*value)),
+        CommandValue::Number(value) => value.as_i64().map(ModeValue::Integer).ok_or_else(|| {
+            CommandError::InvalidArguments("mode arguments require integer numbers".to_owned())
+        }),
+        CommandValue::String(value) => Ok(ModeValue::String(value.clone())),
+        CommandValue::Array(values) => values
+            .iter()
+            .map(command_value_to_mode)
+            .collect::<Result<Vec<_>, _>>()
+            .map(ModeValue::List),
+        CommandValue::Object(values) => values
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), command_value_to_mode(value)?)))
+            .collect::<Result<_, _>>()
+            .map(ModeValue::Map),
+    }
 }
 
 #[cfg(test)]

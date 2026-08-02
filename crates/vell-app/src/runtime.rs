@@ -38,8 +38,9 @@ use vell_core::search::SearchDirection;
 use vell_core::transaction::TransactionDirection;
 use vell_frontend::Frontend;
 use vell_mode::command_registry::{
-    CommandCompletion, CommandEntry, CommandError, CommandHost, CommandInvocation, CommandQuery,
-    CommandRequest, CommandResult, CommandTaskCompletion, CommandTaskId, CommandValue,
+    COMMAND_LINE_COMMAND_ID, CommandCompletion, CommandEntry, CommandError, CommandHost, CommandId,
+    CommandInvocation, CommandQuery, CommandRequest, CommandResult, CommandTaskCompletion,
+    CommandTaskId, CommandValue,
 };
 use vell_protocol::content_query::{ContentData, ContentQuery, RenderQuery};
 use vell_protocol::frontend_event::FrontendEvent;
@@ -57,6 +58,7 @@ struct ScopedCommandHost<'a, F: Frontend> {
     frame: &'a mut ExecutionFrame,
     origin: OperationOrigin,
     depth: usize,
+    deferred: VecDeque<QueuedOperation>,
 }
 
 impl<F: Frontend> CommandHost for ScopedCommandHost<'_, F> {
@@ -88,6 +90,13 @@ impl<F: Frontend> CommandHost for ScopedCommandHost<'_, F> {
                 self.query(query).map(CommandCompletion::from)
             }
             CommandRequest::Execute(operation) => {
+                if matches!(operation, OperationRequest::Mode { .. }) {
+                    self.deferred.push_back(QueuedOperation {
+                        request: operation,
+                        origin: self.origin,
+                    });
+                    return Ok(CommandValue::Null.into());
+                }
                 self.execute_request(operation)?;
                 Ok(CommandValue::Null.into())
             }
@@ -114,6 +123,14 @@ impl<F: Frontend> CommandHost for ScopedCommandHost<'_, F> {
 }
 
 impl<F: Frontend> ScopedCommandHost<'_, F> {
+    fn execute_deferred(&mut self) -> Result<(), CommandError> {
+        let operations = std::mem::take(&mut self.deferred);
+        self.app
+            .execute_operation_queue(operations, self.frame)
+            .map(|_| ())
+            .map_err(|error| CommandError::Failed(error.to_string()))
+    }
+
     fn execute_request(&mut self, operation: OperationRequest) -> Result<(), CommandError> {
         let switched_content = match &operation {
             OperationRequest::Buffer(BufferOperation::Switch { content }) => Some(*content),
@@ -165,6 +182,53 @@ impl<F: Frontend> ScopedCommandHost<'_, F> {
                         CommandError::Failed("current content has no text snapshot".to_owned())
                     })
             }
+            CommandQuery::CurrentTextDocument => {
+                let content = self.origin.content.ok_or_else(|| {
+                    CommandError::Failed("command has no current content".to_owned())
+                })?;
+                let view = self.origin.view.ok_or_else(|| {
+                    CommandError::Failed("command has no current view".to_owned())
+                })?;
+                let source = self
+                    .app
+                    .kernel
+                    .contents()
+                    .text_snapshot(content)
+                    .map(|snapshot| snapshot.to_owned_string())
+                    .ok_or_else(|| {
+                        CommandError::Failed("current content has no text snapshot".to_owned())
+                    })?;
+                let selection = self
+                    .app
+                    .session
+                    .view(view)
+                    .and_then(|view| view.selections())
+                    .map(|selections| selections.primary())
+                    .ok_or_else(|| {
+                        CommandError::Failed("current view has no text selection".to_owned())
+                    })?;
+                let resource_path = match self
+                    .app
+                    .kernel
+                    .contents()
+                    .query(content, ContentQuery::ResourcePath)
+                {
+                    ContentData::ResourcePath(path) => path,
+                    _ => None,
+                };
+                Ok(serde_json::json!({
+                    "content": content.0,
+                    "resourcePath": resource_path,
+                    "source": source,
+                    "selection": {
+                        "anchor": selection.anchor.char_index,
+                        "head": selection.head.char_index,
+                    },
+                }))
+            }
+            CommandQuery::CommandExists(id) => Ok(CommandValue::from(
+                self.app.kernel.commands().get(&id).is_some(),
+            )),
         }
     }
 }
@@ -604,10 +668,15 @@ impl<F: Frontend> App<F> {
                 frame: &mut frame,
                 origin: OperationOrigin::view(invocation.view, invocation.content),
                 depth: 0,
+                deferred: VecDeque::new(),
             };
-            invocation
+            let result = invocation
                 .pending
-                .resume(&mut host, CommandTaskCompletion::new(task, task_result))
+                .resume(&mut host, CommandTaskCompletion::new(task, task_result));
+            match result {
+                Ok(completion) => host.execute_deferred().map(|()| completion),
+                Err(error) => Err(error),
+            }
         };
         let result = match result {
             Ok(CommandCompletion::Ready(_)) => Ok(()),
@@ -1221,8 +1290,14 @@ impl<F: Frontend> App<F> {
                     frame,
                     origin: OperationOrigin::view(view, content),
                     depth: 0,
+                    deferred: VecDeque::new(),
                 };
-                return match host.invoke_command(invocation) {
+                let result = host.invoke_command(invocation);
+                let result = match result {
+                    Ok(completion) => host.execute_deferred().map(|()| completion),
+                    Err(error) => Err(error),
+                };
+                return match result {
                     Ok(CommandCompletion::Ready(_)) => Ok(InputFlow::Stop),
                     Ok(CommandCompletion::Pending(pending)) => {
                         frame
@@ -1254,6 +1329,43 @@ impl<F: Frontend> App<F> {
             let origin = queued.origin;
             let operation = self.resolve_operation(queued)?;
             let result = match operation {
+                ResolvedOperation::ExecuteCommandLine {
+                    request,
+                    view,
+                    content,
+                } => {
+                    let invocation = CommandInvocation::new(
+                        CommandId::new(COMMAND_LINE_COMMAND_ID)
+                            .expect("command line service id is valid"),
+                        vec![CommandValue::from(request.source)],
+                    );
+                    let mut host = ScopedCommandHost {
+                        app: self,
+                        frame,
+                        origin: OperationOrigin::view(view, content),
+                        depth: 0,
+                        deferred: VecDeque::new(),
+                    };
+                    let result = host.invoke_command(invocation);
+                    let result = match result {
+                        Ok(completion) => host.execute_deferred().map(|()| completion),
+                        Err(error) => Err(error),
+                    };
+                    match result {
+                        Ok(CommandCompletion::Ready(_)) => Ok(()),
+                        Ok(CommandCompletion::Pending(pending)) => {
+                            host.frame
+                                .stage_pending_command(pending, view, content)
+                                .map_err(operation_error)?;
+                            queue.clear();
+                            Ok(())
+                        }
+                        Err(error) => Err(recoverable_message(
+                            io::ErrorKind::InvalidInput,
+                            error.to_string(),
+                        )),
+                    }
+                }
                 ResolvedOperation::App(AppOperation::Command(command)) => {
                     match command {
                         AppCommand::Quit => {
@@ -1648,6 +1760,19 @@ impl<F: Frontend> App<F> {
     fn resolve_operation(&self, queued: QueuedOperation) -> io::Result<ResolvedOperation> {
         let QueuedOperation { request, origin } = queued;
         match request {
+            OperationRequest::ExecuteCommandLine(request) => {
+                if origin.scope != OperationOriginScope::View {
+                    return Err(invalid_operation(
+                        "command line execution requires a view-scoped origin",
+                    ));
+                }
+                let (view, content) = self.resolve_view_target(ViewTarget::Current, origin)?;
+                Ok(ResolvedOperation::ExecuteCommandLine {
+                    request,
+                    view,
+                    content,
+                })
+            }
             OperationRequest::App(operation) => Ok(ResolvedOperation::App(operation)),
             OperationRequest::Buffer(operation) => {
                 let operation = match operation {

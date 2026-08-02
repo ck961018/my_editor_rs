@@ -50,6 +50,7 @@ interface VimViewState {
 }
 
 type VimContext = BufferCommandContext<VimContentState, VimViewState, KeyInput>;
+type VimCommandContext = BufferCommandContext<VimContentState, VimViewState>;
 type Effect = (context: VimContext) => void;
 
 function isVisual(state: VimViewState): boolean {
@@ -205,7 +206,9 @@ function handlePending(state: VimViewState, key: KeyInput): Effect[] | null {
       state.pending = null;
       clearPrompt(state);
       const command = pending.value;
-      return [(context) => executeCommand(context, command)];
+      return [
+        (context) => context.commands.executeLine(normalizeCommandLine(command)),
+      ];
     }
     if (key.code === "backspace" && isPlain(key) || isCtrl(key, "h")) {
       pending.value = pending.value.slice(0, -1);
@@ -966,87 +969,12 @@ function handleNormal(state: VimViewState, key: KeyInput): Effect[] | null {
   return null;
 }
 
-function executeCommand(context: VimContext, raw: string): void {
+function normalizeCommandLine(raw: string): string {
   const command = raw.trim();
-  const substitution = parseSubstitution(command);
-  if (substitution) {
-    if (!/^[gi]*$/.test(substitution.flags)) {
-      commandError(context, `E488: trailing characters: ${substitution.flags}`);
-      return;
-    }
-    const search: VimSearchState = {
-      pattern: { kind: "regex", value: substitution.pattern },
-      direction: "forward",
-      caseSensitive: !substitution.flags.includes("i"),
-    };
-    context.state.search = search;
-    const options = { caseSensitive: search.caseSensitive };
-    if (substitution.all) {
-      context.search.replaceAll(
-        search.pattern,
-        substitution.replacement,
-        options,
-      );
-    } else {
-      context.search.replaceNext(search.pattern, substitution.replacement, {
-        ...options,
-        direction: "forward",
-        wrap: false,
-      });
-    }
-    return;
-  }
-
-  const match = /^(\S+)(?:\s+(.*))?$/.exec(command);
-  if (!match) return;
-  const name = match[1];
-  const argument = match[2]?.trim();
-  const force = name.endsWith("!");
-  const base = force ? name.slice(0, -1) : name;
-  if (base === "e" || base === "edit") {
-    if (force && !argument) context.buffers.reload(undefined, true);
-    else if (argument) context.buffers.open(argument);
-    else commandError(context, "E471: path required");
-  } else if (base === "enew" || base === "new") {
-    context.buffers.create();
-  } else if (base === "buffers" || base === "ls") {
-    context.buffers.list();
-  } else if (base === "b" || base === "buffer") {
-    const id = parseContentId(argument);
-    if (id === undefined) commandError(context, "E86: buffer id required");
-    else context.buffers.switch(id);
-  } else if (base === "bd" || base === "bdelete") {
-    const id = argument ? parseContentId(argument) : undefined;
-    if (argument && id === undefined) commandError(context, "E86: invalid buffer id");
-    else context.buffers.close(id, force);
-  } else if (base === "w" || base === "write") {
-    if (argument) context.buffers.saveAs(argument, force);
-    else context.buffers.save(undefined, force);
-  } else if (base === "saveas") {
-    if (argument) context.buffers.saveAs(argument, force);
-    else commandError(context, "E471: path required");
-  } else if (base === "reload") {
-    context.buffers.reload(undefined, force);
-  } else if (base === "duplicate") {
-    context.edit.duplicateLines();
-  } else if (base === "moveup") {
-    context.edit.moveLinesUp();
-  } else if (base === "movedown") {
-    context.edit.moveLinesDown();
-  } else if (base === "comment") {
-    const strategy = editingStrategyFor(context);
-    if (strategy.lineComment) context.edit.toggleLineComment(strategy.lineComment);
-  } else if (base === "blockcomment") {
-    const strategy = editingStrategyFor(context);
-    if (strategy.blockComment) context.edit.toggleBlockComment(strategy.blockComment);
-  } else if (base === "set") {
-    applySetCommand(context, argument ?? "");
-  } else {
-    commandError(context, `E492: not an editor command: ${command}`);
-  }
+  return parseSubstitution(command) ? `substitute ${command}` : command;
 }
 
-function commandError(context: VimContext, message: string): void {
+function commandError(context: VimCommandContext, message: string): void {
   context.viewState.viewPolicy.statusBar = { left: [{ text: message }] };
 }
 
@@ -1056,7 +984,21 @@ function parseContentId(value: string | undefined): number | undefined {
   return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
-function applySetCommand(context: VimContext, argument: string): void {
+function stringArgument(context: VimCommandContext): string | undefined {
+  return typeof context.arguments === "string" ? context.arguments : undefined;
+}
+
+function closeBuffer(context: VimCommandContext, force: boolean): void {
+  const argument = stringArgument(context);
+  const id = argument ? parseContentId(argument) : undefined;
+  if (argument && id === undefined) {
+    commandError(context, "E86: invalid buffer id");
+  } else {
+    context.buffers.close(id, force);
+  }
+}
+
+function applySetCommand(context: VimCommandContext, argument: string): void {
   if (argument === "expandtab") {
     context.viewState.insertSpaces = true;
     return;
@@ -1107,6 +1049,38 @@ function parseSubstitution(command: string): Substitution | undefined {
   };
 }
 
+function applySubstitution(context: VimCommandContext, command: string): void {
+  const substitution = parseSubstitution(command);
+  if (!substitution) {
+    commandError(context, `E492: not an editor command: ${command}`);
+    return;
+  }
+  if (!/^[gi]*$/.test(substitution.flags)) {
+    commandError(context, `E488: trailing characters: ${substitution.flags}`);
+    return;
+  }
+  const search: VimSearchState = {
+    pattern: { kind: "regex", value: substitution.pattern },
+    direction: "forward",
+    caseSensitive: !substitution.flags.includes("i"),
+  };
+  context.state.search = search;
+  const options = { caseSensitive: search.caseSensitive };
+  if (substitution.all) {
+    context.search.replaceAll(
+      search.pattern,
+      substitution.replacement,
+      options,
+    );
+  } else {
+    context.search.replaceNext(search.pattern, substitution.replacement, {
+      ...options,
+      direction: "forward",
+      wrap: false,
+    });
+  }
+}
+
 function takeDelimited(
   text: string,
   start: number,
@@ -1126,6 +1100,52 @@ function takeDelimited(
   return undefined;
 }
 
+function invokeVim(action: string, argument?: string): void {
+  if (argument === undefined) invokeMode(`vim.${action}`);
+  else invokeMode(`vim.${action}`, argument);
+}
+
+function registerVimShortcut(
+  names: readonly string[],
+  action: string,
+): void {
+  for (const name of names) {
+    editor.commands.shortcut(name, (argument) => invokeVim(action, argument));
+  }
+}
+
+editor.commands.shortcut("q", () => quit());
+editor.commands.shortcut("quit", () => quit());
+editor.commands.shortcut("q!", () => forceQuit());
+editor.commands.shortcut("quit!", () => forceQuit());
+editor.commands.shortcut("w", (path) => path === undefined ? save() : invokeVim("write", path));
+editor.commands.shortcut(
+  "write",
+  (path) => path === undefined ? save() : invokeVim("write", path),
+);
+editor.commands.shortcut("wq", async () => {
+  await save();
+  quit();
+});
+registerVimShortcut(["w!", "write!"], "writeForce");
+registerVimShortcut(["e", "edit"], "edit");
+registerVimShortcut(["e!", "edit!"], "editForce");
+registerVimShortcut(["enew", "new"], "new");
+registerVimShortcut(["buffers", "ls"], "buffers");
+registerVimShortcut(["b", "buffer"], "buffer");
+registerVimShortcut(["bd", "bdelete"], "bdelete");
+registerVimShortcut(["bd!", "bdelete!"], "bdeleteForce");
+registerVimShortcut(["saveas"], "saveAs");
+registerVimShortcut(["reload"], "reload");
+registerVimShortcut(["reload!"], "reloadForce");
+registerVimShortcut(["duplicate"], "duplicate");
+registerVimShortcut(["moveup"], "moveUp");
+registerVimShortcut(["movedown"], "moveDown");
+registerVimShortcut(["comment"], "comment");
+registerVimShortcut(["blockcomment"], "blockComment");
+registerVimShortcut(["set"], "set");
+registerVimShortcut(["substitute"], "substitute");
+
 editor.modes.define({
   name: "vim",
   on: {
@@ -1143,6 +1163,83 @@ editor.modes.define({
           selectionShape: "character",
         },
       }),
+      commands: {
+        edit(context) {
+          const path = stringArgument(context);
+          if (path) context.buffers.open(path);
+          else commandError(context, "E471: path required");
+        },
+        editForce(context) {
+          const path = stringArgument(context);
+          if (path) context.buffers.open(path);
+          else context.buffers.reload(undefined, true);
+        },
+        new(context) {
+          context.buffers.create();
+        },
+        buffers(context) {
+          context.buffers.list();
+        },
+        buffer(context) {
+          const id = parseContentId(stringArgument(context));
+          if (id === undefined) commandError(context, "E86: buffer id required");
+          else context.buffers.switch(id);
+        },
+        bdelete(context) {
+          closeBuffer(context, false);
+        },
+        bdeleteForce(context) {
+          closeBuffer(context, true);
+        },
+        write(context) {
+          const path = stringArgument(context);
+          if (path) context.buffers.saveAs(path);
+          else context.buffers.save();
+        },
+        writeForce(context) {
+          const path = stringArgument(context);
+          if (path) context.buffers.saveAs(path, true);
+          else context.buffers.save(undefined, true);
+        },
+        saveAs(context) {
+          const path = stringArgument(context);
+          if (path) context.buffers.saveAs(path);
+          else commandError(context, "E471: path required");
+        },
+        reload(context) {
+          context.buffers.reload();
+        },
+        reloadForce(context) {
+          context.buffers.reload(undefined, true);
+        },
+        duplicate(context) {
+          context.edit.duplicateLines();
+        },
+        moveUp(context) {
+          context.edit.moveLinesUp();
+        },
+        moveDown(context) {
+          context.edit.moveLinesDown();
+        },
+        comment(context) {
+          const strategy = editingStrategyFor(context);
+          if (strategy.lineComment) {
+            context.edit.toggleLineComment(strategy.lineComment);
+          }
+        },
+        blockComment(context) {
+          const strategy = editingStrategyFor(context);
+          if (strategy.blockComment) {
+            context.edit.toggleBlockComment(strategy.blockComment);
+          }
+        },
+        set(context) {
+          applySetCommand(context, stringArgument(context) ?? "");
+        },
+        substitute(context) {
+          applySubstitution(context, stringArgument(context) ?? "");
+        },
+      },
       input(context) {
         const state = context.viewState;
         const key = context.arguments;

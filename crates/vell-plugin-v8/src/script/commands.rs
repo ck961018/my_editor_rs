@@ -15,7 +15,7 @@ use super::{
     json_to_v8, perform_microtask_checkpoint, throw_script_error, v8_to_json,
 };
 
-const RESERVED_ROOTS: &[&str] = &["$script", "register", "shortcut"];
+const RESERVED_ROOTS: &[&str] = &["$commandLine", "$script", "register", "shortcut"];
 
 #[derive(Clone, Debug)]
 pub(super) struct ScriptSourceSpan {
@@ -225,6 +225,10 @@ impl ScriptCommands {
 
     fn callback(&self, id: &CommandId) -> Option<v8::Global<v8::Function>> {
         self.definitions.get(id).cloned()
+    }
+
+    pub(super) fn shortcut(&self, name: &str) -> Option<v8::Global<v8::Function>> {
+        self.shortcuts.get(name).cloned()
     }
 
     pub(super) fn change_count(&self) -> usize {
@@ -488,6 +492,7 @@ pub(crate) fn entries(host: &Rc<RefCell<ScriptHost>>) -> Vec<CommandEntry> {
         .map(|id| ScriptCommandAdapter::entry(host, id))
         .collect::<Vec<_>>();
     entries.push(super::global_script::entry(host));
+    entries.push(super::command_line::entry(host));
     entries
 }
 
@@ -703,6 +708,43 @@ impl ScriptHost {
             let receiver = v8::undefined(scope).into();
             let value = call_script_callback(scope, callback, receiver, &arguments)
                 .ok_or_else(|| current_exception(scope, id.as_str(), "execute"))?;
+            perform_microtask_checkpoint(scope);
+            poll_script_value(scope, value)
+        });
+        drop(active_host);
+        finish_script_execution(result?, scoped_host.take_pending_tasks())
+    }
+
+    pub(super) fn execute_shortcut(
+        &mut self,
+        name: &str,
+        argument: Option<&str>,
+        host: &mut dyn CommandHost,
+    ) -> Result<ScriptExecution, ScriptError> {
+        let callback = self
+            .commands
+            .borrow()
+            .shortcut(name)
+            .ok_or_else(|| ScriptError::new(format!("unknown shortcut '{name}'")))?;
+        let context = self.context.clone();
+        let bridge = self.command_host.clone();
+        let mut scoped_host = ScopedHost::new(host);
+        let active_host = bridge.activate(&mut scoped_host)?;
+        let result = self.invoke(ScriptInvocationKind::Action, |isolate| {
+            v8::scope_with_context!(scope, isolate, context);
+            v8::tc_scope!(let scope, scope);
+            let callback = v8::Local::new(scope, callback);
+            let argument = argument
+                .map(|argument| {
+                    v8::String::new(scope, argument)
+                        .map(|argument| vec![argument.into()])
+                        .ok_or_else(|| ScriptError::new("shortcut argument is too large"))
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let receiver = v8::undefined(scope).into();
+            let value = call_script_callback(scope, callback, receiver, &argument)
+                .ok_or_else(|| current_exception(scope, name, "execute shortcut"))?;
             perform_microtask_checkpoint(scope);
             poll_script_value(scope, value)
         });

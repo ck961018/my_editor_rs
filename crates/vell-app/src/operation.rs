@@ -27,6 +27,11 @@ pub struct OperationOrigin {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResolvedOperation {
+    ExecuteCommandLine {
+        request: ExecuteCommandLine,
+        view: ViewId,
+        content: ContentId,
+    },
     Content {
         content: ContentId,
         operation: ContentOperation,

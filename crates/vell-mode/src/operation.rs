@@ -46,6 +46,7 @@ pub enum ModeTarget {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OperationRequest {
+    ExecuteCommandLine(ExecuteCommandLine),
     Content {
         target: ContentTarget,
         operation: ContentOperation,
@@ -77,6 +78,19 @@ pub enum OperationRequest {
     },
     Buffer(BufferOperation),
     App(AppOperation),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecuteCommandLine {
+    pub source: String,
+}
+
+impl ExecuteCommandLine {
+    pub fn new(source: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
