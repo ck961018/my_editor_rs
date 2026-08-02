@@ -8,6 +8,8 @@ rust-version = "1.88"
 test-support = []
 
 [dependencies]
+serde_json = "1"
+unicode-id-start = "1"
 vell-core = { path = "../vell-core" }
 vell-protocol = { path = "../vell-protocol" }
 tokio-util = { version = "0.7", features = ["rt"] }

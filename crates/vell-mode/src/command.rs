@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::command_registry::CommandInvocation;
 use crate::mode_name::{ModeActionName, ModeName};
 use vell_core::command::EditCommand;
 use vell_protocol::space::SplitDirection;
@@ -16,6 +17,7 @@ pub enum Command {
     Content(ContentCommand),
     Mode(ModeCommand),
     ModeInput(ModeInputCommand),
+    Registered(CommandInvocation),
     Viewport(ViewportCommand),
     Noop,
 }

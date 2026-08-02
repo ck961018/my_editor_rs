@@ -208,6 +208,11 @@ pub fn adapt_dispatch_command(
                 input,
             }],
         ),
+        DispatchCommand::Registered { .. } => {
+            return Err(OperationError::new(
+                "registered command execution is not installed",
+            ));
+        }
         DispatchCommand::Viewport {
             command,
             view,

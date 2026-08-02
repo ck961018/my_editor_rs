@@ -2437,7 +2437,9 @@ dependencies = [
 name = "vell-mode"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "tokio-util",
+ "unicode-id-start",
  "vell-core",
  "vell-protocol",
 ]

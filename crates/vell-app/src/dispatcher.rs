@@ -11,6 +11,7 @@ use vell_core::input::{
     PendingSequence, continuations, longest_complete, match_sequence,
 };
 use vell_core::keymap::Keymap;
+use vell_mode::command_registry::CommandInvocation;
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 use vell_protocol::key_event::KeyEvent;
 use vell_protocol::revision::Revision;
@@ -53,6 +54,11 @@ pub(crate) enum DispatchCommand {
         view: ViewId,
         content: ContentId,
     },
+    Registered {
+        invocation: CommandInvocation,
+        view: ViewId,
+        content: ContentId,
+    },
     Viewport {
         command: ViewportCommand,
         view: ViewId,
@@ -84,6 +90,7 @@ impl DispatchCommand {
             | Self::ContentWithView { content, .. }
             | Self::Mode { content, .. }
             | Self::ModeInput { content, .. }
+            | Self::Registered { content, .. }
             | Self::Viewport { content, .. }
             | Self::ModeContentOperations { content, .. }
             | Self::ModeOperations { content, .. } => Some(*content),
@@ -96,6 +103,7 @@ impl DispatchCommand {
             Self::ContentWithView { view, .. }
             | Self::Mode { view, .. }
             | Self::ModeInput { view, .. }
+            | Self::Registered { view, .. }
             | Self::Viewport { view, .. }
             | Self::ModeOperations { view, .. } => Some(*view),
             Self::App(_)
@@ -1083,6 +1091,41 @@ mod tests {
             DispatchOutcome::Emit {
                 command: DispatchCommand::Viewport {
                     command: viewport,
+                    view: ViewId(0),
+                    content: ContentId(0),
+                },
+                replay: Vec::new(),
+                continuation: None,
+            }
+        );
+    }
+
+    #[test]
+    fn registered_command_resolves_to_the_focused_view() {
+        use vell_mode::command_registry::{CommandId, CommandInvocation};
+
+        let (mut dispatcher, scene, focused, views, mut view_modes, mut content_modes, _, contents) =
+            fixture();
+        let key = KeyEvent::ctrl('x');
+        let invocation = CommandInvocation::new(CommandId::new("buffer.save").unwrap(), Vec::new());
+        dispatcher
+            .global_keymap
+            .bind(key, Command::Registered(invocation.clone()));
+
+        assert_eq!(
+            dispatcher.dispatch(
+                DispatchInput::Normal(key),
+                Instant::now(),
+                focused,
+                &scene,
+                &views,
+                &mut view_modes,
+                &mut content_modes,
+                &contents,
+            ),
+            DispatchOutcome::Emit {
+                command: DispatchCommand::Registered {
+                    invocation,
                     view: ViewId(0),
                     content: ContentId(0),
                 },

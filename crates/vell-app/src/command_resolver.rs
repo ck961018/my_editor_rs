@@ -49,6 +49,14 @@ pub(super) fn resolve_command(
                 content: views.get(&view)?.content(),
             })
         }
+        Command::Registered(invocation) => {
+            let view = source.view_or(focused_view);
+            Some(DispatchCommand::Registered {
+                invocation,
+                view,
+                content: views.get(&view)?.content(),
+            })
+        }
         Command::Viewport(command) => {
             let view = source.view_or(focused_view);
             Some(DispatchCommand::Viewport {
