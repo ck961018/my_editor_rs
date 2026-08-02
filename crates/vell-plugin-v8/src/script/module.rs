@@ -116,6 +116,9 @@ fn transpile_typescript_program_with_map(
     })
 }
 
+/// Inline source maps keep standalone test snippets self-contained. Production
+/// paths transpile whole programs and carry a separate map instead.
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn transpile_typescript(specifier: &str, source: &str) -> Result<String, ScriptError> {
     Ok(transpile_typescript_program_with_map(specifier, source, SourceMapOption::Inline)?.code)
 }

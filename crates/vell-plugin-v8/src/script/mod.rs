@@ -53,10 +53,11 @@ use invocation::{
     recover_heap_limit,
 };
 use mode_adapter::{ScriptBackground, ScriptMode};
+#[cfg(any(test, feature = "test-support"))]
+use module::transpile_typescript;
 use module::{
     AssetSource, ModuleMap, current_exception, host_import_module_dynamically,
-    host_initialize_import_meta, load_module_tree, resolve_module, transpile_typescript,
-    transpile_typescript_program,
+    host_initialize_import_meta, load_module_tree, resolve_module, transpile_typescript_program,
 };
 use primitives::PrimitiveRuntime;
 use schema::install_editor_api;
