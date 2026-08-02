@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use deno_ast::swc::ast::{ArrowExpr, AwaitExpr, ForOfStmt, Function, UsingDecl};
+use deno_ast::swc::ecma_visit::{Visit, VisitWith, noop_visit_type};
 use deno_ast::{
     EmitOptions, MediaType, ModuleSpecifier, ParseParams, TranspileModuleOptions, TranspileOptions,
     parse_module, parse_program,
@@ -62,7 +64,16 @@ fn path_to_asset_key(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-pub(super) fn transpile_typescript(specifier: &str, source: &str) -> Result<String, ScriptError> {
+pub(super) struct TranspiledTypeScript {
+    pub(super) code: String,
+    pub(super) is_module: bool,
+    pub(super) has_top_level_await: bool,
+}
+
+pub(super) fn transpile_typescript_program(
+    specifier: &str,
+    source: &str,
+) -> Result<TranspiledTypeScript, ScriptError> {
     let specifier = ModuleSpecifier::parse(specifier)
         .map_err(|error| ScriptError::new(format!("invalid script specifier: {error}")))?;
     let parsed = parse_program(ParseParams {
@@ -74,6 +85,9 @@ pub(super) fn transpile_typescript(specifier: &str, source: &str) -> Result<Stri
         maybe_syntax: None,
     })
     .map_err(|error| ScriptError::new(error.to_string()))?;
+    let is_module = !parsed.compute_is_script();
+    let mut top_level_await = TopLevelAwait::default();
+    parsed.program_ref().visit_with(&mut top_level_await);
     let emitted = parsed
         .transpile(
             &TranspileOptions::default(),
@@ -82,7 +96,48 @@ pub(super) fn transpile_typescript(specifier: &str, source: &str) -> Result<Stri
         )
         .map_err(|error| ScriptError::new(error.to_string()))?
         .into_source();
-    Ok(emitted.text)
+    Ok(TranspiledTypeScript {
+        code: emitted.text,
+        is_module,
+        has_top_level_await: top_level_await.found,
+    })
+}
+
+pub(super) fn transpile_typescript(specifier: &str, source: &str) -> Result<String, ScriptError> {
+    Ok(transpile_typescript_program(specifier, source)?.code)
+}
+
+#[derive(Default)]
+struct TopLevelAwait {
+    found: bool,
+}
+
+impl Visit for TopLevelAwait {
+    noop_visit_type!();
+
+    fn visit_await_expr(&mut self, _expression: &AwaitExpr) {
+        self.found = true;
+    }
+
+    fn visit_for_of_stmt(&mut self, statement: &ForOfStmt) {
+        if statement.is_await {
+            self.found = true;
+        } else {
+            statement.visit_children_with(self);
+        }
+    }
+
+    fn visit_using_decl(&mut self, declaration: &UsingDecl) {
+        if declaration.is_await {
+            self.found = true;
+        } else {
+            declaration.visit_children_with(self);
+        }
+    }
+
+    fn visit_function(&mut self, _function: &Function) {}
+
+    fn visit_arrow_expr(&mut self, _expression: &ArrowExpr) {}
 }
 
 fn transpile_module(path: &Path, source: &str) -> Result<String, ScriptError> {
@@ -203,6 +258,15 @@ impl ModuleMap {
 
     pub(super) fn origin_for_path(&self, path: &Path) -> Option<ModuleOrigin> {
         self.origins_by_url.get(&module_url(path)).cloned()
+    }
+
+    pub(super) fn register_script_origin(&mut self, path: PathBuf, root: PathBuf) {
+        let origin = ModuleOrigin {
+            path: path.clone(),
+            root,
+            source: AssetSource::Filesystem,
+        };
+        self.origins_by_url.insert(module_url(&path), origin);
     }
 }
 

@@ -14,7 +14,7 @@ use super::{
     json_to_v8, perform_microtask_checkpoint, throw_script_error, v8_to_json,
 };
 
-const RESERVED_ROOTS: &[&str] = &["register", "shortcut"];
+const RESERVED_ROOTS: &[&str] = &["$script", "register", "shortcut"];
 
 #[derive(Clone, Default)]
 pub(super) struct ScriptCommands {
@@ -191,17 +191,17 @@ impl Default for ActiveCommandHost {
     }
 }
 
-struct ScopedHost<'a> {
-    host: &'a mut dyn CommandHost,
+pub(super) struct ScopedHost<'a> {
+    pub(super) host: &'a mut dyn CommandHost,
 }
 
-struct ActiveHostGuard<'a> {
+pub(super) struct ActiveHostGuard<'a> {
     bridge: Rc<ActiveCommandHost>,
     _host: PhantomData<&'a mut ScopedHost<'a>>,
 }
 
 impl ActiveCommandHost {
-    fn activate<'a>(
+    pub(super) fn activate<'a>(
         self: &Rc<Self>,
         host: &'a mut ScopedHost<'a>,
     ) -> Result<ActiveHostGuard<'a>, ScriptError> {
@@ -257,7 +257,7 @@ struct ScriptCommandAdapter {
 }
 
 impl ScriptCommandAdapter {
-    fn entry(host: &Rc<RefCell<ScriptHost>>, id: CommandId) -> CommandEntry {
+    pub(super) fn entry(host: &Rc<RefCell<ScriptHost>>, id: CommandId) -> CommandEntry {
         CommandEntry::new(
             id.clone(),
             Self {
@@ -277,24 +277,38 @@ impl CommandAdapter for ScriptCommandAdapter {
             .map_err(|_| CommandError::Failed("script command runtime is reentrant".to_owned()))?
             .execute_command(&self.id, host, arguments)
             .map_err(|error| CommandError::Failed(error.to_string()));
-        let changes = self
-            .host
-            .borrow()
-            .commands
-            .borrow()
-            .changes_since(change_count);
-        for id in changes {
-            host.register_command(Self::entry(&self.host, id));
-        }
+        publish_changes(&self.host, host, change_count);
         result
     }
 }
 
+pub(super) fn publish_changes(
+    script: &Rc<RefCell<ScriptHost>>,
+    host: &mut dyn CommandHost,
+    change_count: usize,
+) {
+    let changes = script
+        .borrow()
+        .commands
+        .borrow()
+        .changes_since(change_count);
+    for id in changes {
+        host.register_command(ScriptCommandAdapter::entry(script, id));
+    }
+}
+
+pub(super) fn change_count(script: &Rc<RefCell<ScriptHost>>) -> usize {
+    script.borrow().commands.borrow().change_count()
+}
+
 pub(crate) fn entries(host: &Rc<RefCell<ScriptHost>>) -> Vec<CommandEntry> {
     let ids = host.borrow().commands.borrow().ids();
-    ids.into_iter()
+    let mut entries = ids
+        .into_iter()
         .map(|id| ScriptCommandAdapter::entry(host, id))
-        .collect()
+        .collect::<Vec<_>>();
+    entries.push(super::global_script::entry(host));
+    entries
 }
 
 fn register_command(

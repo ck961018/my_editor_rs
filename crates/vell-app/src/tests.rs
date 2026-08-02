@@ -9293,6 +9293,53 @@ editor.commands.register("test.newAndSwitch", () => {
 }
 
 #[test]
+fn persistent_global_script_calls_native_commands_in_its_frame() {
+    let mut loaded =
+        vell_plugin_v8::load_typescript_modes("file:///empty.ts", "globalThis.loaded = true;")
+            .unwrap();
+    loaded
+        .install_native_commands(&crate::native_command_ids())
+        .unwrap();
+    let mut app = App::new(None, 40, 5, ScriptedFrontend::new(Vec::new())).unwrap();
+    for command in loaded.commands {
+        app.register_command(command);
+    }
+    let view = view_id(&app, app.session.focused());
+
+    app.execute_command(DispatchCommand::Registered {
+        invocation: vell_plugin_v8::GlobalScriptRequest::Interactive {
+            source: r#"
+function newAndSwitch() {
+  const content = newBuffer();
+  switchBuffer(content);
+}
+"#
+            .to_owned(),
+        }
+        .into_invocation(),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    app.execute_command(DispatchCommand::Registered {
+        invocation: vell_plugin_v8::GlobalScriptRequest::Interactive {
+            source: "newAndSwitch();".to_owned(),
+        }
+        .into_invocation(),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    let focused_view = view_id(&app, app.session.focused());
+    assert_ne!(
+        app.session.view(focused_view).unwrap().content(),
+        editor_cid()
+    );
+    assert_eq!(app.buffers().len(), 2);
+}
+
+#[test]
 fn failed_registered_command_removes_provisional_content() {
     let mut app = make_app(vec![], None);
     let test_id = CommandId::new("test.createThenFail").unwrap();

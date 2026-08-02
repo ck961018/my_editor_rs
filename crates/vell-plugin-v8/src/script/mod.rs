@@ -26,6 +26,7 @@ use vell_protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
 
 mod bridge;
 mod commands;
+mod global_script;
 mod host;
 mod invocation;
 mod mode_adapter;
