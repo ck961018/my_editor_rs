@@ -107,7 +107,15 @@ impl ScriptHost {
             self.execute_module(&path)?;
             Ok(CommandCompletion::Ready(CommandValue::Null))
         } else {
-            self.evaluate_transpiled_global(&path, program.code)
+            if let Some(source_map) = &program.source_map {
+                self.commands
+                    .borrow_mut()
+                    .record_source_map(path.display().to_string(), source_map)?;
+            }
+            self.update_type_source(path.display().to_string(), &source);
+            let result = self.evaluate_transpiled_global(&path, program.code);
+            self.sync_module_type_sources();
+            result
         }
     }
 
@@ -129,7 +137,15 @@ impl ScriptHost {
                 "global scripts do not support static import or export; use dynamic import()",
             ));
         }
-        self.evaluate_transpiled_global(path, program.code)
+        if let Some(source_map) = &program.source_map {
+            self.commands
+                .borrow_mut()
+                .record_source_map(path.display().to_string(), source_map)?;
+        }
+        self.update_type_source(path.display().to_string(), source);
+        let result = self.evaluate_transpiled_global(path, program.code);
+        self.sync_module_type_sources();
+        result
     }
 
     fn evaluate_transpiled_global(
@@ -292,6 +308,7 @@ mod tests {
 
     struct TestHost {
         registry: Rc<RefCell<CommandRegistry>>,
+        script: Rc<RefCell<ScriptHost>>,
     }
 
     impl CommandHost for TestHost {
@@ -334,7 +351,7 @@ mod tests {
                 Ok(CommandValue::Null.into())
             },
         ));
-        (captured, TestHost { registry })
+        (captured, TestHost { registry, script })
     }
 
     fn evaluate(host: &mut TestHost, source: &str) -> CommandResult {
@@ -379,6 +396,26 @@ editor.commands.register("math.double", value => value * 2);
                 .get(&CommandId::new("math.double").unwrap())
                 .is_some()
         );
+    }
+
+    #[test]
+    fn global_history_is_visible_to_later_type_queries() {
+        let (_captured, mut host) = configured_host();
+        evaluate(
+            &mut host,
+            "function typedHelper(value: number): string { return String(value); }",
+        )
+        .unwrap();
+
+        let diagnostics = host
+            .script
+            .borrow_mut()
+            .type_diagnostics(
+                "file:///later-input.ts",
+                "typedHelper('bad'); typedHelper(42);",
+            )
+            .unwrap();
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
     }
 
     #[test]
@@ -453,6 +490,40 @@ throw new Error("after registration");
 
         assert!(first.contains(".vell-buffer-7.ts"), "{first}");
         assert!(second.contains(".vell-buffer-7.ts"), "{second}");
+    }
+
+    #[test]
+    fn buffer_registration_types_are_visible_to_other_sources() {
+        let (_captured, mut host) = configured_host();
+        host.invoke_command(
+            GlobalScriptRequest::Buffer {
+                content: ContentId(7),
+                resource_path: Some(PathBuf::from("workspace/example.ts")),
+                source: r#"
+editor.commands.register(
+  "buffer.typed",
+  (value: number): number => value + 1,
+);
+"#
+                .to_owned(),
+            }
+            .into_invocation(),
+        )
+        .unwrap();
+
+        let diagnostics = host
+            .script
+            .borrow_mut()
+            .type_environment
+            .diagnostics(
+                "file:///other-buffer.ts",
+                r#"
+editor.commands.buffer.typed("bad");
+buffer.typed("bad");
+"#,
+            )
+            .unwrap();
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:#?}");
     }
 
     #[test]

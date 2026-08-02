@@ -15,6 +15,7 @@
     "../examples/v1-migration.ts",
     "../examples/worker-platform.ts",
     "../examples/worker-platform-worker.ts",
+    "command-system.ts",
     "v2-mode.ts"
   ]
 }

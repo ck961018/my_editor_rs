@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -7,8 +7,8 @@ use std::rc::Rc;
 use deno_ast::swc::ast::{ArrowExpr, AwaitExpr, ForOfStmt, Function, UsingDecl};
 use deno_ast::swc::ecma_visit::{Visit, VisitWith, noop_visit_type};
 use deno_ast::{
-    EmitOptions, MediaType, ModuleSpecifier, ParseParams, TranspileModuleOptions, TranspileOptions,
-    parse_module, parse_program,
+    EmitOptions, MediaType, ModuleSpecifier, ParseParams, SourceMapOption, TranspileModuleOptions,
+    TranspileOptions, parse_module, parse_program,
 };
 
 use super::{
@@ -66,6 +66,7 @@ fn path_to_asset_key(path: &Path) -> String {
 
 pub(super) struct TranspiledTypeScript {
     pub(super) code: String,
+    pub(super) source_map: Option<String>,
     pub(super) is_module: bool,
     pub(super) has_top_level_await: bool,
 }
@@ -73,6 +74,14 @@ pub(super) struct TranspiledTypeScript {
 pub(super) fn transpile_typescript_program(
     specifier: &str,
     source: &str,
+) -> Result<TranspiledTypeScript, ScriptError> {
+    transpile_typescript_program_with_map(specifier, source, SourceMapOption::Separate)
+}
+
+fn transpile_typescript_program_with_map(
+    specifier: &str,
+    source: &str,
+    source_map: SourceMapOption,
 ) -> Result<TranspiledTypeScript, ScriptError> {
     let specifier = ModuleSpecifier::parse(specifier)
         .map_err(|error| ScriptError::new(format!("invalid script specifier: {error}")))?;
@@ -92,19 +101,23 @@ pub(super) fn transpile_typescript_program(
         .transpile(
             &TranspileOptions::default(),
             &TranspileModuleOptions::default(),
-            &EmitOptions::default(),
+            &EmitOptions {
+                source_map,
+                ..EmitOptions::default()
+            },
         )
         .map_err(|error| ScriptError::new(error.to_string()))?
         .into_source();
     Ok(TranspiledTypeScript {
         code: emitted.text,
+        source_map: emitted.source_map,
         is_module,
         has_top_level_await: top_level_await.found,
     })
 }
 
 pub(super) fn transpile_typescript(specifier: &str, source: &str) -> Result<String, ScriptError> {
-    Ok(transpile_typescript_program(specifier, source)?.code)
+    Ok(transpile_typescript_program_with_map(specifier, source, SourceMapOption::Inline)?.code)
 }
 
 #[derive(Default)]
@@ -140,9 +153,9 @@ impl Visit for TopLevelAwait {
     fn visit_arrow_expr(&mut self, _expression: &ArrowExpr) {}
 }
 
-fn transpile_module(path: &Path, source: &str) -> Result<String, ScriptError> {
+fn transpile_module(path: &Path, source: &str) -> Result<(String, Option<String>), ScriptError> {
     match path.extension().and_then(|extension| extension.to_str()) {
-        Some("js") => return Ok(source.to_owned()),
+        Some("js") => return Ok((source.to_owned(), None)),
         Some("ts") => {}
         _ => {
             return Err(ScriptError::new(format!(
@@ -176,11 +189,14 @@ fn transpile_module(path: &Path, source: &str) -> Result<String, ScriptError> {
         .transpile(
             &TranspileOptions::default(),
             &TranspileModuleOptions::default(),
-            &EmitOptions::default(),
+            &EmitOptions {
+                source_map: SourceMapOption::Separate,
+                ..EmitOptions::default()
+            },
         )
         .map_err(|error| ScriptError::new(error.to_string()))?
         .into_source();
-    Ok(emitted.text)
+    Ok((emitted.text, emitted.source_map))
 }
 
 fn module_url(path: &Path) -> String {
@@ -208,6 +224,7 @@ pub(super) struct ModuleMap {
     by_path: HashMap<PathBuf, v8::Global<v8::Module>>,
     by_id: HashMap<i32, Vec<(ModuleOrigin, v8::Global<v8::Module>)>>,
     origins_by_url: HashMap<String, ModuleOrigin>,
+    sources: BTreeMap<PathBuf, String>,
 }
 
 impl ModuleMap {
@@ -268,6 +285,17 @@ impl ModuleMap {
         };
         self.origins_by_url.insert(module_url(&path), origin);
     }
+
+    fn record_source(&mut self, path: PathBuf, source: String) {
+        self.sources.insert(path, source);
+    }
+
+    pub(super) fn source_snapshots(&self) -> Vec<(String, String)> {
+        self.sources
+            .iter()
+            .map(|(path, source)| (path.display().to_string(), source.clone()))
+            .collect()
+    }
 }
 
 pub(super) fn load_module_tree<'scope>(
@@ -282,9 +310,23 @@ pub(super) fn load_module_tree<'scope>(
     let source = read_source(scope, path)?;
     ensure_size("module source", source.len(), MAX_SCRIPT_SOURCE_BYTES)?;
     modules.borrow_mut().reserve_source(source.len())?;
-    let source = transpile_module(path, &source)?;
-    ensure_size("transpiled module", source.len(), MAX_SCRIPT_SOURCE_BYTES)?;
-    let source = v8::String::new(scope, &source)
+    let (javascript, source_map) = transpile_module(path, &source)?;
+    ensure_size(
+        "transpiled module",
+        javascript.len(),
+        MAX_SCRIPT_SOURCE_BYTES,
+    )?;
+    modules.borrow_mut().record_source(path.to_owned(), source);
+    if let Some(source_map) = source_map
+        && let Some(commands) = scope
+            .get_slot::<Rc<RefCell<super::commands::ScriptCommands>>>()
+            .cloned()
+    {
+        commands
+            .borrow_mut()
+            .record_source_map(path.display().to_string(), &source_map)?;
+    }
+    let source = v8::String::new(scope, &javascript)
         .ok_or_else(|| ScriptError::new(format!("script is too large: {}", path.display())))?;
     let origin = module_origin(scope, path);
     let mut compiler_source = v8::script_compiler::Source::new(source, Some(&origin));

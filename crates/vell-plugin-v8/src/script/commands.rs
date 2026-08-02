@@ -16,18 +16,36 @@ use super::{
 
 const RESERVED_ROOTS: &[&str] = &["$script", "register", "shortcut"];
 
+#[derive(Clone, Debug)]
+pub(super) struct ScriptSourceSpan {
+    pub(super) identity: String,
+    pub(super) line: usize,
+    pub(super) column: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ScriptCommandRegistration {
+    pub(super) id: CommandId,
+    pub(super) source: Option<ScriptSourceSpan>,
+}
+
 #[derive(Clone, Default)]
 pub(super) struct ScriptCommands {
     definitions: BTreeMap<CommandId, v8::Global<v8::Function>>,
     shortcuts: BTreeMap<String, v8::Global<v8::Function>>,
-    changes: Vec<CommandId>,
+    changes: Vec<ScriptCommandRegistration>,
     fallback_roots: BTreeMap<String, v8::Global<v8::Value>>,
+    source_maps: BTreeMap<String, deno_ast::swc::sourcemap::SourceMap>,
 }
 
 impl ScriptCommands {
     pub(super) fn install_api(&self, scope: &mut v8::PinScope<'_, '_>) {
         let editor = editor_object(scope).expect("editor API is installed first");
         let commands = v8::Object::new(scope);
+        let null = v8::null(scope);
+        commands
+            .set_prototype(scope, null.into())
+            .expect("command namespace prototype");
         let register = v8::FunctionTemplate::new(scope, register_command)
             .get_function(scope)
             .expect("command registration function");
@@ -39,17 +57,44 @@ impl ScriptCommands {
         set(scope, editor, "commands", commands.into());
     }
 
+    pub(super) fn record_source_map(
+        &mut self,
+        identity: String,
+        source_map: &str,
+    ) -> Result<(), ScriptError> {
+        let source_map = deno_ast::swc::sourcemap::SourceMap::from_slice(source_map.as_bytes())
+            .map_err(|error| ScriptError::new(format!("invalid script source map: {error}")))?;
+        self.source_maps.insert(identity, source_map);
+        Ok(())
+    }
+
+    fn original_position(
+        &self,
+        identity: &str,
+        line: usize,
+        column: usize,
+    ) -> Option<(usize, usize)> {
+        let line = u32::try_from(line.checked_sub(1)?).ok()?;
+        let column = u32::try_from(column.checked_sub(1)?).ok()?;
+        let token = self.source_maps.get(identity)?.lookup_token(line, column)?;
+        Some((
+            usize::try_from(token.get_src_line()).ok()?.checked_add(1)?,
+            usize::try_from(token.get_src_col()).ok()?.checked_add(1)?,
+        ))
+    }
+
     fn register(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
         id: CommandId,
         callback: v8::Local<v8::Function>,
+        source: Option<ScriptSourceSpan>,
     ) -> Result<(), ScriptError> {
         ensure_available_root(&id)?;
         self.install_value(scope, &id, callback.into())?;
         self.definitions
             .insert(id.clone(), v8::Global::new(scope, callback));
-        self.changes.push(id);
+        self.changes.push(ScriptCommandRegistration { id, source });
         Ok(())
     }
 
@@ -105,24 +150,41 @@ impl ScriptCommands {
             let key = v8::String::new(scope, segment)
                 .ok_or_else(|| ScriptError::new("command id is too large for V8"))?;
             if segments.peek().is_none() {
-                if let Some(previous) = parent.get(scope, key.into()) {
+                if parent.has_own_property(scope, key.into()) == Some(true)
+                    && let Some(previous) = parent.get(scope, key.into())
+                {
                     preserve_command_children(scope, previous, value)?;
                 }
-                if parent.set(scope, key.into(), value) != Some(true) {
+                if parent.create_data_property(scope, key.into(), value) != Some(true) {
                     return Err(ScriptError::new(format!(
                         "failed to install command '{id}'"
                     )));
                 }
                 break;
             }
-            let child = parent
-                .get(scope, key.into())
-                .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
-                .unwrap_or_else(|| {
+            let child = if parent.has_own_property(scope, key.into()) == Some(true) {
+                parent
+                    .get(scope, key.into())
+                    .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+            } else {
+                None
+            };
+            let child = match child {
+                Some(child) => child,
+                None => {
                     let child = v8::Object::new(scope);
-                    parent.set(scope, key.into(), child.into());
+                    let null = v8::null(scope);
+                    if child.set_prototype(scope, null.into()) != Some(true)
+                        || parent.create_data_property(scope, key.into(), child.into())
+                            != Some(true)
+                    {
+                        return Err(ScriptError::new(format!(
+                            "failed to install command namespace '{segment}'"
+                        )));
+                    }
                     child
-                });
+                }
+            };
             parent = child;
         }
 
@@ -164,11 +226,11 @@ impl ScriptCommands {
         self.definitions.get(id).cloned()
     }
 
-    fn change_count(&self) -> usize {
+    pub(super) fn change_count(&self) -> usize {
         self.changes.len()
     }
 
-    fn changes_since(&self, count: usize) -> Vec<CommandId> {
+    pub(super) fn changes_since(&self, count: usize) -> Vec<ScriptCommandRegistration> {
         self.changes[count..].to_vec()
     }
 
@@ -292,8 +354,9 @@ pub(super) fn publish_changes(
         .commands
         .borrow()
         .changes_since(change_count);
-    for id in changes {
-        host.register_command(ScriptCommandAdapter::entry(script, id));
+    script.borrow_mut().publish_command_types(&changes);
+    for registration in changes {
+        host.register_command(ScriptCommandAdapter::entry(script, registration.id));
     }
 }
 
@@ -350,12 +413,38 @@ fn register_command(
             .get_slot::<Rc<RefCell<ScriptCommands>>>()
             .cloned()
             .ok_or_else(|| ScriptError::new("command registry is unavailable"))?;
-        registry.borrow_mut().register(scope, id, callback)
+        let source = current_registration_source(scope, &registry);
+        registry
+            .borrow_mut()
+            .register(scope, id, callback, source)?;
+        Ok(callback)
     })();
     match parsed {
-        Ok(()) => return_value.set_undefined(),
+        Ok(callback) => return_value.set(callback.into()),
         Err(error) => throw_script_error(scope, &error.to_string()),
     }
+}
+
+fn current_registration_source(
+    scope: &mut v8::PinScope<'_, '_>,
+    registry: &Rc<RefCell<ScriptCommands>>,
+) -> Option<ScriptSourceSpan> {
+    let stack = v8::StackTrace::current_stack_trace(scope, 1)?;
+    let frame = stack.get_frame(scope, 0)?;
+    let identity = frame
+        .get_script_name_or_source_url(scope)?
+        .to_rust_string_lossy(scope);
+    let line = frame.get_line_number();
+    let column = frame.get_column();
+    let (line, column) = registry
+        .borrow()
+        .original_position(&identity, line, column)
+        .unwrap_or((line, column));
+    (!identity.is_empty() && line > 0 && column > 0).then_some(ScriptSourceSpan {
+        identity,
+        line,
+        column,
+    })
 }
 
 fn register_shortcut(
@@ -539,10 +628,12 @@ fn preserve_command_children(
         let key = names
             .get_index(scope, index)
             .ok_or_else(|| ScriptError::new("failed to inspect command namespace key"))?;
+        let name = v8::Local::<v8::Name>::try_from(key)
+            .map_err(|_| ScriptError::new("invalid command namespace key"))?;
         let value = previous
-            .get(scope, key)
+            .get(scope, name.into())
             .ok_or_else(|| ScriptError::new("failed to read command namespace child"))?;
-        if replacement.set(scope, key, value) != Some(true) {
+        if replacement.create_data_property(scope, name, value) != Some(true) {
             return Err(ScriptError::new(
                 "failed to preserve nested command namespace",
             ));
@@ -553,6 +644,7 @@ fn preserve_command_children(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::time::Duration;
 
     use vell_mode::command_registry::{CommandRegistry, CommandRequest};
@@ -690,6 +782,193 @@ editor.commands.register("test.callBare", () => increment());
     }
 
     #[test]
+    fn registered_handlers_publish_inferred_command_types() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let (script, _host) = configured_host(
+            r#"
+function increment(value: number, by?: number): number {
+  return value + (by ?? 1);
+}
+editor.commands.register(increment);
+editor.commands.register(
+  "format.count",
+  async (prefix: string, count: number): Promise<string> => prefix + count,
+);
+"#,
+            &[],
+            calls,
+        );
+
+        let declarations = script
+            .borrow()
+            .type_environment
+            .generated_declarations()
+            .to_owned();
+        assert!(declarations.contains("increment"), "{declarations}");
+        assert!(declarations.contains("value: number"), "{declarations}");
+        assert!(declarations.contains("by?: number"), "{declarations}");
+        assert!(declarations.contains("Promise<string>"), "{declarations}");
+
+        let diagnostics = script
+            .borrow_mut()
+            .type_environment
+            .diagnostics(
+                "file:///probe.ts",
+                r#"
+editor.commands.increment("bad");
+increment("bad");
+editor.commands.format.count(1, 2);
+editor.commands.format();
+format();
+"#,
+            )
+            .unwrap();
+        assert_eq!(diagnostics.len(), 5, "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn replacement_atomically_updates_namespace_and_bare_global_types() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let (script, _host) = configured_host(
+            r#"editor.commands.register("replaceable", (value: number) => value);"#,
+            &[],
+            calls,
+        );
+        script
+            .borrow_mut()
+            .execute_typescript(
+                "file:///replacement.ts",
+                r#"editor.commands.register("replaceable", (value: string) => value);"#,
+            )
+            .unwrap();
+
+        let diagnostics = script
+            .borrow_mut()
+            .type_environment
+            .diagnostics(
+                "file:///replacement-probe.ts",
+                r#"
+editor.commands.replaceable(1);
+replaceable(1);
+editor.commands.replaceable("ok");
+replaceable("ok");
+"#,
+            )
+            .unwrap();
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:#?}");
+
+        script
+            .borrow_mut()
+            .execute_typescript(
+                "file:///native-replacement.ts",
+                r#"editor.commands.register("save", (path: string) => path);"#,
+            )
+            .unwrap();
+        let diagnostics = script
+            .borrow_mut()
+            .type_environment
+            .diagnostics(
+                "file:///native-replacement-probe.ts",
+                r#"
+editor.commands.save();
+save();
+editor.commands.save("file.txt");
+save("file.txt");
+"#,
+            )
+            .unwrap();
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn module_sources_contribute_imported_handler_types() {
+        let directory = tempfile::tempdir().unwrap();
+        let dependency = directory.path().join("handler.ts");
+        let entry = directory.path().join("commands.ts");
+        fs::write(
+            &dependency,
+            "export function convert(value: number): string { return String(value); }",
+        )
+        .unwrap();
+        fs::write(
+            &entry,
+            r#"
+import { convert } from "./handler.ts";
+editor.commands.register("module.convert", convert);
+"#,
+        )
+        .unwrap();
+        let mut script = ScriptHost::new();
+        script.execute_module(&entry).unwrap();
+
+        let declarations = script.type_environment.generated_declarations().to_owned();
+        assert!(declarations.contains("value: number"), "{declarations}");
+        assert!(declarations.contains("string"), "{declarations}");
+        let diagnostics = script
+            .type_diagnostics(
+                "file:///module-probe.ts",
+                "convert(1); editor.commands.module.convert(1);",
+            )
+            .unwrap();
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn dynamic_registration_locations_use_the_safe_unknown_signature() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let (script, _host) = configured_host(
+            r#"
+const dynamicId = "dynamic.command";
+editor.commands.register(dynamicId, (value: number) => value);
+eval('editor.commands.register("from.eval", (value) => value)');
+editor.commands.register("class.member", (value: number) => value);
+editor.commands.register("__proto__.member", (value: number) => value);
+if (editor.commands.__proto__.member(42) !== 42) throw new Error("namespace");
+"#,
+            &[],
+            calls,
+        );
+
+        let declarations = script
+            .borrow()
+            .type_environment
+            .generated_declarations()
+            .to_owned();
+        assert!(
+            declarations.matches("unknown[]) => unknown").count() >= 2,
+            "{declarations}"
+        );
+        assert!(
+            declarations.contains("readonly \"class\""),
+            "{declarations}"
+        );
+        assert!(
+            !declarations.contains("declare const class:"),
+            "{declarations}"
+        );
+        assert!(
+            declarations.contains("readonly \"__proto__\""),
+            "{declarations}"
+        );
+    }
+
+    #[test]
+    fn compiler_fault_does_not_break_runtime_registration() {
+        let mut script = ScriptHost::new();
+        script.type_environment.fault_for_test();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let (script, mut host) = configure_script(
+            script,
+            r#"editor.commands.register("still.runs", () => 42);"#,
+            &[],
+            calls,
+        );
+
+        assert!(invoke(&mut host, "still.runs").is_ok());
+        assert!(script.borrow().type_environment.fault().is_some());
+    }
+
+    #[test]
     fn a_callable_namespace_keeps_commands_registered_below_it() {
         let calls = Rc::new(RefCell::new(Vec::new()));
         let (_script, mut host) = configured_host(
@@ -724,6 +1003,24 @@ editor.commands.shortcut("write", () => "replacement");
         let commands = host.commands.borrow();
         assert_eq!(commands.shortcuts.len(), 1);
         assert!(commands.shortcuts.contains_key("write"));
+    }
+
+    #[test]
+    fn registration_returns_the_same_callable() {
+        let mut host = ScriptHost::new();
+        host.execute_typescript(
+            "file:///register-return.ts",
+            r#"
+function named(value: number) { return value + 1; }
+const namedResult = editor.commands.register(named);
+const explicit = (value: string) => value.length;
+const explicitResult = editor.commands.register("explicit", explicit);
+if (namedResult !== named || explicitResult !== explicit) {
+  throw new Error("register replaced the callable");
+}
+"#,
+        )
+        .unwrap();
     }
 
     #[test]

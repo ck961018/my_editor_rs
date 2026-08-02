@@ -150,4 +150,29 @@ mod tests {
 
         assert_eq!(registered, exported);
     }
+
+    #[test]
+    fn exported_native_ids_match_the_typescript_seed_declarations() {
+        let declarations = include_str!("../../../runtime/commands.generated.d.ts");
+        let mut declared = declarations
+            .lines()
+            .skip_while(|line| !line.starts_with("interface EditorCommands"))
+            .skip(1)
+            .take_while(|line| *line != "}")
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix("readonly ")?
+                    .split_once(':')
+                    .map(|(id, _)| id.to_owned())
+            })
+            .collect::<Vec<_>>();
+        let mut exported = NATIVE_COMMAND_IDS
+            .iter()
+            .map(|id| (*id).to_owned())
+            .collect::<Vec<_>>();
+        declared.sort();
+        exported.sort();
+
+        assert_eq!(declared, exported);
+    }
 }

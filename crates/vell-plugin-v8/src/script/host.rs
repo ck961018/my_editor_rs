@@ -15,6 +15,7 @@ pub struct ScriptHost {
     pub(super) commands: Rc<RefCell<ScriptCommands>>,
     pub(super) command_host: Rc<ActiveCommandHost>,
     pub(super) next_interactive_script: u64,
+    pub(super) type_environment: TypeEnvironment,
     plugin_root: Rc<RefCell<Option<String>>>,
     primitives: Rc<RefCell<PrimitiveRuntime>>,
     pub(super) worker_decorations: Rc<RefCell<WorkerDecorationBuffer>>,
@@ -96,6 +97,7 @@ impl ScriptHost {
             commands,
             command_host,
             next_interactive_script: 0,
+            type_environment: TypeEnvironment::default(),
             plugin_root,
             primitives,
             worker_decorations,
@@ -133,6 +135,49 @@ impl ScriptHost {
             return Err(ScriptError::new("script heap limit exceeded"));
         }
         result
+    }
+
+    pub(super) fn publish_command_types(
+        &mut self,
+        registrations: &[commands::ScriptCommandRegistration],
+    ) {
+        self.type_environment.publish(registrations);
+    }
+
+    pub(super) fn publish_command_types_since(&mut self, change_count: usize) {
+        let registrations = self.commands.borrow().changes_since(change_count);
+        self.publish_command_types(&registrations);
+    }
+
+    pub(super) fn update_type_source(&mut self, identity: impl Into<String>, source: &str) {
+        self.type_environment
+            .update_source(identity, source.to_owned());
+    }
+
+    pub(super) fn sync_module_type_sources(&mut self) {
+        let sources = self.modules.borrow().source_snapshots();
+        for (identity, source) in sources {
+            self.type_environment.update_source(identity, source);
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn type_diagnostics(
+        &mut self,
+        identity: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Result<Vec<String>, ScriptError> {
+        self.type_environment.diagnostics(identity, source)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn generated_command_declarations(&self) -> &str {
+        self.type_environment.generated_declarations()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn typescript_compiler_version(&mut self) -> Result<String, ScriptError> {
+        self.type_environment.compiler_version()
     }
 
     /// Drain all pending worker→main messages and dispatch them to
@@ -208,6 +253,7 @@ impl ScriptHost {
     }
 
     pub fn execute_typescript(&mut self, specifier: &str, source: &str) -> Result<(), ScriptError> {
+        let command_count = self.commands.borrow().change_count();
         let definition_count = self.definitions.borrow().len();
         let diagnostics = self.diagnostics.borrow().clone();
         let configuration = self.configuration.borrow().clone();
@@ -217,6 +263,7 @@ impl ScriptHost {
             self.diagnostics.replace(diagnostics);
             self.configuration.replace(configuration);
         }
+        self.publish_command_types_since(command_count);
         result
     }
 
@@ -232,6 +279,7 @@ impl ScriptHost {
     }
 
     pub(super) fn execute_embedded_module(&mut self, path: &str) -> Result<(), ScriptError> {
+        let command_count = self.commands.borrow().change_count();
         let definition_count = self.definitions.borrow().len();
         let diagnostics = self.diagnostics.borrow().clone();
         let configuration = self.configuration.borrow().clone();
@@ -270,11 +318,13 @@ impl ScriptHost {
         });
 
         self.plugin_root.replace(None);
+        self.sync_module_type_sources();
         if result.is_err() {
             self.definitions.borrow_mut().truncate(definition_count);
             self.diagnostics.replace(diagnostics);
             self.configuration.replace(configuration);
         }
+        self.publish_command_types_since(command_count);
         result
     }
 
@@ -287,6 +337,7 @@ impl ScriptHost {
             .ok_or_else(|| ScriptError::new("script entry has no parent directory"))?
             .to_owned();
         self.modules.borrow_mut().reset(root.clone());
+        let command_count = self.commands.borrow().change_count();
         let definition_count = self.definitions.borrow().len();
         let diagnostics = self.diagnostics.borrow().clone();
         let configuration = self.configuration.borrow().clone();
@@ -335,6 +386,8 @@ impl ScriptHost {
             }
             Ok(())
         });
+        self.sync_module_type_sources();
+        self.publish_command_types_since(command_count);
         if result.is_err() {
             self.definitions.borrow_mut().truncate(definition_count);
             self.diagnostics.replace(diagnostics);
@@ -626,20 +679,42 @@ impl ScriptHost {
         source: &str,
     ) -> Result<String, ScriptError> {
         ensure_size("TypeScript source", source.len(), MAX_SCRIPT_SOURCE_BYTES)?;
+        let program = transpile_typescript_program(specifier, source)?;
+        if let Some(source_map) = &program.source_map {
+            self.commands
+                .borrow_mut()
+                .record_source_map(specifier.to_owned(), source_map)?;
+        }
+        let javascript = program.code;
+        ensure_size(
+            "transpiled JavaScript",
+            javascript.len(),
+            MAX_SCRIPT_SOURCE_BYTES,
+        )?;
+        self.update_type_source(specifier, source);
         let context = self.context.clone();
         self.invoke(ScriptInvocationKind::ModuleEvaluation, |isolate| {
-            let javascript = transpile_typescript(specifier, source)?;
-            ensure_size(
-                "transpiled JavaScript",
-                javascript.len(),
-                MAX_SCRIPT_SOURCE_BYTES,
-            )?;
             v8::scope_with_context!(scope, isolate, context);
             v8::tc_scope!(let scope, scope);
 
             let source = v8::String::new(scope, &javascript)
                 .ok_or_else(|| ScriptError::new("script source is too large for V8"))?;
-            let script = match v8::Script::compile(scope, source, None) {
+            let resource_name = v8::String::new(scope, specifier)
+                .ok_or_else(|| ScriptError::new("script source identity is too large for V8"))?;
+            let origin = v8::ScriptOrigin::new(
+                scope,
+                resource_name.into(),
+                0,
+                0,
+                false,
+                0,
+                None,
+                false,
+                false,
+                false,
+                None,
+            );
+            let script = match v8::Script::compile(scope, source, Some(&origin)) {
                 Some(script) => script,
                 None => return Err(current_exception(scope, specifier, "compile")),
             };

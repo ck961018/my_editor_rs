@@ -1,2 +1,3 @@
 # Normalize text in Git and use LF in every working tree.
 * text=auto eol=lf
+crates/vell-plugin-v8/vendor/typescript/LICENSE.txt whitespace=-trailing-space

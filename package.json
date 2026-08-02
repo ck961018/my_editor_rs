@@ -2,7 +2,8 @@
   "name": "vell-development",
   "private": true,
   "scripts": {
-    "typecheck": "tsc --noEmit -p runtime/type-tests/tsconfig.json"
+    "typecheck": "tsc --noEmit -p runtime/type-tests/tsconfig.json",
+    "vendor:typescript": "node tools/update-typescript-compiler.mjs"
   },
   "devDependencies": {
     "typescript": "5.9.3"

@@ -1,3 +1,5 @@
+/// <reference path="./commands.generated.d.ts" />
+
 type ScriptData =
 	| null
 	| boolean
@@ -408,23 +410,9 @@ interface CommandPrimitives {
 type EditorCommand = (...arguments: any[]) => unknown;
 
 interface EditorCommands {
-	register<Command extends EditorCommand>(callback: Command): void;
-	register<Command extends EditorCommand>(id: string, callback: Command): void;
+	register<Command extends EditorCommand>(callback: Command): Command;
+	register<Command extends EditorCommand>(id: string, callback: Command): Command;
 	shortcut(name: string, callback: (tail?: string) => unknown): void;
-	newBuffer(): number;
-	switchBuffer(contentId: number): void;
-	save(): void;
-	undo(): void;
-	redo(): void;
-	quit(): void;
-	forceQuit(): void;
-	closePane(): void;
-	splitHorizontal(): void;
-	splitVertical(): void;
-	focusLeft(): void;
-	focusDown(): void;
-	focusUp(): void;
-	focusRight(): void;
 }
 
 type FaceRemapScope = "session" | "content" | "view";

@@ -7,7 +7,8 @@ pub use api::{
     V1_REMOVAL_VERSION,
 };
 pub use script::{
-    ScriptError, load_default_configuration, load_typescript_modes, load_user_configuration,
+    ScriptError, TYPESCRIPT_COMPILER_VERSION, load_default_configuration, load_typescript_modes,
+    load_user_configuration,
 };
 
 #[cfg(feature = "test-support")]

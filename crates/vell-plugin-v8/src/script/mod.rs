@@ -33,6 +33,7 @@ mod mode_adapter;
 mod module;
 mod primitives;
 mod schema;
+mod type_environment;
 mod worker;
 mod worker_channel;
 mod worker_quota;
@@ -54,9 +55,12 @@ use mode_adapter::{ScriptBackground, ScriptMode};
 use module::{
     AssetSource, ModuleMap, current_exception, host_import_module_dynamically,
     host_initialize_import_meta, load_module_tree, resolve_module, transpile_typescript,
+    transpile_typescript_program,
 };
 use primitives::PrimitiveRuntime;
 use schema::install_editor_api;
+pub use type_environment::TYPESCRIPT_COMPILER_VERSION;
+use type_environment::TypeEnvironment;
 
 static V8_INIT: Once = Once::new();
 const V2_INPUT_ACTION: &str = "$input";
