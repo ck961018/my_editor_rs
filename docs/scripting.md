@@ -2,7 +2,7 @@
 
 **状态：** 当前插件作者指南
 
-**更新日期：** 2026-07-28
+**更新日期：** 2026-08-02
 
 宿主架构与信任边界见
 [`TypeScript 脚本架构`](design/typescript-scripting-architecture.md)。
@@ -24,9 +24,12 @@
 
 编辑器和 TypeScript 工具应使用
 [editor.d.ts](../runtime/editor.d.ts)。它是公开 schema 的唯一真相源，并以
-`TYPESCRIPT_DECLARATIONS` 的形式内嵌在 `vell-plugin-v8` 中。CI 会根据
-该文件检查内建插件和迁移示例的类型。运行时会转译 TypeScript，但不会执行
-类型检查。
+`TYPESCRIPT_DECLARATIONS` 的形式内嵌在 `vell-plugin-v8` 中；
+[commands.generated.d.ts](../runtime/commands.generated.d.ts) 是描述原生
+命令签名的伴随文件。CI 会根据这两份声明检查内建插件和迁移示例的类型。
+
+执行路径只转译 TypeScript，不做类型检查。类型检查由独立的命令类型环境提供，
+它只服务于命令签名推导和声明发布，见[动态类型](#动态类型)。
 
 Rust 测试和 headless 工具可以在不创建终端的情况下编译并加载源码字符串：
 
@@ -40,10 +43,11 @@ let modes = loaded.modes;
 let backgrounds = loaded.backgrounds;
 ```
 
-结果只暴露通用 `Mode`、`ModeBackground` 和结构化诊断；V8 类型不会跨越
-crate 边界。`PLUGIN_API_VERSION` 标识当前 schema 版本。根二进制通过
-`load_user_configuration()` 原子取得 Mode、后台运行时、Theme 和 Face
-override，再构建 App。内建配置的测试或 headless 入口可使用
+结果只暴露通用 `Mode`、`ModeBackground`、`CommandEntry` 和结构化诊断；
+V8 类型不会跨越 crate 边界。`PLUGIN_API_VERSION` 标识当前 schema 版本。
+根二进制通过 `load_user_configuration()` 原子取得 Mode、后台运行时、Theme
+和 Face override，再用 `prepare_commands()` 安装原生命令视图并取回命令，
+最后构建 App。内建配置的测试或 headless 入口可使用
 `load_default_configuration()`。
 
 ## 选择 Theme 与覆盖 Face
@@ -70,6 +74,159 @@ presentation root 的对应属性。命令行 `--theme` 优先于 config 选择�
 
 Theme 选择、Face override 和 Mode 定义属于同一个启动 draft。模块执行失败
 时三者一起回滚，不会发布部分配置。
+
+## 注册命令
+
+普通函数定义不会自动成为命令。显式注册后，函数才获得稳定的 `CommandId`，
+并进入 `editor.commands` 命名空间：
+
+```ts
+function increment(value: number): number {
+  return value + 1;
+}
+
+async function saveAndReport(): Promise<void> {
+  await save();
+}
+
+editor.commands.register(increment);
+editor.commands.register("math.increment", increment);
+editor.commands.register("save", saveAndReport);
+```
+
+`register(namedFunction)` 使用函数名作为 ID，`register(id, callback)` 使用
+显式 ID。ID 由一个或多个点分 TypeScript 标识符组成，并按点构造命名空间：
+
+```ts
+editor.commands.math.increment(1);
+```
+
+`register` 返回传入的 callable，因此赋值时仍保留完整推断。重复 ID 会替换
+当前实现，包括替换 Rust 原生命令；已绑定该 ID 的按键随之调用新实现。
+
+宿主只在裸名称当前没有被占用时，为它安装 global fallback，因此词法绑定和
+用户自己的 global 始终优先：
+
+```ts
+save();                  // 没有同名绑定时解析为正式命令
+editor.commands.save();  // 始终是正式命令
+```
+
+Rust 原生命令与 TypeScript 命令有完全相同的调用体验。当前原生命令的签名见
+[commands.generated.d.ts](../runtime/commands.generated.d.ts)。其中
+`invokeMode("mode.command", arguments?)` 是命令进入 Mode command 的唯一
+入口。
+
+## 快捷命令与 `:`
+
+快捷命令是文本入口，最终指向正式命令：
+
+```ts
+editor.commands.shortcut("q", () => quit());
+
+editor.commands.shortcut("wq", async () => {
+  await save();
+  quit();
+});
+```
+
+handler 只接收一个原始可选参数，类型为 `string | undefined`。分派器移除
+名称与参数之间的分隔空白：没有非空白参数时以零个参数调用，否则把剩余文本
+作为一个字符串传入。宿主不拆分引号、flag、range 或位置参数。
+
+传入未注册的回调时，宿主为它创建私有命令 identity。私有 identity 不进入
+公开命令补全，但仍使用正常的命令预算、错误和 execution frame。
+
+`:` 支持三条路径：
+
+```text
+:save()                 单个正式命令调用
+:wq                     注册快捷命令
+:ts const value = 1     普通 TypeScript
+```
+
+函数形式必须是一条以 `editor.commands` 中命令为根的调用表达式；参数本身
+仍是普通 TypeScript 表达式，可以调用普通函数和嵌套命令：
+
+```text
+:switchBuffer(newBuffer())
+:math.increment(41)
+```
+
+顶层声明或多条语句会被拒绝，并提示改用 `:ts`。`:` 的输入状态和按键处理
+属于 Vim 插件；解析与执行属于通用命令服务，Rust 层没有 Ex parser。
+
+## TypeScript 求值
+
+`:ts <source>` 求值参数。`:ts` 不带参数时求值当前 buffer：非空 selection
+优先，否则执行光标所在的完整顶层语句或声明。多行声明按语法节点整体执行；
+无法得到完整节点时报告语法错误，不猜测物理行。
+
+交互求值、buffer 求值和直接运行的 TypeScript 文件共享一个持久 global
+script environment，普通函数、变量和闭包按 JavaScript global script 语义
+跨执行保留。插件与 `config.ts` 继续使用 ES module 作用域，module-local
+绑定不会泄漏到该环境。
+
+持久 script 不支持 top-level `await`，静态 `import` 只属于 module 路径；
+script 使用动态 `import()`。异步入口写成普通函数：
+
+```ts
+async function main(): Promise<void> {
+  await save();
+}
+
+main();
+```
+
+## 命令的结果、异常与异步
+
+同步命令立即返回真实结果。嵌套命令共享最外层 execution frame，因此后续
+调用可以观察前序修改：
+
+```ts
+const id = newBuffer();
+switchBuffer(id);
+```
+
+未捕获异常回滚该同步段的 Content、View、input、history、Mode draft 和
+prepared effect。以下状态不参与宿主回滚：JavaScript heap、global 绑定、
+闭包状态、命令与快捷命令注册，以及已发布的类型声明。
+
+真正异步的命令返回标准 `Promise<T>`。每个实际 `await` 提交当前 frame，
+恢复 continuation 时创建新 frame，并继续绑定命令启动时的 View 与 Content。
+等待期间切换焦点不会改变目标；目标关闭或 revision 失效时 Promise reject。
+
+`save()` 在实际保存完成时 resolve，在冲突或 IO 失败时 reject。组合保存与
+退出必须显式排序：
+
+```ts
+async function writeQuit(): Promise<void> {
+  await save();
+  quit();
+}
+```
+
+外部入口自动等待最终返回的 Promise。脚本既没有返回、也没有 `await` 的
+Promise 不会被追踪或自动等待。
+
+交互入口保留最终结果，但当前没有通用消息区，因此不显示返回值；键位调用
+同样忽略返回值。异常继续通过现有诊断和状态栏路径呈现。
+
+## 动态类型
+
+注册成功后，宿主使用内嵌的官方 TypeScript compiler 推导 handler 的参数、
+返回值和 Promise 类型，并更新虚拟 `commands.generated.d.ts`。下一次交互
+输入、buffer 求值或脚本立即看到该命令的真实类型；重定义会原子替换旧声明。
+
+compiler 运行在独立 isolate 中，用户脚本无法访问它。它只提供类型数据，
+不拥有运行时注册表；实际成功的注册才会发布声明。无法静态定位的动态注册
+退化为安全的 `unknown` 签名，不伪造具体类型。compiler 出错时只禁用类型
+服务，执行与命令注册继续工作。
+
+compiler bundle 随源码管理，构建不调用网络、Node 或 pnpm。来源、license
+与升级流程见 [vendored TypeScript compiler][bundle]。
+
+[bundle]: ../crates/vell-plugin-v8/vendor/typescript/README.md
 
 ## 定义 Mode
 
@@ -108,6 +265,11 @@ Command 使用稳定的限定名称，例如 `pairs.quote`。其他 command 可�
 `context.commands.invoke("pairs.quote")` 暂存该 command。嵌套 command
 与当前 command 共享 transaction，但其返回值不会替换调用方的
 `void | Pass` 决策。
+
+Mode command 与 [`editor.commands`](#注册命令) 中的正式命令是两套命名空间，
+不会互相合并。正式命令通过原生 `invokeMode("pairs.quote")` 进入 Mode
+command；宿主在当前同步段结束后按顺序执行它，因此 Mode callback 不会在
+命令执行途中重入。
 
 ## 原生原语
 
@@ -253,10 +415,6 @@ Node API、共享内存或 worker-to-worker 通道。
 Worker 模块加载或语法错误通过异步 `error` 事件报告。URL/options 校验和配额
 错误可由构造器同步抛出。未捕获异常、超时或 heap exhaustion 会终止对应
 Worker 并产生 `ErrorEvent`，不会终止主 isolate。
-
-独立 command 仍有意保持为延后功能。目前没有 command palette 或非 Mode
-调用入口，因此 `context.commands.invoke()` 只解析已注册的 Mode-local
-限定 command，不维护第二套全局脚本 action 表。
 
 ## 迁移 v1 Mode
 

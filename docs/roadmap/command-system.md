@@ -1,8 +1,13 @@
 # 命令系统 Roadmap
 
-**状态：** 计划中（设计已确认，尚未实现）
+**状态：** 已交付（M1–M8 全部完成）
 
 **更新日期：** 2026-08-02
+
+交付后的当前实现描述见
+[Command 与执行所有权][execution-ownership]、
+[TypeScript 脚本架构][typescript-architecture] 和
+[`docs/scripting.md`](../scripting.md)。本文保留为历史规划记录。
 
 ## 1. 目标
 

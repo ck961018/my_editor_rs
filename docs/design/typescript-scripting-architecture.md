@@ -2,7 +2,7 @@
 
 **状态：** 当前实现
 
-**更新日期：** 2026-07-28
+**更新日期：** 2026-08-02
 
 ## 1. 定位
 
@@ -19,10 +19,22 @@ embedded plugins / optional config.ts
 -> Content / View / history / presentation
 ```
 
+命令是第二条入口。它同样以 `vell-mode` 契约结束，不绕开执行帧：
+
+```text
+source
+├── TypeEnvironment  独立 isolate 中的 checker 与生成声明
+└── ScriptHost       转译、执行、保留 JS 状态
+        └── editor.commands proxy
+                └── scoped CommandHost
+                        └── vell-app ExecutionFrame
+```
+
 `vell-app` 的普通依赖不含 V8。根二进制先调用
 `vell_plugin_v8::load_user_configuration()`，再把 Mode、后台运行时、
-ThemeName 和纯 protocol Face override DTO 注入 App。V8 类型不跨出
-`vell-plugin-v8` 的公共边界。
+ThemeName 和纯 protocol Face override DTO 注入 App。`prepare_commands()`
+在同一步安装 native 命令的 TypeScript 视图，并返回语言中立的
+`CommandEntry` 列表。V8 类型不跨出 `vell-plugin-v8` 的公共边界。
 
 ## 2. 加载与所有权
 
@@ -69,8 +81,10 @@ App 不识别具体 ScriptHost 类型。
 ## 4. 公开 schema
 
 `runtime/editor.d.ts` 是公开 TypeScript schema 的唯一真相源，并通过
-`TYPESCRIPT_DECLARATIONS` 内嵌到 Rust API。CI 对声明、内建插件和迁移示例
-运行严格类型检查。
+`TYPESCRIPT_DECLARATIONS` 内嵌到 Rust API。`runtime/commands.generated.d.ts`
+是它的生成伴随文件，描述当前 native 命令签名；它由 Rust schema 决定，并由
+contract test 保证与 `NATIVE_COMMAND_IDS` 一致。CI 对声明、内建插件和迁移
+示例运行严格类型检查。
 
 `PLUGIN_API_VERSION` 当前为 2。v2 使用 ContentKind adapter：
 
@@ -174,7 +188,110 @@ operation 上限来自 `vell-mode` 的共享常量，不能与 App frame 上限�
 合法 batch 一次转换为 `TextChangeSet`，由 App 统一获得 history、selection
 映射、undo/redo 与 rollback。
 
-## 8. Presentation
+## 8. 命令与 `editor.commands`
+
+命令与 Mode 无关。`editor.commands` 是正式命令的权威命名空间：
+
+```ts
+editor.commands.register(formatDocument)
+editor.commands.register("math.increment", increment)
+editor.commands.shortcut("wq", async () => {
+  await save()
+  quit()
+})
+```
+
+`register` 返回传入的 callable，因此局部类型推断不丢失。ID 是一个或多个点分
+TypeScript 标识符，按点构造嵌套 namespace object。同 ID 重新注册原子替换
+namespace 叶子、bare global fallback 和宿主 `CommandRegistry` 中的实现，
+并保留该节点下已注册的子命令。`$commandLine`、`$script`、`register` 和
+`shortcut` 是保留根，不能被脚本占用。
+
+宿主为每个 native 命令安装 callable wrapper，使 native 与 TS 命令具有相同的
+函数调用体验。bare global fallback 只在该名称当前是 undefined、或仍是宿主
+自己安装的 fallback 时才写入，因此词法绑定和用户自定义 global 优先；
+`editor.commands.save()` 始终明确调用正式命令。
+
+`shortcut` 只接收一个原始可选参数 `string | undefined`。传入未注册回调时，
+宿主保留私有 callback identity：它不进入公开命令补全，但仍使用正常的命令
+预算、错误和执行 frame。
+
+调用期间，`ScriptCommandAdapter` 通过 RAII guard 安装 scoped host。guard 在
+成功、异常、timeout 和 termination 路径都会清除，因此 callback 结束后保存的
+context 或 wrapper 无法访问旧 frame。同一 isolate 内的 TS-to-TS 调用保留普通
+JavaScript value；只有跨 Rust 边界的参数与结果才转换为 owned JSON。
+
+命令注册属于 definition state。它立即更新 V8 命令视图、宿主 registry 和类型
+环境，即使同一次执行随后抛错也不回滚。
+
+## 9. 持久 global script evaluator
+
+除 module 之外，`ScriptHost` 还提供一个持久 global script environment。交互
+求值、buffer 求值和直接运行的 TS 文件共享同一份 global 绑定：
+
+```text
+$script.evaluate
+├── Interactive  一次 : 或 API 输入
+├── Buffer       buffer 中的 selection 或顶层节点
+└── File         直接运行的 TS 文件
+```
+
+普通 global function、variable 和 closure 按 JavaScript global script 语义跨
+执行保留；未注册的普通函数不会出现在 `editor.commands`。插件与用户配置继续
+使用 ES module 作用域，module-local 绑定不泄漏到 global script。
+
+global script 不支持 top-level `await`，静态 `import` 也只属于 module 路径；
+script 使用动态 `import()`。异步入口写成普通函数并调用它。外部入口自动等待
+最终返回的 Promise，但不追踪脚本既没有返回、也没有 `await` 的 Promise。
+
+语法错误和运行时异常只失败当次求值，不损坏主 isolate 或已保留的 global。
+
+## 10. 增量 TypeScript 类型环境
+
+`TypeEnvironment` 在**独立 isolate** 中运行官方 TypeScript compiler bundle。
+用户脚本无法访问该 isolate；它只提供 language-service 数据，不拥有运行时
+registry。实际成功的注册事件是声明发布的唯一来源。
+
+虚拟 project 由内嵌 `editor.d.ts`、必要的 `lib.*.d.ts`、module source、
+global script history 和生成的 `commands.generated.d.ts` 组成。注册调用携带
+source identity 与 span，checker 据此推导 handler 参数、返回值和 Promise
+类型，并原子替换被重定义命令的旧声明。无法静态定位的动态注册退化为安全的
+`unknown` 签名，不伪造具体类型。
+
+compiler isolate 有独立的 heap 与超时预算。它发生 fault 时被禁用并记录原因，
+执行 isolate 与命令 registry 继续正常工作。
+
+bundle 随源码管理，Cargo 只读取已 check-in 的文件；构建不调用网络、Node 或
+pnpm。来源、license 与升级流程见 [vendored TypeScript compiler][bundle]。
+
+[bundle]: ../../crates/vell-plugin-v8/vendor/typescript/README.md
+
+## 11. 命令行分类与分派
+
+`ExecuteCommandLine` 到达固定服务命令 `$commandLine.execute`。分类只发生在
+这里，Rust app 层没有 Vim 或 Ex parser 分支：
+
+```text
+trim source
+├── 单条以已注册命令为根的调用表达式 -> 正式命令调用
+├── 首个 token 是已注册 shortcut      -> shortcut(tail)
+├── 首个 token 是 ts                  -> global script 求值
+└── 其他                              -> 结构化错误
+```
+
+函数形式必须是**一条**以 `editor.commands` 中命令为根的调用表达式。裸名称
+形式在求值前被重写为显式 `editor.commands.` 前缀，因此参数表达式仍是普通
+TypeScript，可以调用普通函数和 nested command，但根名称只从命令表解析。
+顶层声明或多条语句被拒绝，并提示改用 `ts`。
+
+shortcut 分派移除名称与参数之间的分隔空白：没有非空白参数时以零个参数调用，
+否则把剩余文本作为一个字符串传入。系统不拆分引号、flag、range 或位置参数。
+
+`ts` 带参数时求值该参数；不带参数时求值当前 buffer：非空 selection 优先，
+否则取光标所在的完整顶层语句或声明。无法得到完整节点时报告语法错误，不猜测
+物理行。位置换算使用字符索引，覆盖非 ASCII 源码。
+
+## 12. Presentation
 
 脚本可以定义 named Face、content decoration、view decoration 和 View policy。
 callback 返回的数据转换为 owned Rust presentation layer。
@@ -193,7 +310,7 @@ Script callback
 Content decoration 带 Content revision。文本变化后，旧 decoration 可先通过
 `ContentChange` 映射，直到新的异步 snapshot 安装，避免空白高亮帧。
 
-## 9. Worker 平台原语
+## 13. Worker 平台原语
 
 `Worker` 是 ScriptHost 级平台能力，不属于 Mode definition。插件顶层可以创建
 module Worker，主 isolate 定期泵送其消息：
@@ -227,26 +344,32 @@ Worker module graph 和资源读取都限制在插件根目录。它没有网络
 Node API、共享内存或任意文件访问。Promise 通过受控 microtask pump 完成；
 取消、超时、heap exhaustion 和未捕获异常只终止对应 Worker。
 
-## 10. 预算与恢复
+## 14. 预算与恢复
 
 当前默认限制：
 
 - 普通 callback 2 秒，module startup 5 秒；
 - worker request 30 秒；
+- compiler isolate startup 10 秒，单次查询 2 秒，heap 256 MiB；
 - isolate heap 128 MiB，另保留 16 MiB 终止恢复余量；
 - 单个脚本或 module 4 MiB，module graph 16 MiB；
 - 普通 JSON state/result 4 MiB，结构化输入 32 MiB；
 - 单 callback 最多 255 个 operation；
+- 注册命令最多 256 层嵌套调用；
 - 单次 presentation 最多 100,000 个 decoration。
+
+命令调用和 operation 共享 `ExecutionFrame` 预算，因此 TypeScript 命令无法
+通过嵌套调用绕开单 frame 的 operation 上限。
 
 主 isolate 的 watchdog 在线程中持有 `IsolateHandle`。超时或 heap pressure
 触发 V8 termination；termination 传播出 scope 后，RAII 清理 watchdog，
 恢复 terminate 状态与 heap limit。只有 runtime 可安全恢复时才继续调用。
+resume 的 Promise continuation 走同一条 watchdog 与 heap 恢复路径。
 
 所有大小、超时、转换和 presentation 检查都发生在发布 state、operation 或
 cache 之前。
 
-## 11. 故障隔离
+## 15. 故障隔离
 
 主动 input/command callback 错误映射为 Mode fault，并使当前 execution frame
 失败。App 恢复 Content、View、input 与 history checkpoint，丢弃 operation 和
@@ -256,22 +379,31 @@ Mode draft，但事件循环继续。
 attachment。Worker 错误通过自身 `error` 事件隔离。基础文本编辑、其他 Mode
 与渲染继续工作；诊断包含 Mode、callback phase 和 message。
 
+命令错误映射为 `CommandError`，并按来源呈现：命令行输入进入现有 status bar
+与诊断路径，键位调用忽略返回值但仍报告异常。同步失败回滚该 frame 的宿主
+mutation，但不回滚 JavaScript heap、global binding、closure、命令与快捷命令
+注册，以及已发布的类型声明。compiler isolate fault 只禁用类型服务。
+
 主 isolate 由全部 ScriptMode 共享，因此这些限制不是恶意代码的进程级隔离。
 在需要自动运行不受信任插件前，必须重新评估 isolate 或进程边界。
 
-## 12. 物理模块
+## 16. 物理模块
 
 ```text
 vell-plugin-v8::script
-├── mod          façade、加载、共享运行时类型
-├── host         isolate、context、definition 与 callback registry
-├── invocation   调用、microtask、watchdog 与 heap 恢复
-├── mode_adapter ScriptMode、状态与 presentation 接线
-├── module       本地 ES module graph 与 TypeScript 转译
-├── bridge       Rust、JSON 与 V8 值转换
-├── schema       v1/v2 definition 解析
-├── primitives   callback-scoped native function
-└── worker       后台 isolate、资源、取消与 Promise
+├── mod              façade、加载、共享运行时类型
+├── host             isolate、context、definition 与 callback registry
+├── invocation       调用、microtask、watchdog 与 heap 恢复
+├── mode_adapter     ScriptMode、状态与 presentation 接线
+├── module           本地 ES module graph 与 TypeScript 转译
+├── bridge           Rust、JSON 与 V8 值转换
+├── schema           v1/v2 definition 解析
+├── primitives       callback-scoped native function
+├── commands         editor.commands、scoped host、adapter 与 Promise
+├── global_script    持久 global script environment
+├── command_line     命令行分类、shortcut 分派与 buffer 求值
+├── type_environment compiler isolate 与生成声明
+└── worker           后台 isolate、资源、取消与 Promise
 ```
 
 依赖方向保持：

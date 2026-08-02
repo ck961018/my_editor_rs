@@ -2,7 +2,7 @@
 
 **状态：** 当前实现
 
-**更新日期：** 2026-07-22
+**更新日期：** 2026-08-02
 
 ## 1. 目标
 
@@ -42,6 +42,14 @@ vell binary    -> vell-app
 `vell-app` 只在测试依赖中使用 `vell-plugin-v8`，用于跨层脚本集成测试；
 其普通依赖图不含 V8。
 
+命令系统不改变这张图。`CommandRegistry` 和 adapter/host trait 属于
+`vell-mode`，实例与 native 命令属于 `vell-app`，TypeScript adapter 属于
+`vell-plugin-v8`。三者之间只传递语言中立的 owned value，因此 app 无需认识
+V8，`vell-protocol` 也不承担本地命令枚举或调用。
+
+外部依赖方面，`vell-mode` 与 `vell-app` 使用 `serde_json` 表示
+`CommandValue`；它是纯数据 crate，不引入运行时或前端依赖。
+
 ## 3. 各层边界
 
 - `vell-protocol` 保存 ID、几何、Scene、输入、viewport、render query、
@@ -49,11 +57,13 @@ vell binary    -> vell-app
 - `vell-core` 保存封闭 Content 模型、Buffer、ContentStore、编辑计划、
   文本事务和通用输入算法。它不依赖 Mode、Tokio、Frontend 或终端。
 - `vell-mode` 定义 Mode、typed adapter、state store、presentation、
-  command 和 `OperationRequest`。它不知道 app 执行器和具体 VM。
+  command、命令 registry 契约和 `OperationRequest`。它不知道 app 执行器和
+  具体 VM。
 - `vell-frontend` 只定义 `Frontend` trait，避免 app 与具体前端互相依赖。
-- `vell-app` 拥有运行时编排、目标解析和宿主状态，不依赖 TUI 或 V8。
-- `vell-plugin-v8` 把 TypeScript schema 适配为通用 Mode，不向外泄漏 V8
-  类型。
+- `vell-app` 拥有运行时编排、目标解析、命令注册表和宿主状态，不依赖 TUI
+  或 V8。
+- `vell-plugin-v8` 把 TypeScript schema 适配为通用 Mode 与命令，不向外泄漏
+  V8 类型。
 - `vell-tui` 同时拥有 crossterm 封装、Taffy 布局和渲染，不依赖 app、
   core、mode 或 V8。
 - 根 `vell` 二进制加载脚本 Mode，并组装 App 与 TUI。
@@ -82,5 +92,5 @@ ContentStore       -> Content
 - `cargo metadata --no-deps` 的内部依赖仍符合上图；
 - `cargo tree -p vell-app -e normal` 不出现 V8、Taffy 或 crossterm；
 - `vell-tui` 不反向依赖 app；
-- `vell-plugin-v8` 的公共 API 只暴露通用 Mode 与结构化诊断；
+- `vell-plugin-v8` 的公共 API 只暴露通用 Mode、`CommandEntry` 与结构化诊断；
 - workspace 测试、Clippy 和 Rustdoc 通过。

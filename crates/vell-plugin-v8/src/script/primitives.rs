@@ -1496,3 +1496,66 @@ fn extend_selection(
     }
     Ok(value.boolean_value(scope))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The declaration file is the only public schema, so every installed
+    /// primitive must be reachable from it.
+    #[test]
+    fn every_primitive_is_declared_in_the_public_schema() {
+        let declarations = crate::api::TYPESCRIPT_DECLARATIONS;
+        let mut missing = Vec::new();
+        for &(_, namespace, name) in PRIMITIVES {
+            let interface = interface_for(namespace);
+            let members = interface_members(declarations, interface)
+                .unwrap_or_else(|| panic!("editor.d.ts has no interface {interface}"));
+            if !members.iter().any(|member| member == name) {
+                missing.push(format!("{interface}.{name}"));
+            }
+        }
+
+        assert!(missing.is_empty(), "undeclared primitives: {missing:?}");
+    }
+
+    /// Maps a primitive namespace to its declaration interface. Adding a
+    /// namespace must extend this table, so a new one cannot stay undeclared.
+    fn interface_for(namespace: &str) -> &'static str {
+        match namespace {
+            "app" => "AppPrimitives",
+            "buffers" => "BufferPrimitives",
+            "clipboard" => "ClipboardPrimitives",
+            "commands" => "CommandPrimitives",
+            "cursor" => "CursorPrimitives",
+            "faces" => "FacePrimitives",
+            "history" => "HistoryPrimitives",
+            "mode" => "ModePrimitives",
+            "search" => "SearchPrimitives",
+            "text" => "TextPrimitives",
+            "viewport" => "ViewportPrimitives",
+            other => panic!("primitive namespace '{other}' has no declared interface"),
+        }
+    }
+
+    fn interface_members(declarations: &str, interface: &str) -> Option<Vec<String>> {
+        let body = declarations
+            .split_once(&format!("\ninterface {interface} {{\n"))?
+            .1
+            .split_once("\n}\n")?
+            .0;
+        Some(
+            body.lines()
+                .filter_map(|line| {
+                    let member = line.trim_start();
+                    let end = member.find(['(', '?', ':'])?;
+                    let member = &member[..end];
+                    member
+                        .chars()
+                        .all(|character| character.is_alphanumeric() || character == '_')
+                        .then(|| member.to_owned())
+                })
+                .collect(),
+        )
+    }
+}
