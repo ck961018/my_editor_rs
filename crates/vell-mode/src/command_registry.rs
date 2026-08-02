@@ -91,6 +91,19 @@ fn is_identifier_continue(character: char) -> bool {
 
 pub type CommandValue = serde_json::Value;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CommandTaskId(u64);
+
+impl CommandTaskId {
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandInvocation {
     pub command: CommandId,
@@ -108,6 +121,7 @@ pub enum CommandError {
     UnknownCommand(CommandId),
     InvalidArguments(String),
     RecursionLimit { limit: usize },
+    AsyncFailed(String),
     Failed(String),
 }
 
@@ -121,6 +135,7 @@ impl fmt::Display for CommandError {
             Self::RecursionLimit { limit } => {
                 write!(formatter, "command recursion limit of {limit} exceeded")
             }
+            Self::AsyncFailed(message) => message.fmt(formatter),
             Self::Failed(message) => message.fmt(formatter),
         }
     }
@@ -128,10 +143,154 @@ impl fmt::Display for CommandError {
 
 impl std::error::Error for CommandError {}
 
+pub struct CommandTaskCompletion {
+    task: CommandTaskId,
+    result: Result<CommandValue, CommandError>,
+}
+
+impl CommandTaskCompletion {
+    pub fn new(task: CommandTaskId, result: Result<CommandValue, CommandError>) -> Self {
+        Self { task, result }
+    }
+
+    pub fn task(&self) -> CommandTaskId {
+        self.task
+    }
+
+    pub fn into_result(self) -> Result<CommandValue, CommandError> {
+        self.result
+    }
+}
+
+pub enum CommandContinuationResult {
+    Ready(CommandValue),
+    Pending(Vec<CommandTaskId>),
+}
+
+pub trait CommandContinuation {
+    fn resume(
+        &self,
+        host: &mut dyn CommandHost,
+        completion: CommandTaskCompletion,
+    ) -> Result<CommandContinuationResult, CommandError>;
+
+    fn cancel(&self, reason: CommandError);
+}
+
+#[derive(Clone)]
+pub struct CommandPending {
+    tasks: Vec<CommandTaskId>,
+    continuation: Option<Rc<dyn CommandContinuation>>,
+}
+
+impl CommandPending {
+    pub fn task(task: CommandTaskId) -> Self {
+        Self {
+            tasks: vec![task],
+            continuation: None,
+        }
+    }
+
+    pub fn continuation(
+        tasks: Vec<CommandTaskId>,
+        continuation: impl CommandContinuation + 'static,
+    ) -> Result<Self, CommandError> {
+        validate_pending_tasks(&tasks)?;
+        Ok(Self {
+            tasks,
+            continuation: Some(Rc::new(continuation)),
+        })
+    }
+
+    pub fn tasks(&self) -> &[CommandTaskId] {
+        &self.tasks
+    }
+
+    pub fn direct_task(&self) -> Option<CommandTaskId> {
+        match (&self.continuation, self.tasks.as_slice()) {
+            (None, [task]) => Some(*task),
+            _ => None,
+        }
+    }
+
+    pub fn resume(
+        &self,
+        host: &mut dyn CommandHost,
+        completion: CommandTaskCompletion,
+    ) -> CommandResult {
+        if !self.tasks.contains(&completion.task()) {
+            return Err(CommandError::Failed(format!(
+                "command is not waiting for task {}",
+                completion.task().get()
+            )));
+        }
+        let Some(continuation) = &self.continuation else {
+            return completion.into_result().map(CommandCompletion::Ready);
+        };
+        match continuation.resume(host, completion)? {
+            CommandContinuationResult::Ready(value) => Ok(CommandCompletion::Ready(value)),
+            CommandContinuationResult::Pending(tasks) => {
+                validate_pending_tasks(&tasks)?;
+                Ok(CommandCompletion::Pending(Self {
+                    tasks,
+                    continuation: Some(Rc::clone(continuation)),
+                }))
+            }
+        }
+    }
+
+    pub fn cancel(&self, reason: CommandError) {
+        if let Some(continuation) = &self.continuation {
+            continuation.cancel(reason);
+        }
+    }
+}
+
+impl fmt::Debug for CommandPending {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CommandPending")
+            .field("tasks", &self.tasks)
+            .field("has_continuation", &self.continuation.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for CommandPending {
+    fn eq(&self, other: &Self) -> bool {
+        self.tasks == other.tasks
+            && match (&self.continuation, &other.continuation) {
+                (None, None) => true,
+                (Some(left), Some(right)) => Rc::ptr_eq(left, right),
+                _ => false,
+            }
+    }
+}
+
+impl Eq for CommandPending {}
+
+fn validate_pending_tasks(tasks: &[CommandTaskId]) -> Result<(), CommandError> {
+    if tasks.is_empty() {
+        return Err(CommandError::Failed(
+            "pending command has no host task to resume it".to_owned(),
+        ));
+    }
+    if tasks
+        .iter()
+        .enumerate()
+        .any(|(index, task)| tasks[..index].contains(task))
+    {
+        return Err(CommandError::Failed(
+            "pending command contains duplicate host tasks".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandCompletion {
     Ready(CommandValue),
-    Pending,
+    Pending(CommandPending),
 }
 
 impl From<CommandValue> for CommandCompletion {
@@ -152,6 +311,7 @@ pub enum CommandQuery {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandRequest {
     Execute(OperationRequest),
+    ExecuteAsync(OperationRequest),
     CreateBuffer,
     Query(CommandQuery),
 }
@@ -268,6 +428,76 @@ mod tests {
     #[test]
     fn command_values_cover_json_numbers() {
         assert_eq!(CommandValue::from(1.5).as_f64(), Some(1.5));
+    }
+
+    #[test]
+    fn direct_task_completion_preserves_its_owned_result() {
+        let registry = Rc::new(RefCell::new(CommandRegistry::new()));
+        let mut host = TestHost::new(registry, 8);
+        let task = CommandTaskId::new(7);
+        let pending = CommandPending::task(task);
+
+        let result = pending
+            .resume(
+                &mut host,
+                CommandTaskCompletion::new(task, Ok(CommandValue::from("saved"))),
+            )
+            .unwrap();
+
+        assert_eq!(
+            result,
+            CommandCompletion::Ready(CommandValue::from("saved"))
+        );
+    }
+
+    #[test]
+    fn opaque_continuation_can_wait_for_a_follow_up_task() {
+        struct TwoStepContinuation;
+
+        impl CommandContinuation for TwoStepContinuation {
+            fn resume(
+                &self,
+                _host: &mut dyn CommandHost,
+                completion: CommandTaskCompletion,
+            ) -> Result<CommandContinuationResult, CommandError> {
+                if completion.task() == CommandTaskId::new(1) {
+                    completion.into_result()?;
+                    Ok(CommandContinuationResult::Pending(vec![
+                        CommandTaskId::new(2),
+                    ]))
+                } else {
+                    Ok(CommandContinuationResult::Ready(completion.into_result()?))
+                }
+            }
+
+            fn cancel(&self, _reason: CommandError) {}
+        }
+
+        let registry = Rc::new(RefCell::new(CommandRegistry::new()));
+        let mut host = TestHost::new(registry, 8);
+        let first = CommandTaskId::new(1);
+        let pending = CommandPending::continuation(vec![first], TwoStepContinuation).unwrap();
+        let CommandCompletion::Pending(pending) = pending
+            .resume(
+                &mut host,
+                CommandTaskCompletion::new(first, Ok(CommandValue::Null)),
+            )
+            .unwrap()
+        else {
+            panic!("continuation completed before its second task");
+        };
+        let second = CommandTaskId::new(2);
+
+        assert_eq!(pending.tasks(), &[second]);
+        assert_eq!(
+            pending
+                .resume(
+                    &mut host,
+                    CommandTaskCompletion::new(second, Ok(CommandValue::from(42))),
+                )
+                .unwrap(),
+            CommandCompletion::Ready(CommandValue::from(42))
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 interface EditorCommands {
 	readonly newBuffer: () => number;
 	readonly switchBuffer: (contentId: number) => void;
-	readonly save: () => void;
+	readonly save: () => Promise<void>;
 	readonly undo: () => void;
 	readonly redo: () => void;
 	readonly quit: () => void;
@@ -17,7 +17,7 @@ interface EditorCommands {
 
 declare const newBuffer: () => number;
 declare const switchBuffer: (contentId: number) => void;
-declare const save: () => void;
+declare const save: () => Promise<void>;
 declare const undo: () => void;
 declare const redo: () => void;
 declare const quit: () => void;

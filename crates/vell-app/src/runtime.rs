@@ -6,13 +6,16 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use crate::action::{TransactionIntent, ViewAction};
-use crate::application::App;
+use crate::application::{App, CommandTaskTarget, PendingCommandInvocation};
 #[cfg(test)]
 use crate::behavior::EffectBehavior;
 use crate::command::{AppCommand, ContentCommand};
 use crate::diagnostics::RuntimeDiagnostic;
 use crate::dispatcher::{DispatchCommand, DispatchInput, DispatchOutcome};
-use crate::execution::{ExecutionFrame, InputCheckpoint, PreparedEffect, StateRollback};
+use crate::execution::{
+    ExecutionFrame, ExecutionFrameParts, InputCheckpoint, PendingCommandStart, PreparedEffect,
+    StateRollback,
+};
 use crate::layout::LayoutError;
 use crate::mode::{CursorDomain, InputFlow};
 use crate::operation::{
@@ -36,7 +39,7 @@ use vell_core::transaction::TransactionDirection;
 use vell_frontend::Frontend;
 use vell_mode::command_registry::{
     CommandCompletion, CommandEntry, CommandError, CommandHost, CommandInvocation, CommandQuery,
-    CommandRequest, CommandResult, CommandValue,
+    CommandRequest, CommandResult, CommandTaskCompletion, CommandTaskId, CommandValue,
 };
 use vell_protocol::content_query::{ContentData, ContentQuery, RenderQuery};
 use vell_protocol::frontend_event::FrontendEvent;
@@ -85,23 +88,22 @@ impl<F: Frontend> CommandHost for ScopedCommandHost<'_, F> {
                 self.query(query).map(CommandCompletion::from)
             }
             CommandRequest::Execute(operation) => {
-                let switched_content = match &operation {
-                    OperationRequest::Buffer(BufferOperation::Switch { content }) => Some(*content),
-                    _ => None,
-                };
-                let queued = QueuedOperation {
-                    request: operation,
-                    origin: self.origin,
-                };
-                self.app
-                    .execute_operation_queue(VecDeque::from([queued]), self.frame)
-                    .map_err(|error| CommandError::Failed(error.to_string()))?;
-                if let Some(content) = switched_content {
-                    self.origin.content = Some(content);
-                    self.origin.view = None;
-                    self.origin.scope = OperationOriginScope::Content;
-                }
+                self.execute_request(operation)?;
                 Ok(CommandValue::Null.into())
+            }
+            CommandRequest::ExecuteAsync(operation) => {
+                let task = self.app.allocate_command_task()?;
+                let effect_start = self.frame.prepared_effect_count();
+                self.execute_request(operation)
+                    .map_err(|error| CommandError::AsyncFailed(error.to_string()))?;
+                if !self.frame.attach_task_to_save_since(effect_start, task) {
+                    return Err(CommandError::AsyncFailed(
+                        "asynchronous command did not start a host task".to_owned(),
+                    ));
+                }
+                Ok(CommandCompletion::Pending(
+                    vell_mode::command_registry::CommandPending::task(task),
+                ))
             }
         }
     }
@@ -112,6 +114,26 @@ impl<F: Frontend> CommandHost for ScopedCommandHost<'_, F> {
 }
 
 impl<F: Frontend> ScopedCommandHost<'_, F> {
+    fn execute_request(&mut self, operation: OperationRequest) -> Result<(), CommandError> {
+        let switched_content = match &operation {
+            OperationRequest::Buffer(BufferOperation::Switch { content }) => Some(*content),
+            _ => None,
+        };
+        let queued = QueuedOperation {
+            request: operation,
+            origin: self.origin,
+        };
+        self.app
+            .execute_operation_queue(VecDeque::from([queued]), self.frame)
+            .map_err(|error| CommandError::Failed(error.to_string()))?;
+        if let Some(content) = switched_content {
+            self.origin.content = Some(content);
+            self.origin.view = None;
+            self.origin.scope = OperationOriginScope::Content;
+        }
+        Ok(())
+    }
+
     fn consume_request(&mut self) -> Result<(), CommandError> {
         self.frame
             .consume_operation()
@@ -339,6 +361,7 @@ impl<F: Frontend> App<F> {
 
     pub async fn run(&mut self) -> io::Result<()> {
         let run_result = self.run_loop().await;
+        self.cancel_pending_commands("command cancelled because the editor is shutting down");
         let shutdown_result = self.shutdown_tasks().await;
         run_result.and(shutdown_result)
     }
@@ -485,6 +508,178 @@ impl<F: Frontend> App<F> {
         ExecutionFrame::new(content, input)
     }
 
+    fn allocate_command_task(&mut self) -> Result<CommandTaskId, CommandError> {
+        let value = self.next_command_task;
+        self.next_command_task = value
+            .checked_add(1)
+            .ok_or_else(|| CommandError::Failed("command task ids exhausted".to_owned()))?;
+        Ok(CommandTaskId::new(value))
+    }
+
+    fn install_pending_command(&mut self, start: PendingCommandStart) {
+        let missing_task = start
+            .pending
+            .tasks()
+            .iter()
+            .find(|task| !self.command_tasks.contains_key(task));
+        let expected_state = self.kernel.contents().text_state_id(start.content);
+        let reason = if let Some(task) = missing_task {
+            Some(format!("command task {} was not published", task.get()))
+        } else if self
+            .session
+            .view(start.view)
+            .is_none_or(|view| view.content() != start.content)
+        {
+            Some("command target view no longer exists".to_owned())
+        } else if expected_state.is_none() {
+            Some("command target content no longer exists".to_owned())
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            start.pending.cancel(CommandError::Failed(reason.clone()));
+            self.record_runtime_message(reason);
+            return;
+        }
+        self.pending_commands.push(PendingCommandInvocation {
+            pending: start.pending,
+            view: start.view,
+            content: start.content,
+            expected_state: expected_state.expect("validated text command target"),
+        });
+    }
+
+    pub(super) fn complete_command_tasks(
+        &mut self,
+        content: ContentId,
+        revision: u64,
+        result: Result<CommandValue, CommandError>,
+    ) {
+        let tasks = self
+            .command_tasks
+            .iter()
+            .filter_map(|(task, target)| {
+                (target.content == content && target.revision <= revision).then_some(*task)
+            })
+            .collect::<Vec<_>>();
+        for task in tasks {
+            self.command_tasks.remove(&task);
+            let mut index = 0;
+            while index < self.pending_commands.len() {
+                if self.pending_commands[index].pending.tasks().contains(&task) {
+                    let invocation = self.pending_commands.remove(index);
+                    self.resume_pending_command(invocation, task, result.clone());
+                } else {
+                    index += 1;
+                }
+            }
+        }
+    }
+
+    fn resume_pending_command(
+        &mut self,
+        invocation: PendingCommandInvocation,
+        task: CommandTaskId,
+        task_result: Result<CommandValue, CommandError>,
+    ) {
+        let target_valid = self
+            .session
+            .view(invocation.view)
+            .is_some_and(|view| view.content() == invocation.content)
+            && self.kernel.contents().text_state_id(invocation.content)
+                == Some(invocation.expected_state);
+        if !target_valid {
+            let reason = CommandError::Failed(
+                "command target changed while the command was suspended".to_owned(),
+            );
+            invocation.pending.cancel(reason.clone());
+            self.record_runtime_message(reason.to_string());
+            return;
+        }
+
+        let mut frame = self.begin_execution_frame(Some(invocation.content), None);
+        let result = {
+            let mut host = ScopedCommandHost {
+                app: self,
+                frame: &mut frame,
+                origin: OperationOrigin::view(invocation.view, invocation.content),
+                depth: 0,
+            };
+            invocation
+                .pending
+                .resume(&mut host, CommandTaskCompletion::new(task, task_result))
+        };
+        let result = match result {
+            Ok(CommandCompletion::Ready(_)) => Ok(()),
+            Ok(CommandCompletion::Pending(pending)) => frame
+                .stage_pending_command(pending, invocation.view, invocation.content)
+                .map_err(operation_error),
+            Err(error) => Err(recoverable_message(
+                io::ErrorKind::InvalidInput,
+                error.to_string(),
+            )),
+        };
+        if let Err(error) = self.finish_execution_frame(frame, result) {
+            self.record_recoverable_error(error);
+        }
+    }
+
+    fn cancel_pending_commands(&mut self, reason: &str) {
+        let pending = std::mem::take(&mut self.pending_commands);
+        for invocation in pending {
+            invocation
+                .pending
+                .cancel(CommandError::Failed(reason.to_owned()));
+        }
+    }
+
+    pub(super) fn cancel_pending_commands_for_view(&mut self, view: ViewId) {
+        let reason = "command target view was closed while the command was suspended";
+        let mut cancelled = false;
+        let mut index = 0;
+        while index < self.pending_commands.len() {
+            if self.pending_commands[index].view == view {
+                let invocation = self.pending_commands.remove(index);
+                invocation
+                    .pending
+                    .cancel(CommandError::Failed(reason.to_owned()));
+                cancelled = true;
+            } else {
+                index += 1;
+            }
+        }
+        if cancelled {
+            self.record_runtime_message(reason.to_owned());
+        }
+    }
+
+    fn cancel_stale_pending_commands(&mut self) {
+        let reason = "command target changed while the command was suspended";
+        let mut cancelled = false;
+        let mut index = 0;
+        while index < self.pending_commands.len() {
+            let invocation = &self.pending_commands[index];
+            let valid = self
+                .session
+                .view(invocation.view)
+                .is_some_and(|view| view.content() == invocation.content)
+                && self.kernel.contents().text_state_id(invocation.content)
+                    == Some(invocation.expected_state);
+            if valid {
+                index += 1;
+            } else {
+                let invocation = self.pending_commands.remove(index);
+                invocation
+                    .pending
+                    .cancel(CommandError::Failed(reason.to_owned()));
+                cancelled = true;
+            }
+        }
+        if cancelled {
+            self.record_runtime_message(reason.to_owned());
+        }
+    }
+
     fn checkpoint_target(&mut self, frame: &mut ExecutionFrame, content: ContentId) {
         if !frame.needs_target_checkpoint(content) {
             return;
@@ -503,8 +698,14 @@ impl<F: Frontend> App<F> {
         result: io::Result<T>,
     ) -> io::Result<T> {
         let success = result.is_ok();
-        let (checkpoints, mut mode_drafts, provisional_contents, view_touches, effects) =
-            frame.into_parts();
+        let ExecutionFrameParts {
+            checkpoints,
+            mut mode_drafts,
+            provisional_contents,
+            view_touches,
+            effects,
+            pending_command,
+        } = frame.into_parts();
         if !success {
             let (content, selections, input, state_rollbacks) = checkpoints.into_parts();
             for rollback in state_rollbacks.into_iter().rev() {
@@ -549,7 +750,11 @@ impl<F: Frontend> App<F> {
         }
         self.kernel.finish_command_transaction(success);
         if success {
+            self.cancel_stale_pending_commands();
             self.publish_prepared_effects(effects);
+            if let Some(pending) = pending_command {
+                self.install_pending_command(pending);
+            }
             self.kernel.schedule_mode_jobs();
             self.session
                 .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
@@ -623,9 +828,14 @@ impl<F: Frontend> App<F> {
                     frame.record_view_touch(view, revision);
                 }
             }
+            if frame.has_pending_command() {
+                queue.clear();
+                break;
+            }
         }
 
         if result.is_ok()
+            && !frame.has_pending_command()
             && let (Some(view), Some(content)) = (view, content)
             && frame.targets(content)
             && self.session.cursor_domain_in_draft(
@@ -661,7 +871,18 @@ impl<F: Frontend> App<F> {
                     content,
                     snapshot,
                     force,
+                    task,
                 } => {
+                    if let Some(task) = task {
+                        let previous = self.command_tasks.insert(
+                            task,
+                            CommandTaskTarget {
+                                content,
+                                revision: snapshot.revision,
+                            },
+                        );
+                        assert!(previous.is_none(), "command task id is unique");
+                    }
                     self.kernel.queue_save(content, snapshot, force);
                 }
                 PreparedEffect::SaveAs {
@@ -780,7 +1001,12 @@ impl<F: Frontend> App<F> {
                         ));
                     }
                 }
-                PreparedEffect::Quit => self.kernel.cancel(),
+                PreparedEffect::Quit => {
+                    self.cancel_pending_commands(
+                        "command cancelled because the editor is quitting",
+                    );
+                    self.kernel.cancel();
+                }
             }
         }
     }
@@ -998,9 +1224,12 @@ impl<F: Frontend> App<F> {
                 };
                 return match host.invoke_command(invocation) {
                     Ok(CommandCompletion::Ready(_)) => Ok(InputFlow::Stop),
-                    Ok(CommandCompletion::Pending) => Err(invalid_operation(
-                        "pending command completion is not supported yet",
-                    )),
+                    Ok(CommandCompletion::Pending(pending)) => {
+                        frame
+                            .stage_pending_command(pending, view, content)
+                            .map_err(operation_error)?;
+                        Ok(InputFlow::Stop)
+                    }
                     Err(error) => Err(recoverable_message(
                         io::ErrorKind::InvalidInput,
                         error.to_string(),
@@ -1798,6 +2027,7 @@ impl<F: Frontend> App<F> {
                         content,
                         snapshot,
                         force,
+                        task: None,
                     },
                 );
             }

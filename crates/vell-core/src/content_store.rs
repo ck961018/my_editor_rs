@@ -215,6 +215,10 @@ impl ContentStore {
         self.entries.get(&id)?.content.text_snapshot()
     }
 
+    pub fn text_state_id(&self, id: ContentId) -> Option<crate::core::transaction::TextStateId> {
+        self.entries.get(&id)?.content.text_state_id()
+    }
+
     pub fn search_snapshot(
         &self,
         id: ContentId,

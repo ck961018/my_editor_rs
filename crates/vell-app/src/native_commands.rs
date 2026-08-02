@@ -42,7 +42,7 @@ pub(super) fn native_command_registry() -> CommandRegistry {
     register_no_args(
         &mut registry,
         "save",
-        execute(OperationRequest::Content {
+        CommandRequest::ExecuteAsync(OperationRequest::Content {
             target: ContentTarget::Current,
             operation: ContentOperation::Save,
         }),

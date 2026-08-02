@@ -12,6 +12,7 @@ use vell_core::clipboard::ClipboardPayload;
 use vell_core::content::SaveSnapshot;
 use vell_core::content_store::ContentSnapshot;
 use vell_core::transaction::TransactionDirection;
+use vell_mode::command_registry::{CommandPending, CommandTaskId};
 use vell_mode::operation::MAX_OPERATIONS_PER_FRAME;
 use vell_protocol::content_query::{FaceName, FaceRemapScope, FaceRemapToken};
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
@@ -33,7 +34,23 @@ pub(super) struct ExecutionFrame {
     prepared_face_tokens: HashSet<FaceRemapToken>,
     topology_effect_prepared: bool,
     viewport_effect_prepared: bool,
+    pending_command: Option<PendingCommandStart>,
     budget: ExecutionBudget,
+}
+
+pub(super) struct PendingCommandStart {
+    pub pending: CommandPending,
+    pub view: ViewId,
+    pub content: ContentId,
+}
+
+pub(super) struct ExecutionFrameParts {
+    pub checkpoints: CheckpointJournal,
+    pub mode_drafts: ModeDraftJournal,
+    pub provisional_contents: Vec<ContentId>,
+    pub view_touches: HashMap<ViewId, Revision>,
+    pub effects: Vec<PreparedEffect>,
+    pub pending_command: Option<PendingCommandStart>,
 }
 
 pub(super) struct CheckpointJournal {
@@ -62,6 +79,7 @@ pub(super) enum PreparedEffect {
         content: ContentId,
         snapshot: SaveSnapshot,
         force: bool,
+        task: Option<CommandTaskId>,
     },
     SaveAs {
         content: ContentId,
@@ -132,12 +150,56 @@ impl ExecutionFrame {
             prepared_face_tokens: HashSet::new(),
             topology_effect_prepared: false,
             viewport_effect_prepared: false,
+            pending_command: None,
             budget: ExecutionBudget::default(),
         }
     }
 
     pub(super) fn prepare(&mut self, effect: PreparedEffect) {
         self.prepared_effects.push(effect);
+    }
+
+    pub(super) fn prepared_effect_count(&self) -> usize {
+        self.prepared_effects.len()
+    }
+
+    pub(super) fn attach_task_to_save_since(&mut self, start: usize, task: CommandTaskId) -> bool {
+        self.prepared_effects[start..]
+            .iter_mut()
+            .rev()
+            .find_map(|effect| match effect {
+                PreparedEffect::Save {
+                    task: save_task, ..
+                } if save_task.is_none() => Some(save_task),
+                _ => None,
+            })
+            .is_some_and(|save_task| {
+                *save_task = Some(task);
+                true
+            })
+    }
+
+    pub(super) fn stage_pending_command(
+        &mut self,
+        pending: CommandPending,
+        view: ViewId,
+        content: ContentId,
+    ) -> Result<(), OperationError> {
+        if self.pending_command.is_some() {
+            return Err(OperationError::new(
+                "an execution frame cannot suspend more than one command",
+            ));
+        }
+        self.pending_command = Some(PendingCommandStart {
+            pending,
+            view,
+            content,
+        });
+        Ok(())
+    }
+
+    pub(super) fn has_pending_command(&self) -> bool {
+        self.pending_command.is_some()
     }
 
     pub(super) fn prepare_face(
@@ -275,22 +337,15 @@ impl ExecutionFrame {
         self.view_touches.entry(view).or_insert(revision);
     }
 
-    pub(super) fn into_parts(
-        self,
-    ) -> (
-        CheckpointJournal,
-        ModeDraftJournal,
-        Vec<ContentId>,
-        HashMap<ViewId, Revision>,
-        Vec<PreparedEffect>,
-    ) {
-        (
-            self.checkpoints,
-            self.mode_drafts,
-            self.provisional_contents,
-            self.view_touches,
-            self.prepared_effects,
-        )
+    pub(super) fn into_parts(self) -> ExecutionFrameParts {
+        ExecutionFrameParts {
+            checkpoints: self.checkpoints,
+            mode_drafts: self.mode_drafts,
+            provisional_contents: self.provisional_contents,
+            view_touches: self.view_touches,
+            effects: self.prepared_effects,
+            pending_command: self.pending_command,
+        }
     }
 }
 
@@ -400,7 +455,6 @@ mod tests {
         frame.prepare_face(first.clone()).unwrap();
 
         assert!(frame.prepare_face(first).is_err());
-        let (_, _, _, _, effects) = frame.into_parts();
-        assert_eq!(effects.len(), 1);
+        assert_eq!(frame.into_parts().effects.len(), 1);
     }
 }

@@ -1460,6 +1460,9 @@ fn make_script_app(source: &str) -> App<ScriptedFrontend> {
         session: bootstrap.session,
         frontend: ScriptedFrontend::new(Vec::new()),
         runtime_diagnostics: Vec::new(),
+        next_command_task: 0,
+        command_tasks: Default::default(),
+        pending_commands: Vec::new(),
         behavior: BehaviorRecorder::default(),
     }
 }
@@ -1499,6 +1502,9 @@ editor.modes.define({
         session: bootstrap.session,
         frontend: ScriptedFrontend::new(Vec::new()),
         runtime_diagnostics: Vec::new(),
+        next_command_task: 0,
+        command_tasks: Default::default(),
+        pending_commands: Vec::new(),
         behavior: BehaviorRecorder::default(),
     };
     let (_, identity) = normalize_path(&path).unwrap();
@@ -9232,8 +9238,11 @@ fn registered_new_buffer_result_can_feed_nested_switch() {
                 CommandId::new("newBuffer").unwrap(),
                 Vec::new(),
             ))?;
-            let CommandCompletion::Ready(content) = created else {
-                return Ok(CommandCompletion::Pending);
+            let content = match created {
+                CommandCompletion::Ready(content) => content,
+                CommandCompletion::Pending(pending) => {
+                    return Ok(CommandCompletion::Pending(pending));
+                }
             };
             host.invoke_command(CommandInvocation::new(
                 CommandId::new("switchBuffer").unwrap(),
@@ -9337,6 +9346,588 @@ function newAndSwitch() {
         editor_cid()
     );
     assert_eq!(app.buffers().len(), 2);
+}
+
+fn install_command_script(
+    app: &mut App<ScriptedFrontend>,
+    source: &str,
+    extra_native_commands: &[CommandId],
+) {
+    let mut loaded =
+        vell_plugin_v8::load_typescript_modes("file:///async-commands.ts", source).unwrap();
+    let mut native_commands = crate::native_command_ids();
+    native_commands.extend_from_slice(extra_native_commands);
+    loaded.install_native_commands(&native_commands).unwrap();
+    for command in loaded.commands {
+        app.register_command(command);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_save_command_stays_pending_until_the_write_completes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("native-command-save.txt");
+    std::fs::write(&path, "before").unwrap();
+    let mut app = App::new(path.to_str(), 40, 5, ScriptedFrontend::new(Vec::new())).unwrap();
+    let view = view_id(&app, app.session.focused());
+
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(CommandId::new("save").unwrap(), Vec::new()),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert_eq!(app.pending_commands.len(), 1);
+    let message = app.kernel.receive_message().await.unwrap();
+    app.handle_app_message(message).unwrap();
+    assert!(app.pending_commands.is_empty());
+    assert_eq!(save_state(&app, editor_cid()), SaveState::Saved);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn returned_save_promise_resumes_before_quit() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("async-save-quit.txt");
+    std::fs::write(&path, "before").unwrap();
+    let mut app = App::new(path.to_str(), 40, 5, ScriptedFrontend::new(Vec::new())).unwrap();
+    install_command_script(
+        &mut app,
+        r#"
+editor.commands.register("test.saveThenQuit", async () => {
+  await save();
+  quit();
+});
+"#,
+        &[],
+    );
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("changed ".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(
+            CommandId::new("test.saveThenQuit").unwrap(),
+            Vec::new(),
+        ),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert_eq!(app.pending_commands.len(), 1);
+    assert!(!app.kernel.is_cancelled());
+    let message = app.kernel.receive_message().await.unwrap();
+    app.handle_app_message(message).unwrap();
+
+    assert!(app.kernel.is_cancelled());
+    assert!(app.pending_commands.is_empty());
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "changed before");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn async_command_resume_keeps_its_original_target_after_focus_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("async-fixed-target.txt");
+    std::fs::write(&path, "before").unwrap();
+    let captured = Rc::new(RefCell::new(Vec::new()));
+    let captured_for_command = Rc::clone(&captured);
+    let capture_id = CommandId::new("test.captureCurrent").unwrap();
+    let mut app = App::new(path.to_str(), 40, 5, ScriptedFrontend::new(Vec::new())).unwrap();
+    app.register_command(CommandEntry::new(
+        capture_id.clone(),
+        move |host: &mut dyn CommandHost, _arguments: Vec<CommandValue>| {
+            let result = host.request(CommandRequest::Query(CommandQuery::CurrentContent))?;
+            if let CommandCompletion::Ready(value) = &result {
+                captured_for_command.borrow_mut().push(value.clone());
+            }
+            Ok(result)
+        },
+    ));
+    install_command_script(
+        &mut app,
+        r#"
+editor.commands.register("test.saveAndCapture", async () => {
+  await save();
+  return test.captureCurrent();
+});
+"#,
+        std::slice::from_ref(&capture_id),
+    );
+    let original_view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(
+            CommandId::new("test.saveAndCapture").unwrap(),
+            Vec::new(),
+        ),
+        view: original_view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(CommandId::new("splitHorizontal").unwrap(), Vec::new()),
+        view: original_view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    let other = app.new_buffer();
+    app.switch_buffer(other).unwrap();
+
+    let message = app.kernel.receive_message().await.unwrap();
+    app.handle_app_message(message).unwrap();
+
+    assert_eq!(&*captured.borrow(), &[CommandValue::from(editor_cid().0)]);
+    assert_eq!(
+        app.session
+            .view_for_space(app.session.focused())
+            .and_then(|view| app.session.view(view))
+            .map(|view| view.content()),
+        Some(other)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn text_change_while_awaiting_cancels_the_original_continuation() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("async-stale-target.txt");
+    std::fs::write(&path, "before").unwrap();
+    let calls = Rc::new(RefCell::new(0));
+    let calls_for_command = Rc::clone(&calls);
+    let capture_id = CommandId::new("test.captureResume").unwrap();
+    let mut app = App::new(path.to_str(), 40, 5, ScriptedFrontend::new(Vec::new())).unwrap();
+    app.register_command(CommandEntry::new(
+        capture_id.clone(),
+        move |_host: &mut dyn CommandHost, _arguments: Vec<CommandValue>| {
+            *calls_for_command.borrow_mut() += 1;
+            Ok(CommandValue::Null.into())
+        },
+    ));
+    install_command_script(
+        &mut app,
+        r#"
+editor.commands.register("test.saveAndResume", async () => {
+  await save();
+  test.captureResume();
+});
+"#,
+        std::slice::from_ref(&capture_id),
+    );
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(
+            CommandId::new("test.saveAndResume").unwrap(),
+            Vec::new(),
+        ),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("new ".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert!(app.pending_commands.is_empty());
+
+    let message = app.kernel.receive_message().await.unwrap();
+    app.handle_app_message(message).unwrap();
+
+    assert_eq!(*calls.borrow(), 0);
+    assert!(app.pending_commands.is_empty());
+    assert!(
+        app.runtime_diagnostics()
+            .last()
+            .unwrap()
+            .message
+            .contains("target changed")
+    );
+    assert_eq!(text_rows(&app, editor_cid()), ["new before"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn post_await_exception_rolls_back_only_the_resumed_frame() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("async-frame-rollback.txt");
+    std::fs::write(&path, "before").unwrap();
+    let mut app = App::new(path.to_str(), 40, 5, ScriptedFrontend::new(Vec::new())).unwrap();
+    install_command_script(
+        &mut app,
+        r#"
+editor.commands.register("test.failAfterSave", async () => {
+  await save();
+  const created = newBuffer();
+  switchBuffer(created);
+  throw new Error("after await");
+});
+"#,
+        &[],
+    );
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("saved ".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(
+            CommandId::new("test.failAfterSave").unwrap(),
+            Vec::new(),
+        ),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    let message = app.kernel.receive_message().await.unwrap();
+    app.handle_app_message(message).unwrap();
+
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "saved before");
+    assert_eq!(app.buffers().len(), 1);
+    assert_eq!(
+        app.session.view(view).map(|view| view.content()),
+        Some(editor_cid())
+    );
+    assert!(
+        app.runtime_diagnostics()
+            .last()
+            .unwrap()
+            .message
+            .contains("after await")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn save_failure_rejects_the_script_promise() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("async-save-error.txt");
+    std::fs::write(&path, "before").unwrap();
+    let captured = Rc::new(RefCell::new(Vec::new()));
+    let captured_for_command = Rc::clone(&captured);
+    let capture_id = CommandId::new("test.captureError").unwrap();
+    let mut app = App::new(path.to_str(), 40, 5, ScriptedFrontend::new(Vec::new())).unwrap();
+    app.register_command(CommandEntry::new(
+        capture_id.clone(),
+        move |_host: &mut dyn CommandHost, arguments: Vec<CommandValue>| {
+            captured_for_command.borrow_mut().extend(arguments);
+            Ok(CommandValue::Null.into())
+        },
+    ));
+    install_command_script(
+        &mut app,
+        r#"
+editor.commands.register("test.catchSave", async () => {
+  try {
+    await save();
+  } catch (error) {
+    test.captureError(String(error));
+  }
+});
+"#,
+        std::slice::from_ref(&capture_id),
+    );
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(CommandId::new("test.catchSave").unwrap(), Vec::new()),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    let revision = app.command_tasks.values().next().unwrap().revision;
+    let state = app.pending_commands[0].expected_state;
+
+    app.handle_app_message(AppMessage::SaveCompleted {
+        content: editor_cid(),
+        revision,
+        state,
+        result: Err(io::Error::other("disk full")),
+    })
+    .unwrap();
+
+    let captured = captured.borrow();
+    let [CommandValue::String(message)] = captured.as_slice() else {
+        panic!("save rejection was not caught: {captured:?}");
+    };
+    assert!(message.contains("save failed: disk full"), "{message}");
+    assert!(app.pending_commands.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn promise_all_correlates_multiple_save_tasks_to_one_continuation() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("async-save-all.txt");
+    std::fs::write(&path, "before").unwrap();
+    let calls = Rc::new(RefCell::new(0));
+    let calls_for_command = Rc::clone(&calls);
+    let capture_id = CommandId::new("test.captureAll").unwrap();
+    let mut app = App::new(path.to_str(), 40, 5, ScriptedFrontend::new(Vec::new())).unwrap();
+    app.register_command(CommandEntry::new(
+        capture_id.clone(),
+        move |_host: &mut dyn CommandHost, _arguments: Vec<CommandValue>| {
+            *calls_for_command.borrow_mut() += 1;
+            Ok(CommandValue::Null.into())
+        },
+    ));
+    install_command_script(
+        &mut app,
+        r#"
+editor.commands.register("test.saveAll", async () => {
+  await Promise.all([save(), save()]);
+  test.captureAll();
+});
+"#,
+        std::slice::from_ref(&capture_id),
+    );
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(CommandId::new("test.saveAll").unwrap(), Vec::new()),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert_eq!(app.command_tasks.len(), 2);
+    let message = app.kernel.receive_message().await.unwrap();
+    app.handle_app_message(message).unwrap();
+
+    assert_eq!(*calls.borrow(), 1);
+    assert!(app.command_tasks.is_empty());
+    assert!(app.pending_commands.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unreturned_save_promise_does_not_suspend_the_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("async-unreturned-save.txt");
+    std::fs::write(&path, "before").unwrap();
+    let mut app = App::new(path.to_str(), 40, 5, ScriptedFrontend::new(Vec::new())).unwrap();
+    install_command_script(
+        &mut app,
+        r#"
+editor.commands.register("test.fireAndForget", () => {
+  save();
+});
+"#,
+        &[],
+    );
+    let view = view_id(&app, app.session.focused());
+
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(
+            CommandId::new("test.fireAndForget").unwrap(),
+            Vec::new(),
+        ),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert!(app.pending_commands.is_empty());
+    assert_eq!(app.command_tasks.len(), 1);
+    let message = app.kernel.receive_message().await.unwrap();
+    app.handle_app_message(message).unwrap();
+    assert!(app.command_tasks.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_the_original_view_cancels_its_suspended_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("async-closed-view.txt");
+    std::fs::write(&path, "before").unwrap();
+    let calls = Rc::new(RefCell::new(0));
+    let calls_for_command = Rc::clone(&calls);
+    let capture_id = CommandId::new("test.captureClosed").unwrap();
+    let mut app = App::new(path.to_str(), 40, 5, ScriptedFrontend::new(Vec::new())).unwrap();
+    app.register_command(CommandEntry::new(
+        capture_id.clone(),
+        move |_host: &mut dyn CommandHost, _arguments: Vec<CommandValue>| {
+            *calls_for_command.borrow_mut() += 1;
+            Ok(CommandValue::Null.into())
+        },
+    ));
+    install_command_script(
+        &mut app,
+        r#"
+editor.commands.register("test.resumeClosed", async () => {
+  await save();
+  test.captureClosed();
+});
+"#,
+        std::slice::from_ref(&capture_id),
+    );
+    let original_view = view_id(&app, app.session.focused());
+    let original_space = space_for_view(app.session.scene(), original_view).unwrap();
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(CommandId::new("splitHorizontal").unwrap(), Vec::new()),
+        view: original_view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(
+            CommandId::new("test.resumeClosed").unwrap(),
+            Vec::new(),
+        ),
+        view: original_view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    app.close_space(original_space).unwrap();
+
+    assert!(app.pending_commands.is_empty());
+
+    let message = app.kernel.receive_message().await.unwrap();
+    app.handle_app_message(message).unwrap();
+
+    assert_eq!(*calls.borrow(), 0);
+    assert!(app.pending_commands.is_empty());
+    assert!(
+        app.runtime_diagnostics()
+            .last()
+            .unwrap()
+            .message
+            .contains("target view was closed")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_registered_after_await_is_published_to_the_host_registry() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("async-register.txt");
+    std::fs::write(&path, "before").unwrap();
+    let mut app = App::new(path.to_str(), 40, 5, ScriptedFrontend::new(Vec::new())).unwrap();
+    install_command_script(
+        &mut app,
+        r#"
+editor.commands.register("test.installAfterSave", async () => {
+  await save();
+  editor.commands.register("test.installedAfterSave", () => newBuffer());
+});
+"#,
+        &[],
+    );
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(
+            CommandId::new("test.installAfterSave").unwrap(),
+            Vec::new(),
+        ),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    let message = app.kernel.receive_message().await.unwrap();
+    app.handle_app_message(message).unwrap();
+    let installed = CommandId::new("test.installedAfterSave").unwrap();
+
+    assert!(app.kernel.commands().get(&installed).is_some());
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(installed, Vec::new()),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    assert_eq!(app.buffers().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn global_typescript_evaluator_resumes_its_final_promise() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("async-global-script.txt");
+    std::fs::write(&path, "before").unwrap();
+    let mut loaded =
+        vell_plugin_v8::load_typescript_modes("file:///async-global-config.ts", "void 0;").unwrap();
+    loaded
+        .install_native_commands(&crate::native_command_ids())
+        .unwrap();
+    let mut app = App::new(path.to_str(), 40, 5, ScriptedFrontend::new(Vec::new())).unwrap();
+    for command in loaded.commands {
+        app.register_command(command);
+    }
+    let view = view_id(&app, app.session.focused());
+
+    app.execute_command(DispatchCommand::Registered {
+        invocation: vell_plugin_v8::GlobalScriptRequest::Interactive {
+            source: r#"
+async function saveThenQuitFromGlobal() {
+  await save();
+  quit();
+}
+saveThenQuitFromGlobal();
+"#
+            .to_owned(),
+        }
+        .into_invocation(),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert_eq!(app.pending_commands.len(), 1);
+    let message = app.kernel.receive_message().await.unwrap();
+    app.handle_app_message(message).unwrap();
+    assert!(app.kernel.is_cancelled());
+}
+
+#[test]
+fn save_conflict_is_exposed_to_typescript_as_a_rejected_promise() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("async-save-conflict.txt");
+    std::fs::write(&path, "opened").unwrap();
+    let captured = Rc::new(RefCell::new(Vec::new()));
+    let captured_for_command = Rc::clone(&captured);
+    let capture_id = CommandId::new("test.capturePromise").unwrap();
+    let mut app = App::new(path.to_str(), 40, 5, ScriptedFrontend::new(Vec::new())).unwrap();
+    app.register_command(CommandEntry::new(
+        capture_id.clone(),
+        move |_host: &mut dyn CommandHost, arguments: Vec<CommandValue>| {
+            captured_for_command.borrow_mut().extend(arguments);
+            Ok(CommandValue::Null.into())
+        },
+    ));
+    install_command_script(
+        &mut app,
+        r#"
+editor.commands.register("test.captureConflict", async () => {
+  const pending = save();
+  test.capturePromise(pending instanceof Promise);
+  try {
+    await pending;
+  } catch (error) {
+    test.capturePromise(String(error));
+  }
+});
+"#,
+        std::slice::from_ref(&capture_id),
+    );
+    std::fs::write(&path, "external").unwrap();
+    let view = view_id(&app, app.session.focused());
+
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(
+            CommandId::new("test.captureConflict").unwrap(),
+            Vec::new(),
+        ),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    let captured = captured.borrow();
+    assert_eq!(captured.first(), Some(&CommandValue::Bool(true)));
+    let Some(CommandValue::String(error)) = captured.get(1) else {
+        panic!("save conflict did not reject its promise: {captured:?}");
+    };
+    assert!(error.contains("external changes"), "{error}");
+    assert!(app.pending_commands.is_empty());
+    assert!(app.command_tasks.is_empty());
 }
 
 #[test]

@@ -24,6 +24,14 @@ impl<F: Frontend> App<F> {
                 state,
                 result,
             } => {
+                let command_result = result
+                    .as_ref()
+                    .map(|()| vell_mode::command_registry::CommandValue::default())
+                    .map_err(|error| {
+                        vell_mode::command_registry::CommandError::Failed(format!(
+                            "save failed: {error}"
+                        ))
+                    });
                 let completion = self.kernel.complete_save(content, revision, state, result);
                 let (result, queued) = completion.into_parts();
                 let content_changed = matches!(
@@ -38,6 +46,7 @@ impl<F: Frontend> App<F> {
                 if let Some((snapshot, force)) = queued {
                     self.kernel.queue_save(content, snapshot, force);
                 }
+                self.complete_command_tasks(content, revision, command_result);
                 true
             }
             AppMessage::ModeJobFinished {

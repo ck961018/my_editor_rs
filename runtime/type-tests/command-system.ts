@@ -14,6 +14,8 @@ const localResult: string = registeredLocal(42);
 const explicitResult: number = registeredExplicit("vell");
 const contentId: number = newBuffer();
 switchBuffer(contentId);
+const saving: Promise<void> = save();
 
 void localResult;
 void explicitResult;
+void saving;

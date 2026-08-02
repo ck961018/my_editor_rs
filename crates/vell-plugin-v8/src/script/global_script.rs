@@ -4,15 +4,19 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use deno_ast::ModuleSpecifier;
+#[cfg(test)]
+use vell_mode::command_registry::CommandCompletion;
 use vell_mode::command_registry::{
-    CommandAdapter, CommandCompletion, CommandEntry, CommandError, CommandHost, CommandId,
-    CommandResult, CommandValue,
+    CommandAdapter, CommandEntry, CommandError, CommandHost, CommandId, CommandResult, CommandValue,
 };
 use vell_protocol::ids::ContentId;
 
 use crate::api::GLOBAL_SCRIPT_COMMAND_ID;
 
-use super::commands::{ScopedHost, change_count, publish_changes};
+use super::commands::{
+    ScopedHost, ScriptExecution, ScriptValue, change_count, finish_script_execution,
+    poll_script_value, publish_changes,
+};
 use super::module::{AssetSource, transpile_typescript_program};
 use super::{
     MAX_SCRIPT_SOURCE_BYTES, ScriptError, ScriptHost, ScriptInvocationKind, current_exception,
@@ -38,12 +42,13 @@ impl CommandAdapter for GlobalScriptAdapter {
     fn invoke(&self, host: &mut dyn CommandHost, arguments: Vec<CommandValue>) -> CommandResult {
         let request = parse_request(arguments)?;
         let changes = change_count(&self.host);
-        let result = self
+        let execution = self
             .host
             .try_borrow_mut()
             .map_err(|_| CommandError::Failed("script runtime is reentrant".to_owned()))?
             .execute_global_script(request, host)
             .map_err(|error| CommandError::Failed(error.to_string()));
+        let result = execution.and_then(|execution| execution.into_completion(&self.host));
         publish_changes(&self.host, host, changes);
         result
     }
@@ -63,11 +68,11 @@ impl ScriptHost {
         &mut self,
         request: EvaluationRequest,
         host: &mut dyn CommandHost,
-    ) -> Result<CommandCompletion, ScriptError> {
+    ) -> Result<ScriptExecution, ScriptError> {
         let bridge = self.command_host.clone();
-        let mut scoped_host = ScopedHost { host };
-        let _active_host = bridge.activate(&mut scoped_host)?;
-        match request {
+        let mut scoped_host = ScopedHost::new(host);
+        let active_host = bridge.activate(&mut scoped_host)?;
+        let result = match request {
             EvaluationRequest::Interactive(source) => {
                 let path = self.next_interactive_path()?;
                 self.evaluate_global_source(&path, &source)
@@ -81,7 +86,9 @@ impl ScriptHost {
                 self.evaluate_global_source(&path, &source)
             }
             EvaluationRequest::File(path) => self.evaluate_global_file(&path),
-        }
+        };
+        drop(active_host);
+        finish_script_execution(result?, scoped_host.take_pending_tasks())
     }
 
     fn next_interactive_path(&mut self) -> Result<PathBuf, ScriptError> {
@@ -92,7 +99,7 @@ impl ScriptHost {
         Ok(script_root()?.join(format!(".vell-interactive-{id}.ts")))
     }
 
-    fn evaluate_global_file(&mut self, path: &Path) -> Result<CommandCompletion, ScriptError> {
+    fn evaluate_global_file(&mut self, path: &Path) -> Result<ScriptValue, ScriptError> {
         let path = path
             .canonicalize()
             .map_err(|error| ScriptError::new(format!("failed to open script: {error}")))?;
@@ -105,7 +112,7 @@ impl ScriptHost {
         reject_top_level_await(&program)?;
         if program.is_module {
             self.execute_module(&path)?;
-            Ok(CommandCompletion::Ready(CommandValue::Null))
+            Ok(ScriptValue::Ready(CommandValue::Null))
         } else {
             if let Some(source_map) = &program.source_map {
                 self.commands
@@ -123,7 +130,7 @@ impl ScriptHost {
         &mut self,
         path: &Path,
         source: &str,
-    ) -> Result<CommandCompletion, ScriptError> {
+    ) -> Result<ScriptValue, ScriptError> {
         ensure_size(
             "global TypeScript source",
             source.len(),
@@ -152,7 +159,7 @@ impl ScriptHost {
         &mut self,
         path: &Path,
         javascript: String,
-    ) -> Result<CommandCompletion, ScriptError> {
+    ) -> Result<ScriptValue, ScriptError> {
         ensure_size(
             "transpiled global script",
             javascript.len(),
@@ -191,13 +198,8 @@ impl ScriptHost {
             let value = script
                 .run(scope)
                 .ok_or_else(|| current_exception(scope, &path.display().to_string(), "execute"))?;
-            let pending = value.is_promise();
             perform_microtask_checkpoint(scope);
-            Ok(if pending {
-                CommandCompletion::Pending
-            } else {
-                CommandCompletion::Ready(CommandValue::Null)
-            })
+            poll_script_value(scope, value)
         })
     }
 }
@@ -419,7 +421,7 @@ editor.commands.register("math.double", value => value * 2);
     }
 
     #[test]
-    fn final_promise_is_reported_without_running_an_async_scheduler() {
+    fn synchronously_settled_final_promise_returns_its_value() {
         let (_captured, mut host) = configured_host();
 
         assert_eq!(
@@ -427,7 +429,7 @@ editor.commands.register("math.double", value => value * 2);
                 &mut host,
                 "async function main() { return await Promise.resolve(42); } main();",
             ),
-            Ok(CommandCompletion::Pending)
+            Ok(CommandCompletion::Ready(CommandValue::from(42)))
         );
     }
 
@@ -593,7 +595,7 @@ globalThis.dynamicImport;
 
         assert_eq!(
             host.invoke_command(GlobalScriptRequest::File { path: script }.into_invocation()),
-            Ok(CommandCompletion::Pending)
+            Ok(CommandCompletion::Ready(CommandValue::Null))
         );
         evaluate(
             &mut host,

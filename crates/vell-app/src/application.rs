@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io;
 use std::time::Instant;
 
@@ -11,16 +12,32 @@ use crate::mode::{Mode, ModeAttachmentError, ModeBackground};
 use crate::mode_name::ModeName;
 use crate::session::ClientSession;
 use vell_core::buffer::Buffer;
+use vell_core::transaction::TextStateId;
 use vell_frontend::Frontend;
-use vell_mode::command_registry::CommandEntry;
+use vell_mode::command_registry::{CommandEntry, CommandPending, CommandTaskId};
 use vell_protocol::content_query::{FaceOverride, ThemeName};
-use vell_protocol::ids::ContentId;
+use vell_protocol::ids::{ContentId, ViewId};
+
+pub(super) struct CommandTaskTarget {
+    pub content: ContentId,
+    pub revision: u64,
+}
+
+pub(super) struct PendingCommandInvocation {
+    pub pending: CommandPending,
+    pub view: ViewId,
+    pub content: ContentId,
+    pub expected_state: TextStateId,
+}
 
 pub struct App<F: Frontend> {
     pub(super) kernel: Kernel,
     pub(super) session: ClientSession,
     pub(super) frontend: F,
     pub(super) runtime_diagnostics: Vec<RuntimeDiagnostic>,
+    pub(super) next_command_task: u64,
+    pub(super) command_tasks: HashMap<CommandTaskId, CommandTaskTarget>,
+    pub(super) pending_commands: Vec<PendingCommandInvocation>,
     #[cfg(test)]
     pub(super) behavior: BehaviorRecorder,
 }
@@ -186,6 +203,9 @@ impl<F: Frontend> App<F> {
             session: bootstrap.session,
             frontend,
             runtime_diagnostics: Vec::new(),
+            next_command_task: 0,
+            command_tasks: HashMap::new(),
+            pending_commands: Vec::new(),
             #[cfg(test)]
             behavior: BehaviorRecorder::default(),
         };

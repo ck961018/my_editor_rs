@@ -5,8 +5,9 @@ use std::ptr;
 use std::rc::Rc;
 
 use vell_mode::command_registry::{
-    CommandAdapter, CommandCompletion, CommandEntry, CommandError, CommandHost, CommandId,
-    CommandInvocation, CommandResult, CommandValue,
+    CommandAdapter, CommandCompletion, CommandContinuation, CommandContinuationResult,
+    CommandEntry, CommandError, CommandHost, CommandId, CommandInvocation, CommandPending,
+    CommandResult, CommandTaskCompletion, CommandTaskId, CommandValue,
 };
 
 use super::{
@@ -255,22 +256,41 @@ impl Default for ActiveCommandHost {
 
 pub(super) struct ScopedHost<'a> {
     pub(super) host: &'a mut dyn CommandHost,
+    pending_tasks: Vec<ScriptTaskResolver>,
+}
+
+pub(super) struct ScriptTaskResolver {
+    task: CommandTaskId,
+    resolver: v8::Global<v8::PromiseResolver>,
+}
+
+impl<'a> ScopedHost<'a> {
+    pub(super) fn new(host: &'a mut dyn CommandHost) -> Self {
+        Self {
+            host,
+            pending_tasks: Vec::new(),
+        }
+    }
+
+    pub(super) fn take_pending_tasks(&mut self) -> Vec<ScriptTaskResolver> {
+        std::mem::take(&mut self.pending_tasks)
+    }
 }
 
 pub(super) struct ActiveHostGuard<'a> {
     bridge: Rc<ActiveCommandHost>,
-    _host: PhantomData<&'a mut ScopedHost<'a>>,
+    _host: PhantomData<&'a mut ()>,
 }
 
 impl ActiveCommandHost {
     pub(super) fn activate<'a>(
         self: &Rc<Self>,
-        host: &'a mut ScopedHost<'a>,
+        host: &'a mut ScopedHost<'_>,
     ) -> Result<ActiveHostGuard<'a>, ScriptError> {
         if !self.pointer.get().is_null() {
             return Err(ScriptError::new("a command host is already active"));
         }
-        self.pointer.set(host as *mut ScopedHost<'a> as *mut ());
+        self.pointer.set(host as *mut ScopedHost<'_> as *mut ());
         Ok(ActiveHostGuard {
             bridge: Rc::clone(self),
             _host: PhantomData,
@@ -303,12 +323,108 @@ impl ActiveCommandHost {
         let host = unsafe { &mut *(pointer.cast::<ScopedHost<'static>>()) };
         host.host.invoke_command(invocation)
     }
+
+    fn track_task(
+        &self,
+        task: CommandTaskId,
+        resolver: v8::Global<v8::PromiseResolver>,
+    ) -> Result<(), CommandError> {
+        let pointer = self.pointer.get();
+        if pointer.is_null() {
+            return Err(CommandError::Failed(
+                "native command wrapper is outside an active command callback".to_owned(),
+            ));
+        }
+        // SAFETY: the active guard owns the stack host for the duration of all
+        // synchronous V8 callbacks, as documented by `activate`.
+        let host = unsafe { &mut *(pointer.cast::<ScopedHost<'static>>()) };
+        if host
+            .pending_tasks
+            .iter()
+            .any(|pending| pending.task == task)
+        {
+            return Err(CommandError::Failed(format!(
+                "command task {} was returned more than once",
+                task.get()
+            )));
+        }
+        host.pending_tasks
+            .push(ScriptTaskResolver { task, resolver });
+        Ok(())
+    }
 }
 
 impl Drop for ActiveHostGuard<'_> {
     fn drop(&mut self) {
         self.bridge.pointer.set(ptr::null_mut());
         self.bridge.invoking.set(false);
+    }
+}
+
+pub(super) enum ScriptExecution {
+    Ready(CommandValue),
+    Pending(ScriptPromiseState),
+}
+
+pub(super) struct ScriptPromiseState {
+    promise: v8::Global<v8::Promise>,
+    tasks: BTreeMap<CommandTaskId, v8::Global<v8::PromiseResolver>>,
+}
+
+impl ScriptExecution {
+    pub(super) fn into_completion(self, host: &Rc<RefCell<ScriptHost>>) -> CommandResult {
+        match self {
+            Self::Ready(value) => Ok(CommandCompletion::Ready(value)),
+            Self::Pending(state) => {
+                let tasks = state.tasks.keys().copied().collect();
+                let continuation = ScriptPromiseContinuation {
+                    host: Rc::clone(host),
+                    state: RefCell::new(Some(state)),
+                };
+                CommandPending::continuation(tasks, continuation).map(CommandCompletion::Pending)
+            }
+        }
+    }
+}
+
+struct ScriptPromiseContinuation {
+    host: Rc<RefCell<ScriptHost>>,
+    state: RefCell<Option<ScriptPromiseState>>,
+}
+
+impl CommandContinuation for ScriptPromiseContinuation {
+    fn resume(
+        &self,
+        host: &mut dyn CommandHost,
+        completion: CommandTaskCompletion,
+    ) -> Result<CommandContinuationResult, CommandError> {
+        let change_count = change_count(&self.host);
+        let state = self.state.borrow_mut().take().ok_or_else(|| {
+            CommandError::Failed("command continuation is not pending".to_owned())
+        })?;
+        let execution = {
+            self.host
+                .try_borrow_mut()
+                .map_err(|_| {
+                    CommandError::Failed("script command runtime is reentrant".to_owned())
+                })?
+                .resume_command_promise(state, host, completion)
+                .map_err(|error| CommandError::Failed(error.to_string()))
+        };
+        publish_changes(&self.host, host, change_count);
+        let execution = execution?;
+        match execution {
+            ScriptExecution::Ready(value) => Ok(CommandContinuationResult::Ready(value)),
+            ScriptExecution::Pending(state) => {
+                let tasks = state.tasks.keys().copied().collect();
+                self.state.replace(Some(state));
+                Ok(CommandContinuationResult::Pending(tasks))
+            }
+        }
+    }
+
+    fn cancel(&self, _reason: CommandError) {
+        self.state.borrow_mut().take();
     }
 }
 
@@ -333,12 +449,13 @@ impl ScriptCommandAdapter {
 impl CommandAdapter for ScriptCommandAdapter {
     fn invoke(&self, host: &mut dyn CommandHost, arguments: Vec<CommandValue>) -> CommandResult {
         let change_count = self.host.borrow().commands.borrow().change_count();
-        let result = self
+        let execution = self
             .host
             .try_borrow_mut()
             .map_err(|_| CommandError::Failed("script command runtime is reentrant".to_owned()))?
             .execute_command(&self.id, host, arguments)
             .map_err(|error| CommandError::Failed(error.to_string()));
+        let result = execution.and_then(|execution| execution.into_completion(&self.host));
         publish_changes(&self.host, host, change_count);
         result
     }
@@ -482,24 +599,63 @@ fn invoke_native_command(
 ) {
     let result = (|| {
         let id = arguments.data().to_rust_string_lossy(scope);
-        let id = CommandId::new(id).map_err(|error| ScriptError::new(error.to_string()))?;
+        let id = CommandId::new(id)
+            .map_err(|error| CommandError::InvalidArguments(error.to_string()))?;
         let values = (0..arguments.length())
             .map(|index| v8_to_json(scope, arguments.get(index), "command argument"))
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| CommandError::InvalidArguments(error.to_string()))?;
         let bridge = scope
             .get_slot::<Rc<ActiveCommandHost>>()
             .cloned()
-            .ok_or_else(|| ScriptError::new("command host bridge is unavailable"))?;
-        bridge
-            .invoke(CommandInvocation::new(id, values))
-            .map_err(|error| ScriptError::new(error.to_string()))
+            .ok_or_else(|| CommandError::Failed("command host bridge is unavailable".to_owned()))?;
+        bridge.invoke(CommandInvocation::new(id, values))
     })();
     match result {
         Ok(CommandCompletion::Ready(value)) => match json_to_v8(scope, &value) {
             Ok(value) => return_value.set(value),
             Err(error) => throw_script_error(scope, &error.to_string()),
         },
-        Ok(CommandCompletion::Pending) => return_value.set_undefined(),
+        Ok(CommandCompletion::Pending(pending)) => {
+            let result: Result<v8::Local<v8::Promise>, ScriptError> = (|| {
+                let task = pending.direct_task().ok_or_else(|| {
+                    ScriptError::new("native wrapper received a nested command continuation")
+                })?;
+                let resolver = v8::PromiseResolver::new(scope)
+                    .ok_or_else(|| ScriptError::new("failed to create command promise"))?;
+                let promise = resolver.get_promise(scope);
+                let bridge = scope
+                    .get_slot::<Rc<ActiveCommandHost>>()
+                    .cloned()
+                    .ok_or_else(|| ScriptError::new("command host bridge is unavailable"))?;
+                bridge
+                    .track_task(task, v8::Global::new(scope, resolver))
+                    .map_err(|error| ScriptError::new(error.to_string()))?;
+                Ok(promise)
+            })();
+            match result {
+                Ok(promise) => return_value.set(promise.into()),
+                Err(error) => throw_script_error(scope, &error.to_string()),
+            }
+        }
+        Err(CommandError::AsyncFailed(message)) => {
+            let result: Result<v8::Local<v8::Promise>, ScriptError> = (|| {
+                let resolver = v8::PromiseResolver::new(scope)
+                    .ok_or_else(|| ScriptError::new("failed to create command promise"))?;
+                let promise = resolver.get_promise(scope);
+                let message = v8::String::new(scope, &message)
+                    .ok_or_else(|| ScriptError::new("command rejection message is too large"))?;
+                let exception = v8::Exception::error(scope, message);
+                if resolver.reject(scope, exception) != Some(true) {
+                    return Err(ScriptError::new("failed to reject command promise"));
+                }
+                Ok(promise)
+            })();
+            match result {
+                Ok(promise) => return_value.set(promise.into()),
+                Err(error) => throw_script_error(scope, &error.to_string()),
+            }
+        }
         Err(error) => throw_script_error(scope, &error.to_string()),
     }
 }
@@ -526,7 +682,7 @@ impl ScriptHost {
         id: &CommandId,
         host: &mut dyn CommandHost,
         arguments: Vec<CommandValue>,
-    ) -> Result<CommandCompletion, ScriptError> {
+    ) -> Result<ScriptExecution, ScriptError> {
         let callback = self
             .commands
             .borrow()
@@ -534,9 +690,9 @@ impl ScriptHost {
             .ok_or_else(|| ScriptError::new(format!("unknown script command '{id}'")))?;
         let context = self.context.clone();
         let bridge = self.command_host.clone();
-        let mut scoped_host = ScopedHost { host };
-        let _active_host = bridge.activate(&mut scoped_host)?;
-        self.invoke(ScriptInvocationKind::Action, |isolate| {
+        let mut scoped_host = ScopedHost::new(host);
+        let active_host = bridge.activate(&mut scoped_host)?;
+        let result = self.invoke(ScriptInvocationKind::Action, |isolate| {
             v8::scope_with_context!(scope, isolate, context);
             v8::tc_scope!(let scope, scope);
             let callback = v8::Local::new(scope, callback);
@@ -547,14 +703,148 @@ impl ScriptHost {
             let receiver = v8::undefined(scope).into();
             let value = call_script_callback(scope, callback, receiver, &arguments)
                 .ok_or_else(|| current_exception(scope, id.as_str(), "execute"))?;
-            let pending = value.is_promise();
             perform_microtask_checkpoint(scope);
-            Ok(if pending {
-                CommandCompletion::Pending
-            } else {
-                CommandCompletion::Ready(CommandValue::Null)
-            })
-        })
+            poll_script_value(scope, value)
+        });
+        drop(active_host);
+        finish_script_execution(result?, scoped_host.take_pending_tasks())
+    }
+
+    fn resume_command_promise(
+        &mut self,
+        mut state: ScriptPromiseState,
+        host: &mut dyn CommandHost,
+        completion: CommandTaskCompletion,
+    ) -> Result<ScriptExecution, ScriptError> {
+        let task = completion.task();
+        let resolver = state.tasks.remove(&task).ok_or_else(|| {
+            ScriptError::new(format!("command is not waiting for task {}", task.get()))
+        })?;
+        let completion = completion.into_result();
+        let context = self.context.clone();
+        let promise = state.promise.clone();
+        let bridge = self.command_host.clone();
+        let mut scoped_host = ScopedHost::new(host);
+        let active_host = bridge.activate(&mut scoped_host)?;
+        let result = self.invoke(ScriptInvocationKind::Action, |isolate| {
+            v8::scope_with_context!(scope, isolate, context);
+            v8::tc_scope!(let scope, scope);
+            let resolver = v8::Local::new(scope, resolver);
+            match completion {
+                Ok(value) => {
+                    let value = json_to_v8(scope, &value)?;
+                    if resolver.resolve(scope, value) != Some(true) {
+                        return Err(ScriptError::new("failed to resolve command promise"));
+                    }
+                }
+                Err(error) => {
+                    let message = v8::String::new(scope, &error.to_string()).ok_or_else(|| {
+                        ScriptError::new("command rejection message is too large")
+                    })?;
+                    let exception = v8::Exception::error(scope, message);
+                    if resolver.reject(scope, exception) != Some(true) {
+                        return Err(ScriptError::new("failed to reject command promise"));
+                    }
+                }
+            }
+            perform_microtask_checkpoint(scope);
+            let promise = v8::Local::new(scope, promise);
+            poll_promise(scope, promise)
+        });
+        drop(active_host);
+        let result = result?;
+        if let ScriptValue::Pending(promise) = result {
+            state.promise = promise;
+            for pending in scoped_host.take_pending_tasks() {
+                if state.tasks.insert(pending.task, pending.resolver).is_some() {
+                    return Err(ScriptError::new(format!(
+                        "command task {} was returned more than once",
+                        pending.task.get()
+                    )));
+                }
+            }
+            if state.tasks.is_empty() {
+                return Err(ScriptError::new(
+                    "pending command has no host task to resume it",
+                ));
+            }
+            Ok(ScriptExecution::Pending(state))
+        } else {
+            finish_script_execution(result, Vec::new())
+        }
+    }
+}
+
+pub(super) enum ScriptValue {
+    Ready(CommandValue),
+    Pending(v8::Global<v8::Promise>),
+}
+
+pub(super) fn poll_script_value(
+    scope: &mut v8::PinScope<'_, '_>,
+    value: v8::Local<v8::Value>,
+) -> Result<ScriptValue, ScriptError> {
+    match v8::Local::<v8::Promise>::try_from(value) {
+        Ok(promise) => poll_promise(scope, promise),
+        Err(_) => Ok(ScriptValue::Ready(CommandValue::Null)),
+    }
+}
+
+fn poll_promise(
+    scope: &mut v8::PinScope<'_, '_>,
+    promise: v8::Local<v8::Promise>,
+) -> Result<ScriptValue, ScriptError> {
+    match promise.state() {
+        v8::PromiseState::Pending => Ok(ScriptValue::Pending(v8::Global::new(scope, promise))),
+        v8::PromiseState::Fulfilled => {
+            command_value(scope, promise.result(scope)).map(ScriptValue::Ready)
+        }
+        v8::PromiseState::Rejected => {
+            promise.mark_as_handled();
+            Err(ScriptError::new(
+                promise.result(scope).to_rust_string_lossy(scope),
+            ))
+        }
+    }
+}
+
+fn command_value(
+    scope: &mut v8::PinScope<'_, '_>,
+    value: v8::Local<v8::Value>,
+) -> Result<CommandValue, ScriptError> {
+    if value.is_undefined() {
+        Ok(CommandValue::Null)
+    } else {
+        v8_to_json(scope, value, "command result")
+    }
+}
+
+pub(super) fn finish_script_execution(
+    value: ScriptValue,
+    tasks: Vec<ScriptTaskResolver>,
+) -> Result<ScriptExecution, ScriptError> {
+    match value {
+        ScriptValue::Ready(value) => Ok(ScriptExecution::Ready(value)),
+        ScriptValue::Pending(promise) => {
+            let mut task_map = BTreeMap::new();
+            for pending in tasks {
+                if task_map.insert(pending.task, pending.resolver).is_some() {
+                    return Err(ScriptError::new(format!(
+                        "command task {} was returned more than once",
+                        pending.task.get()
+                    )));
+                }
+            }
+            if task_map.is_empty() {
+                return Err(ScriptError::new(
+                    "pending command has no host task to resume it",
+                ));
+            }
+            Ok(ScriptExecution::Pending(ScriptPromiseState {
+                promise,
+                tasks: task_map,
+            }))
+        }
     }
 }
 
@@ -754,9 +1044,49 @@ editor.commands.register("test.run", () => {
 
         assert_eq!(
             invoke(&mut host, "test.run"),
-            Ok(CommandCompletion::Pending)
+            Ok(CommandCompletion::Ready(CommandValue::from(1)))
         );
         assert_eq!(&*calls.borrow(), &["ordinary", "native", "direct"]);
+    }
+
+    #[test]
+    fn resumed_continuation_keeps_the_watchdog_and_host_recovers() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let (_script, mut host) = configured_host(
+            r#"
+editor.commands.register("test.hangAfterWait", async () => {
+  await wait();
+  while (true) {}
+});
+editor.commands.register("test.afterTimeout", () => 42);
+"#,
+            &["wait"],
+            calls,
+        );
+        let task = CommandTaskId::new(91);
+        host.registry.borrow_mut().register(CommandEntry::new(
+            id("wait"),
+            move |_host: &mut dyn CommandHost, _arguments: Vec<CommandValue>| {
+                Ok(CommandCompletion::Pending(CommandPending::task(task)))
+            },
+        ));
+        let CommandCompletion::Pending(pending) = invoke(&mut host, "test.hangAfterWait").unwrap()
+        else {
+            panic!("async command did not suspend");
+        };
+
+        let error = pending
+            .resume(
+                &mut host,
+                CommandTaskCompletion::new(task, Ok(CommandValue::Null)),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("timeout"), "{error}");
+        assert_eq!(
+            invoke(&mut host, "test.afterTimeout"),
+            Ok(CommandCompletion::Ready(CommandValue::Null))
+        );
     }
 
     #[test]

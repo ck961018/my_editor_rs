@@ -63,6 +63,9 @@ fn make_native_app() -> App<ScriptedFrontend> {
         session: bootstrap.session,
         frontend: ScriptedFrontend::new(Vec::new()),
         runtime_diagnostics: Vec::new(),
+        next_command_task: 0,
+        command_tasks: Default::default(),
+        pending_commands: Vec::new(),
         behavior: BehaviorRecorder::default(),
     }
 }

@@ -108,6 +108,9 @@ impl<F: Frontend> App<F> {
         {
             self.kernel.commit_transaction(content);
         }
+        if let Some((view, _)) = removed {
+            self.cancel_pending_commands_for_view(view);
+        }
         self.session
             .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
         Ok(result)
@@ -135,6 +138,9 @@ impl<F: Frontend> App<F> {
             content_modes,
             contents,
         )?;
+        if let Some((view, _)) = removed {
+            self.cancel_pending_commands_for_view(view);
+        }
         self.kernel.schedule_mode_jobs();
         if let Some((view, content)) = removed
             && self.kernel.active_transaction_owner(content) == Some(Some(view))

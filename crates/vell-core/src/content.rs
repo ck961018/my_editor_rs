@@ -162,6 +162,13 @@ impl Content {
         }
     }
 
+    pub fn text_state_id(&self) -> Option<TextStateId> {
+        match self {
+            Self::Buffer(buffer) => Some(buffer.state_id()),
+            Self::StatusBar(_) => None,
+        }
+    }
+
     pub(crate) fn query(&self, query: ContentQuery) -> ContentData {
         match (self, query) {
             (Self::Buffer(buffer), ContentQuery::TextRows(range)) => {
