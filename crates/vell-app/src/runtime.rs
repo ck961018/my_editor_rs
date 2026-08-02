@@ -35,8 +35,8 @@ use vell_core::search::SearchDirection;
 use vell_core::transaction::TransactionDirection;
 use vell_frontend::Frontend;
 use vell_mode::command_registry::{
-    CommandCompletion, CommandError, CommandHost, CommandInvocation, CommandQuery, CommandRequest,
-    CommandResult, CommandValue,
+    CommandCompletion, CommandEntry, CommandError, CommandHost, CommandInvocation, CommandQuery,
+    CommandRequest, CommandResult, CommandValue,
 };
 use vell_protocol::content_query::{ContentData, ContentQuery, RenderQuery};
 use vell_protocol::frontend_event::FrontendEvent;
@@ -104,6 +104,10 @@ impl<F: Frontend> CommandHost for ScopedCommandHost<'_, F> {
                 Ok(CommandValue::Null.into())
             }
         }
+    }
+
+    fn register_command(&mut self, entry: CommandEntry) {
+        self.app.register_command(entry);
     }
 }
 

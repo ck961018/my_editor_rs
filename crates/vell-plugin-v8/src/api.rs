@@ -1,5 +1,11 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use vell_mode::command_registry::{CommandEntry, CommandId};
 use vell_mode::{Mode, ModeBackground};
 use vell_protocol::content_query::{FaceOverride, ThemeName};
+
+use crate::script::{ScriptError, ScriptHost};
 
 pub const PLUGIN_API_VERSION: u32 = 2;
 pub const V1_REMOVAL_VERSION: &str = "0.3.0";
@@ -32,7 +38,15 @@ impl ScriptDiagnostic {
 pub struct LoadedScriptModes {
     pub modes: Vec<Box<dyn Mode>>,
     pub backgrounds: Vec<Box<dyn ModeBackground>>,
+    pub commands: Vec<CommandEntry>,
     pub diagnostics: Vec<ScriptDiagnostic>,
+    pub(crate) host: Rc<RefCell<ScriptHost>>,
+}
+
+impl LoadedScriptModes {
+    pub fn install_native_commands(&mut self, native_ids: &[CommandId]) -> Result<(), ScriptError> {
+        self.host.borrow_mut().install_native_commands(native_ids)
+    }
 }
 
 pub struct LoadedEditorConfiguration {
@@ -40,4 +54,15 @@ pub struct LoadedEditorConfiguration {
     pub backgrounds: Vec<Box<dyn ModeBackground>>,
     pub theme: Option<ThemeName>,
     pub face_overrides: Vec<FaceOverride>,
+    pub(crate) host: Rc<RefCell<ScriptHost>>,
+}
+
+impl LoadedEditorConfiguration {
+    pub fn prepare_commands(
+        &mut self,
+        native_ids: &[CommandId],
+    ) -> Result<Vec<CommandEntry>, ScriptError> {
+        self.host.borrow_mut().install_native_commands(native_ids)?;
+        Ok(ScriptHost::command_entries(&self.host))
+    }
 }

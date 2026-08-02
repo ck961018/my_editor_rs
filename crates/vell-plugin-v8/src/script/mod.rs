@@ -25,6 +25,7 @@ use vell_protocol::ids::ContentId;
 use vell_protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
 
 mod bridge;
+mod commands;
 mod host;
 mod invocation;
 mod mode_adapter;
@@ -41,6 +42,7 @@ use bridge::{
     set_object, set_resource_facts, set_save_state, set_string, set_value, throw_dom_exception,
     throw_script_error, throw_type_error, v8_to_json, view_policy_from_json,
 };
+use commands::{ActiveCommandHost, ScriptCommands};
 pub use host::ScriptHost;
 use invocation::{
     HeapLimitState, InvocationWatchdog, ScriptExecutionBudget, ScriptInvocationKind,
@@ -477,9 +479,10 @@ fn loaded_editor_configuration(
     };
     Ok(LoadedEditorConfiguration {
         modes,
-        backgrounds: vec![Box::new(ScriptBackground::new(host))],
+        backgrounds: vec![Box::new(ScriptBackground::new(host.clone()))],
         theme: configuration.theme,
         face_overrides: configuration.face_overrides,
+        host,
     })
 }
 
@@ -495,11 +498,15 @@ pub fn load_typescript_modes(
         .into_iter()
         .map(|mode| Box::new(mode) as Box<dyn Mode>)
         .collect();
-    let backgrounds = vec![Box::new(ScriptBackground::new(host)) as Box<dyn ModeBackground>];
+    let backgrounds =
+        vec![Box::new(ScriptBackground::new(host.clone())) as Box<dyn ModeBackground>];
+    let commands = ScriptHost::command_entries(&host);
     Ok(LoadedScriptModes {
         modes,
         backgrounds,
+        commands,
         diagnostics,
+        host,
     })
 }
 

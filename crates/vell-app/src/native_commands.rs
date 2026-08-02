@@ -10,6 +10,23 @@ use vell_mode::command_registry::{
 use vell_protocol::ids::ContentId;
 use vell_protocol::space::SplitDirection;
 
+pub const NATIVE_COMMAND_IDS: &[&str] = &[
+    "newBuffer",
+    "switchBuffer",
+    "save",
+    "undo",
+    "redo",
+    "quit",
+    "forceQuit",
+    "closePane",
+    "splitHorizontal",
+    "splitVertical",
+    "focusLeft",
+    "focusDown",
+    "focusUp",
+    "focusRight",
+];
+
 pub(super) fn native_command_registry() -> CommandRegistry {
     let mut registry = CommandRegistry::new();
     register_no_args(&mut registry, "newBuffer", CommandRequest::CreateBuffer);
@@ -68,6 +85,10 @@ pub(super) fn native_command_registry() -> CommandRegistry {
     registry
 }
 
+pub fn native_command_ids() -> Vec<CommandId> {
+    NATIVE_COMMAND_IDS.iter().map(|id| command_id(id)).collect()
+}
+
 fn register_no_args(registry: &mut CommandRegistry, id: &str, request: CommandRequest) {
     registry.register(CommandEntry::new(
         command_id(id),
@@ -111,4 +132,22 @@ fn one_content_id(arguments: Vec<CommandValue>) -> Result<ContentId, CommandErro
     value.as_u64().map(ContentId).ok_or_else(|| {
         CommandError::InvalidArguments("content id must be a non-negative integer".to_owned())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exported_native_ids_match_the_registry() {
+        let registry = native_command_registry();
+        let registered = registry
+            .iter()
+            .map(|entry| entry.id().clone())
+            .collect::<Vec<_>>();
+        let mut exported = native_command_ids();
+        exported.sort();
+
+        assert_eq!(registered, exported);
+    }
 }

@@ -38,6 +38,7 @@ pub use diagnostics::{
     ModeDecorationDiagnostics, NamedPolicySources, RuntimeDiagnostic, ViewModeDiagnostics,
 };
 pub use layout::{StatusBarHandle, StatusBarPlacement};
+pub use native_commands::native_command_ids;
 pub use vell_mode::{FaceRegistrationError, FaceRegistrationErrorReason};
 
 #[cfg(test)]

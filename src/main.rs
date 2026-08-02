@@ -1,4 +1,4 @@
-use vell_app::App;
+use vell_app::{App, native_command_ids};
 use vell_plugin_v8::load_user_configuration;
 use vell_protocol::content_query::ThemeName;
 use vell_tui::TuiFrontend;
@@ -28,7 +28,10 @@ async fn main() -> io::Result<()> {
 
     let (width, height) = term_size().unwrap_or((80, 24));
     let frontend = TuiFrontend::new(Output::new(io::BufWriter::new(io::stdout())));
-    let configuration = load_user_configuration().map_err(io::Error::other)?;
+    let mut configuration = load_user_configuration().map_err(io::Error::other)?;
+    let commands = configuration
+        .prepare_commands(&native_command_ids())
+        .map_err(io::Error::other)?;
     let theme = theme.map(ThemeName::new).or(configuration.theme);
     let mut app = App::with_modes_visuals_and_backgrounds(
         path.as_deref(),
@@ -40,6 +43,9 @@ async fn main() -> io::Result<()> {
         theme,
         configuration.face_overrides,
     )?;
+    for command in commands {
+        app.register_command(command);
+    }
     let _guard = TerminalGuard::enter()?;
     app.run().await?;
     Ok(())

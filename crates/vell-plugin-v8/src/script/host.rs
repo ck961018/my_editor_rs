@@ -12,6 +12,8 @@ pub struct ScriptHost {
     pub(super) definitions: Rc<RefCell<Vec<ScriptModeDefinition>>>,
     pub(super) diagnostics: Rc<RefCell<ScriptDiagnostics>>,
     pub(super) configuration: Rc<RefCell<ScriptConfigurationDraft>>,
+    pub(super) commands: Rc<RefCell<ScriptCommands>>,
+    pub(super) command_host: Rc<ActiveCommandHost>,
     plugin_root: Rc<RefCell<Option<String>>>,
     primitives: Rc<RefCell<PrimitiveRuntime>>,
     pub(super) worker_decorations: Rc<RefCell<WorkerDecorationBuffer>>,
@@ -46,12 +48,16 @@ impl ScriptHost {
         let definitions = Rc::new(RefCell::new(Vec::new()));
         let diagnostics = Rc::new(RefCell::new(ScriptDiagnostics::default()));
         let configuration = Rc::new(RefCell::new(ScriptConfigurationDraft::default()));
+        let commands = Rc::new(RefCell::new(ScriptCommands::default()));
+        let command_host = Rc::new(ActiveCommandHost::default());
         let plugin_root = Rc::new(RefCell::new(None));
         let primitives = PrimitiveRuntime::new();
         isolate.set_slot(modules.clone());
         isolate.set_slot(definitions.clone());
         isolate.set_slot(diagnostics.clone());
         isolate.set_slot(configuration.clone());
+        isolate.set_slot(commands.clone());
+        isolate.set_slot(command_host.clone());
         isolate.set_slot(plugin_root.clone());
         isolate.set_slot(primitives.clone());
         // Worker quota: per-plugin 8, global 32, depth 4.
@@ -86,6 +92,8 @@ impl ScriptHost {
             definitions,
             diagnostics,
             configuration,
+            commands,
+            command_host,
             plugin_root,
             primitives,
             worker_decorations,

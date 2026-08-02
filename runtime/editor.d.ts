@@ -405,6 +405,28 @@ interface CommandPrimitives {
 	invoke(command: `${string}.${string}`, arguments?: ScriptData): void;
 }
 
+type EditorCommand = (...arguments: any[]) => unknown;
+
+interface EditorCommands {
+	register<Command extends EditorCommand>(callback: Command): void;
+	register<Command extends EditorCommand>(id: string, callback: Command): void;
+	shortcut(name: string, callback: (tail?: string) => unknown): void;
+	newBuffer(): number;
+	switchBuffer(contentId: number): void;
+	save(): void;
+	undo(): void;
+	redo(): void;
+	quit(): void;
+	forceQuit(): void;
+	closePane(): void;
+	splitHorizontal(): void;
+	splitVertical(): void;
+	focusLeft(): void;
+	focusDown(): void;
+	focusUp(): void;
+	focusRight(): void;
+}
+
 type FaceRemapScope = "session" | "content" | "view";
 type EditorFaceExpression = string | EditorFacePatch;
 
@@ -625,6 +647,7 @@ interface ModeDefinition<ContentState, ViewState> {
 }
 
 declare const editor: {
+	readonly commands: EditorCommands;
 	readonly theme: {
 		use(name: string): void;
 	};

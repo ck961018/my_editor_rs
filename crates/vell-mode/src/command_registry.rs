@@ -160,6 +160,10 @@ pub trait CommandHost {
     fn invoke_command(&mut self, invocation: CommandInvocation) -> CommandResult;
 
     fn request(&mut self, request: CommandRequest) -> CommandResult;
+
+    /// Installs a definition immediately. Definition state is intentionally
+    /// outside the host mutation journal used by an execution frame.
+    fn register_command(&mut self, entry: CommandEntry);
 }
 
 pub trait CommandAdapter {
@@ -458,6 +462,10 @@ mod tests {
             Err(CommandError::Failed(
                 "test host does not support requests".to_owned(),
             ))
+        }
+
+        fn register_command(&mut self, entry: CommandEntry) {
+            self.registry.borrow_mut().register(entry);
         }
     }
 }

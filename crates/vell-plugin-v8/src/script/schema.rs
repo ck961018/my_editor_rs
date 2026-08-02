@@ -35,6 +35,11 @@ pub(super) fn install_editor_api(scope: &mut v8::PinScope<'_, '_>) {
         write_decorations.into(),
     );
     set_object(scope, global, "editor", editor);
+    let commands = scope
+        .get_slot::<Rc<RefCell<ScriptCommands>>>()
+        .cloned()
+        .expect("command registry slot");
+    commands.borrow().install_api(scope);
 }
 
 fn write_decorations(
