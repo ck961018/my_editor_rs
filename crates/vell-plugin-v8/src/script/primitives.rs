@@ -244,33 +244,7 @@ impl PrimitiveRuntime {
     }
 }
 
-pub(super) fn install_v1(
-    scope: &mut v8::PinScope<'_, '_>,
-    context: v8::Local<v8::Object>,
-    invocation_id: u64,
-) {
-    for namespace in ["cursor", "text", "history", "viewport", "mode", "app"] {
-        let object = v8::Object::new(scope);
-        for &(primitive, primitive_namespace, name) in PRIMITIVES {
-            if primitive_namespace == namespace {
-                let encoded = encode(invocation_id, primitive as u8);
-                let data = v8::Number::new(scope, encoded as f64);
-                let function = v8::Function::builder(call_primitive)
-                    .data(data.into())
-                    .build(scope)
-                    .expect("primitive function");
-                let name = v8::String::new(scope, name).expect("primitive name");
-                object.set(scope, name.into(), function.into());
-            }
-        }
-        set_object(scope, context, namespace, object);
-    }
-
-    set_flow_function(scope, context, "handled", invocation_id, false);
-    set_flow_function(scope, context, "forward", invocation_id, true);
-}
-
-pub(super) fn install_v2(
+pub(super) fn install_primitives(
     scope: &mut v8::PinScope<'_, '_>,
     context: v8::Local<v8::Object>,
     invocation_id: u64,
@@ -322,23 +296,6 @@ pub(super) fn install_v2(
     v8::Global::new(scope, sentinel)
 }
 
-fn set_flow_function(
-    scope: &mut v8::PinScope<'_, '_>,
-    context: v8::Local<v8::Object>,
-    name: &str,
-    invocation_id: u64,
-    forward: bool,
-) {
-    let encoded = invocation_id * 2 + u64::from(forward);
-    let data = v8::Number::new(scope, encoded as f64);
-    let function = v8::Function::builder(action_flow)
-        .data(data.into())
-        .build(scope)
-        .expect("flow function");
-    let name = v8::String::new(scope, name).expect("flow name");
-    context.set(scope, name.into(), function.into());
-}
-
 fn encode(invocation_id: u64, primitive: u8) -> u64 {
     invocation_id << OPCODE_BITS | u64::from(primitive)
 }
@@ -362,22 +319,6 @@ fn active_runtime(
         ));
     }
     Ok(runtime)
-}
-
-fn action_flow(
-    scope: &mut v8::PinScope,
-    arguments: v8::FunctionCallbackArguments,
-    mut return_value: v8::ReturnValue,
-) {
-    let Some(encoded) = callback_data(scope, &arguments) else {
-        return;
-    };
-    let invocation_id = encoded / 2;
-    if let Err(error) = active_runtime(scope, invocation_id) {
-        throw_script_error(scope, &error.to_string());
-        return;
-    }
-    return_value.set(v8::Boolean::new(scope, encoded % 2 == 1).into());
 }
 
 fn action_pass(

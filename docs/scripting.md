@@ -38,13 +38,12 @@ let loaded = vell_plugin_v8::load_typescript_modes(
     "file:///test.ts",
     source,
 )?;
-assert!(loaded.diagnostics.is_empty());
 let modes = loaded.modes;
 let backgrounds = loaded.backgrounds;
 ```
 
-结果只暴露通用 `Mode`、`ModeBackground`、`CommandEntry` 和结构化诊断；
-V8 类型不会跨越 crate 边界。`PLUGIN_API_VERSION` 标识当前 schema 版本。
+结果只暴露通用 `Mode`、`ModeBackground` 和 `CommandEntry`；
+V8 类型不会跨越 crate 边界。
 根二进制通过 `load_user_configuration()` 原子取得 Mode、后台运行时、Theme
 和 Face override，再用 `prepare_commands()` 安装原生命令视图并取回命令，
 最后构建 App。内建配置的测试或 headless 入口可使用
@@ -415,29 +414,6 @@ Node API、共享内存或 worker-to-worker 通道。
 Worker 模块加载或语法错误通过异步 `error` 事件报告。URL/options 校验和配额
 错误可由构造器同步抛出。未捕获异常、超时或 heap exhaustion 会终止对应
 Worker 并产生 `ErrorEvent`，不会终止主 isolate。
-
-## 迁移 v1 Mode
-
-迁移窗口内，用户配置仍可使用 v1 `content/view/actions/keys` schema。
-即使定义了多个 v1 Mode，一个已配置的 host 也只会产生一次弃用 warning。
-parser 会把它们适配到与 v2 相同的已注册 Mode 和 execution frame。
-
-普通 Buffer Mode 的迁移是机械性的：
-
-- 将 `content.create` 移到 `on.buffer.state`；
-- 将 `view.create` 移到 `on.buffer.viewState`；
-- 将 `actions` 重命名为 `on.buffer.commands`，并把 `keys` 移到旁边；
-- 将 `contentState` 重命名为 `state`，将 `text` 原语改为 `edit`；
-- 用 `pass()` 替换 `forward()`，并删除 `handled()` 返回值。
-
-内建 Vim 和 Tree-sitter 插件使用 v2，因此不会经过兼容 parser。
-[已检查的迁移示例](../runtime/examples/v1-migration.ts) 同时由 TypeScript
-编译器和 Rust host 测试执行。
-
-v1 在 0.1.x 中已弃用，在 0.2.x 中仍可使用并产生一次结构化 warning，
-在 0.3.0 中将被删除。删除 v1 前，已检查的迁移示例和所有内建插件必须继续
-使用 v2。公开的 `V1_REMOVAL_VERSION` 常量和 contract test 会确保 warning、
-声明与发布策略保持一致。
 
 ## 模块与信任边界
 

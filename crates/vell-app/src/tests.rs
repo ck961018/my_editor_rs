@@ -1490,12 +1490,16 @@ async fn script_timeout_keeps_native_edit_save_and_quit_available() {
         r#"
 editor.modes.define({
   name: "timeout-recovery",
-  content: { create: () => ({ calls: 0 }) },
-  actions: {
-    hang(context) {
-      context.contentState.calls++;
-      context.text.insert("discarded");
-      while (true) {}
+  on: {
+    buffer: {
+      state: () => ({ calls: 0 }),
+      commands: {
+        hang(ctx) {
+          ctx.state.calls++;
+          ctx.edit.insert("discarded");
+          while (true) {}
+        },
+      },
     },
   },
 });
@@ -4483,11 +4487,11 @@ async fn mode_can_handle_input_then_continue_to_the_next_mode() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn v2_script_pass_continues_through_modes_in_attachment_order() {
+async fn script_pass_continues_through_modes_in_attachment_order() {
     let mut app = make_script_app(
         r#"
 editor.modes.define({
-  name: "first-v2",
+  name: "first",
   on: {
     buffer: {
       commands: {
@@ -4501,7 +4505,7 @@ editor.modes.define({
   },
 });
 editor.modes.define({
-  name: "second-v2",
+  name: "second",
   on: {
     buffer: {
       commands: {
@@ -4524,7 +4528,7 @@ editor.modes.define({
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn v2_nested_command_flow_does_not_override_the_caller_flow() {
+async fn nested_command_flow_does_not_override_the_caller_flow() {
     let mut stopped = make_script_app(
         r#"
 editor.modes.define({
@@ -4605,34 +4609,41 @@ editor.modes.define({
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn v2_nested_command_isolates_flow_from_the_entire_invocation_subtree() {
+async fn nested_command_isolates_flow_from_the_entire_invocation_subtree() {
     let mut app = make_script_app(
         r#"
 editor.modes.define({
-  name: "outer-v2",
+  name: "outer",
   on: {
     buffer: {
-      commands: { run(ctx) { ctx.commands.invoke("legacy.delegate"); } },
+      commands: { run(ctx) { ctx.commands.invoke("delegator.delegate"); } },
       keys: { "q": "run" },
     },
   },
 });
 editor.modes.define({
-  name: "legacy",
-  content: { create: () => null },
-  view: { create: () => null },
-  actions: {
-    delegate(ctx) {
-      ctx.mode.invoke("passer", "pass");
-      return ctx.handled();
+  name: "delegator",
+  on: {
+    buffer: {
+      commands: {
+        delegate(ctx) {
+          ctx.commands.invoke("passer.pass");
+        },
+      },
     },
   },
 });
 editor.modes.define({
   name: "passer",
-  content: { create: () => null },
-  view: { create: () => null },
-  actions: { pass(ctx) { return ctx.forward(); } },
+  on: {
+    buffer: {
+      commands: {
+        pass(ctx) {
+          return ctx.pass();
+        },
+      },
+    },
+  },
 });
 editor.modes.define({
   name: "fallback",
@@ -4654,11 +4665,11 @@ editor.modes.define({
 }
 
 #[test]
-fn v2_script_adapters_attach_only_to_matching_standard_content() {
+fn script_adapters_attach_only_to_matching_standard_content() {
     let app = make_script_app(
         r#"
 editor.modes.define({
-  name: "status-v2",
+  name: "status",
   on: {
     statusBar: {
       state: () => ({ ready: true }),
@@ -4684,7 +4695,7 @@ editor.modes.define({
     assert!(app.session.view_modes().mode_names(editor_view).is_empty());
     assert_eq!(
         app.session.view_modes().mode_names(status_view),
-        vec![ModeName::new("status-v2")]
+        vec![ModeName::new("status")]
     );
 }
 

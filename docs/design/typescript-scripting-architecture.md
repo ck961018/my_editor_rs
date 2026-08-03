@@ -86,7 +86,7 @@ App 不识别具体 ScriptHost 类型。
 contract test 保证与 `NATIVE_COMMAND_IDS` 一致。CI 对声明、内建插件和迁移
 示例运行严格类型检查。
 
-`PLUGIN_API_VERSION` 当前为 2。v2 使用 ContentKind adapter：
+adapter schema 使用 ContentKind：
 
 ```ts
 editor.modes.define({
@@ -114,10 +114,6 @@ Buffer 与 StatusBar adapter 获得不同的静态 context。Buffer context 暴�
 context 还暴露
 目标 View 与 Content ID，并可通过 `viewPolicy.statusBar` 定制左、中、右分段
 及 Face。StatusBar 不暴露 cursor、text edit 或 Buffer 文本能力。
-
-v1 `content/view/actions/keys` schema 只作为兼容 parser 存在。每个 host 最多
-产生一条结构化弃用诊断；`V1_REMOVAL_VERSION` 为 `0.3.0`。兼容层不会改变
-Rust Mode contract。
 
 ## 5. ScriptMode 与状态
 
@@ -160,7 +156,7 @@ callback 结束后调用会被拒绝。
 V8 callback 不重入 app executor。`ctx.commands.invoke("mode.command")` 只把
 typed Mode invocation 暂存到结果；app 在 scope 退出后深度优先执行。
 
-v2 command 正常返回 `void` 表示 Stop；只有 `return ctx.pass()` 继续到
+command 正常返回 `void` 表示 Stop；只有 `return ctx.pass()` 继续到
 下一 Mode。普通返回值不承载 mutation。
 
 ## 7. Native primitives
@@ -397,7 +393,7 @@ vell-plugin-v8::script
 ├── mode_adapter     ScriptMode、状态与 presentation 接线
 ├── module           本地 ES module graph 与 TypeScript 转译
 ├── bridge           Rust、JSON 与 V8 值转换
-├── schema           v1/v2 definition 解析
+├── schema           definition 解析
 ├── primitives       callback-scoped native function
 ├── commands         editor.commands、scoped host、adapter 与 Promise
 ├── global_script    持久 global script environment

@@ -290,7 +290,6 @@ pub(super) fn content_context_object<'scope>(
     scope: &mut v8::PinScope<'scope, '_>,
     context: &ModeContentContext<'_>,
     include_text: bool,
-    include_legacy_document: bool,
 ) -> Result<v8::Local<'scope, v8::Object>, ScriptError> {
     let argument = v8::Object::new(scope);
     set_number(scope, argument, "contentId", context.content_id().0 as f64);
@@ -300,14 +299,6 @@ pub(super) fn content_context_object<'scope>(
     if let Some(buffer) = context.buffer() {
         if include_text && let Some(snapshot) = buffer.text_snapshot() {
             set_string(scope, argument, "text", &snapshot.to_owned_string());
-        }
-        if include_legacy_document {
-            set_legacy_document_context(
-                scope,
-                argument,
-                buffer.resource_name(),
-                buffer.dirty_state(),
-            );
         }
         set_resource_facts(
             scope,
@@ -321,22 +312,6 @@ pub(super) fn content_context_object<'scope>(
         set_save_state(scope, argument, buffer.save_state());
     }
     Ok(argument)
-}
-
-fn set_legacy_document_context(
-    scope: &mut v8::PinScope,
-    argument: v8::Local<v8::Object>,
-    resource_name: Option<String>,
-    dirty_state: Option<DirtyState>,
-) {
-    let document = v8::Object::new(scope);
-    if let Some(name) = resource_name {
-        set_string(scope, document, "fileName", &name);
-    }
-    let key = v8::String::new(scope, "modified").unwrap();
-    let modified = v8::Boolean::new(scope, dirty_state == Some(DirtyState::Modified));
-    document.set(scope, key.into(), modified.into());
-    set_object(scope, argument, "document", document);
 }
 
 pub(super) fn set_resource_facts(

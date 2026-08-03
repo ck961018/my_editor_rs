@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
-use crate::api::{LoadedEditorConfiguration, LoadedScriptModes, ScriptDiagnostic};
+use crate::api::{LoadedEditorConfiguration, LoadedScriptModes};
 use vell_core::content::ContentKind;
 use vell_mode::command::ModeValue;
 use vell_mode::mode_name::{ModeActionName, ModeName};
@@ -41,8 +41,8 @@ mod worker_quota;
 
 use bridge::{
     content_change_to_v8, content_context_object, json_to_mode_value, json_to_v8, optional_string,
-    parse_position, property, required_object, required_string, required_usize, set_number,
-    set_object, set_resource_facts, set_save_state, set_string, set_value, throw_dom_exception,
+    parse_position, property, required_object, required_string, set_number, set_object,
+    set_resource_facts, set_save_state, set_string, set_value, throw_dom_exception,
     throw_script_error, throw_type_error, v8_to_json, view_policy_from_json,
 };
 use commands::{ActiveCommandHost, ScriptCommands};
@@ -65,7 +65,7 @@ pub use type_environment::TYPESCRIPT_COMPILER_VERSION;
 use type_environment::TypeEnvironment;
 
 static V8_INIT: Once = Once::new();
-const V2_INPUT_ACTION: &str = "$input";
+const INPUT_ACTION: &str = "$input";
 const SCRIPT_CALLBACK_TIMEOUT: Duration = Duration::from_secs(2);
 const SCRIPT_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_SCRIPT_SOURCE_BYTES: usize = 4 * 1024 * 1024;
@@ -138,31 +138,10 @@ struct ScriptActionDefinition {
     callback: v8::Global<v8::Function>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ScriptApiVersion {
-    V1,
-    V2,
-}
-
-#[derive(Clone, Default)]
-struct ScriptDiagnostics {
-    messages: Vec<ScriptDiagnostic>,
-    v1_deprecation_reported: bool,
-}
-
 #[derive(Clone, Default)]
 struct ScriptConfigurationDraft {
     theme: Option<ThemeName>,
     face_overrides: Vec<FaceOverride>,
-}
-
-impl ScriptApiVersion {
-    fn content_state_name(self) -> &'static str {
-        match self {
-            Self::V1 => "contentState",
-            Self::V2 => "state",
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -185,7 +164,6 @@ struct ScriptAdapterDefinitions {
 #[derive(Clone)]
 struct ScriptModeDefinition {
     name: ModeName,
-    version: ScriptApiVersion,
     face_definitions: Vec<FaceDefinition>,
     before: Option<ModeName>,
     adapters: ScriptAdapterDefinitions,
@@ -459,9 +437,6 @@ fn load_optional_user_config(
             path.display()
         );
     }
-    for diagnostic in host.borrow_mut().take_diagnostics() {
-        eprintln!("warning: {}", diagnostic.message);
-    }
     result
 }
 
@@ -499,7 +474,6 @@ pub fn load_typescript_modes(
 ) -> Result<LoadedScriptModes, ScriptError> {
     let mut host = ScriptHost::new();
     host.execute_typescript(specifier, source)?;
-    let diagnostics = host.take_diagnostics();
     let host = Rc::new(RefCell::new(host));
     let modes = ScriptHost::script_modes(&host)
         .into_iter()
@@ -512,7 +486,6 @@ pub fn load_typescript_modes(
         modes,
         backgrounds,
         commands,
-        diagnostics,
         host,
     })
 }
@@ -628,40 +601,6 @@ fn mode_value_to_json(value: &ModeValue) -> serde_json::Value {
 fn parse_action_result(
     scope: &mut v8::PinScope,
     value: v8::Local<v8::Value>,
-    operations: Vec<vell_mode::operation::OperationRequest>,
-) -> Result<ModeResult, ScriptError> {
-    if value.is_null_or_undefined() {
-        return Ok(ModeResult::operations(operations));
-    }
-    if value.is_boolean() {
-        return Ok(if value.boolean_value(scope) {
-            ModeResult::continue_with(operations)
-        } else {
-            ModeResult::operations(operations)
-        });
-    }
-    let object = v8::Local::<v8::Object>::try_from(value)
-        .map_err(|_| ScriptError::new("script action must return a flow value or object"))?;
-    let continue_input = property(scope, object, "continue")
-        .filter(|value| !value.is_null_or_undefined())
-        .map(|value| {
-            value
-                .is_boolean()
-                .then(|| value.boolean_value(scope))
-                .ok_or_else(|| ScriptError::new("action continue must be a boolean"))
-        })
-        .transpose()?
-        .unwrap_or(false);
-    Ok(if continue_input {
-        ModeResult::continue_with(operations)
-    } else {
-        ModeResult::operations(operations)
-    })
-}
-
-fn parse_v2_action_result(
-    scope: &mut v8::PinScope,
-    value: v8::Local<v8::Value>,
     pass: &v8::Global<v8::Object>,
     operations: Vec<vell_mode::operation::OperationRequest>,
 ) -> Result<ModeResult, ScriptError> {
@@ -673,79 +612,12 @@ fn parse_v2_action_result(
         return Ok(ModeResult::continue_with(operations));
     }
     Err(ScriptError::new(
-        "v2 command must return undefined or ctx.pass()",
+        "command must return undefined or ctx.pass()",
     ))
 }
 
-fn parse_decorations_property(
-    scope: &mut v8::PinScope,
-    value: v8::Local<v8::Value>,
-    name: &str,
-    snapshot: Option<vell_core::text_snapshot::TextSnapshot>,
-    current_revision: Option<vell_protocol::revision::Revision>,
-) -> Result<Option<Vec<NamedTextDecoration>>, ScriptError> {
-    if value.is_null_or_undefined() || value.is_boolean() {
-        return Ok(None);
-    }
-    let result = v8::Local::<v8::Object>::try_from(value)
-        .map_err(|_| ScriptError::new("script action must return an object or undefined"))?;
-    let Some(value) = property(scope, result, name) else {
-        return Ok(None);
-    };
-    if value.is_null_or_undefined() {
-        return Ok(None);
-    }
-    let snapshot =
-        snapshot.ok_or_else(|| ScriptError::new("decorations require editable text content"))?;
-    let snapshot_value = v8::Local::<v8::Object>::try_from(value)
-        .map_err(|_| ScriptError::new(format!("{name} must be an object")))?;
-    let revision = required_usize(scope, snapshot_value, "revision")? as u64;
-    let current_revision =
-        current_revision.ok_or_else(|| ScriptError::new("decorations require a text revision"))?;
-    if revision != current_revision.0 {
-        return Err(ScriptError::new(format!(
-            "stale decoration revision: expected {}, got {revision}",
-            current_revision.0
-        )));
-    }
-    let spans = property(scope, snapshot_value, "spans")
-        .and_then(|value| v8::Local::<v8::Array>::try_from(value).ok())
-        .ok_or_else(|| ScriptError::new(format!("{name}.spans must be an array")))?;
-    ensure_count(
-        "decorations",
-        spans.length() as usize,
-        MAX_SCRIPT_DECORATIONS,
-    )?;
-    let mut decorations = Vec::with_capacity(spans.length() as usize);
-    for index in 0..spans.length() {
-        let span = spans
-            .get_index(scope, index)
-            .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
-            .ok_or_else(|| ScriptError::new(format!("decoration {index} must be an object")))?;
-        let range = required_object(scope, span, "range")?;
-        let start_value = required_object(scope, range, "start")?;
-        let start = parse_position(scope, start_value, &snapshot)?;
-        let end_value = required_object(scope, range, "end")?;
-        let end = parse_position(scope, end_value, &snapshot)?;
-        if start >= end {
-            return Err(ScriptError::new(format!(
-                "decoration {index} must have a non-empty ordered range"
-            )));
-        }
-        decorations.push(NamedTextDecoration {
-            start: vell_protocol::selection::TextOffset { char_index: start },
-            end: vell_protocol::selection::TextOffset { char_index: end },
-            face: FaceName::new(required_string(scope, span, "face")?),
-        });
-    }
-    decorations.sort_by_key(|decoration| (decoration.start.char_index, decoration.end.char_index));
-    Ok(Some(decorations))
-}
-
 /// Parse a raw spans array (as passed to `editor.writeDecorations`)
-/// into sorted `NamedTextDecoration`s. Unlike `parse_decorations_property`,
-/// this takes the spans array directly — revision validation is the
-/// caller's responsibility.
+/// into sorted `NamedTextDecoration`s.
 pub(super) fn parse_decoration_spans(
     scope: &mut v8::PinScope,
     spans: v8::Local<v8::Array>,
@@ -1048,7 +920,7 @@ throw new Error("invalid user config");
             .execute_typescript(
                 "file:///loop.ts",
                 r#"
-editor.modes.define({ name: "partial", actions: {} });
+editor.modes.define({ name: "partial", on: { buffer: {} } });
 while (true) {}
 "#,
             )
@@ -1279,17 +1151,20 @@ editor.modes.define({{
 editor.modes.define({
   name: "pairs",
   before: "base-mode",
-  content: { create: () => ({ calls: 0 }) },
-  view: { create: (content: { calls: number }) => ({ initial: content.calls }) },
-  actions: {
-    quote(context) {
-      context.contentState.calls++;
-      context.viewState.initial++;
-      context.text.insert("\"\"");
-      return context.handled();
+  on: {
+    buffer: {
+      state: () => ({ calls: 0 }),
+      viewState: (content: { calls: number }) => ({ initial: content.calls }),
+      commands: {
+        quote(ctx) {
+          ctx.state.calls++;
+          ctx.viewState.initial++;
+          ctx.edit.insert("\"\"");
+        },
+      },
+      keys: { "\"": "quote" },
     },
   },
-  keys: { "\"": "quote" },
 });
 "#,
         )
@@ -1364,7 +1239,7 @@ editor.modes.define({
     }
 
     #[test]
-    fn registers_v2_buffer_commands_with_void_and_qualified_invocation() {
+    fn registers_buffer_commands_with_void_and_qualified_invocation() {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.ts");
         fs::write(
@@ -1523,7 +1398,7 @@ editor.modes.define({
     }
 
     #[test]
-    fn v2_editing_strategies_receive_snapshot_and_validate_before_publish() {
+    fn editing_strategies_receive_snapshot_and_validate_before_publish() {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.ts");
         fs::write(
@@ -1670,14 +1545,14 @@ editor.modes.define({
     }
 
     #[test]
-    fn v2_pass_is_distinct_from_legacy_booleans_and_errors_do_not_publish_state() {
+    fn pass_continues_flow_and_errors_do_not_publish_state() {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.ts");
         fs::write(
             &config,
             r#"
 editor.modes.define({
-  name: "flow-v2",
+  name: "flow",
   on: {
     buffer: {
       state: () => ({ calls: 0 }),
@@ -1766,7 +1641,7 @@ editor.modes.define({
     }
 
     #[test]
-    fn v2_status_bar_adapter_has_no_buffer_primitives() {
+    fn status_bar_adapter_has_no_buffer_primitives() {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().join("config.ts");
         fs::write(
@@ -1845,7 +1720,7 @@ editor.modes.define({
     }
 
     #[test]
-    fn v2_schema_rejects_unknown_adapters_legacy_fields_and_invalid_keys() {
+    fn schema_rejects_unknown_adapters_and_invalid_keys() {
         for (name, body, expected) in [
             (
                 "unknown-adapter",
@@ -1855,7 +1730,7 @@ editor.modes.define({
             (
                 "mixed-schema",
                 r#"on: { buffer: { commands: {} } }, actions: {}"#,
-                "cannot combine 'on' with legacy 'actions'",
+                "cannot combine 'on' with 'actions'",
             ),
             (
                 "unknown-command",
@@ -1912,7 +1787,7 @@ editor.modes.define({
             let source = format!("editor.modes.define({{ name: {name:?}, {body} }});");
 
             let error = host
-                .execute_typescript("file:///v2-invalid.ts", &source)
+                .execute_typescript("file:///invalid.ts", &source)
                 .unwrap_err()
                 .to_string();
 
@@ -1929,24 +1804,25 @@ editor.modes.define({
             r#"
 editor.modes.define({
   name: "faulty-state",
-  content: { create: () => ({ calls: 0 }) },
-  view: {
-    create: () => ({
-      calls: 0,
-      viewPolicy: { cursorStyle: "block" },
-    }),
-  },
-  actions: {
-    throwing(context) {
-      context.contentState.calls++;
-      context.viewState.calls++;
-      throw new Error("action exploded");
-    },
-    invalid(context) {
-      context.contentState.calls++;
-      context.viewState.calls++;
-      context.viewState.viewPolicy.cursorStyle = 42;
-      return context.handled();
+  on: {
+    buffer: {
+      state: () => ({ calls: 0 }),
+      viewState: () => ({
+        calls: 0,
+        viewPolicy: { cursorStyle: "block" },
+      }),
+      commands: {
+        throwing(ctx) {
+          ctx.state.calls++;
+          ctx.viewState.calls++;
+          throw new Error("action exploded");
+        },
+        invalid(ctx) {
+          ctx.state.calls++;
+          ctx.viewState.calls++;
+          ctx.viewState.viewPolicy.cursorStyle = 42;
+        },
+      },
     },
   },
 });
@@ -2034,25 +1910,26 @@ editor.modes.define({
             r#"
 editor.modes.define({
   name: "timed-out-action",
-  content: { create: () => ({ calls: 0 }) },
-  view: {
-    create: () => ({
-      calls: 0,
-      viewPolicy: { cursorStyle: "bar" },
-    }),
-  },
-  actions: {
-    hang(context) {
-      context.contentState.calls++;
-      context.viewState.calls++;
-      context.viewState.viewPolicy.cursorStyle = "block";
-      context.text.insert("discarded");
-      while (true) {}
-    },
-    recover(context) {
-      context.contentState.calls++;
-      context.viewState.calls++;
-      return context.handled();
+  on: {
+    buffer: {
+      state: () => ({ calls: 0 }),
+      viewState: () => ({
+        calls: 0,
+        viewPolicy: { cursorStyle: "bar" },
+      }),
+      commands: {
+        hang(ctx) {
+          ctx.state.calls++;
+          ctx.viewState.calls++;
+          ctx.viewState.viewPolicy.cursorStyle = "block";
+          ctx.edit.insert("discarded");
+          while (true) {}
+        },
+        recover(ctx) {
+          ctx.state.calls++;
+          ctx.viewState.calls++;
+        },
+      },
     },
   },
 });
@@ -2138,39 +2015,25 @@ editor.modes.define({
                 r#"
 editor.modes.define({{
   name: "output-limits",
-  content: {{ create: () => ({{ calls: 0 }}) }},
-  actions: {{
-    operations(context) {{
-      context.contentState.calls++;
-      for (let index = 0; index < {}; index++) context.text.insert("x");
-      return context.handled();
-    }},
-    operationCount(context) {{
-      context.contentState.calls++;
-      context.cursor.moveWordForward({});
-      return context.handled();
-    }},
-    decorations(context) {{
-      context.contentState.calls++;
-      return {{
-        contentDecorations: {{
-          revision: context.revision,
-          spans: Array.from({{ length: {} }}, () => ({{
-            range: {{
-              start: {{ line: 0, character: 0 }},
-              end: {{ line: 0, character: 0 }},
-            }},
-            face: "limit",
-          }})),
+  on: {{
+    buffer: {{
+      state: () => ({{ calls: 0 }}),
+      commands: {{
+        operations(ctx) {{
+          ctx.state.calls++;
+          for (let index = 0; index < {}; index++) ctx.edit.insert("x");
         }},
-      }};
+        operationCount(ctx) {{
+          ctx.state.calls++;
+          ctx.cursor.moveWordForward({});
+        }},
+      }},
     }},
   }},
 }});
 "#,
                 MAX_SCRIPT_OPERATIONS + 1,
                 MAX_SCRIPT_OPERATIONS + 1,
-                MAX_SCRIPT_DECORATIONS + 1
             ),
         )
         .unwrap();
@@ -2192,7 +2055,6 @@ editor.modes.define({{
         for (action, expected) in [
             ("operations", "limit exceeded for operations"),
             ("operationCount", "limit exceeded for operation count"),
-            ("decorations", "limit exceeded for decorations"),
         ] {
             let error = mode
                 .execute_view_with_arguments(
@@ -2227,11 +2089,6 @@ editor.modes.define({{
                 .collect::<Vec<_>>(),
             vec!["vim", "syntax-highlighting"]
         );
-        assert!(
-            definitions
-                .iter()
-                .all(|definition| definition.version == ScriptApiVersion::V2)
-        );
         let vim = definitions
             .iter()
             .find(|definition| definition.name.as_str() == "vim")
@@ -2242,7 +2099,7 @@ editor.modes.define({{
             vim_adapter
                 .actions
                 .iter()
-                .all(|action| action.name.as_str() != V2_INPUT_ACTION)
+                .all(|action| action.name.as_str() != INPUT_ACTION)
         );
         let highlighting = definitions
             .iter()
@@ -2250,11 +2107,10 @@ editor.modes.define({{
             .unwrap();
         let adapter = highlighting.adapters.buffer.as_ref().unwrap();
         assert!(adapter.create_content.is_some());
-        assert!(host.diagnostics.borrow().messages.is_empty());
     }
 
     #[test]
-    fn v2_raw_input_is_not_a_registered_mode_command() {
+    fn raw_input_is_not_a_registered_mode_command() {
         let host = load_default_plugins().unwrap();
         let vim = ScriptHost::script_modes(&host)
             .into_iter()
@@ -2264,43 +2120,10 @@ editor.modes.define({{
         registry.register(vim).unwrap();
 
         let error = registry
-            .resolve_command_checked(&ModeName::new("vim"), &ModeActionName::new(V2_INPUT_ACTION))
+            .resolve_command_checked(&ModeName::new("vim"), &ModeActionName::new(INPUT_ACTION))
             .unwrap_err();
 
         assert!(matches!(error, ModeError::UnknownAction { .. }));
-    }
-
-    #[test]
-    fn v1_schema_reports_one_deprecation_diagnostic_per_host() {
-        let mut host = ScriptHost::new();
-        host.execute_typescript(
-            "file:///legacy.ts",
-            r#"
-editor.modes.define({ name: "legacy-one", actions: {} });
-editor.modes.define({ name: "legacy-two", actions: {} });
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            host.take_diagnostics(),
-            vec![ScriptDiagnostic::v1_deprecation()]
-        );
-        assert!(host.take_diagnostics().is_empty());
-
-        host.execute_typescript(
-            "file:///legacy-again.ts",
-            r#"editor.modes.define({ name: "legacy-three", actions: {} });"#,
-        )
-        .unwrap();
-        assert!(host.take_diagnostics().is_empty());
-
-        host.execute_typescript(
-            "file:///modern.ts",
-            r#"editor.modes.define({ name: "modern", on: { buffer: {} } });"#,
-        )
-        .unwrap();
-        assert!(host.take_diagnostics().is_empty());
     }
 
     #[test]
@@ -2343,66 +2166,11 @@ worker.postMessage(null);
     }
 
     #[test]
-    fn v1_content_context_keeps_the_legacy_document_view() {
-        let loaded = load_typescript_modes(
-            "file:///legacy-document.ts",
-            r#"
-editor.modes.define({
-  name: "legacy-document",
-  content: {
-    create(context) {
-      return {
-        hasDocument: context.document !== undefined,
-        modified: context.document?.modified ?? true,
-      };
-    },
-  },
-  actions: {},
-});
-"#,
-        )
-        .unwrap();
-        let mode = loaded.modes.into_iter().next().unwrap();
-        let content = ContentId(0);
-        let mut contents = ContentStore::default();
-        contents
-            .insert(content, Content::Buffer(Buffer::new()))
-            .unwrap();
-
-        let state = mode
-            .create_content_state(&ModeContentContext::new(content, &contents))
-            .unwrap();
-
-        assert_eq!(
-            script_state(state.as_ref(), mode.name()).unwrap().data,
-            serde_json::json!({ "hasDocument": true, "modified": false })
-        );
-    }
-
-    #[test]
-    fn public_contract_executes_the_checked_v1_migration_example() {
-        let source = include_str!("../../../../runtime/examples/v1-migration.ts");
-        let loaded = load_typescript_modes("file:///v1-migration.ts", source).unwrap();
-        let names = loaded
-            .modes
-            .iter()
-            .map(|mode| mode.name().as_str())
-            .collect::<Vec<_>>();
-
-        assert_eq!(names, vec!["migration-v1", "migration-v2"]);
-        assert_eq!(loaded.diagnostics, vec![ScriptDiagnostic::v1_deprecation()]);
-        assert_eq!(crate::PLUGIN_API_VERSION, 2);
-        assert_eq!(crate::V1_REMOVAL_VERSION, "0.3.0");
-        assert!(
-            loaded.diagnostics[0]
-                .message
-                .contains(crate::V1_REMOVAL_VERSION)
-        );
-        assert!(crate::TYPESCRIPT_DECLARATIONS.contains("interface ModeDefinitionV2"));
-        assert!(crate::TYPESCRIPT_DECLARATIONS.contains(&format!(
-            "@deprecated Removed in Vell {}",
-            crate::V1_REMOVAL_VERSION
-        )));
+    fn public_contract_keeps_the_declaration_surface_current() {
+        assert!(crate::TYPESCRIPT_DECLARATIONS.contains("interface ModeDefinition"));
+        assert!(!crate::TYPESCRIPT_DECLARATIONS.contains("ModeDefinitionV2"));
+        assert!(!crate::TYPESCRIPT_DECLARATIONS.contains("@deprecated Removed in Vell"));
+        assert!(!crate::TYPESCRIPT_DECLARATIONS.contains("interface ModeDefinition<ContentState"));
     }
 
     #[test]
@@ -2439,16 +2207,19 @@ editor.modes.define({
             r#"
 editor.modes.define({
   name: "unicode-edit",
-  actions: {
-    replace(context) {
-      context.text.applyEdits([{
+  on: {
+    buffer: {
+      commands: {
+        replace(ctx) {
+          ctx.edit.applyEdits([{
             range: {
               start: { line: 0, character: 1 },
               end: { line: 0, character: 3 },
             },
             text: "中",
-      }]);
-      return context.handled();
+          }]);
+        },
+      },
     },
   },
 });
@@ -2509,14 +2280,16 @@ editor.modes.define({
 let retained;
 editor.modes.define({
   name: "retained-context",
-  actions: {
-    retain(context) {
-      retained = context;
-      return context.handled();
-    },
-    reuse(context) {
-      retained.cursor.moveLeft();
-      return context.handled();
+  on: {
+    buffer: {
+      commands: {
+        retain(ctx) {
+          retained = ctx;
+        },
+        reuse(ctx) {
+          retained.cursor.moveLeft();
+        },
+      },
     },
   },
 });

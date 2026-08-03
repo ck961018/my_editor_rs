@@ -138,13 +138,13 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
 - `runtime/editor.d.ts` 与 Rust schema 必须同步；改变任一侧时补充契约测试。
 - 内建插件通过 `plugin.json` 的 `order` 排序，不能在 Rust bootstrap 中按名
   选择 Vim 或 Tree-sitter。
-- v2 adapter 使用 `on.buffer` 或 `on.statusBar`；只暴露该 ContentKind 合法
+- adapter 使用 `on.buffer` 或 `on.statusBar`；只暴露该 ContentKind 合法
   的 context 能力。
 - 脚本 state 必须是 JSON-compatible owned data。V8 handle、函数、Promise、
   循环引用和宿主引用不得进入 Mode state。
 - 后台任务使用全局标准 `new Worker`；Worker 不属于 Mode。结果通过主
   isolate 的 revision-safe sink（如 `editor.writeDecorations`）发布。
-- 不要绕开脚本预算、原子发布、故障隔离、路径限制或 v1 兼容诊断。
+- 不要绕开脚本预算、原子发布、故障隔离或路径限制。
 
 ## 测试重点
 
@@ -154,7 +154,7 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
 - `vell-app`：使用测试模块内 `ScriptedFrontend` 覆盖输入、operation、
   rollback、history、保存、Scene 和 presentation 集成。
 - `vell-plugin-v8`：schema、TypeScript 转译、模块加载、预算、worker、
-  UTF-16 转换、v1 迁移与故障恢复。
+  UTF-16 转换与故障恢复。
 - `vell-tui`：终端事件、Taffy 几何、SceneRenderer、viewport 和文本 cell。
 - `runtime/`：运行 `pnpm typecheck` 检查声明、内建插件和迁移示例。
 

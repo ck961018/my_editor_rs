@@ -298,7 +298,7 @@ pub enum FaceDefinitionProvider {
 标准 namespace：
 
 | Namespace | 用途 | 定义者 |
-|---|---|---|
+| --- | --- | --- |
 | `ui.*` | 编辑器 UI | Host |
 | `syntax.*` | 语法与 markup | Host |
 | `diagnostic.*` | 错误、警告等 | Host |
@@ -542,7 +542,7 @@ FaceOperation::AddRelative
 FaceOperation::RemoveRelative
 ```
 
-TypeScript v2 callback 通过 `ctx.faces.setBase`、`ctx.faces.addRelative` 和
+TypeScript callback 通过 `ctx.faces.setBase`、`ctx.faces.addRelative` 和
 `ctx.faces.removeRelative` 产生这些 operation。scope 是 `session`、`content`
 或 `view`；`addRelative` 同步返回安全整数 token，但实际 remap 仍只在 frame
 成功后发布。
@@ -834,7 +834,7 @@ InvalidFaceRemapOwner
 当前代码中的概念迁移如下：
 
 | 当前概念 | 目标概念 |
-|---|---|
+| --- | --- |
 | `FaceName` | 保留，移动到稳定 style contract |
 | `Face` | 拆为 `FacePatch` 与 `PaintFace` |
 | `Face::overlay` | 改为三态 patch composition |

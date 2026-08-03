@@ -6,16 +6,17 @@
     "target": "ES2022",
     "module": "ES2022",
     "allowImportingTsExtensions": true,
-    "lib": ["ES2022"]
+    "lib": [
+      "ES2022"
+    ]
   },
   "files": [
     "../plugins/tree-sitter/plugin.ts",
     "../plugins/vim/editing.ts",
     "../plugins/vim/plugin.ts",
-    "../examples/v1-migration.ts",
     "../examples/worker-platform.ts",
     "../examples/worker-platform-worker.ts",
     "command-system.ts",
-    "v2-mode.ts"
+    "../type-tests/mode.ts"
   ]
 }

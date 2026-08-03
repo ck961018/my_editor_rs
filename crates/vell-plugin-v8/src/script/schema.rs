@@ -221,20 +221,6 @@ fn define_mode(
                 );
                 return;
             }
-            if definition.version == ScriptApiVersion::V1 {
-                let Some(diagnostics) = scope.get_slot::<Rc<RefCell<ScriptDiagnostics>>>().cloned()
-                else {
-                    throw_script_error(scope, "script diagnostic registry is unavailable");
-                    return;
-                };
-                let mut diagnostics = diagnostics.borrow_mut();
-                if !diagnostics.v1_deprecation_reported {
-                    diagnostics.v1_deprecation_reported = true;
-                    diagnostics
-                        .messages
-                        .push(ScriptDiagnostic::v1_deprecation());
-                }
-            }
             definitions.borrow_mut().push(definition);
             return_value.set_undefined();
         }
@@ -251,58 +237,33 @@ fn parse_mode_definition(
     let name = required_string(scope, object, "name")?;
     let before = optional_string(scope, object, "before")?.map(ModeName::new);
     let face_definitions = parse_face_definitions(scope, object)?;
-    let (version, adapters) = match property(scope, object, "on") {
-        Some(value) if !value.is_null_or_undefined() => (
-            ScriptApiVersion::V2,
-            parse_v2_adapters(scope, object, value)?,
-        ),
-        _ => (
-            ScriptApiVersion::V1,
-            ScriptAdapterDefinitions {
-                buffer: Some(parse_v1_adapter(scope, object)?),
-                status_bar: None,
-            },
-        ),
+    let adapters = match property(scope, object, "on") {
+        Some(value) if !value.is_null_or_undefined() => parse_adapters(scope, object, value)?,
+        _ => {
+            return Err(ScriptError::new(
+                "mode definition must provide on.buffer or on.statusBar",
+            ));
+        }
     };
     Ok(ScriptModeDefinition {
         name: ModeName::new(name),
-        version,
         face_definitions,
         before,
         adapters,
     })
 }
 
-fn parse_v1_adapter(
-    scope: &mut v8::PinScope,
-    object: v8::Local<v8::Object>,
-) -> Result<ScriptAdapterDefinition, ScriptError> {
-    let actions = parse_actions(scope, object, "actions", true)?;
-    let bindings = parse_bindings(scope, object, &actions)?;
-    let input_action = parse_input_action(scope, object, &actions)?;
-    let create_content = optional_factory(scope, object, "content")?;
-    let content_changed = optional_section_callback(scope, object, "content", "changed")?;
-    let create_view = optional_factory(scope, object, "view")?;
-    Ok(ScriptAdapterDefinition {
-        actions,
-        bindings,
-        input_action,
-        input: None,
-        create_content,
-        content_changed,
-        create_view,
-    })
-}
-
-fn parse_v2_adapters(
+fn parse_adapters(
     scope: &mut v8::PinScope,
     definition: v8::Local<v8::Object>,
     value: v8::Local<v8::Value>,
 ) -> Result<ScriptAdapterDefinitions, ScriptError> {
-    for legacy in ["content", "view", "actions", "keys", "input", "worker"] {
-        if property(scope, definition, legacy).is_some_and(|value| !value.is_null_or_undefined()) {
+    for unsupported in ["content", "view", "actions", "keys", "input", "worker"] {
+        if property(scope, definition, unsupported)
+            .is_some_and(|value| !value.is_null_or_undefined())
+        {
             return Err(ScriptError::new(format!(
-                "v2 mode definition cannot combine 'on' with legacy '{legacy}'"
+                "mode definition cannot combine 'on' with '{unsupported}'"
             )));
         }
     }
@@ -323,25 +284,22 @@ fn parse_v2_adapters(
         let adapter = v8::Local::<v8::Object>::try_from(value)
             .map_err(|_| ScriptError::new(format!("mode adapter '{name}' must be an object")))?;
         match name.as_str() {
-            "buffer" => {
-                adapters.buffer = Some(parse_v2_adapter(scope, adapter, ContentKind::Buffer)?)
-            }
+            "buffer" => adapters.buffer = Some(parse_adapter(scope, adapter, ContentKind::Buffer)?),
             "statusBar" => {
-                adapters.status_bar =
-                    Some(parse_v2_adapter(scope, adapter, ContentKind::StatusBar)?)
+                adapters.status_bar = Some(parse_adapter(scope, adapter, ContentKind::StatusBar)?)
             }
             _ => return Err(ScriptError::new(format!("unknown mode adapter '{name}'"))),
         }
     }
     if adapters.buffer.is_none() && adapters.status_bar.is_none() {
         return Err(ScriptError::new(
-            "v2 mode definition must provide on.buffer or on.statusBar",
+            "mode definition must provide on.buffer or on.statusBar",
         ));
     }
     Ok(adapters)
 }
 
-fn parse_v2_adapter(
+fn parse_adapter(
     scope: &mut v8::PinScope,
     object: v8::Local<v8::Object>,
     kind: ContentKind,
@@ -349,10 +307,10 @@ fn parse_v2_adapter(
     let actions = parse_actions(scope, object, "commands", false)?;
     if actions
         .iter()
-        .any(|action| action.name.as_str() == V2_INPUT_ACTION)
+        .any(|action| action.name.as_str() == INPUT_ACTION)
     {
         return Err(ScriptError::new(format!(
-            "mode command '{V2_INPUT_ACTION}' is reserved for raw input"
+            "mode command '{INPUT_ACTION}' is reserved for raw input"
         )));
     }
     let input = optional_function(scope, object, "input")?;
@@ -466,21 +424,6 @@ fn parse_bindings(
     Ok(bindings)
 }
 
-fn parse_input_action(
-    scope: &mut v8::PinScope,
-    object: v8::Local<v8::Object>,
-    actions: &[ScriptActionDefinition],
-) -> Result<Option<usize>, ScriptError> {
-    optional_string(scope, object, "input")?
-        .map(|name| {
-            actions
-                .iter()
-                .position(|action| action.name.as_str() == name)
-                .ok_or_else(|| ScriptError::new(format!("unknown input command '{name}'")))
-        })
-        .transpose()
-}
-
 fn optional_function(
     scope: &mut v8::PinScope,
     object: v8::Local<v8::Object>,
@@ -494,55 +437,6 @@ fn optional_function(
     }
     let callback = v8::Local::<v8::Function>::try_from(value)
         .map_err(|_| ScriptError::new(format!("mode {name} must be a function")))?;
-    Ok(Some(v8::Global::new(scope, callback)))
-}
-
-fn optional_factory(
-    scope: &mut v8::PinScope,
-    definition: v8::Local<v8::Object>,
-    name: &str,
-) -> Result<Option<v8::Global<v8::Function>>, ScriptError> {
-    let Some(value) = property(scope, definition, name) else {
-        return Ok(None);
-    };
-    if value.is_null_or_undefined() {
-        return Ok(None);
-    }
-    let section = v8::Local::<v8::Object>::try_from(value)
-        .map_err(|_| ScriptError::new(format!("mode {name} must be an object")))?;
-    let Some(create) = property(scope, section, "create") else {
-        return Ok(None);
-    };
-    let create = v8::Local::<v8::Function>::try_from(create)
-        .map_err(|_| ScriptError::new(format!("mode {name}.create must be a function")))?;
-    Ok(Some(v8::Global::new(scope, create)))
-}
-
-fn optional_section_callback(
-    scope: &mut v8::PinScope,
-    definition: v8::Local<v8::Object>,
-    section_name: &str,
-    callback_name: &str,
-) -> Result<Option<v8::Global<v8::Function>>, ScriptError> {
-    let Some(value) = property(scope, definition, section_name) else {
-        return Ok(None);
-    };
-    if value.is_null_or_undefined() {
-        return Ok(None);
-    }
-    let section = v8::Local::<v8::Object>::try_from(value)
-        .map_err(|_| ScriptError::new(format!("mode {section_name} must be an object")))?;
-    let Some(callback) = property(scope, section, callback_name) else {
-        return Ok(None);
-    };
-    if callback.is_null_or_undefined() {
-        return Ok(None);
-    }
-    let callback = v8::Local::<v8::Function>::try_from(callback).map_err(|_| {
-        ScriptError::new(format!(
-            "mode {section_name}.{callback_name} must be a function"
-        ))
-    })?;
     Ok(Some(v8::Global::new(scope, callback)))
 }
 

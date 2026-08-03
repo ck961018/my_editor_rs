@@ -46,7 +46,7 @@ theme 插件、纯后台索引器同理。
 - 不实现 graceful shutdown 协议(编辑器场景不需要)。
 - 不实现 URL scheme 路由(无 `https://`、`blob:`),只支持最终仍在
   插件根目录内的相对路径、绝对路径和 `file:` URL。
-- 不保留 v1/v2 兼容层(无包袱,字段推倒重来)。
+- 不保留兼容层(无包袱,字段推倒重来)。
 
 ## 总体架构
 
@@ -289,7 +289,7 @@ tree-sitter 的 `input`
 - `editor.worker.onMessage` 全局单点。
 - `BackgroundAnalysisDefinition` / `BackgroundAnalysisInputContext` /
   `BackgroundAnalysisApplyContext` 整套类型。
-- v1 `content.job` / `content.applyJob` / `worker`。
+- `content.job` / `content.applyJob` / `worker`(已删除的 analysis 表面)。
 - `WorkerResponse` 泛型参数(类型从 worker 的 postMessage 推导)。
 
 ### 保留搬进平台的逻辑
@@ -331,7 +331,7 @@ tree-sitter 的 `input`
 ### TypeScript 侧(`runtime/`)
 
 `pnpm typecheck` 必过。新增类型契约测试(参考现有
-`runtime/type-tests/v2-mode.ts`):
+`runtime/type-tests/mode.ts`):
 
 - `new Worker(new URL(..., import.meta.url))` 类型正确。
 - `Worker` 构造器 options 类型(`type: "module"`, `signal`)。

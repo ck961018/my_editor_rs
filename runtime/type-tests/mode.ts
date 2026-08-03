@@ -47,10 +47,7 @@ editor.modes.define({
 						{ kind: "literal", value: "needle" },
 						{ caseSensitive: false, direction: "forward", wrap: true },
 					);
-					ctx.search.replaceNext(
-						{ kind: "regex", value: "(needle)" },
-						"$1",
-					);
+					ctx.search.replaceNext({ kind: "regex", value: "(needle)" }, "$1");
 					ctx.search.replaceAll(
 						{ kind: "literal", value: "needle" },
 						"replacement",
@@ -130,12 +127,12 @@ editor.modes.define<{
 	},
 });
 
-// @ts-expect-error V2 commands return only void or ctx.pass().
 editor.modes.define({
 	name: "invalid-return",
 	on: {
 		buffer: {
 			commands: {
+				// @ts-expect-error Commands return only void or ctx.pass().
 				invalidReturn() {
 					return true;
 				},

@@ -155,11 +155,6 @@ interface TextDecorationSpan {
 	face: string;
 }
 
-interface TextDecorationSnapshot {
-	revision: number;
-	spans: TextDecorationSpan[];
-}
-
 interface EditorFace {
 	foreground?: number | `#${string}`;
 	background?: number | `#${string}`;
@@ -239,14 +234,6 @@ interface StatusBarPresentation {
 	center?: StatusBarSegment[];
 	right?: StatusBarSegment[];
 }
-
-interface ModeActionResult {
-	continue?: boolean;
-	contentDecorations?: TextDecorationSnapshot;
-	viewDecorations?: TextDecorationSnapshot;
-}
-
-declare const editorPass: unique symbol;
 
 interface Pass {
 	readonly [editorPass]: true;
@@ -347,24 +334,15 @@ type EditorClipboardEdit =
 	| "selected-lines";
 
 interface ClipboardPrimitives {
-	copy(
-		kind: EditorClipboardKind,
-		destination?: EditorClipboardEndpoint,
-	): void;
+	copy(kind: EditorClipboardKind, destination?: EditorClipboardEndpoint): void;
 	copyForEdit(
 		kind: EditorClipboardKind,
 		edit: EditorClipboardEdit,
 		count?: number,
 		destination?: EditorClipboardEndpoint,
 	): void;
-	cut(
-		kind: EditorClipboardKind,
-		destination?: EditorClipboardEndpoint,
-	): void;
-	paste(
-		source?: EditorClipboardEndpoint,
-		placement?: "before" | "after",
-	): void;
+	cut(kind: EditorClipboardKind, destination?: EditorClipboardEndpoint): void;
+	paste(source?: EditorClipboardEndpoint, placement?: "before" | "after"): void;
 }
 
 interface HistoryPrimitives {
@@ -412,7 +390,10 @@ type EditorCommand = (...arguments: any[]) => unknown;
 
 interface EditorCommands {
 	register<Command extends EditorCommand>(callback: Command): Command;
-	register<Command extends EditorCommand>(id: string, callback: Command): Command;
+	register<Command extends EditorCommand>(
+		id: string,
+		callback: Command,
+	): Command;
 	shortcut(name: string, callback: (tail?: string) => unknown): void;
 }
 
@@ -557,7 +538,7 @@ interface StatusBarAdapterDefinition<ContentState, ViewState> {
 	): void | Pass;
 }
 
-interface ModeDefinitionV2<
+interface ModeDefinition<
 	BufferState = ScriptData,
 	BufferViewState = ScriptData,
 	StatusBarState = ScriptData,
@@ -576,63 +557,6 @@ interface ContentChange {
 	readonly startCharacter: number;
 	readonly endCharacter: number;
 	readonly text: string;
-}
-
-/** @deprecated Removed in Vell 0.3.0 with the v1 Mode API. */
-interface DocumentContext {
-	readonly fileName?: string;
-	readonly modified: boolean;
-}
-
-interface ContentContext<ContentState, Arguments = ScriptData> {
-	readonly contentId: number;
-	readonly revision?: number;
-	readonly text?: string;
-	/** @deprecated Use resourceName and dirty on v2 Buffer contexts. */
-	readonly document?: DocumentContext;
-	readonly change?: ContentChange[];
-	readonly arguments?: Arguments;
-	contentState: ContentState;
-}
-
-interface ModeContext<ContentState, ViewState, Arguments = ScriptData>
-	extends ContentContext<ContentState, Arguments> {
-	readonly contentId: number;
-	readonly viewId: number;
-	readonly arguments: Arguments;
-	readonly cursor: CursorPrimitives;
-	readonly text: TextPrimitives;
-	readonly history: HistoryPrimitives;
-	readonly viewport: ViewportPrimitives;
-	readonly mode: ModePrimitives;
-	readonly app: AppPrimitives;
-	viewState: ViewState;
-	handled(): false;
-	forward(): true;
-}
-
-/** @deprecated Removed in Vell 0.3.0. Use ModeDefinitionV2. */
-interface ModeDefinition<ContentState, ViewState> {
-	name: string;
-	before?: string;
-	faces?: Record<string, EditorModeFace>;
-	content?: {
-		create(
-			context: Omit<ContentContext<never>, "contentState" | "arguments">,
-		): ContentState;
-		changed?(context: ContentContext<ContentState>): void;
-	};
-	view?: {
-		create(contentState: ContentState): ViewState & { viewPolicy?: ViewPolicy };
-	};
-	input?: string;
-	actions: Record<
-		string,
-		(
-			context: ModeContext<ContentState, ViewState>,
-		) => ModeActionResult | boolean | void
-	>;
-	keys?: Record<string, string>;
 }
 
 declare const editor: {
@@ -654,16 +578,12 @@ declare const editor: {
 			StatusBarState = ScriptData,
 			StatusBarViewState = ScriptData,
 		>(
-			definition: ModeDefinitionV2<
+			definition: ModeDefinition<
 				BufferState,
 				BufferViewState,
 				StatusBarState,
 				StatusBarViewState
 			>,
-		): void;
-		/** @deprecated Removed in Vell 0.3.0. Use the `on` adapter schema. */
-		define<ContentState, ViewState>(
-			definition: ModeDefinition<ContentState, ViewState>,
 		): void;
 	};
 	readonly resources: {

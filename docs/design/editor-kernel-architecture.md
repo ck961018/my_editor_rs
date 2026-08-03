@@ -195,9 +195,9 @@ selections；StatusBar view variant 提供目标 ID 和目标 Content 的细粒�
 当前 variant 创建不同 state，不支持的能力不会出现在对应的强类型
 context 上。Context 不借出 `&mut Content`、`&mut View` 或宿主对象。
 第一版保留一个 Rust `Mode` trait 和 closed adapter table，不复制两套
-生命周期 callback。TypeScript v2 通过 `on.buffer` 和
-`on.statusBar` 把同一边界映射为内容专属的用户 context；v1
-schema 暂时由脚本 parser 兼容，不建立另一套 Mode runtime。
+生命周期 callback。TypeScript 通过 `on.buffer` 和
+`on.statusBar` 把同一边界映射为内容专属的用户 context，不建立另一套
+Mode runtime。
 
 Mode action 返回有序 operation。action scope 决定允许的目标：content
 scope 不能产生 View operation，view scope 可以作用于绑定 View 与 Content。

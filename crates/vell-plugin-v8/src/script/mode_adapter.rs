@@ -14,9 +14,8 @@ use vell_protocol::key_event::KeyEvent;
 
 use super::bridge::view_policy_from_json;
 use super::{
-    ScriptActionDefinition, ScriptAdapterDefinition, ScriptApiVersion, ScriptError, ScriptHost,
-    ScriptModeDefinition, ScriptModeState, key_event_arguments, map_decoration_set, script_state,
-    script_state_mut,
+    ScriptActionDefinition, ScriptAdapterDefinition, ScriptError, ScriptHost, ScriptModeDefinition,
+    ScriptModeState, key_event_arguments, map_decoration_set, script_state, script_state_mut,
 };
 
 pub(super) struct ScriptBackground {
@@ -38,7 +37,6 @@ impl ModeBackground for ScriptBackground {
 pub(super) struct ScriptMode {
     host: Rc<RefCell<ScriptHost>>,
     name: ModeName,
-    version: ScriptApiVersion,
     actions: Vec<ModeActionName>,
     adapters: ScriptAdapters,
     face_definitions: Vec<FaceDefinition>,
@@ -126,7 +124,6 @@ impl ScriptMode {
         Self {
             host,
             name: definition.name,
-            version: definition.version,
             actions,
             adapters,
             face_definitions: definition.face_definitions,
@@ -178,14 +175,13 @@ impl Mode for ScriptMode {
         let adapter = self.adapter(context.content_kind());
         let mut host = self.host.borrow_mut();
         let result = (|| {
-            let data =
-                host.create_content_state(adapter.create_content.as_ref(), self.version, context)?;
+            let data = host.create_content_state(adapter.create_content.as_ref(), context)?;
             let mut state = ScriptModeState::new(data);
             if let Some(callback) = adapter.content_changed.as_ref() {
                 let change = vell_core::content::ContentChange::Text(
                     vell_core::transaction::TextChangeSet::empty(),
                 );
-                host.content_changed(callback, self.version, context, &mut state, &change)?;
+                host.content_changed(callback, context, &mut state, &change)?;
             }
             Ok(Box::new(state) as Box<dyn ModeState>)
         })();
@@ -266,7 +262,6 @@ impl Mode for ScriptMode {
             .borrow_mut()
             .execute_action(
                 callback,
-                self.version,
                 context,
                 &key_event_arguments(key),
                 content_state,
@@ -303,7 +298,7 @@ impl Mode for ScriptMode {
         if let Some(callback) = adapter.content_changed.as_ref() {
             self.host
                 .borrow_mut()
-                .content_changed(callback, self.version, context, state, change)
+                .content_changed(callback, context, state, change)
                 .map_err(|error| ModeError::CallbackFailed {
                     mode: self.name.clone(),
                     message: error.to_string(),
@@ -339,7 +334,7 @@ impl Mode for ScriptMode {
         _version: u64,
         _result: ModeJobResult,
     ) -> Result<bool, ModeError> {
-        // ponytail: analysis/v1 job apply removed in Task 7.
+        // ponytail: analysis job apply removed with the worker platform.
         Ok(false)
     }
 
@@ -417,7 +412,6 @@ impl Mode for ScriptMode {
             .borrow_mut()
             .execute_action(
                 &callback.callback,
-                self.version,
                 context,
                 arguments,
                 content_state,

@@ -60,7 +60,7 @@ TypeScript(`runtime/editor.d.ts`)、V8 isolate + std::thread。
   Mode schema 里删 `analysis` 字段与 `BackgroundAnalysisDefinition`
   等类型。
 - `mod.rs` — **小改**。删除 `ScriptAnalysisDefinition`、
-  v1 `ContentJob`/`applyJob` 相关。配额表常量定义在此。
+  `ContentJob`/`applyJob` 相关。配额表常量定义在此。
 - `mode_adapter.rs` — **小改**。删除 analysis 调度逻辑(input 轮询/
   generation/apply)。Mode 不再管 worker。
 
@@ -73,7 +73,7 @@ TypeScript(`runtime/editor.d.ts`)、V8 isolate + std::thread。
 
 - `runtime/editor.d.ts` — **大改**。删除 `analysis` 字段、
   `BackgroundAnalysis*` 类型、`editor.worker.onMessage`、
-  v1 `ContentJob`/`applyJob`/`worker`、`WorkerResponse` 泛型。
+  `ContentJob`/`applyJob`/`worker`、`WorkerResponse` 泛型。
   新增全局 `Worker` 构造器类型(标准 DOM lib 已含,只需声明
   `declare const Worker: ...` 或引用 lib)、`editor.writeDecorations`
   sink 签名。
@@ -81,7 +81,7 @@ TypeScript(`runtime/editor.d.ts`)、V8 isolate + std::thread。
   改为显式 `new Worker` + `AbortController` + `editor.writeDecorations`。
 - `runtime/plugins/tree-sitter/worker.ts` — **迁移**。
   `editor.worker.onMessage` → `self.onmessage`。可选拆多文件。
-- `runtime/type-tests/v2-mode.ts` — **补**。Worker 构造/sink 类型契约。
+- `runtime/type-tests/mode.ts` — **补**。Worker 构造/sink 类型契约。
 - `runtime/examples/worker-platform.ts` — **新增**。迁移参考示例。
 
 ---
@@ -800,14 +800,14 @@ git commit -m "feat(vell-plugin-v8): frame-safe editor.writeDecorations sink"
 
 ---
 
-## Task 7: 删除 analysis / editor.worker.onMessage / v1 job 表面
+## Task 7: 删除 analysis / editor.worker.onMessage / job 表面
 
 **Files:**
 
 - Modify: `crates/vell-plugin-v8/src/script/schema.rs`
   (删 `parse_analyses`、`parse_worker`、analysis 字段校验)
 - Modify: `crates/vell-plugin-v8/src/script/mod.rs`
-  (删 `ScriptAnalysisDefinition`、v1 `ContentJob`/`applyJob`/
+  (删 `ScriptAnalysisDefinition`、`ContentJob`/`applyJob`/
   `ScriptWorker` 字段)
 - Modify: `crates/vell-plugin-v8/src/script/mode_adapter.rs`
   (删 analysis 调度:input 轮询/generation/apply)
@@ -844,7 +844,7 @@ Expected: FAIL(analysis 仍被接受)
 3. `schema.rs` 删 `parse_analyses`/`parse_worker` 函数。
 4. `schema.rs` legacy 校验(line 293/307)删 `worker`/`job`/
    `applyJob`/`analysis` 字段。
-5. `mod.rs` 删 `ScriptAnalysisDefinition` struct、v1
+5. `mod.rs` 删 `ScriptAnalysisDefinition` struct、
    `ContentJob`/`applyJob`/`worker` 字段与解析。
 6. `mode_adapter.rs` 删 analysis 调度(input 轮询/generation/
    apply 调用块)。
@@ -860,7 +860,7 @@ Expected: analysis 相关测试改/删后全过
 cargo fmt --all -- --check
 cargo clippy -p vell-plugin-v8 --all-targets -- -D warnings
 git add -A
-git commit -m "refactor(vell-plugin-v8): remove Mode-bound analysis and v1 job surface"
+git commit -m "refactor(vell-plugin-v8): remove Mode-bound analysis and job surface"
 ```
 
 ---
@@ -870,8 +870,8 @@ git commit -m "refactor(vell-plugin-v8): remove Mode-bound analysis and v1 job s
 **Files:**
 
 - Modify: `runtime/editor.d.ts`(删 analysis/WorkerResponse/
-  editor.worker/v1 job 类型;加 Worker 引用 + writeDecorations)
-- Test: `runtime/type-tests/v2-mode.ts`、`pnpm typecheck`
+  editor.worker/job 类型;加 Worker 引用 + writeDecorations)
+- Test: `runtime/type-tests/mode.ts`、`pnpm typecheck`
 
 **Interfaces:**
 
@@ -887,7 +887,7 @@ git commit -m "refactor(vell-plugin-v8): remove Mode-bound analysis and v1 job s
   `TextSnapshotAnalysisMessage`(line ~327-388)
 - Mode 定义里 `analysis?: Record<...>` 字段(line ~327)
 - `editor.worker.onMessage`(line ~549-555)
-- v1 `ModeDefinition.worker`/`content.job`/`content.applyJob`/
+- `ModeDefinition.worker`/`content.job`/`content.applyJob`/
   `WorkerResponse` 泛型(line ~485-503)
 
 新增(文件顶部或 editor 对象内):
@@ -910,7 +910,7 @@ declare const editor: {
 - [ ] **Step 2: Add type contract tests**
 
 ```ts
-// runtime/type-tests/v2-mode.ts 追加
+// runtime/type-tests/mode.ts 追加
 import type { Worker, MessageEvent, AbortController } from "./helpers";
 import type { TextDecorationSpan } from "../editor";
 
@@ -941,7 +941,7 @@ Expected: PASS
 - [ ] **Step 4: Commit**
 
 ```bash
-git add runtime/editor.d.ts runtime/type-tests/v2-mode.ts
+git add runtime/editor.d.ts runtime/type-tests/mode.ts
 git commit -m "refactor(runtime): update editor.d.ts for Web Worker platform primitive"
 ```
 
