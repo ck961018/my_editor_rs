@@ -11,7 +11,6 @@ use crate::theme::FaceEnvironment;
 use vell_core::buffer::Buffer;
 use vell_core::content::{Content, ContentKind};
 use vell_core::content_store::ContentStore;
-use vell_core::status_bar::StatusBar;
 use vell_protocol::content_query::{FaceOverride, ThemeName};
 use vell_protocol::ids::{ContentId, ViewId};
 
@@ -83,9 +82,7 @@ pub(super) fn bootstrap_editor_with_theme(
 ) -> io::Result<EditorBootstrap> {
     let mut ids = BootstrapIds::default();
     let editor_content = ids.content();
-    let status_content = ids.content();
     let editor_view = ids.view();
-    let status_view = ids.view();
     let configured = configured_modes
         .iter()
         .map(|mode| ConfiguredMode {
@@ -100,9 +97,6 @@ pub(super) fn bootstrap_editor_with_theme(
     contents
         .insert(editor_content, Content::Buffer(buffer))
         .expect("bootstrap allocates unique content ids");
-    contents
-        .insert(status_content, Content::StatusBar(StatusBar::new()))
-        .expect("bootstrap allocates unique content ids");
     let mut modes = ModeRegistry::new();
     let mut registered = Vec::with_capacity(configured_modes.len());
     for mode in configured_modes {
@@ -116,19 +110,7 @@ pub(super) fn bootstrap_editor_with_theme(
         ContentKind::Buffer,
     )
     .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    let status_order = stable_mode_order(
-        &configured,
-        &indexes,
-        &registered,
-        &modes,
-        ContentKind::StatusBar,
-    )
-    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let editor_modes = editor_order
-        .into_iter()
-        .map(|index| configured[index].name.clone())
-        .collect();
-    let status_modes = status_order
         .into_iter()
         .map(|index| configured[index].name.clone())
         .collect();
@@ -147,11 +129,6 @@ pub(super) fn bootstrap_editor_with_theme(
                 view: editor_view,
                 content: editor_content,
                 modes: editor_modes,
-            },
-            status: InitialView {
-                view: status_view,
-                content: status_content,
-                modes: status_modes,
             },
             next_view_id: ids.next_view,
         },
@@ -281,12 +258,10 @@ pub(super) fn create_editor_session(
     width: usize,
     height: usize,
     editor_content: ContentId,
-    status_content: ContentId,
     editor_modes: Vec<ModeName>,
 ) -> ClientSession {
     let mut ids = BootstrapIds::default();
     let editor_view = ids.view();
-    let status_view = ids.view();
     ClientSession::editor(
         contents,
         modes,
@@ -298,11 +273,6 @@ pub(super) fn create_editor_session(
                 view: editor_view,
                 content: editor_content,
                 modes: editor_modes,
-            },
-            status: InitialView {
-                view: status_view,
-                content: status_content,
-                modes: Vec::new(),
             },
             next_view_id: ids.next_view,
         },
@@ -353,13 +323,9 @@ mod tests {
     #[test]
     fn session_bootstrap_uses_explicit_content_roles() {
         let editor = ContentId(7);
-        let status = ContentId(11);
         let mut contents = ContentStore::default();
         contents
             .insert(editor, Content::Buffer(Buffer::new()))
-            .unwrap();
-        contents
-            .insert(status, Content::StatusBar(StatusBar::new()))
             .unwrap();
         let modes = ModeRegistry::new();
         let mut mode_contents = crate::mode::ModeContentStore::default();
@@ -371,12 +337,10 @@ mod tests {
             40,
             5,
             editor,
-            status,
             Vec::new(),
         );
 
         assert_eq!(session.views()[&ViewId(0)].content(), editor);
-        assert_eq!(session.views()[&ViewId(1)].content(), status);
         assert_eq!(session.next_view_id_for_test(), 2);
     }
 
@@ -388,17 +352,7 @@ mod tests {
             5,
             vec![
                 ordered_mode("base", None, crate::mode::ModeAdapters::buffer()),
-                ordered_mode(
-                    "status-first",
-                    None,
-                    crate::mode::ModeAdapters::status_bar(),
-                ),
                 ordered_mode("overlay", Some("base"), crate::mode::ModeAdapters::buffer()),
-                ordered_mode(
-                    "status-late",
-                    Some("base"),
-                    crate::mode::ModeAdapters::status_bar(),
-                ),
                 ordered_mode("tail", None, crate::mode::ModeAdapters::buffer()),
             ],
         )
@@ -407,10 +361,6 @@ mod tests {
         assert_eq!(
             bootstrap.session.view_modes().mode_names(ViewId(0)),
             ["overlay", "base", "tail"].map(ModeName::new)
-        );
-        assert_eq!(
-            bootstrap.session.view_modes().mode_names(ViewId(1)),
-            ["status-first", "status-late"].map(ModeName::new)
         );
     }
 

@@ -452,11 +452,6 @@ interface BufferContentContext {
 	};
 }
 
-interface StatusBarContentContext {
-	readonly contentId: number;
-	readonly revision?: number;
-}
-
 interface BufferCommandContext<ContentState, ViewState, Arguments = ScriptData>
 	extends BufferContentContext {
 	readonly viewId: number;
@@ -474,31 +469,6 @@ interface BufferCommandContext<ContentState, ViewState, Arguments = ScriptData>
 	readonly faces: FacePrimitives;
 	readonly app: AppPrimitives;
 	readonly buffers: BufferPrimitives;
-	state: ContentState;
-	viewState: ViewState;
-	pass(): Pass;
-}
-
-interface StatusBarCommandContext<
-	ContentState,
-	ViewState,
-	Arguments = ScriptData,
-> extends StatusBarContentContext {
-	readonly viewId: number;
-	readonly targetViewId: number;
-	readonly targetContentId: number;
-	readonly resourceName?: string;
-	readonly resourcePath?: string;
-	readonly backingState?: "untitled" | "unmaterialized" | "materialized";
-	readonly dirty?: boolean;
-	readonly saveState?: "idle" | "saved" | "failed";
-	readonly textMetrics?: {
-		readonly lineCount: number;
-		readonly characterCount: number;
-	};
-	readonly arguments: Arguments;
-	readonly commands: CommandPrimitives;
-	readonly faces: FacePrimitives;
 	state: ContentState;
 	viewState: ViewState;
 	pass(): Pass;
@@ -525,31 +495,15 @@ interface BufferAdapterDefinition<ContentState, ViewState> {
 	): void;
 }
 
-interface StatusBarAdapterDefinition<ContentState, ViewState> {
-	state?(context: StatusBarContentContext): ContentState;
-	viewState?(state: Readonly<ContentState>): ViewState;
-	commands?: Record<
-		string,
-		(context: StatusBarCommandContext<ContentState, ViewState>) => void | Pass
-	>;
-	keys?: Record<string, string>;
-	input?(
-		context: StatusBarCommandContext<ContentState, ViewState, EditorKeyEvent>,
-	): void | Pass;
-}
-
 interface ModeDefinition<
 	BufferState = ScriptData,
 	BufferViewState = ScriptData,
-	StatusBarState = ScriptData,
-	StatusBarViewState = ScriptData,
 > {
 	name: string;
 	before?: string;
 	faces?: Record<string, EditorModeFace>;
 	on: {
 		buffer?: BufferAdapterDefinition<BufferState, BufferViewState>;
-		statusBar?: StatusBarAdapterDefinition<StatusBarState, StatusBarViewState>;
 	};
 }
 
@@ -572,18 +526,8 @@ declare const editor: {
 		): void;
 	};
 	readonly modes: {
-		define<
-			BufferState = ScriptData,
-			BufferViewState = ScriptData,
-			StatusBarState = ScriptData,
-			StatusBarViewState = ScriptData,
-		>(
-			definition: ModeDefinition<
-				BufferState,
-				BufferViewState,
-				StatusBarState,
-				StatusBarViewState
-			>,
+		define<BufferState = ScriptData, BufferViewState = ScriptData>(
+			definition: ModeDefinition<BufferState, BufferViewState>,
 		): void;
 	};
 	readonly resources: {

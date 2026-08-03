@@ -5,7 +5,6 @@ use crate::core::buffer::{Buffer, BufferTransactionData};
 use crate::core::clipboard::{ClipboardKind, ClipboardPayload, PastePlacement};
 use crate::core::command::EditCommand;
 use crate::core::content_view_state::ContentViewState;
-use crate::core::status_bar::StatusBar;
 use crate::core::text_snapshot::TextSnapshot;
 use crate::core::transaction::{TextChangeSet, TextStateId, TextTransactionError};
 use crate::protocol::content_query::{
@@ -123,20 +122,17 @@ impl ContentTransaction {
 #[derive(Clone)]
 pub enum Content {
     Buffer(Buffer),
-    StatusBar(StatusBar),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ContentKind {
     Buffer,
-    StatusBar,
 }
 
 impl Content {
     pub fn empty(kind: ContentKind) -> Self {
         match kind {
             ContentKind::Buffer => Self::Buffer(Buffer::new()),
-            ContentKind::StatusBar => Self::StatusBar(StatusBar::new()),
         }
     }
 
@@ -151,21 +147,18 @@ impl Content {
     pub fn kind(&self) -> ContentKind {
         match self {
             Self::Buffer(_) => ContentKind::Buffer,
-            Self::StatusBar(_) => ContentKind::StatusBar,
         }
     }
 
     pub fn text_snapshot(&self) -> Option<TextSnapshot> {
         match self {
             Self::Buffer(buffer) => Some(TextSnapshot::new(buffer.slice())),
-            Self::StatusBar(_) => None,
         }
     }
 
     pub fn text_state_id(&self) -> Option<TextStateId> {
         match self {
             Self::Buffer(buffer) => Some(buffer.state_id()),
-            Self::StatusBar(_) => None,
         }
     }
 
@@ -207,7 +200,6 @@ impl Content {
                     char_count: buffer.slice().len_chars(),
                 })
             }
-            _ => ContentData::Unsupported,
         }
     }
 
@@ -218,7 +210,6 @@ impl Content {
     ) -> Option<ContentEditPlan> {
         match self {
             Self::Buffer(buffer) => Some(buffer.plan_edit(command, selections)),
-            Self::StatusBar(_) => None,
         }
     }
 
@@ -229,7 +220,6 @@ impl Content {
     ) -> Option<ClipboardPayload> {
         match self {
             Self::Buffer(buffer) => Some(buffer.copy_selections(selections, kind)),
-            Self::StatusBar(_) => None,
         }
     }
 
@@ -241,7 +231,6 @@ impl Content {
     ) -> Option<ClipboardPayload> {
         match self {
             Self::Buffer(buffer) => Some(buffer.copy_for_edit(selections, command, kind)),
-            Self::StatusBar(_) => None,
         }
     }
 
@@ -252,7 +241,6 @@ impl Content {
     ) -> Option<(ClipboardPayload, ContentEditPlan)> {
         match self {
             Self::Buffer(buffer) => Some(buffer.plan_cut(selections, kind)),
-            Self::StatusBar(_) => None,
         }
     }
 
@@ -264,7 +252,6 @@ impl Content {
     ) -> Option<ContentEditPlan> {
         match self {
             Self::Buffer(buffer) => Some(buffer.plan_paste(selections, payload, placement)),
-            Self::StatusBar(_) => None,
         }
     }
 
@@ -284,14 +271,12 @@ impl Content {
                     transaction,
                 }
             }
-            (Self::StatusBar(_), ContentAction::Text(_)) => ContentActionResult::NotHandled,
         }
     }
 
     pub fn create_view_state(&self) -> ContentViewState {
         match self {
             Self::Buffer(_) => ContentViewState::buffer(),
-            Self::StatusBar(_) => ContentViewState::unbound_status_bar(),
         }
     }
 
@@ -300,23 +285,12 @@ impl Content {
         state: &mut ContentViewState,
         change: &ContentChange,
     ) -> Result<bool, crate::core::content_view_state::ContentViewStateError> {
-        let state_kind = state.kind();
         match (self, state, change) {
             (
                 Self::Buffer(buffer),
                 ContentViewState::Buffer(state),
                 ContentChange::Text(change),
             ) => Ok(buffer.transform_selections(state.selections_mut(), change)),
-            (Self::StatusBar(_), ContentViewState::StatusBar(_), ContentChange::Text(_)) => {
-                Ok(false)
-            }
-            (Self::Buffer(_), ContentViewState::StatusBar(_), ContentChange::Text(_))
-            | (Self::StatusBar(_), ContentViewState::Buffer(_), ContentChange::Text(_)) => Err(
-                crate::core::content_view_state::ContentViewStateError::KindMismatch {
-                    content: self.kind(),
-                    state: state_kind,
-                },
-            ),
         }
     }
 
@@ -326,7 +300,6 @@ impl Content {
                 let mut reconciled = selections.clone();
                 !buffer.reconcile_selections(&mut reconciled)
             }
-            Self::StatusBar(_) => false,
         }
     }
 
@@ -340,7 +313,6 @@ impl Content {
                 .apply_transaction_data(data, direction)
                 .map(|change| Some(ContentChange::Text(change)))
                 .map_err(ContentTransactionError::Text),
-            (Self::StatusBar(_), _) => Ok(None),
         }
     }
 
@@ -417,7 +389,6 @@ impl Content {
                     false,
                 ))
             }
-            (Self::StatusBar(_), _) => ContentResult::NotHandled,
         }
     }
 }
@@ -458,27 +429,11 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_creates_an_explicitly_unbound_view() {
-        let content = Content::StatusBar(StatusBar::new());
-        assert_eq!(content.kind(), ContentKind::StatusBar);
-        let ContentViewState::StatusBar(state) = content.create_view_state() else {
-            panic!("status-bar content must create status-bar view state");
-        };
-        assert_eq!(state.target(), None);
-    }
-
-    #[test]
     fn contents_explicitly_report_save_support() {
         let mut buffer = Content::Buffer(Buffer::new());
         assert!(matches!(
             buffer.execute(ContentInput::Save),
             ContentResult::Handled(_)
         ));
-
-        let mut status = Content::StatusBar(StatusBar::new());
-        assert_eq!(
-            status.execute(ContentInput::Save),
-            ContentResult::NotHandled
-        );
     }
 }

@@ -16,7 +16,7 @@ use crate::operation::OperationRequest;
 use crate::presentation::{ContentPresentationLayer, ViewPresentationLayer};
 use vell_core::content::{ContentChange, ContentKind};
 use vell_core::content_store::ContentStore;
-use vell_core::content_view_state::{BufferViewState, ContentViewState, StatusBarViewState};
+use vell_core::content_view_state::{BufferViewState, ContentViewState};
 use vell_core::input::{InputDecision, InputStatus};
 use vell_core::keymap::Keymap;
 use vell_protocol::content_query::{
@@ -208,10 +208,6 @@ pub enum ModeContextError {
         content_kind: ContentKind,
         state_kind: ContentKind,
     },
-    UnboundStatusBar {
-        view: ViewId,
-        content: ContentId,
-    },
 }
 
 impl fmt::Display for ModeContextError {
@@ -230,11 +226,6 @@ impl fmt::Display for ModeContextError {
             } => write!(
                 formatter,
                 "view {} for content {} has {state_kind:?} state, expected {content_kind:?}",
-                view.0, content.0
-            ),
-            Self::UnboundStatusBar { view, content } => write!(
-                formatter,
-                "status-bar view {} for content {} has no target",
                 view.0, content.0
             ),
         }
@@ -720,17 +711,10 @@ fn face_inheritance_has_cycle(faces: &HashMap<FaceName, RegisteredFace>, start: 
 )]
 pub enum ModeContentContext<'a> {
     Buffer(BufferModeContentContext<'a>),
-    StatusBar(StatusBarModeContentContext<'a>),
 }
 
 #[allow(dead_code, reason = "native Mode adapter capability surface")]
 pub struct BufferModeContentContext<'a> {
-    content_id: ContentId,
-    contents: &'a ContentStore,
-}
-
-#[allow(dead_code, reason = "native Mode adapter capability surface")]
-pub struct StatusBarModeContentContext<'a> {
     content_id: ContentId,
     contents: &'a ContentStore,
 }
@@ -749,45 +733,30 @@ impl<'a> ModeContentContext<'a> {
                 content_id,
                 contents,
             }),
-            ContentKind::StatusBar => Self::StatusBar(StatusBarModeContentContext {
-                content_id,
-                contents,
-            }),
         }
     }
 
     pub fn content_id(&self) -> ContentId {
         match self {
             Self::Buffer(context) => context.content_id,
-            Self::StatusBar(context) => context.content_id,
         }
     }
 
     pub fn content_kind(&self) -> ContentKind {
         match self {
             Self::Buffer(_) => ContentKind::Buffer,
-            Self::StatusBar(_) => ContentKind::StatusBar,
         }
     }
 
     pub fn content_revision(&self) -> Option<Revision> {
         match self {
             Self::Buffer(context) => context.contents.revision(context.content_id),
-            Self::StatusBar(context) => context.contents.revision(context.content_id),
         }
     }
 
     pub fn buffer(&self) -> Option<&BufferModeContentContext<'a>> {
         match self {
             Self::Buffer(context) => Some(context),
-            Self::StatusBar(_) => None,
-        }
-    }
-
-    pub fn status_bar(&self) -> Option<&StatusBarModeContentContext<'a>> {
-        match self {
-            Self::Buffer(_) => None,
-            Self::StatusBar(context) => Some(context),
         }
     }
 }
@@ -879,13 +848,9 @@ impl BufferModeContentContext<'_> {
     }
 }
 
-#[allow(dead_code, reason = "native Mode adapter capability surface")]
-impl StatusBarModeContentContext<'_> {}
-
 #[allow(dead_code, reason = "reserved for generic Mode extensions")]
 pub enum ModeViewContext<'a> {
     Buffer(BufferModeViewContext<'a>),
-    StatusBar(StatusBarModeViewContext<'a>),
 }
 
 #[allow(dead_code, reason = "native Mode adapter capability surface")]
@@ -893,14 +858,6 @@ pub struct BufferModeViewContext<'a> {
     view_id: ViewId,
     content_id: ContentId,
     state: &'a BufferViewState,
-    contents: &'a ContentStore,
-}
-
-#[allow(dead_code, reason = "native Mode adapter capability surface")]
-pub struct StatusBarModeViewContext<'a> {
-    view_id: ViewId,
-    content_id: ContentId,
-    state: &'a StatusBarViewState,
     contents: &'a ContentStore,
 }
 
@@ -927,68 +884,36 @@ impl<'a> ModeViewContext<'a> {
                     contents,
                 }))
             }
-            (ContentKind::StatusBar, ContentViewState::StatusBar(state)) => {
-                if state.target().is_none() {
-                    return Err(ModeContextError::UnboundStatusBar {
-                        view: view_id,
-                        content: content_id,
-                    });
-                }
-                Ok(Self::StatusBar(StatusBarModeViewContext {
-                    view_id,
-                    content_id,
-                    state,
-                    contents,
-                }))
-            }
-            (_, state) => Err(ModeContextError::IncompatibleViewState {
-                view: view_id,
-                content: content_id,
-                content_kind,
-                state_kind: state.kind(),
-            }),
         }
     }
 
     pub fn view_id(&self) -> ViewId {
         match self {
             Self::Buffer(context) => context.view_id,
-            Self::StatusBar(context) => context.view_id,
         }
     }
 
     pub fn content_id(&self) -> ContentId {
         match self {
             Self::Buffer(context) => context.content_id,
-            Self::StatusBar(context) => context.content_id,
         }
     }
 
     pub fn content_kind(&self) -> ContentKind {
         match self {
             Self::Buffer(_) => ContentKind::Buffer,
-            Self::StatusBar(_) => ContentKind::StatusBar,
         }
     }
 
     pub fn content_revision(&self) -> Option<Revision> {
         match self {
             Self::Buffer(context) => context.contents.revision(context.content_id),
-            Self::StatusBar(context) => context.contents.revision(context.content_id),
         }
     }
 
     pub fn buffer(&self) -> Option<&BufferModeViewContext<'a>> {
         match self {
             Self::Buffer(context) => Some(context),
-            Self::StatusBar(_) => None,
-        }
-    }
-
-    pub fn status_bar(&self) -> Option<&StatusBarModeViewContext<'a>> {
-        match self {
-            Self::Buffer(_) => None,
-            Self::StatusBar(context) => Some(context),
         }
     }
 }
@@ -1081,83 +1006,6 @@ impl BufferModeViewContext<'_> {
 
     pub fn text_snapshot(&self) -> Option<vell_core::text_snapshot::TextSnapshot> {
         self.contents.text_snapshot(self.content_id)
-    }
-}
-
-#[allow(dead_code, reason = "native Mode adapter capability surface")]
-impl StatusBarModeViewContext<'_> {
-    fn target(&self) -> (ViewId, ContentId) {
-        self.state
-            .target()
-            .expect("status-bar mode context validates its target")
-    }
-
-    pub fn target_view_id(&self) -> ViewId {
-        self.target().0
-    }
-
-    pub fn target_content_id(&self) -> ContentId {
-        self.target().1
-    }
-
-    pub fn resource_name(&self) -> Option<String> {
-        match self
-            .contents
-            .query(self.target().1, ContentQuery::ResourceName)
-        {
-            ContentData::ResourceName(name) => name,
-            _ => None,
-        }
-    }
-
-    pub fn resource_path(&self) -> Option<String> {
-        match self
-            .contents
-            .query(self.target().1, ContentQuery::ResourcePath)
-        {
-            ContentData::ResourcePath(path) => path,
-            _ => None,
-        }
-    }
-
-    pub fn backing_state(&self) -> Option<BufferBackingState> {
-        match self
-            .contents
-            .query(self.target().1, ContentQuery::BackingState)
-        {
-            ContentData::BackingState(state) => Some(state),
-            _ => None,
-        }
-    }
-
-    pub fn dirty_state(&self) -> Option<DirtyState> {
-        match self
-            .contents
-            .query(self.target().1, ContentQuery::DirtyState)
-        {
-            ContentData::DirtyState(state) => Some(state),
-            _ => None,
-        }
-    }
-
-    pub fn save_state(&self) -> Option<SaveState> {
-        match self
-            .contents
-            .query(self.target().1, ContentQuery::SaveState)
-        {
-            ContentData::SaveState(state) => Some(state),
-            _ => None,
-        }
-    }
-
-    pub fn text_metrics(&self) -> Option<TextMetrics> {
-        match self
-            .contents
-            .query(self.target().1, ContentQuery::TextMetrics)
-        {
-            ContentData::TextMetrics(metrics) => Some(metrics),
-            _ => None,
-        }
     }
 }
 
@@ -1266,13 +1114,12 @@ pub enum ModeActionScope {
 #[derive(Clone, Copy)]
 pub enum ModeAdapter<'a> {
     Buffer(&'a dyn Mode),
-    StatusBar(&'a dyn Mode),
 }
 
 impl<'a> ModeAdapter<'a> {
     fn behavior(self) -> &'a dyn Mode {
         match self {
-            Self::Buffer(mode) | Self::StatusBar(mode) => mode,
+            Self::Buffer(mode) => mode,
         }
     }
 }
@@ -1280,48 +1127,21 @@ impl<'a> ModeAdapter<'a> {
 #[derive(Clone, Copy, Default)]
 pub struct ModeAdapters {
     buffer: bool,
-    status_bar: bool,
 }
 
 impl ModeAdapters {
     pub fn buffer() -> Self {
-        Self {
-            buffer: true,
-            status_bar: false,
-        }
-    }
-
-    #[allow(
-        dead_code,
-        reason = "native modes may adapt multiple closed content kinds"
-    )]
-    pub fn status_bar() -> Self {
-        Self {
-            buffer: false,
-            status_bar: true,
-        }
-    }
-
-    #[allow(
-        dead_code,
-        reason = "native modes may adapt multiple closed content kinds"
-    )]
-    pub fn buffer_and_status_bar() -> Self {
-        Self {
-            buffer: true,
-            status_bar: true,
-        }
+        Self { buffer: true }
     }
 
     pub fn contains(self, kind: ContentKind) -> bool {
         match kind {
             ContentKind::Buffer => self.buffer,
-            ContentKind::StatusBar => self.status_bar,
         }
     }
 
     fn is_empty(self) -> bool {
-        !self.buffer && !self.status_bar
+        !self.buffer
     }
 }
 
@@ -1609,7 +1429,6 @@ struct ModeRegistration {
 
 struct RegisteredModeAdapters {
     buffer: Option<Rc<dyn Mode>>,
-    status_bar: Option<Rc<dyn Mode>>,
 }
 
 pub struct ModeViewInstance {
@@ -1669,7 +1488,6 @@ impl ModeRegistry {
             return Err(ModeRegistrationError::MissingAdapter(name));
         }
         let has_buffer = declared_adapters.contains(ContentKind::Buffer);
-        let has_status_bar = declared_adapters.contains(ContentKind::StatusBar);
         let mut actions = HashMap::new();
         for (index, action_name) in action_names.iter().cloned().enumerate() {
             let action = ModeActionId(u32::try_from(index).expect("mode action id overflow"));
@@ -1685,7 +1503,6 @@ impl ModeRegistry {
         let definition: Rc<dyn Mode> = Rc::from(definition);
         let adapters = RegisteredModeAdapters {
             buffer: has_buffer.then(|| definition.clone()),
-            status_bar: has_status_bar.then(|| definition.clone()),
         };
         let registered = Rc::new(ModeRegistration {
             id,
@@ -1832,11 +1649,6 @@ impl ModeRegistration {
     fn adapter(&self, kind: ContentKind) -> Option<ModeAdapter<'_>> {
         match kind {
             ContentKind::Buffer => self.adapters.buffer.as_deref().map(ModeAdapter::Buffer),
-            ContentKind::StatusBar => self
-                .adapters
-                .status_bar
-                .as_deref()
-                .map(ModeAdapter::StatusBar),
         }
     }
 }

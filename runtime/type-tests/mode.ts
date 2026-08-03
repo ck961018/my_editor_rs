@@ -80,33 +80,6 @@ editor.modes.define({
 				return ctx.pass();
 			},
 		},
-		statusBar: {
-			state: () => ({ updates: 0 }),
-			viewState: () => null,
-			commands: {
-				update(ctx) {
-					ctx.state.updates++;
-					void ctx.targetContentId;
-					void ctx.resourceName;
-					void ctx.resourcePath;
-					void ctx.backingState;
-					void ctx.dirty;
-					void ctx.saveState;
-					void ctx.textMetrics;
-					ctx.faces.addRelative("ui.status-bar", [{ bold: true }], "view");
-					// @ts-expect-error StatusBar adapters cannot edit Buffer text.
-					ctx.edit.insert("forbidden");
-					// @ts-expect-error StatusBar adapters do not expose a cursor.
-					ctx.cursor.moveLeft();
-					// @ts-expect-error StatusBar adapters do not expose history.
-					ctx.history.undo();
-					// @ts-expect-error StatusBar adapters do not expose a viewport.
-					ctx.viewport.scroll(1);
-					// @ts-expect-error StatusBar adapters do not expose app commands.
-					ctx.app.quit();
-				},
-			},
-		},
 	},
 });
 

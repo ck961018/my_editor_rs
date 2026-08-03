@@ -262,12 +262,11 @@ mod tests {
     use crate::core::buffer::Buffer;
     use crate::core::command::EditCommand;
     use crate::core::content::{Content, ContentKind};
-    use crate::core::status_bar::StatusBar;
     use crate::core::transaction::{TextChangeSet, TextEdit};
     use crate::protocol::content_query::{
         BufferBackingState, ContentData, ContentQuery, DirtyState, RowRange, SaveState, TextMetrics,
     };
-    use crate::protocol::ids::{ContentId, ViewId};
+    use crate::protocol::ids::ContentId;
 
     fn apply_planned_edit(store: &mut ContentStore, id: ContentId, command: EditCommand) {
         let selections = store
@@ -439,55 +438,35 @@ mod tests {
     #[test]
     fn kind_is_dispatched_by_content() {
         let buffer_id = ContentId(4);
-        let status_bar_id = ContentId(5);
         let mut store = ContentStore::default();
         store
             .insert(buffer_id, Content::Buffer(Buffer::new()))
             .unwrap();
-        store
-            .insert(status_bar_id, Content::StatusBar(StatusBar::new()))
-            .unwrap();
 
         assert_eq!(store.kind(buffer_id), Some(ContentKind::Buffer));
-        assert_eq!(store.kind(status_bar_id), Some(ContentKind::StatusBar));
         assert_eq!(store.kind(ContentId(99)), None);
     }
 
     #[test]
-    fn view_state_transform_rejects_missing_and_mismatched_content() {
+    fn view_state_transform_rejects_missing_content() {
         let buffer = ContentId(4);
-        let status_bar = ContentId(5);
         let missing = ContentId(6);
         let mut store = ContentStore::default();
         store
             .insert(buffer, Content::Buffer(Buffer::new()))
             .unwrap();
-        store
-            .insert(status_bar, Content::StatusBar(StatusBar::new()))
-            .unwrap();
         let change = ContentChange::Text(
             TextChangeSet::from_edits(0, vec![TextEdit::new(0..0, "x")]).unwrap(),
         );
         let mut buffer_state = ContentViewState::buffer();
-        let mut status_bar_state = ContentViewState::status_bar(ViewId(7), buffer);
 
         assert_eq!(
             store.transform_view_state(missing, &mut buffer_state, &change),
             Err(ContentViewStateError::MissingContent(missing))
         );
         assert_eq!(
-            store.transform_view_state(buffer, &mut status_bar_state, &change),
-            Err(ContentViewStateError::KindMismatch {
-                content: ContentKind::Buffer,
-                state: ContentKind::StatusBar,
-            })
-        );
-        assert_eq!(
-            store.transform_view_state(status_bar, &mut buffer_state, &change),
-            Err(ContentViewStateError::KindMismatch {
-                content: ContentKind::StatusBar,
-                state: ContentKind::Buffer,
-            })
+            store.transform_view_state(buffer, &mut buffer_state, &change),
+            Ok(false)
         );
     }
 
@@ -499,7 +478,7 @@ mod tests {
         apply_planned_edit(&mut store, id, EditCommand::InsertText("x".to_string()));
 
         assert_eq!(
-            store.insert(id, Content::StatusBar(StatusBar::new())),
+            store.insert(id, Content::Buffer(Buffer::new())),
             Err(DuplicateContentId { id })
         );
         assert_eq!(

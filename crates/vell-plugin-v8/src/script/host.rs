@@ -452,29 +452,6 @@ impl ScriptHost {
                         buffer.text_metrics(),
                     );
                     set_save_state(scope, argument, buffer.save_state());
-                } else if let Some(status) = context.status_bar() {
-                    set_number(
-                        scope,
-                        argument,
-                        "targetViewId",
-                        status.target_view_id().0 as f64,
-                    );
-                    set_number(
-                        scope,
-                        argument,
-                        "targetContentId",
-                        status.target_content_id().0 as f64,
-                    );
-                    set_resource_facts(
-                        scope,
-                        argument,
-                        status.resource_name(),
-                        status.resource_path(),
-                        status.backing_state(),
-                        status.dirty_state(),
-                        status.text_metrics(),
-                    );
-                    set_save_state(scope, argument, status.save_state());
                 }
                 let arguments = json_to_v8(scope, &mode_value_to_json(arguments))?;
                 set_value(scope, argument, "arguments", arguments);

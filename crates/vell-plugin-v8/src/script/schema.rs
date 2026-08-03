@@ -240,9 +240,7 @@ fn parse_mode_definition(
     let adapters = match property(scope, object, "on") {
         Some(value) if !value.is_null_or_undefined() => parse_adapters(scope, object, value)?,
         _ => {
-            return Err(ScriptError::new(
-                "mode definition must provide on.buffer or on.statusBar",
-            ));
+            return Err(ScriptError::new("mode definition must provide on.buffer"));
         }
     };
     Ok(ScriptModeDefinition {
@@ -285,16 +283,11 @@ fn parse_adapters(
             .map_err(|_| ScriptError::new(format!("mode adapter '{name}' must be an object")))?;
         match name.as_str() {
             "buffer" => adapters.buffer = Some(parse_adapter(scope, adapter, ContentKind::Buffer)?),
-            "statusBar" => {
-                adapters.status_bar = Some(parse_adapter(scope, adapter, ContentKind::StatusBar)?)
-            }
             _ => return Err(ScriptError::new(format!("unknown mode adapter '{name}'"))),
         }
     }
-    if adapters.buffer.is_none() && adapters.status_bar.is_none() {
-        return Err(ScriptError::new(
-            "mode definition must provide on.buffer or on.statusBar",
-        ));
+    if adapters.buffer.is_none() {
+        return Err(ScriptError::new("mode definition must provide on.buffer"));
     }
     Ok(adapters)
 }
@@ -302,7 +295,7 @@ fn parse_adapters(
 fn parse_adapter(
     scope: &mut v8::PinScope,
     object: v8::Local<v8::Object>,
-    kind: ContentKind,
+    _kind: ContentKind,
 ) -> Result<ScriptAdapterDefinition, ScriptError> {
     let actions = parse_actions(scope, object, "commands", false)?;
     if actions
@@ -314,29 +307,15 @@ fn parse_adapter(
         )));
     }
     let input = optional_function(scope, object, "input")?;
-    let content_changed = match kind {
-        ContentKind::Buffer => {
-            for field in ["worker", "job", "applyJob", "analysis"] {
-                if property(scope, object, field).is_some_and(|value| !value.is_null_or_undefined())
-                {
-                    return Err(ScriptError::new(format!(
-                        "mode buffer.{field} is not supported"
-                    )));
-                }
+    let content_changed = {
+        for field in ["worker", "job", "applyJob", "analysis"] {
+            if property(scope, object, field).is_some_and(|value| !value.is_null_or_undefined()) {
+                return Err(ScriptError::new(format!(
+                    "mode buffer.{field} is not supported"
+                )));
             }
-            optional_function(scope, object, "changed")?
         }
-        ContentKind::StatusBar => {
-            for field in ["changed", "worker", "job", "applyJob", "analysis"] {
-                if property(scope, object, field).is_some_and(|value| !value.is_null_or_undefined())
-                {
-                    return Err(ScriptError::new(format!(
-                        "mode statusBar.{field} is not supported"
-                    )));
-                }
-            }
-            None
-        }
+        optional_function(scope, object, "changed")?
     };
     Ok(ScriptAdapterDefinition {
         bindings: parse_bindings(scope, object, &actions)?,

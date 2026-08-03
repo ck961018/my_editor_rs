@@ -24,9 +24,9 @@ use crate::command::{
 };
 use crate::kernel::FileBaseline;
 use crate::mode::{
-    Mode, ModeActionScope, ModeAdapters, ModeAttachmentError, ModeContentContext, ModeContextError,
-    ModeError, ModeFaultPhase, ModeResult, ModeState, ModeViewContext, ModeViewInstance,
-    ModeViewPolicy, NamedStatusBarPresentation, NamedStatusBarSegment,
+    Mode, ModeActionScope, ModeAdapters, ModeAttachmentError, ModeContentContext, ModeError,
+    ModeFaultPhase, ModeResult, ModeState, ModeViewContext, ModeViewInstance, ModeViewPolicy,
+    NamedStatusBarPresentation, NamedStatusBarSegment,
 };
 use crate::mode_name::{ModeActionName, ModeName};
 use crate::operation::{
@@ -43,7 +43,6 @@ use vell_core::command::EditCommand;
 use vell_core::content::{
     Content, ContentChange, ContentEffect, ContentInput, ContentKind, ContentResult,
 };
-use vell_core::content_view_state::ContentViewState;
 use vell_core::keymap::Keymap;
 use vell_core::search::{CaseSensitivity, SearchDirection, SearchOptions, SearchPattern};
 use vell_core::transaction::{TextChangeSet, TextEdit};
@@ -54,9 +53,9 @@ use vell_mode::command_registry::{
 };
 use vell_plugin_v8::ScriptHost;
 use vell_protocol::content_query::{
-    BufferBackingState, Color, ContentData, ContentQuery, ContentQueryKind, CursorStyle,
-    DirtyState, Face, FaceExpr, FaceName, NamedTextDecoration, RenderQuery, RenderQueryError,
-    RowRange, SaveState, StatusBarPresentation, TextPresentation, ViewData, ViewPresentation,
+    BufferBackingState, Color, ContentData, ContentQuery, CursorStyle, DirtyState, Face, FaceExpr,
+    FaceName, NamedTextDecoration, RenderQuery, RenderQueryError, RowRange, SaveState,
+    StatusBarPresentation, TextPresentation, ViewData, ViewPresentation,
 };
 use vell_protocol::frontend_event::{FrontendEvent, ResizeEvent};
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
@@ -759,17 +758,14 @@ impl Mode for AdapterProbeMode {
     }
 
     fn adapters(&self) -> ModeAdapters {
-        ModeAdapters::buffer_and_status_bar()
+        ModeAdapters::buffer()
     }
 
     fn create_content_state(
         &self,
         context: &ModeContentContext<'_>,
     ) -> Result<Box<dyn ModeState>, ModeError> {
-        match context.content_kind() {
-            ContentKind::Buffer => assert!(context.buffer().is_some()),
-            ContentKind::StatusBar => assert!(context.status_bar().is_some()),
-        }
+        assert!(context.buffer().is_some());
         Ok(Box::new(AdapterProbeState {
             kind: context.content_kind(),
         }))
@@ -780,20 +776,10 @@ impl Mode for AdapterProbeMode {
         _content_state: &dyn ModeState,
         context: &ModeViewContext<'_>,
     ) -> Result<Box<dyn ModeState>, ModeError> {
-        match context.content_kind() {
-            ContentKind::Buffer => {
-                assert_eq!(
-                    context.buffer().unwrap().selections().primary().head(),
-                    TextOffset::origin()
-                )
-            }
-            ContentKind::StatusBar => {
-                let status = context.status_bar().unwrap();
-                assert_eq!(status.target_content_id(), editor_cid());
-                assert_eq!(status.dirty_state(), Some(DirtyState::Clean));
-                assert_eq!(status.save_state(), Some(SaveState::Idle));
-            }
-        }
+        assert_eq!(
+            context.buffer().unwrap().selections().primary().head(),
+            TextOffset::origin()
+        );
         Ok(Box::new(AdapterProbeState {
             kind: context.content_kind(),
         }))
@@ -810,7 +796,7 @@ impl Mode for SaveStatusMode {
     }
 
     fn adapters(&self) -> ModeAdapters {
-        ModeAdapters::status_bar()
+        ModeAdapters::buffer()
     }
 
     fn view_policy(
@@ -819,14 +805,9 @@ impl Mode for SaveStatusMode {
         _view_state: &dyn ModeState,
         context: &ModeViewContext<'_>,
     ) -> ModeViewPolicy {
-        let save_state = context
-            .status_bar()
-            .and_then(|status| status.save_state())
-            .expect("save status mode targets a buffer");
-        let backing_state = context
-            .status_bar()
-            .and_then(|status| status.backing_state())
-            .expect("save status mode targets a buffer");
+        let buffer = context.buffer().expect("save status mode targets a buffer");
+        let save_state = buffer.save_state().expect("buffer has save state");
+        let backing_state = buffer.backing_state().expect("buffer has backing state");
         ModeViewPolicy {
             status_bar: Some(NamedStatusBarPresentation {
                 center: vec![NamedStatusBarSegment {
@@ -2019,7 +2000,6 @@ async fn sessions_sharing_one_kernel_keep_client_state_independent() {
         80,
         20,
         editor_cid(),
-        ContentId(1),
         editor_modes,
     );
     let second_view = view_for_space(second.scene(), second.focused()).unwrap();
@@ -2089,7 +2069,6 @@ fn production_content_paths_use_closed_static_dispatch() {
     }
     assert!(content_view_state.contains("pub enum ContentViewState"));
     assert!(content_view_state.contains("Buffer(BufferViewState)"));
-    assert!(content_view_state.contains("StatusBar(StatusBarViewState)"));
     assert!(!content_view_state.contains("Option<Selections>"));
     assert!(!view.contains("match self.state"));
     assert!(!view.contains("match &mut self.state"));
@@ -2097,111 +2076,6 @@ fn production_content_paths_use_closed_static_dispatch() {
         assert!(!app.contains(concrete_transaction));
         assert!(!transaction.contains(concrete_transaction));
     }
-}
-
-#[test]
-fn edit_rejects_mismatched_content_view_state_without_mutating_content() {
-    let mut app = make_app(vec![], None);
-    let view = view_id(&app, app.session.focused());
-    *app.session.view_mut(view).unwrap().state_mut() =
-        ContentViewState::status_bar(view, editor_cid());
-
-    let error = app
-        .execute_command(DispatchCommand::ContentWithView {
-            command: ContentCommand::Edit(EditCommand::InsertText("x".to_string())),
-            view,
-            content: editor_cid(),
-        })
-        .unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("editable view has no buffer state")
-    );
-    assert_eq!(text_rows(&app, editor_cid()), vec![""]);
-}
-
-#[test]
-fn edit_rolls_back_when_another_view_has_mismatched_state() {
-    let mut app = make_app(vec![], None);
-    let left = app.session.focused();
-    let source = view_id(&app, left);
-    let right = app
-        .split_space(left, editor_cid(), true, SplitDirection::Right, false)
-        .unwrap()
-        .new_space;
-    let incompatible = view_id(&app, right);
-    *app.session.view_mut(incompatible).unwrap().state_mut() =
-        ContentViewState::status_bar(source, editor_cid());
-    let content_revision = app.kernel.contents().revision(editor_cid());
-    let source_revision = app.session.views()[&source].revision();
-    let source_selections = app.session.views()[&source].selections().unwrap().clone();
-    let history = app.kernel.history_behavior_for_test(editor_cid());
-
-    let error = app
-        .execute_command(DispatchCommand::ContentWithView {
-            command: ContentCommand::Edit(EditCommand::InsertText("x".to_string())),
-            view: source,
-            content: editor_cid(),
-        })
-        .unwrap_err();
-
-    assert!(error.to_string().contains("content kind Buffer"));
-    assert_eq!(text_rows(&app, editor_cid()), vec![""]);
-    assert_eq!(
-        app.kernel.contents().revision(editor_cid()),
-        content_revision
-    );
-    assert_eq!(app.session.views()[&source].revision(), source_revision);
-    assert_eq!(
-        app.session.views()[&source].selections(),
-        Some(&source_selections)
-    );
-    assert_eq!(app.kernel.history_behavior_for_test(editor_cid()), history);
-}
-
-#[test]
-fn render_query_rejects_mismatched_content_view_state() {
-    let mut app = make_app(vec![], None);
-    let view = view_id(&app, app.session.focused());
-    let status_view = app
-        .session
-        .views()
-        .iter()
-        .find_map(|(id, view)| (view.content() == ContentId(1)).then_some(*id))
-        .unwrap();
-    *app.session.view_mut(view).unwrap().state_mut() =
-        ContentViewState::status_bar(view, editor_cid());
-    let query = AppQuery {
-        contents: app.kernel.contents(),
-        views: app.session.views(),
-        presentation: app.session.presentation(),
-        faces: app.session.faces(),
-    };
-
-    assert_eq!(
-        query.view(view),
-        Err(RenderQueryError::IncompatibleContentViewState {
-            view,
-            content: editor_cid(),
-        })
-    );
-
-    *app.session.view_mut(status_view).unwrap().state_mut() = ContentViewState::buffer();
-    let query = AppQuery {
-        contents: app.kernel.contents(),
-        views: app.session.views(),
-        presentation: app.session.presentation(),
-        faces: app.session.faces(),
-    };
-    assert_eq!(
-        query.view(status_view),
-        Err(RenderQueryError::IncompatibleContentViewState {
-            view: status_view,
-            content: ContentId(1),
-        })
-    );
 }
 
 fn text_rows(app: &App<ScriptedFrontend>, content: ContentId) -> Vec<String> {
@@ -2500,18 +2374,15 @@ fn content_query_reads_buffer_and_view() {
         Ok(ContentData::TextRows(vec!["hi".to_string()]))
     );
     assert_eq!(
-        query.content(ContentId(1), ContentQuery::DirtyState),
-        Err(RenderQueryError::UnsupportedContentQuery {
-            content: ContentId(1),
-            query: ContentQueryKind::DirtyState,
-        })
-    );
-    assert_eq!(
         query.content(
             ContentId(99),
             ContentQuery::TextRows(RowRange { start: 0, end: 1 }),
         ),
         Err(RenderQueryError::MissingContent(ContentId(99)))
+    );
+    assert_eq!(
+        query.content(ContentId(1), ContentQuery::DirtyState),
+        Err(RenderQueryError::MissingContent(ContentId(1)))
     );
     assert_eq!(
         query.decorations(ViewId(99), RowRange { start: 0, end: 1 }),
@@ -3010,7 +2881,7 @@ fn status_bar_view_data_has_no_text_selection_or_mode_cursor() {
         .session
         .views()
         .iter()
-        .find_map(|(id, view)| (view.content() == ContentId(1)).then_some(*id))
+        .find_map(|(id, view)| view.is_status_bar().then_some(*id))
         .expect("status bar view exists");
     let query = AppQuery {
         contents: app.kernel.contents(),
@@ -3064,23 +2935,15 @@ fn global_status_bar_retargets_after_close_and_replace() {
 
     let status = app.status_bar_for_view(left_view).unwrap();
     assert_eq!(
-        app.session.views()[&status.view]
-            .state()
-            .status_bar_state()
-            .unwrap()
-            .target(),
-        Some((left_view, editor_cid()))
+        app.session.views()[&status.view].status_target(),
+        Some(left_view)
     );
 
     app.replace_space_content(left_space, other, true).unwrap();
     let replacement = view_id(&app, left_space);
     assert_eq!(
-        app.session.views()[&status.view]
-            .state()
-            .status_bar_state()
-            .unwrap()
-            .target(),
-        Some((replacement, other))
+        app.session.views()[&status.view].status_target(),
+        Some(replacement)
     );
 }
 
@@ -3198,7 +3061,7 @@ fn per_pane_status_bars_cover_inert_buffer_views_in_both_creation_orders() {
 }
 
 #[test]
-fn unbound_status_bar_content_is_rejected_before_layout_mutation() {
+fn missing_content_is_rejected_before_layout_mutation() {
     let mut app = make_app(vec![], None);
     let focused = app.session.focused();
     let revision = app.session.scene_revision();
@@ -3206,11 +3069,11 @@ fn unbound_status_bar_content_is_rejected_before_layout_mutation() {
 
     assert!(matches!(
         app.split_space(focused, ContentId(1), true, SplitDirection::Right, true,),
-        Err(LayoutError::UnboundStatusBarView(ContentId(1)))
+        Err(LayoutError::MissingContent(ContentId(1)))
     ));
     assert!(matches!(
         app.replace_space_content(focused, ContentId(1), true),
-        Err(LayoutError::UnboundStatusBarView(ContentId(1)))
+        Err(LayoutError::MissingContent(ContentId(1)))
     ));
     assert_eq!(app.session.scene_revision(), revision);
     assert_eq!(app.session.next_view_id_for_test(), next_view);
@@ -3261,13 +3124,14 @@ fn per_pane_status_bars_are_distinct_and_independently_hidden() {
 }
 
 #[test]
-fn status_bar_mode_can_replace_the_default_presentation() {
+fn buffer_mode_view_policy_can_replace_the_default_status_bar_presentation() {
     let app = make_script_app(
         r#"
 editor.modes.define({
   name: "custom-status",
   on: {
-    statusBar: {
+    buffer: {
+      state: () => ({}),
       viewState: () => ({
         viewPolicy: {
           statusBar: {
@@ -3277,14 +3141,14 @@ editor.modes.define({
           },
         },
       }),
-      commands: {},
     },
   },
 });
 editor.modes.define({
   name: "shadowed-status",
   on: {
-    statusBar: {
+    buffer: {
+      state: () => ({}),
       viewState: () => ({
         viewPolicy: {
           statusBar: {
@@ -3292,7 +3156,6 @@ editor.modes.define({
           },
         },
       }),
-      commands: {},
     },
   },
 });
@@ -3319,15 +3182,6 @@ editor.modes.define({
             vec!["right".to_owned()]
         )
     );
-    let diagnostics = app
-        .mode_diagnostics()
-        .into_iter()
-        .find(|entry| entry.view == status.view)
-        .unwrap();
-    assert_eq!(
-        diagnostics.policy_sources.status_bar,
-        Some(ModeName::new("custom-status"))
-    );
 }
 
 fn status_region_texts(
@@ -3352,7 +3206,7 @@ fn attach_save_status_mode(app: &mut App<ScriptedFrontend>) {
         .modes_mut()
         .register(SaveStatusMode { name: name.clone() })
         .unwrap();
-    app.attach_mode_to_content(ContentId(1), &name).unwrap();
+    app.attach_mode_to_content(editor_cid(), &name).unwrap();
 }
 
 fn custom_status_center(app: &App<ScriptedFrontend>) -> String {
@@ -3455,7 +3309,7 @@ async fn two_views_of_one_buffer_keep_independent_mode_instances() {
 }
 
 #[test]
-fn one_mode_can_attach_canonical_adapters_to_both_content_kinds() {
+fn one_mode_can_attach_canonical_adapter_to_buffer_content() {
     let mut app = make_app(vec![], None);
     let name = ModeName::new("adapter-probe");
     let mode = app
@@ -3470,14 +3324,7 @@ fn one_mode_can_attach_canonical_adapters_to_both_content_kinds() {
             .adapter(mode, ContentKind::Buffer)
             .is_some()
     );
-    assert!(
-        app.kernel
-            .modes()
-            .adapter(mode, ContentKind::StatusBar)
-            .is_some()
-    );
     app.attach_mode_to_content(editor_cid(), &name).unwrap();
-    app.attach_mode_to_content(ContentId(1), &name).unwrap();
 
     assert_eq!(
         app.kernel
@@ -3487,18 +3334,11 @@ fn one_mode_can_attach_canonical_adapters_to_both_content_kinds() {
             kind: ContentKind::Buffer,
         })
     );
-    assert_eq!(
-        app.kernel
-            .content_modes()
-            .state_for_test::<AdapterProbeState>(mode, ContentId(1)),
-        Some(&AdapterProbeState {
-            kind: ContentKind::StatusBar,
-        })
-    );
     for (view, kind) in app
         .session
         .views()
         .iter()
+        .filter(|(_, view)| !view.is_status_bar())
         .map(|(id, view)| (*id, app.kernel.contents().kind(view.content()).unwrap()))
     {
         assert_eq!(
@@ -3511,11 +3351,10 @@ fn one_mode_can_attach_canonical_adapters_to_both_content_kinds() {
 }
 
 #[test]
-fn unsupported_attachment_is_structured_and_leaves_no_partial_profile() {
+fn attach_to_missing_content_is_structured_and_leaves_no_partial_profile() {
     let mut app = make_app(vec![], None);
     let name = ModeName::new("buffer-only");
-    let mode = app
-        .kernel
+    app.kernel
         .modes_mut()
         .register(HighlightMode {
             name: name.clone(),
@@ -3526,31 +3365,16 @@ fn unsupported_attachment_is_structured_and_leaves_no_partial_profile() {
             },
         })
         .unwrap();
-    let status = ContentId(1);
-    let profile_before = app.session.mode_chain_for_new_view(status);
+    let missing = ContentId(1);
+    let profile_before = app.session.mode_chain_for_new_view(missing);
 
-    let error = app.attach_mode_to_content(status, &name).unwrap_err();
+    let error = app.attach_mode_to_content(missing, &name).unwrap_err();
 
-    assert_eq!(
-        error,
-        ModeAttachmentError::UnsupportedContent {
-            mode: name.clone(),
-            content: status,
-            kind: ContentKind::StatusBar,
-        }
-    );
-    assert_eq!(app.session.mode_chain_for_new_view(status), profile_before);
-    assert!(app.kernel.content_modes().revision(mode, status).is_none());
-    let status_view = app
-        .session
-        .views()
-        .iter()
-        .find_map(|(id, view)| (view.content() == status).then_some(*id))
-        .unwrap();
-    assert!(!app.session.view_modes().contains(status_view, &name));
+    assert_eq!(error, ModeAttachmentError::UnknownContent(missing));
+    assert_eq!(app.session.mode_chain_for_new_view(missing), profile_before);
 
     assert_eq!(
-        app.attach_mode_to_content(status, &ModeName::new("missing")),
+        app.attach_mode_to_content(editor_cid(), &ModeName::new("missing")),
         Err(ModeAttachmentError::UnknownMode(ModeName::new("missing")))
     );
     assert_eq!(
@@ -3560,66 +3384,25 @@ fn unsupported_attachment_is_structured_and_leaves_no_partial_profile() {
 }
 
 #[test]
-fn attachment_rejects_an_incompatible_view_before_mutating_profile() {
-    let mut app = make_app(vec![], None);
-    let name = ModeName::new("adapter-probe");
-    let mode = app
-        .kernel
-        .modes_mut()
-        .register(AdapterProbeMode { name: name.clone() })
-        .unwrap();
-    let content = ContentId(1);
-    let view = app
-        .session
-        .views()
-        .iter()
-        .find_map(|(id, view)| (view.content() == content).then_some(*id))
-        .unwrap();
-    *app.session.view_mut(view).unwrap().state_mut() = ContentViewState::buffer();
-    let profile_before = app.session.mode_chain_for_new_view(content);
-
-    let error = app.attach_mode_to_content(content, &name).unwrap_err();
-
-    assert_eq!(
-        error,
-        ModeAttachmentError::InvalidViewContext(ModeContextError::IncompatibleViewState {
-            view,
-            content,
-            content_kind: ContentKind::StatusBar,
-            state_kind: ContentKind::Buffer,
-        })
-    );
-    assert_eq!(app.session.mode_chain_for_new_view(content), profile_before);
-    assert!(app.kernel.content_modes().revision(mode, content).is_none());
-    assert!(!app.session.view_modes().contains(view, &name));
-}
-
-#[test]
-fn mode_invocation_rejects_a_content_without_the_registered_adapter() {
+fn mode_invocation_rejects_an_unregistered_content() {
     let mut app = make_app(vec![], None);
     let mode = ModeName::new("shared-content");
     app.kernel
         .modes_mut()
         .register(SharedContentMode::new())
         .unwrap();
-    let status = ContentId(1);
-    let status_view = app
-        .session
-        .views()
-        .iter()
-        .find_map(|(id, view)| (view.content() == status).then_some(*id))
-        .unwrap();
+    let missing = ContentId(1);
 
     let error = app
         .execute_command(DispatchCommand::Mode {
             command: ModeCommand::new(mode, ModeActionName::new("advance")),
-            view: status_view,
-            content: status,
+            view: view_id(&app, app.session.focused()),
+            content: missing,
         })
         .unwrap_err();
 
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    assert!(error.to_string().contains("has no StatusBar adapter"));
+    assert!(error.to_string().contains("targets missing content"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3951,7 +3734,7 @@ fn typed_buffer_list_surfaces_metadata() {
 
     let listing = &app.runtime_diagnostics.last().unwrap().message;
     assert!(listing.contains("0: [untitled]"), "{listing}");
-    assert!(listing.contains("2: [untitled]"), "{listing}");
+    assert!(listing.contains("1: [untitled]"), "{listing}");
 }
 
 #[tokio::test]
@@ -4185,7 +3968,9 @@ fn reload_buffer_guards_dirty_text_and_force_installs_disk_state() {
         .session
         .views()
         .iter()
-        .find(|(candidate, state)| **candidate != view && state.content() == content)
+        .find(|(candidate, state)| {
+            **candidate != view && !state.is_status_bar() && state.content() == content
+        })
         .unwrap()
         .0;
     app.execute_command(DispatchCommand::ModeOperations {
@@ -4200,7 +3985,7 @@ fn reload_buffer_guards_dirty_text_and_force_installs_disk_state() {
         .session
         .views()
         .values()
-        .filter(|view| view.content() == content)
+        .filter(|view| !view.is_status_bar() && view.content() == content)
         .map(|view| view.selections().unwrap().primary().head().char_index)
         .collect::<Vec<_>>();
     before_heads.sort_unstable();
@@ -4220,7 +4005,7 @@ fn reload_buffer_guards_dirty_text_and_force_installs_disk_state() {
         .session
         .views()
         .values()
-        .filter(|view| view.content() == content)
+        .filter(|view| !view.is_status_bar() && view.content() == content)
         .map(|view| view.selections().unwrap().primary().head().char_index)
         .collect::<Vec<_>>();
     reloaded_heads.sort_unstable();
@@ -4386,22 +4171,12 @@ fn close_buffer_rejects_a_pending_save_even_when_forced() {
 }
 
 #[test]
-fn switch_buffer_rejects_missing_and_non_buffer_content() {
+fn switch_buffer_rejects_missing_content() {
     let mut app = make_app(vec![], None);
-    let status = app
-        .kernel
-        .contents()
-        .ids()
-        .find(|content| app.kernel.contents().kind(*content) == Some(ContentKind::StatusBar))
-        .unwrap();
 
     assert!(matches!(
         app.switch_buffer(ContentId(u64::MAX)),
         Err(super::BufferLifecycleError::MissingContent(_))
-    ));
-    assert!(matches!(
-        app.switch_buffer(status),
-        Err(super::BufferLifecycleError::UnsupportedContent(_))
     ));
 }
 
@@ -4662,41 +4437,6 @@ editor.modes.define({
         .unwrap();
 
     assert_eq!(text_rows(&app, editor_cid()), vec![""]);
-}
-
-#[test]
-fn script_adapters_attach_only_to_matching_standard_content() {
-    let app = make_script_app(
-        r#"
-editor.modes.define({
-  name: "status",
-  on: {
-    statusBar: {
-      state: () => ({ ready: true }),
-      commands: {},
-    },
-  },
-});
-"#,
-    );
-    let editor_view = app
-        .session
-        .views()
-        .iter()
-        .find_map(|(id, view)| (view.content() == editor_cid()).then_some(*id))
-        .unwrap();
-    let status_view = app
-        .session
-        .views()
-        .iter()
-        .find_map(|(id, view)| (view.content() == ContentId(1)).then_some(*id))
-        .unwrap();
-
-    assert!(app.session.view_modes().mode_names(editor_view).is_empty());
-    assert_eq!(
-        app.session.view_modes().mode_names(status_view),
-        vec![ModeName::new("status")]
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -8194,30 +7934,24 @@ fn raw_view_mode_content_action_maps_its_source_view() {
 }
 
 #[test]
-fn status_bar_view_content_operation_returns_error_instead_of_panicking() {
+fn status_bar_view_content_operation_targets_its_bound_content() {
     let mut app = make_app(vec![], None);
     let status_view = app
         .session
         .views()
         .iter()
-        .find_map(|(id, view)| (view.content() == ContentId(1)).then_some(*id))
+        .find_map(|(id, view)| view.is_status_bar().then_some(*id))
         .unwrap();
     let change = TextChangeSet::from_edits(0, vec![TextEdit::new(0..0, "x")]).unwrap();
 
-    let error = app
-        .execute_command(DispatchCommand::ModeOperations {
-            operations: vec![view_content(ContentAction::Text(change))],
-            view: status_view,
-            content: ContentId(1),
-        })
-        .unwrap_err();
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![view_content(ContentAction::Text(change))],
+        view: status_view,
+        content: editor_cid(),
+    })
+    .unwrap();
 
-    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    assert!(
-        error
-            .to_string()
-            .contains("view content operation requires buffer view state")
-    );
+    assert_eq!(text_rows(&app, editor_cid()), vec!["x"]);
 }
 
 #[test]

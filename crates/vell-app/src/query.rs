@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use crate::presentation::PresentationLayerStore;
 use crate::theme::SessionFaces;
 use crate::view::View;
-use vell_core::content::ContentKind;
 use vell_core::content_store::ContentStore;
 use vell_core::content_view_state::ContentViewState;
 use vell_protocol::content_query::{
@@ -46,107 +45,42 @@ impl RenderQuery for AppQuery<'_> {
             .get(&id)
             .ok_or(RenderQueryError::MissingView(id))?;
         let content = view.content();
-        let content_kind = self
+        let _content_kind = self
             .contents
             .kind(content)
             .ok_or(RenderQueryError::MissingContent(content))?;
-        let presentation = match (content_kind, view.state()) {
-            (ContentKind::Buffer, ContentViewState::Buffer(state)) => {
-                let content_revision = self
-                    .contents
-                    .revision(content)
-                    .ok_or(RenderQueryError::MissingContent(content))?;
-                let policy = self
-                    .presentation
-                    .policy(id, content_revision, view.revision());
-                ViewPresentation::Text(TextPresentation {
-                    base_face: self.faces.resolve_root_for(
-                        &FaceName::new("ui.editor"),
-                        content,
-                        id,
-                    ),
-                    selections: state.selections().clone(),
-                    cursor_style: policy.cursor_style.unwrap_or(CursorStyle::Default),
-                    selection_shape: policy.selection_shape.unwrap_or(SelectionShape::Character),
-                    selection_face: policy
-                        .selection_face
-                        .as_ref()
-                        .map(|face| self.faces.resolve_for(face, content, id))
-                        .unwrap_or_else(|| {
-                            self.faces
-                                .resolve_for(&FaceName::new("ui.selection"), content, id)
-                        }),
-                    tab_width: policy
-                        .tab_width
-                        .unwrap_or(DEFAULT_TAB_WIDTH)
-                        .clamp(1, MAX_TAB_WIDTH),
-                })
-            }
-            (ContentKind::StatusBar, ContentViewState::StatusBar(state)) => {
-                let Some((target_view, target_content)) = state.target() else {
-                    return Err(RenderQueryError::IncompatibleContentViewState {
-                        view: id,
-                        content,
-                    });
-                };
-                let content_revision = self
-                    .contents
-                    .revision(content)
-                    .ok_or(RenderQueryError::MissingContent(content))?;
-                let policy = self
-                    .presentation
-                    .policy(id, content_revision, view.revision());
-                let target_status_bar = self.views.get(&target_view).and_then(|view| {
-                    if view.content() != target_content {
-                        return None;
-                    }
-                    let revision = self.contents.revision(target_content)?;
-                    self.presentation
-                        .policy(target_view, revision, view.revision())
-                        .status_bar
-                });
-                let status_bar = policy.status_bar.as_ref().or(target_status_bar.as_ref());
-                let mut presentation = status_bar.map_or_else(
-                    || {
-                        default_status_bar_presentation(
-                            target_view,
-                            target_content,
-                            self.contents,
-                            self.views,
-                            self.faces,
-                            content,
-                            id,
-                        )
-                    },
-                    |presentation| StatusBarPresentation {
-                        base_face: self.faces.resolve_status_bar_root(target_view, content, id),
-                        left: resolve_status_segments(&presentation.left, self.faces, content, id),
-                        center: resolve_status_segments(
-                            &presentation.center,
-                            self.faces,
-                            content,
-                            id,
-                        ),
-                        right: resolve_status_segments(
-                            &presentation.right,
-                            self.faces,
-                            content,
-                            id,
-                        ),
-                    },
-                );
-                if let Some(message) = self.presentation.status_message() {
-                    presentation.center = vec![StatusBarSegment {
-                        text: message.to_owned(),
-                        face: FacePatch::default(),
-                    }];
-                }
-                ViewPresentation::StatusBar(presentation)
-            }
-            (ContentKind::Buffer, ContentViewState::StatusBar(_))
-            | (ContentKind::StatusBar, ContentViewState::Buffer(_)) => {
-                return Err(RenderQueryError::IncompatibleContentViewState { view: id, content });
-            }
+        if let Some(target_view) = view.status_target() {
+            return self.status_bar_view(id, content, target_view, view);
+        }
+        let ContentViewState::Buffer(state) = view.state();
+        let presentation = {
+            let content_revision = self
+                .contents
+                .revision(content)
+                .ok_or(RenderQueryError::MissingContent(content))?;
+            let policy = self
+                .presentation
+                .policy(id, content_revision, view.revision());
+            ViewPresentation::Text(TextPresentation {
+                base_face: self
+                    .faces
+                    .resolve_root_for(&FaceName::new("ui.editor"), content, id),
+                selections: state.selections().clone(),
+                cursor_style: policy.cursor_style.unwrap_or(CursorStyle::Default),
+                selection_shape: policy.selection_shape.unwrap_or(SelectionShape::Character),
+                selection_face: policy
+                    .selection_face
+                    .as_ref()
+                    .map(|face| self.faces.resolve_for(face, content, id))
+                    .unwrap_or_else(|| {
+                        self.faces
+                            .resolve_for(&FaceName::new("ui.selection"), content, id)
+                    }),
+                tab_width: policy
+                    .tab_width
+                    .unwrap_or(DEFAULT_TAB_WIDTH)
+                    .clamp(1, MAX_TAB_WIDTH),
+            })
         };
         Ok(ViewData {
             content,
@@ -164,18 +98,6 @@ impl RenderQuery for AppQuery<'_> {
             .get(&id)
             .ok_or(RenderQueryError::MissingView(id))?;
         let content = view.content();
-        let content_kind = self
-            .contents
-            .kind(content)
-            .ok_or(RenderQueryError::MissingContent(content))?;
-        match (content_kind, view.state()) {
-            (ContentKind::StatusBar, ContentViewState::StatusBar(_)) => return Ok(Vec::new()),
-            (ContentKind::Buffer, ContentViewState::Buffer(_)) => {}
-            (ContentKind::Buffer, ContentViewState::StatusBar(_))
-            | (ContentKind::StatusBar, ContentViewState::Buffer(_)) => {
-                return Err(RenderQueryError::IncompatibleContentViewState { view: id, content });
-            }
-        }
         let content_revision = self
             .contents
             .revision(content)
@@ -203,6 +125,69 @@ impl RenderQuery for AppQuery<'_> {
                 face: self.faces.resolve_for(&decoration.face, content, id),
             })
             .collect())
+    }
+}
+
+impl AppQuery<'_> {
+    fn status_bar_view(
+        &self,
+        id: ViewId,
+        content: ContentId,
+        target_view: ViewId,
+        view: &View,
+    ) -> Result<ViewData, RenderQueryError> {
+        let target_view_data = self
+            .views
+            .get(&target_view)
+            .ok_or(RenderQueryError::MissingView(target_view))?;
+        let target_content = target_view_data.content();
+        let target_revision = self
+            .contents
+            .revision(target_content)
+            .ok_or(RenderQueryError::MissingContent(target_content))?;
+        let content_revision = self
+            .contents
+            .revision(content)
+            .ok_or(RenderQueryError::MissingContent(content))?;
+        let policy = self
+            .presentation
+            .policy(id, content_revision, view.revision());
+        let target_status_bar =
+            self.presentation
+                .policy(target_view, target_revision, target_view_data.revision());
+        let status_bar = policy
+            .status_bar
+            .as_ref()
+            .or(target_status_bar.status_bar.as_ref());
+        let mut presentation = status_bar.map_or_else(
+            || {
+                default_status_bar_presentation(
+                    target_view,
+                    target_content,
+                    self.contents,
+                    self.views,
+                    self.faces,
+                    content,
+                    id,
+                )
+            },
+            |presentation| StatusBarPresentation {
+                base_face: self.faces.resolve_status_bar_root(target_view, content, id),
+                left: resolve_status_segments(&presentation.left, self.faces, content, id),
+                center: resolve_status_segments(&presentation.center, self.faces, content, id),
+                right: resolve_status_segments(&presentation.right, self.faces, content, id),
+            },
+        );
+        if let Some(message) = self.presentation.status_message() {
+            presentation.center = vec![StatusBarSegment {
+                text: message.to_owned(),
+                face: FacePatch::default(),
+            }];
+        }
+        Ok(ViewData {
+            content,
+            presentation: ViewPresentation::StatusBar(presentation),
+        })
     }
 }
 

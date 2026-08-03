@@ -364,7 +364,7 @@ impl<F: Frontend> App<F> {
             .session
             .views()
             .iter()
-            .filter(|(_, view)| view.content() == content)
+            .filter(|(_, view)| !view.is_status_bar() && view.content() == content)
             .filter_map(|(view, _)| {
                 space_for_view(self.session.scene(), *view).map(|space| (*view, space))
             })
@@ -393,7 +393,7 @@ impl<F: Frontend> App<F> {
             .session
             .views()
             .iter()
-            .filter(|(_, view)| view.content() == content)
+            .filter(|(_, view)| !view.is_status_bar() && view.content() == content)
             .filter_map(|(view, _)| space_for_view(self.session.scene(), *view))
             .collect::<Vec<_>>();
         for space in target_spaces {
@@ -455,7 +455,6 @@ impl<F: Frontend> App<F> {
     ) -> Result<(), BufferLifecycleError> {
         match self.kernel.contents().kind(content) {
             None => Err(BufferLifecycleError::MissingContent(content)),
-            Some(ContentKind::StatusBar) => Err(BufferLifecycleError::UnsupportedContent(content)),
             Some(ContentKind::Buffer) => Ok(()),
         }
     }
@@ -515,7 +514,6 @@ impl<F: Frontend> App<F> {
     fn require_buffer(&self, content: ContentId) -> Result<BufferInfo, BufferLifecycleError> {
         match self.kernel.contents().kind(content) {
             None => Err(BufferLifecycleError::MissingContent(content)),
-            Some(ContentKind::StatusBar) => Err(BufferLifecycleError::UnsupportedContent(content)),
             Some(ContentKind::Buffer) => self
                 .buffer_info(content)
                 .ok_or(BufferLifecycleError::UnsupportedContent(content)),

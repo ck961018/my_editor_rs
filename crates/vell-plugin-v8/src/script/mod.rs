@@ -158,7 +158,6 @@ struct ScriptAdapterDefinition {
 #[derive(Clone, Default)]
 struct ScriptAdapterDefinitions {
     buffer: Option<ScriptAdapterDefinition>,
-    status_bar: Option<ScriptAdapterDefinition>,
 }
 
 #[derive(Clone)]
@@ -662,8 +661,6 @@ mod tests {
     use vell_core::command::EditCommand;
     use vell_core::content::{Content, ContentKind};
     use vell_core::content_store::ContentStore;
-    use vell_core::content_view_state::ContentViewState;
-    use vell_core::status_bar::StatusBar;
     use vell_mode::{InputFlow, ModeRegistry};
     use vell_protocol::ids::{ContentId, ViewId};
 
@@ -1177,11 +1174,6 @@ editor.modes.define({
         let mut registry = ModeRegistry::new();
         let registered = registry.register(registered_mode).unwrap();
         assert!(registry.adapter(registered, ContentKind::Buffer).is_some());
-        assert!(
-            registry
-                .adapter(registered, ContentKind::StatusBar)
-                .is_none()
-        );
         let mut modes = ScriptHost::script_modes(&host);
         let mode = modes.pop().unwrap();
         assert_eq!(mode.name().as_str(), "pairs");
@@ -1292,7 +1284,6 @@ editor.modes.define({
         let host = Rc::new(RefCell::new(host));
         let mode = ScriptHost::script_modes(&host).pop().unwrap();
         assert!(mode.adapters().contains(ContentKind::Buffer));
-        assert!(!mode.adapters().contains(ContentKind::StatusBar));
         let definitions = mode.face_definitions();
         assert_eq!(definitions.len(), 1);
         assert_eq!(definitions[0].name.as_str(), "plugin.pairs.match");
@@ -1641,85 +1632,6 @@ editor.modes.define({
     }
 
     #[test]
-    fn status_bar_adapter_has_no_buffer_primitives() {
-        let directory = tempfile::tempdir().unwrap();
-        let config = directory.path().join("config.ts");
-        fs::write(
-            &config,
-            r#"
-editor.modes.define({
-  name: "status-probe",
-  on: {
-    statusBar: {
-      state: () => ({ calls: 0 }),
-      viewState: () => ({ ready: true }),
-      commands: {
-        touch(ctx) {
-          if ("edit" in ctx || "cursor" in ctx) {
-            throw new Error("buffer capability leaked");
-          }
-          void ctx.targetContentId;
-          void ctx.resourceName;
-          void ctx.dirty;
-          void ctx.saveState;
-          ctx.state.calls++;
-        },
-      },
-    },
-  },
-});
-"#,
-        )
-        .unwrap();
-
-        let mut host = ScriptHost::new();
-        host.execute_module(&config).unwrap();
-        let host = Rc::new(RefCell::new(host));
-        let mode = ScriptHost::script_modes(&host).pop().unwrap();
-        assert!(!mode.adapters().contains(ContentKind::Buffer));
-        assert!(mode.adapters().contains(ContentKind::StatusBar));
-
-        let buffer = ContentId(0);
-        let status = ContentId(1);
-        let mut contents = ContentStore::default();
-        contents
-            .insert(buffer, Content::Buffer(Buffer::new()))
-            .unwrap();
-        contents
-            .insert(status, Content::StatusBar(StatusBar::new()))
-            .unwrap();
-        let unbound = contents.create_view_state(status).unwrap();
-        assert!(matches!(
-            ModeViewContext::new(ViewId(1), status, &unbound, &contents),
-            Err(vell_mode::ModeContextError::UnboundStatusBar { .. })
-        ));
-        let view_state = ContentViewState::status_bar(ViewId(1), buffer);
-        let context = ModeViewContext::new(ViewId(1), status, &view_state, &contents).unwrap();
-        let content_context = ModeContentContext::new(status, &contents);
-        let mut content_state = mode.create_content_state(&content_context).unwrap();
-        let mut view_state = mode
-            .create_view_state(content_state.as_ref(), &context)
-            .unwrap();
-        let result = mode
-            .execute_view_with_arguments(
-                content_state.as_mut(),
-                view_state.as_mut(),
-                &context,
-                &ModeActionName::new("touch"),
-                &ModeValue::Null,
-            )
-            .unwrap();
-
-        assert_eq!(result.into_parts(), (InputFlow::Stop, Vec::new()));
-        assert_eq!(
-            script_state(content_state.as_ref(), mode.name())
-                .unwrap()
-                .data,
-            serde_json::json!({ "calls": 1 })
-        );
-    }
-
-    #[test]
     fn schema_rejects_unknown_adapters_and_invalid_keys() {
         for (name, body, expected) in [
             (
@@ -1743,24 +1655,9 @@ editor.modes.define({
                 "unsupported key binding: Ctrl+X",
             ),
             (
-                "status-changed",
-                r#"on: { statusBar: { changed() {} } }"#,
-                "mode statusBar.changed is not supported",
-            ),
-            (
-                "status-worker",
-                r#"on: { statusBar: { worker: "worker.ts" } }"#,
-                "mode statusBar.worker is not supported",
-            ),
-            (
                 "raw-worker-lifecycle",
                 r#"on: { buffer: { job() {} } }"#,
                 "mode buffer.job is not supported",
-            ),
-            (
-                "status-analysis",
-                r#"on: { statusBar: { analysis: {} } }"#,
-                "mode statusBar.analysis is not supported",
             ),
             (
                 "buffer-analysis-field-rejected",

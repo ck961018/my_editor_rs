@@ -57,14 +57,12 @@ struct ScriptAdapter {
 #[derive(Default)]
 struct ScriptAdapters {
     buffer: Option<ScriptAdapter>,
-    status_bar: Option<ScriptAdapter>,
 }
 
 impl ScriptAdapters {
     fn get(&self, kind: ContentKind) -> Option<&ScriptAdapter> {
         match kind {
             ContentKind::Buffer => self.buffer.as_ref(),
-            ContentKind::StatusBar => self.status_bar.as_ref(),
         }
     }
 }
@@ -98,13 +96,7 @@ impl ScriptMode {
         owns_worker_decorations: bool,
     ) -> Self {
         let mut actions = Vec::new();
-        for adapter in [
-            definition.adapters.buffer.as_ref(),
-            definition.adapters.status_bar.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        for adapter in [definition.adapters.buffer.as_ref()].into_iter().flatten() {
             for action in &adapter.actions {
                 if !actions.contains(&action.name) {
                     actions.push(action.name.clone());
@@ -115,10 +107,6 @@ impl ScriptMode {
             buffer: definition
                 .adapters
                 .buffer
-                .map(|adapter| ScriptAdapter::new(&definition.name, adapter)),
-            status_bar: definition
-                .adapters
-                .status_bar
                 .map(|adapter| ScriptAdapter::new(&definition.name, adapter)),
         };
         Self {
@@ -149,14 +137,9 @@ impl Mode for ScriptMode {
     }
 
     fn adapters(&self) -> ModeAdapters {
-        match (
-            self.adapters.buffer.is_some(),
-            self.adapters.status_bar.is_some(),
-        ) {
-            (true, true) => ModeAdapters::buffer_and_status_bar(),
-            (true, false) => ModeAdapters::buffer(),
-            (false, true) => ModeAdapters::status_bar(),
-            (false, false) => unreachable!("script parser requires at least one adapter"),
+        match self.adapters.buffer.is_some() {
+            true => ModeAdapters::buffer(),
+            false => unreachable!("script parser requires at least one adapter"),
         }
     }
 

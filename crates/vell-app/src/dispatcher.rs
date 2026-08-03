@@ -911,7 +911,6 @@ mod tests {
     use vell_core::command::EditCommand;
     use vell_core::content::Content;
     use vell_core::content_store::ContentStore;
-    use vell_core::status_bar::StatusBar;
     use vell_protocol::ids::ContentId;
     use vell_protocol::viewport::{
         ViewportCursorBehavior, ViewportMoveAmount, ViewportMoveDirection,
@@ -978,13 +977,9 @@ mod tests {
         ContentStore,
     ) {
         let editor = ContentId(0);
-        let status = ContentId(1);
         let mut contents = ContentStore::default();
         contents
             .insert(editor, Content::Buffer(Buffer::new()))
-            .unwrap();
-        contents
-            .insert(status, Content::StatusBar(StatusBar::new()))
             .unwrap();
         let mut modes = ModeRegistry::new();
         modes.register(DispatcherTestMode::new()).unwrap();
@@ -996,10 +991,7 @@ mod tests {
                 ViewId(0),
                 View::new(editor, contents.create_view_state(editor).unwrap()),
             ),
-            (
-                ViewId(1),
-                View::new(status, contents.create_view_state(status).unwrap()),
-            ),
+            (ViewId(1), View::status_bar(editor, ViewId(0))),
         ]);
         let mut view_modes = ModeViewStore::default();
         let mode = modes

@@ -126,7 +126,11 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
   不得内部创建或消耗另一个 builder。
 - 新增 ContentKind 必须同时扩展 `Content`、`ContentViewState`、
   `ContentStore` 静态分派、Mode adapter context 和 render query 配对。
-- app 不得借出或匹配 `Buffer`、`StatusBar` 等具体 Content 变体。
+- `ContentKind` 目前只包含 `Buffer`。状态栏是 View 的附属呈现位，
+  不是 Content：状态栏 view 通过 `View::status_bar` 创建并持有
+  `status_target`（服务的 editor view），呈现数据来自目标 view 的
+  `viewPolicy.statusBar`，不进入切换列表或 buffer 编号。
+- app 不得借出或匹配 `Buffer` 等具体 Content 变体。
 - 不要恢复全局 `HeadlessFrontend`。app 集成测试继续使用测试模块内的
   `ScriptedFrontend`；终端字节与布局细节由 `vell-tui` 单测覆盖。
 - 不要仅因未使用就删除带原因的 `#[allow(dead_code)]` 预留契约，除非任务

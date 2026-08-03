@@ -263,7 +263,6 @@ pub(super) fn install_primitives(
             ("app", "app"),
             ("buffers", "buffers"),
         ],
-        ContentKind::StatusBar => &[("commands", "commands"), ("faces", "faces")],
     };
     for &(primitive_namespace, context_namespace) in namespaces {
         let object = v8::Object::new(scope);

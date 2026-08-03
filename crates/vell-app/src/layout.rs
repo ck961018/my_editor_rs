@@ -71,7 +71,7 @@ impl<F: Frontend> App<F> {
             .session
             .view_for_space(target)
             .and_then(|view| self.session.view(view))
-            .filter(|view| view.content() == content)
+            .filter(|view| !view.is_status_bar() && view.content() == content)
             .map(|view| view.state().clone());
         let mode_names = self.session.mode_chain_for_new_view(content);
         let mut view = create_view(content, self.kernel.contents(), &mode_names)
@@ -175,7 +175,6 @@ pub(super) enum LayoutError {
     NoFocusableSpace,
     NoStatusBar,
     StatusBarSpace(SpaceId),
-    UnboundStatusBarView(ContentId),
     Scene(SceneError),
 }
 
@@ -193,11 +192,6 @@ impl fmt::Display for LayoutError {
             Self::StatusBarSpace(space) => {
                 write!(formatter, "space {} is managed by the status bar", space.0)
             }
-            Self::UnboundStatusBarView(content) => write!(
-                formatter,
-                "status-bar content {} requires an explicit view target",
-                content.0
-            ),
             Self::Scene(error) => write!(formatter, "scene mutation failed: {error:?}"),
         }
     }
