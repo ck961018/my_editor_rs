@@ -53,9 +53,10 @@
 - `runtime/plugins/`：内建插件及其清单、脚本和 worker。
 - `runtime/examples/`：受 TypeScript 与 Rust 测试覆盖的迁移示例。
 - `docs/design/`：当前实现的架构与边界说明。
+- `docs/adr/`：架构决策记录（Content 模型、ContentKind 等）。
+- `docs/roadmap/`：功能路线图。
 - `docs/superpowers/specs/`：已确认设计的历史规格记录。
 - `docs/scripting.md`：插件作者指南。
-- `docs/release.md`：CI 与人工发布门槛。
 
 ## Crate 依赖边界
 
@@ -142,7 +143,8 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
 - `runtime/editor.d.ts` 与 Rust schema 必须同步；改变任一侧时补充契约测试。
 - 内建插件通过 `plugin.json` 的 `order` 排序，不能在 Rust bootstrap 中按名
   选择 Vim 或 Tree-sitter。
-- adapter 使用 `on.buffer` 或 `on.statusBar`；只暴露该 ContentKind 合法
+- adapter 使用 `on.buffer`；状态栏分段经
+  `viewState.viewPolicy.statusBar` 提供。只暴露该 ContentKind 合法
   的 context 能力。
 - 脚本 state 必须是 JSON-compatible owned data。V8 handle、函数、Promise、
   循环引用和宿主引用不得进入 Mode state。

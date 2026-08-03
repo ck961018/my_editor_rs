@@ -114,7 +114,7 @@ enum ContentKind {
 `ContentKind` 是与 `Content` 一一对应的封闭判别值，由
 `Content::kind()` 穷尽映射。它不是插件字符串或动态 registry
 key；新增 Content 时必须同步处理所有静态分派位置。
-状态栏不是 Content：它是 View 的附属呈现位（见 5.3）。
+状态栏不是 Content：它是 View 的附属呈现位（见 5.2）。
 
 `ContentStore` 是唯一 Content 表，每个 entry 保存 Content 与 Revision。
 Content 自己分派具体变体的 view state、snapshot 和 query；Store 只负责
