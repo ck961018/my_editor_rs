@@ -104,22 +104,21 @@ view state，同时共享 Content 与 Mode content state。
 ```rust
 enum Content {
     Buffer(Buffer),
-    StatusBar(StatusBar),
 }
 
 enum ContentKind {
     Buffer,
-    StatusBar,
 }
 ```
 
-`ContentKind` 是与 `Content` 一一对应的封闭判别值，由 `Content::kind()`
-穷尽映射。它不是插件字符串或动态 registry key；新增 Content 时必须同步处理
-所有静态分派位置。
+`ContentKind` 是与 `Content` 一一对应的封闭判别值，由
+`Content::kind()` 穷尽映射。它不是插件字符串或动态 registry
+key；新增 Content 时必须同步处理所有静态分派位置。
+状态栏不是 Content：它是 View 的附属呈现位（见 5.3）。
 
 `ContentStore` 是唯一 Content 表，每个 entry 保存 Content 与 Revision。
 Content 自己分派具体变体的 view state、snapshot 和 query；Store 只负责
-ID、entry revision 与生命周期。app 不借出或识别 `Buffer`、`StatusBar`。
+ID、entry revision 与生命周期。app 不借出或识别 `Buffer`。
 Content 接收
 `ContentAction`、保存请求和后台 `ContentEvent`，不接收顶层 `Command`、
 原始按键或可变 View state。
@@ -150,18 +149,22 @@ View
 ```
 
 `ContentViewState` 是与封闭 Content 对齐的显式枚举：Buffer View 持有
-`BufferViewState { selections }`，StatusBar View 持有目标 `ViewId` 和
-`ContentId`。因此 Buffer View 始终具有 selections，StatusBar View
-不能误用文本状态。Content 与 View state 种类不匹配时返回结构化错误，不在
-生产路径 panic。View 不保存 Mode instance、presentation layer 或 history。
-Mode chain、输入状态和呈现缓存由 `ClientSession` 中的集中 store 管理。
+`BufferViewState { selections }`，因此 Buffer View 始终有 selections。
+View 还带有一个可选的 `status_target`：非空表示该 view 是状态栏
+呈现位，绑定服务的 editor view，不作为可聚焦内容 view。状态栏位
+复用 BufferViewState 但永不使用其 selections。View 不保存 Mode
+instance、presentation layer 或 history。Mode chain、输入状态和
+呈现缓存由 `ClientSession` 中的集中 store 管理。
 
-`ClientSession` 共享一个 StatusBar Content，并支持两种布局策略：全局策略
-只有一个 StatusBar View，其目标随焦点变化；per-pane 策略为每个 Buffer
-View 创建独立 StatusBar View。状态栏可通过把对应 Space 高度设为零独立
-隐藏。app 可按 View 查询单个状态栏，也可按 Content 查询全部对应状态栏。
-状态栏最终呈现是带 Face 的左、中、右分段；Mode 的
-`viewPolicy.statusBar` 可以替换默认呈现，TUI 只负责布局与绘制。
+状态栏不是 Content（ADR 0001）：由 `View::status_bar` 创建的
+呈现位承载，绑定服务的 editor content 并持有 `status_target`。
+`ClientSession` 支持两种布局策略：全局策略只有一个状态栏 View，
+其目标随焦点变化；per-pane 策略为每个 Buffer View 创建独立
+状态栏 View。状态栏可通过把对应 Space 高度设为零独立隐藏。
+app 可按 View 查询单个状态栏，也可按 Content 查询全部对应
+状态栏。状态栏最终呈现是带 Face 的左、中、右分段；呈现数据
+来自目标 view 的 `viewPolicy.statusBar`，可替换默认呈现，TUI
+只负责布局与绘制。
 
 ## 6. Mode 模型
 
@@ -175,29 +178,26 @@ Mode profile:     ContentId          -> ordered ModeName[]
 ```
 
 每个 View 可以附加多个有序 Mode。native 与 TypeScript Mode 实现同一个
-`Mode` contract；app 不按实现类型分支。每个定义通过 `ModeAdapters` 提供
-Buffer、StatusBar 中的一种或多种支持 slot。registry 在注册时冻结
+`Mode` contract；app 不按实现类型分支。每个定义通过 `ModeAdapters`
+提供 Buffer 支持 slot（封闭表只含 Buffer）。registry 在注册时冻结
 这张封闭 support table，并可按 `(ModeId, ContentKind)` 查询绑定了
-Mode definition 的 adapter。第一版的各 slot 共用同一个 definition，
-通过强类型 context 区分行为；runtime callback 只从已注册 adapter
+Mode definition 的 adapter。runtime callback 只从已注册 adapter
 进入。
 
-初始 profile 按 ContentKind 分别对 `before` 约束做稳定拓扑排序。
+初始 profile 对 `before` 约束做稳定拓扑排序。
 前向引用有效；无约束且同时可用的 Mode 保持配置
 顺序。目标不存在或同一 ContentKind 的约束成环时，启动返回
 结构化错误。目标不支持当前
 ContentKind 时，该约束不影响这条 ModeChain。
 
 `ModeContentContext` 和 `ModeViewContext` 都是按 `ContentKind` 封闭的
-enum。Buffer variant 仅提供强类型文本查询、细粒度资源事实、snapshot 和
-selections；StatusBar view variant 提供目标 ID 和目标 Content 的细粒度
-事实。一个多 adapter native Mode 可以按
-当前 variant 创建不同 state，不支持的能力不会出现在对应的强类型
+enum。Buffer variant 仅提供强类型文本查询、细粒度资源事实、snapshot
+和 selections。不支持的能力不会出现在对应的强类型
 context 上。Context 不借出 `&mut Content`、`&mut View` 或宿主对象。
-第一版保留一个 Rust `Mode` trait 和 closed adapter table，不复制两套
-生命周期 callback。TypeScript 通过 `on.buffer` 和
-`on.statusBar` 把同一边界映射为内容专属的用户 context，不建立另一套
-Mode runtime。
+TypeScript 通过 `on.buffer` 把同一边界映射为内容专属的用户 context，
+不建立另一套 Mode runtime。状态栏呈现不再经过 Mode adapter：插件通过
+buffer mode 的 `viewState.viewPolicy.statusBar` 提供，由 app 在
+render query 层组装。
 
 Mode action 返回有序 operation。action scope 决定允许的目标：content
 scope 不能产生 View operation，view scope 可以作用于绑定 View 与 Content。

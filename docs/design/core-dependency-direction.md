@@ -75,7 +75,7 @@ V8，`vell-protocol` 也不承担本地命令枚举或调用。
 ```text
 generic input trie <- dispatcher consumers
 text motion/range  <- Buffer edit planning
-Content            -> Buffer / StatusBar
+Content            -> Buffer
 ContentStore       -> Content
 ```
 

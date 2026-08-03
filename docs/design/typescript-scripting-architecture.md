@@ -109,11 +109,11 @@ editor.modes.define({
 });
 ```
 
-Buffer 与 StatusBar adapter 获得不同的静态 context。Buffer context 暴露
-资源名、路径、载体状态、脏状态、保存结果和文本统计；StatusBar view
-context 还暴露
-目标 View 与 Content ID，并可通过 `viewPolicy.statusBar` 定制左、中、右分段
-及 Face。StatusBar 不暴露 cursor、text edit 或 Buffer 文本能力。
+Buffer adapter 获得静态 context。Buffer context 暴露
+资源名、路径、载体状态、脏状态、保存结果和文本统计。
+状态栏呈现不经过 adapter：buffer mode 通过
+`viewState.viewPolicy.statusBar` 定制左、中、右分段及 Face，
+app 在 render query 层组装。Buffer context 不暴露状态栏目标 ID。
 
 ## 5. ScriptMode 与状态
 

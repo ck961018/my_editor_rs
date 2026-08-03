@@ -22,7 +22,8 @@ View 保存与一个 Content 绑定的会话状态；app 解析目标并原子�
 - attachment ordering 约束；
 - named Face 默认值。
 
-`ModeAdapters` 当前可包含 Buffer 和 StatusBar slot。native Mode 可以直接
+`ModeAdapters` 当前只包含 Buffer slot（状态栏是 View 附属呈现，
+不是 adapter slot）。native Mode 可以直接
 实现 `Mode`，也可以通过 `TypedMode` 与 `ErasedMode` 在静态状态类型和
 运行时类型擦除之间建立单一 adapter。TypeScript Mode 使用相同的 erased
 contract。
@@ -57,8 +58,11 @@ Space 只标识 Scene 布局节点，也不拥有 View 或 Mode 状态。
 
 - Buffer content context 可以查询文档状态、稳定文本快照和范围；
 - Buffer view context 还包含目标 View 的 selections；
-- StatusBar context 只提供状态栏相关 owned 数据；
 - 不合法的 cursor、edit 或 Buffer 文本能力不会出现在对应 adapter 上。
+
+状态栏呈现不进 adapter：buffer mode 通过 `viewPolicy.statusBar`
+提供分段文本与 Face，app 在 render query 层组装为
+`StatusBarPresentation`。
 
 Context 只在 callback 期间有效，不借出 `&mut Content`、`&mut View`、
 `ContentStore` 或 App。脚本 context 中的 native function 在 callback

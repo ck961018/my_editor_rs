@@ -38,8 +38,9 @@ ClientSession
 ```
 
 一个 Mode 定义可以同时提供 content state、view state、command、input、
-content-change observer、presentation 和 background job。它也可以为 Buffer
-和 StatusBar 中的一种或多种 ContentKind 提供 adapter。
+content-change observer、presentation 和 background job。它也可以为
+Buffer ContentKind 提供 adapter。状态栏是 View 的附属呈现位，
+不是 ContentKind，因此没有状态栏 adapter。
 
 ## 3. 统一 contract
 
@@ -62,7 +63,7 @@ TypeScript 的 `ScriptMode` 是这一 contract 的 adapter，不是第二套 Mod
 
 ## 4. ContentKind adapter
 
-当前封闭 ContentKind 为 Buffer 与 StatusBar。每个 adapter 决定：
+当前封闭 ContentKind 为 Buffer。每个 adapter 决定：
 
 - content state factory；
 - view state factory；
@@ -74,8 +75,10 @@ TypeScript 的 `ScriptMode` 是这一 contract 的 adapter，不是第二套 Mod
 
 `ModeContentContext` 和 `ModeViewContext` 也是封闭 enum。Buffer context
 可以读取文本快照和细粒度资源事实，Buffer view context 还能读取
-selections；StatusBar view context 包含目标 View、目标 Content 及其资源
-事实。Context 不借出可变 Content、View、ContentStore 或 App。
+selections。状态栏 view 不承载 Mode adapter：呈现数据来自服务的
+editor view 的 `viewPolicy.statusBar`，在 app 的 render query 层组装
+为 `ViewPresentation::StatusBar`。Context 不借出可变 Content、View、
+ContentStore 或 App。
 
 ## 5. Chain 与 profile
 

@@ -283,10 +283,9 @@ Viewport 原语包括按 pane 大小滚动和 cursor 对齐。`alignTop()`、
 
 Buffer context 通过 `resourceName`、`resourcePath`、`backingState`、
 `dirty`、`saveState` 和 `textMetrics` 暴露彼此独立的只读事实。
-StatusBar view context 还提供
-`targetViewId` 和 `targetContentId`。状态栏 Mode 可以在
+状态栏呈现不经过独立 context：buffer mode 在
 `viewPolicy.statusBar` 中定义带可选 Face 的 `left`、`center` 和 `right`
-分段。
+分段，app 把目标 buffer view 的 policy 组装为状态栏呈现。
 
 `context.app` 除保存和退出外，还提供 `closePane()`、
 `splitHorizontal()`、`splitVertical()` 与四个 `focus*()` 原语。pane close、
