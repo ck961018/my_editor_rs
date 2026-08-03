@@ -6,10 +6,10 @@ use crate::view::View;
 use vell_core::content_store::ContentStore;
 use vell_core::content_view_state::ContentViewState;
 use vell_protocol::content_query::{
-    BufferBackingState, ContentData, ContentQuery, ContentQueryKind, CursorStyle, DirtyState,
-    FaceName, FacePatch, RenderQuery, RenderQueryError, RowRange, SaveState, SelectionShape,
-    StatusBarPresentation, StatusBarSegment, TextDecoration, TextPresentation, ViewData,
-    ViewPresentation, DEFAULT_TAB_WIDTH, MAX_TAB_WIDTH,
+    BufferBackingState, ContentData, ContentQuery, ContentQueryKind, CursorStyle,
+    DEFAULT_TAB_WIDTH, DirtyState, FaceName, FacePatch, MAX_TAB_WIDTH, RenderQuery,
+    RenderQueryError, RowRange, SaveState, SelectionShape, StatusBarPresentation, StatusBarSegment,
+    TextDecoration, TextPresentation, ViewData, ViewPresentation,
 };
 use vell_protocol::ids::{ContentId, ViewId};
 
