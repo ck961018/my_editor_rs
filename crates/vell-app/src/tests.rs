@@ -74,6 +74,11 @@ mod baseline;
 struct ScriptedFrontend {
     events: VecDeque<FrontendEvent>,
     next_event_at: Option<tokio::time::Instant>,
+    // When set, next_event waits until `renders` reaches this count (bounded
+    // by next_event_at) before delivering the first event. Lets tests that
+    // rely on async worker results run on slow CI runners without a fixed
+    // wall-clock window.
+    wait_for_renders: Option<usize>,
     renders: usize,
     scene_revisions: Vec<Revision>,
     fail_next_event: bool,
@@ -1281,6 +1286,7 @@ impl ScriptedFrontend {
         Self {
             events: events.into(),
             next_event_at: None,
+            wait_for_renders: None,
             renders: 0,
             scene_revisions: Vec::new(),
             fail_next_event: false,
@@ -1301,7 +1307,13 @@ impl ScriptedFrontend {
 impl Frontend for ScriptedFrontend {
     async fn next_event(&mut self) -> io::Result<Option<FrontendEvent>> {
         if let Some(deadline) = self.next_event_at {
-            tokio::time::sleep_until(deadline).await;
+            if let Some(target) = self.wait_for_renders {
+                while self.renders < target && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            } else {
+                tokio::time::sleep_until(deadline).await;
+            }
         }
         if self.fail_next_event {
             self.fail_next_event = false;
@@ -1847,8 +1859,11 @@ async fn runtime_polls_worker_results_without_input() {
         vec![FrontendEvent::Key(KeyEvent::ctrl('q'))],
         file.path().to_str(),
     );
+    // Wait until the worker decoration render lands before quitting; a fixed
+    // window fails on slow CI runners where V8 cold start exceeds it.
+    app.frontend.wait_for_renders = Some(2);
     app.frontend.next_event_at =
-        Some(tokio::time::Instant::now() + std::time::Duration::from_millis(200));
+        Some(tokio::time::Instant::now() + std::time::Duration::from_secs(10));
     let view = view_id(&app, app.session.focused());
 
     app.run().await.unwrap();
