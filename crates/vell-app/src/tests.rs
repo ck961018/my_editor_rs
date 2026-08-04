@@ -74,11 +74,12 @@ mod baseline;
 struct ScriptedFrontend {
     events: VecDeque<FrontendEvent>,
     next_event_at: Option<tokio::time::Instant>,
-    // When set, next_event waits until `renders` reaches this count (bounded
-    // by next_event_at) before delivering the first event. Lets tests that
-    // rely on async worker results run on slow CI runners without a fixed
-    // wall-clock window.
-    wait_for_renders: Option<usize>,
+    // When set, next_event waits until a render carries decorations for the
+    // given view (bounded by next_event_at) before delivering the first
+    // event. Lets tests that rely on async worker results wait adaptively
+    // on slow CI runners instead of a fixed wall-clock window.
+    wait_for_decorations: Option<(ViewId, RowRange)>,
+    decorations_seen: bool,
     renders: usize,
     scene_revisions: Vec<Revision>,
     fail_next_event: bool,
@@ -1286,7 +1287,8 @@ impl ScriptedFrontend {
         Self {
             events: events.into(),
             next_event_at: None,
-            wait_for_renders: None,
+            wait_for_decorations: None,
+            decorations_seen: false,
             renders: 0,
             scene_revisions: Vec::new(),
             fail_next_event: false,
@@ -1307,8 +1309,8 @@ impl ScriptedFrontend {
 impl Frontend for ScriptedFrontend {
     async fn next_event(&mut self) -> io::Result<Option<FrontendEvent>> {
         if let Some(deadline) = self.next_event_at {
-            if let Some(target) = self.wait_for_renders {
-                while self.renders < target && tokio::time::Instant::now() < deadline {
+            if self.wait_for_decorations.is_some() {
+                while !self.decorations_seen && tokio::time::Instant::now() < deadline {
                     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 }
             } else {
@@ -1342,11 +1344,19 @@ impl Frontend for ScriptedFrontend {
         &mut self,
         _scene: &Scene,
         scene_revision: Revision,
-        _query: &dyn RenderQuery,
+        query: &dyn RenderQuery,
         _focused: SpaceId,
     ) -> io::Result<()> {
         self.renders += 1;
         self.scene_revisions.push(scene_revision);
+        if let Some((view, rows)) = self.wait_for_decorations
+            && !self.decorations_seen
+            && query
+                .decorations(view, rows)
+                .is_ok_and(|decorations| !decorations.is_empty())
+        {
+            self.decorations_seen = true;
+        }
         if self.fail_render {
             self.fail_render = false;
             return Err(io::Error::other("scripted render failure"));
@@ -1859,12 +1869,14 @@ async fn runtime_polls_worker_results_without_input() {
         vec![FrontendEvent::Key(KeyEvent::ctrl('q'))],
         file.path().to_str(),
     );
-    // Wait until the worker decoration render lands before quitting; a fixed
-    // window fails on slow CI runners where V8 cold start exceeds it.
-    app.frontend.wait_for_renders = Some(2);
-    app.frontend.next_event_at =
-        Some(tokio::time::Instant::now() + std::time::Duration::from_secs(10));
+    // Wait for the worker decoration render before quitting. The wait is
+    // adaptive (it ends as soon as decorations land); the deadline is only a
+    // fallback because worker cold start (V8 isolate + tree-sitter wasm
+    // compile) is slow on 2-core CI runners.
     let view = view_id(&app, app.session.focused());
+    app.frontend.wait_for_decorations = Some((view, RowRange { start: 0, end: 1 }));
+    app.frontend.next_event_at =
+        Some(tokio::time::Instant::now() + std::time::Duration::from_secs(120));
 
     app.run().await.unwrap();
 
