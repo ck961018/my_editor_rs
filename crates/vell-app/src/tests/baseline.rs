@@ -183,6 +183,7 @@ editor.modes.define({
         presentation: presentation.session.presentation(),
         faces: presentation.session.faces(),
     };
+    let body_space = presentation.session.body_space_for_view(view).unwrap();
     let visible_rows = RowRange {
         start: 5_000,
         end: 5_050,
@@ -190,7 +191,10 @@ editor.modes.define({
     let started = Instant::now();
     let mut visible_decorations = 0;
     for _ in 0..PRESENTATION_ITERATIONS {
-        visible_decorations += query.decorations(view, visible_rows).unwrap().len();
+        visible_decorations += query
+            .decorations(view, body_space, visible_rows)
+            .unwrap()
+            .len();
     }
     assert_eq!(visible_decorations, PRESENTATION_ITERATIONS * 50);
     report(

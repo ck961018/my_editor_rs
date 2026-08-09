@@ -9,11 +9,12 @@ use super::query::AppQuery;
 
 pub(super) fn respond(query: &AppQuery<'_>, request: Request) -> Response {
     let result = match request.data {
-        RequestData::View { view } => match query.views.get(&view) {
+        RequestData::View { view, space } => match query.views.get(&view) {
             Some(local_view) => query
-                .view(view)
+                .view(view, space)
                 .map(|data| ResponseData::View {
                     view,
+                    space,
                     revision: local_view.revision(),
                     data,
                 })
@@ -56,6 +57,7 @@ fn content_query_protocol_error(error: RenderQueryError) -> ProtocolError {
         RenderQueryError::UnsupportedContentQuery { .. } => ProtocolErrorCode::UnsupportedQuery,
         RenderQueryError::InvalidContentData { .. }
         | RenderQueryError::MissingView(_)
+        | RenderQueryError::UnmappedSpace { .. }
         | RenderQueryError::IncompatibleContentViewState { .. } => {
             ProtocolErrorCode::InvalidContentData
         }
@@ -73,7 +75,7 @@ mod tests {
     use vell_core::content::Content;
     use vell_core::content_store::ContentStore;
     use vell_protocol::content_query::{ContentData, ContentQuery, RowRange, ViewPresentation};
-    use vell_protocol::ids::{ContentId, ViewId};
+    use vell_protocol::ids::{ContentId, SpaceId, ViewId};
     use vell_protocol::remote::RequestId;
     use vell_protocol::revision::Revision;
 
@@ -91,7 +93,8 @@ mod tests {
             contents
                 .insert(content, Content::Buffer(Buffer::new()))
                 .unwrap();
-            let view = View::new(content, contents.create_view_state(content).unwrap());
+            let mut view = View::new(content, contents.create_view_state(content).unwrap());
+            view.assign_pane(SpaceId(0), crate::view::BODY_PANE);
             Self {
                 contents,
                 views: HashMap::from([(ViewId(0), view)]),
@@ -117,7 +120,10 @@ mod tests {
             &fixture.query(),
             Request {
                 id: RequestId(9),
-                data: RequestData::View { view: ViewId(0) },
+                data: RequestData::View {
+                    view: ViewId(0),
+                    space: SpaceId(0),
+                },
             },
         );
 
@@ -126,6 +132,7 @@ mod tests {
             response.result,
             Ok(ResponseData::View {
                 view: ViewId(0),
+                space: SpaceId(0),
                 revision: Revision(0),
                 data: vell_protocol::content_query::ViewData {
                     presentation: ViewPresentation::Text(_),
@@ -133,6 +140,26 @@ mod tests {
                 },
             })
         ));
+    }
+
+    #[test]
+    fn unmapped_space_is_an_invalid_view_state_error() {
+        let fixture = Fixture::new();
+        let response = respond(
+            &fixture.query(),
+            Request {
+                id: RequestId(3),
+                data: RequestData::View {
+                    view: ViewId(0),
+                    space: SpaceId(42),
+                },
+            },
+        );
+
+        assert_eq!(
+            response.result.unwrap_err().code,
+            ProtocolErrorCode::InvalidViewState
+        );
     }
 
     #[test]
@@ -166,7 +193,10 @@ mod tests {
             &fixture.query(),
             Request {
                 id: RequestId(1),
-                data: RequestData::View { view: ViewId(99) },
+                data: RequestData::View {
+                    view: ViewId(99),
+                    space: SpaceId(0),
+                },
             },
         );
         let unsupported = respond(

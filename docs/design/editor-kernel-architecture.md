@@ -72,7 +72,7 @@ App<F: Frontend>
 缓存。当前仍是一对一组合，没有 session registry 或并发共享容器。
 
 根二进制先加载内建与用户 TypeScript Mode，再由 `vell-app::bootstrap`
-分配 editor/status 的 `ContentId` 与初始 `ViewId`。
+分配 editor 的 `ContentId` 与初始 `ViewId`。
 每个 `ClientSession` 持有唯一 `SceneBuilder`。TUI 的 `SceneRenderer` 按
 `ViewId` 持有 viewport；后端 session 不保存终端滚动位置。
 
@@ -80,6 +80,7 @@ App<F: Frontend>
 
 ```text
 Scene:        SpaceId -> ViewId
+View pane:    (ViewId, SpaceId) -> PaneKey
 View:         ViewId -> ContentId + ContentViewState
 Content:      ContentId -> Content
 Mode content: (ModeId, ContentId) -> ModeState
@@ -91,7 +92,10 @@ Mode view:    (ModeId, ViewId) -> ModeState
 - `ContentId` 是可被多个 View 引用的共享内容；
 - `ModeId` 是一个 native 或 script Mode 定义。
 
-同一 `ViewId` 不能挂载到多个 Scene leaf。同一 `ContentId` 可以由多个
+同一 `ViewId` 可以挂载到多个 Scene leaf：一个 view 的正文与
+gutter/bar 等直属 Pane 各占一个 Content Space，view 端的
+`ViewPaneMap` 维护 SpaceId 与 PaneKey 的映射，渲染查询携带来源
+SpaceId。同一 `ContentId` 可以由多个
 View 展示；这些 View 拥有独立 selections、revision、viewport 和 Mode
 view state，同时共享 Content 与 Mode content state。
 
@@ -114,7 +118,7 @@ enum ContentKind {
 `ContentKind` 是与 `Content` 一一对应的封闭判别值，由
 `Content::kind()` 穷尽映射。它不是插件字符串或动态 registry
 key；新增 Content 时必须同步处理所有静态分派位置。
-状态栏不是 Content：它是 View 的附属呈现位（见 5.2）。
+状态栏不是 Content：它是 editor view 的直属 Pane（见 5.2）。
 
 `ContentStore` 是唯一 Content 表，每个 entry 保存 Content 与 Revision。
 Content 自己分派具体变体的 view state、snapshot 和 query；Store 只负责
@@ -145,25 +149,34 @@ decoration 查询都返回 `Result`；缺失 ID、不支持的查询、错误的
 View
 ├── ContentId
 ├── ContentViewState
-└── Revision
+├── Revision
+├── ViewPaneMap (SpaceId <-> PaneKey)
+├── switchable
+└── parent / children (语义树)
 ```
 
 `ContentViewState` 是与封闭 Content 对齐的显式枚举：Buffer View 持有
 `BufferViewState { selections }`，因此 Buffer View 始终有 selections。
-View 还带有一个可选的 `status_target`：非空表示该 view 是状态栏
-呈现位，绑定服务的 editor view，不作为可聚焦内容 view。状态栏位
-复用 BufferViewState 但永不使用其 selections。View 不保存 Mode
-instance、presentation layer 或 history。Mode chain、输入状态和
-呈现缓存由 `ClientSession` 中的集中 store 管理。
+View 是完整的展示单元：它可以控制多个直属 Pane（正文 `body`、
+状态栏 `builtin.status` 等），`ViewPaneMap` 维护 SpaceId 与 PaneKey
+的双向映射；渲染与事件查询携带来源 SpaceId，由 view 决定该 Pane
+的 presentation。View 不保存 Mode instance、presentation layer 或
+history。Mode chain、输入状态和呈现缓存由 `ClientSession` 中的
+集中 store 管理。
 
-状态栏不是 Content（ADR 0001）：由 `View::status_bar` 创建的
-呈现位承载，绑定服务的 editor content 并持有 `status_target`。
-`ClientSession` 支持两种布局策略：全局策略只有一个状态栏 View，
-其目标随焦点变化；per-pane 策略为每个 Buffer View 创建独立
-状态栏 View。状态栏可通过把对应 Space 高度设为零独立隐藏。
+`switchable` 是实例属性：通用 View 切换沿焦点 Pane 所属 view 的
+语义 `parent` 链向上，第一个 switchable 的 view 即切换目标。语义
+父子（复合 view 的组合关系）与 Space 布局父子是不同维度。
+
+状态栏不是 Content（ADR 0001），也不是独立 View：状态栏 Space 直接
+引用其服务的 editor view，并在该 view 的 `ViewPaneMap` 中登记为
+`builtin.status` Pane。`ClientSession` 支持两种布局策略：全局策略
+只有一个状态栏 Space，焦点变化时把它移交给新的焦点 editor view
+（改写 Space 的 view 引用）；per-pane 策略为每个 Buffer View 维护
+独立状态栏 Space。状态栏可通过把对应 Space 高度设为零独立隐藏。
 app 可按 View 查询单个状态栏，也可按 Content 查询全部对应
 状态栏。状态栏最终呈现是带 Face 的左、中、右分段；呈现数据
-来自目标 view 的 `viewPolicy.statusBar`，可替换默认呈现，TUI
+来自该 view 自身的 `viewPolicy.statusBar`，可替换默认呈现，TUI
 只负责布局与绘制。
 
 ## 6. Mode 模型

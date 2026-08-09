@@ -242,13 +242,13 @@ impl SessionFaces {
         self.environment.set_display_profile(profile);
     }
 
+    /// 状态栏 Pane 的根 face：随其所属 editor view 是否为活动 view 切换。
     pub(super) fn resolve_status_bar_root(
         &self,
-        target: ViewId,
-        content: vell_protocol::ids::ContentId,
         view: ViewId,
+        content: vell_protocol::ids::ContentId,
     ) -> PaintFace {
-        let name = if self.active_view.get() == Some(target) {
+        let name = if self.active_view.get() == Some(view) {
             "ui.status-bar"
         } else {
             "ui.status-bar.inactive"
@@ -609,10 +609,8 @@ mod tests {
         let faces = SessionFaces::new(FaceRegistry::default(), environment);
         faces.set_active_view(Some(ViewId(1)));
 
-        let active =
-            faces.resolve_status_bar_root(ViewId(1), vell_protocol::ids::ContentId(1), ViewId(10));
-        let inactive =
-            faces.resolve_status_bar_root(ViewId(2), vell_protocol::ids::ContentId(1), ViewId(10));
+        let active = faces.resolve_status_bar_root(ViewId(1), vell_protocol::ids::ContentId(1));
+        let inactive = faces.resolve_status_bar_root(ViewId(2), vell_protocol::ids::ContentId(1));
 
         assert_eq!(
             active.background,

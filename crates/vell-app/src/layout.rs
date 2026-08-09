@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 
 use crate::application::App;
@@ -16,11 +17,16 @@ pub enum StatusBarPlacement {
     PerPane,
 }
 
+/// 状态栏 Pane 的定位信息：状态栏不再是独立 view，而是某个 editor view
+/// 的 STATUS_PANE 直属 Pane。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StatusBarHandle {
-    pub view: ViewId,
-    pub content: ContentId,
+    /// 状态栏 Pane 所在的 Space。
+    pub space: SpaceId,
+    /// 当前拥有该 Pane 的 editor view。
     pub target_view: ViewId,
+    /// target_view 绑定的 content。
+    pub content: ContentId,
 }
 
 impl<F: Frontend> App<F> {
@@ -36,13 +42,17 @@ impl<F: Frontend> App<F> {
         self.session.status_bars_for_content(content)
     }
 
+    /// 焦点 Pane 所属 view 的通用切换目标（最近 switchable 祖先）。
+    pub fn switch_target(&self) -> Option<ViewId> {
+        self.session.switch_target(self.session.focused())
+    }
+
     pub fn set_status_bar_placement(
         &mut self,
         placement: StatusBarPlacement,
     ) -> std::io::Result<()> {
-        let (contents, modes, content_modes) = self.kernel.mode_attachment_parts();
         self.session
-            .set_status_bar_placement(placement, modes, content_modes, contents)
+            .set_status_bar_placement(placement)
             .map_err(std::io::Error::other)?;
         self.session
             .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
@@ -71,7 +81,7 @@ impl<F: Frontend> App<F> {
             .session
             .view_for_space(target)
             .and_then(|view| self.session.view(view))
-            .filter(|view| !view.is_status_bar() && view.content() == content)
+            .filter(|view| view.content() == content)
             .map(|view| view.state().clone());
         let mode_names = self.session.mode_chain_for_new_view(content);
         let mut view = create_view(content, self.kernel.contents(), &mode_names)
@@ -257,10 +267,21 @@ pub(super) fn view_for_space(scene: &Scene, space: SpaceId) -> Option<ViewId> {
     }
 }
 
-pub(super) fn space_for_view(scene: &Scene, view: ViewId) -> Option<SpaceId> {
-    scene_views(scene)
-        .into_iter()
-        .find_map(|(space, candidate)| (candidate == view).then_some(space))
+/// 通用 View 切换的目标解析：从焦点 Pane 所属 view 沿语义 parent 链向上，
+/// 第一个 switchable 的 view 即切换目标。
+pub(super) fn resolve_switch_target(
+    scene: &Scene,
+    views: &HashMap<ViewId, View>,
+    focused: SpaceId,
+) -> Option<ViewId> {
+    let mut current = view_for_space(scene, focused)?;
+    loop {
+        let view = views.get(&current)?;
+        if view.switchable() {
+            return Some(current);
+        }
+        current = view.parent()?;
+    }
 }
 
 pub(super) fn view_space_focusable(scene: &Scene, space: SpaceId) -> Option<bool> {

@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::ids::{ContentId, ViewId};
+use crate::ids::{ContentId, SpaceId, ViewId};
 use crate::selection::{Selections, TextOffset, TextPoint};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -589,6 +589,11 @@ pub enum ContentData {
 pub enum RenderQueryError {
     MissingView(ViewId),
     MissingContent(ContentId),
+    /// space 不是该 view 的直属 Pane：view 无法决定此处的显示内容。
+    UnmappedSpace {
+        view: ViewId,
+        space: SpaceId,
+    },
     UnsupportedContentQuery {
         content: ContentId,
         query: ContentQueryKind,
@@ -609,6 +614,13 @@ impl fmt::Display for RenderQueryError {
             Self::MissingView(view) => write!(formatter, "view {} does not exist", view.0),
             Self::MissingContent(content) => {
                 write!(formatter, "content {} does not exist", content.0)
+            }
+            Self::UnmappedSpace { view, space } => {
+                write!(
+                    formatter,
+                    "space {} is not a pane of view {}",
+                    space.0, view.0
+                )
             }
             Self::UnsupportedContentQuery { content, query } => {
                 write!(
@@ -634,12 +646,17 @@ impl fmt::Display for RenderQueryError {
 impl std::error::Error for RenderQueryError {}
 
 /// 前端通过消息拉取后端内容的只读契约。
+///
+/// 同一 view 可以对应多个 Content Space（正文与 gutter/bar 等直属 Pane），
+/// 因此按 view 拉取展示数据时必须携带来源 SpaceId，由 view 决定该 Pane
+/// 的具体 presentation。
 pub trait RenderQuery {
     fn content(&self, id: ContentId, query: ContentQuery) -> Result<ContentData, RenderQueryError>;
-    fn view(&self, id: ViewId) -> Result<ViewData, RenderQueryError>;
+    fn view(&self, id: ViewId, space: SpaceId) -> Result<ViewData, RenderQueryError>;
     fn decorations(
         &self,
         _view: ViewId,
+        _space: SpaceId,
         _visible_rows: RowRange,
     ) -> Result<Vec<TextDecoration>, RenderQueryError> {
         Ok(Vec::new())

@@ -11,8 +11,7 @@ use super::bootstrap::{bootstrap_editor, create_editor_session};
 use super::command_resolver::default_global_keymap;
 use super::dispatcher::{DispatchCommand, Dispatcher};
 use super::layout::{
-    LayoutError, NewView, StatusBarPlacement, focusable_view_count, resolve_focus, space_for_view,
-    view_for_space,
+    LayoutError, NewView, StatusBarPlacement, focusable_view_count, resolve_focus, view_for_space,
 };
 use super::message::{AppMessage, OpenedBuffer, OpenedPath};
 use super::query::AppQuery;
@@ -75,10 +74,10 @@ struct ScriptedFrontend {
     events: VecDeque<FrontendEvent>,
     next_event_at: Option<tokio::time::Instant>,
     // When set, next_event waits until a render carries decorations for the
-    // given view (bounded by next_event_at) before delivering the first
-    // event. Lets tests that rely on async worker results wait adaptively
-    // on slow CI runners instead of a fixed wall-clock window.
-    wait_for_decorations: Option<(ViewId, RowRange)>,
+    // given view body pane (bounded by next_event_at) before delivering the
+    // first event. Lets tests that rely on async worker results wait
+    // adaptively on slow CI runners instead of a fixed wall-clock window.
+    wait_for_decorations: Option<(ViewId, SpaceId, RowRange)>,
     decorations_seen: bool,
     renders: usize,
     scene_revisions: Vec<Revision>,
@@ -1349,10 +1348,10 @@ impl Frontend for ScriptedFrontend {
     ) -> io::Result<()> {
         self.renders += 1;
         self.scene_revisions.push(scene_revision);
-        if let Some((view, rows)) = self.wait_for_decorations
+        if let Some((view, space, rows)) = self.wait_for_decorations
             && !self.decorations_seen
             && query
-                .decorations(view, rows)
+                .decorations(view, space, rows)
                 .is_ok_and(|decorations| !decorations.is_empty())
         {
             self.decorations_seen = true;
@@ -1368,7 +1367,7 @@ impl Frontend for ScriptedFrontend {
         &mut self,
         _scene: &Scene,
         _scene_revision: Revision,
-        _view: ViewId,
+        _space: SpaceId,
         cursor_row: usize,
         command: ViewportCommand,
     ) -> io::Result<ResolvedViewportCommand> {
@@ -1694,7 +1693,11 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
             faces: app.session.faces(),
         };
         let decorations = query
-            .decorations(view, RowRange { start: 0, end: 1 })
+            .decorations(
+                view,
+                app.session.body_space_for_view(view).unwrap(),
+                RowRange { start: 0, end: 1 },
+            )
             .unwrap();
         if decorations.iter().any(|d| d.end.char_index == 2) {
             break;
@@ -1712,7 +1715,11 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
         faces: app.session.faces(),
     };
     let decorations = query
-        .decorations(view, RowRange { start: 0, end: 1 })
+        .decorations(
+            view,
+            app.session.body_space_for_view(view).unwrap(),
+            RowRange { start: 0, end: 1 },
+        )
         .unwrap();
     assert!(decorations.iter().any(|decoration| {
         decoration.start.char_index == 0
@@ -1734,7 +1741,11 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
         faces: app.session.faces(),
     };
     let decorations = query
-        .decorations(view, RowRange { start: 0, end: 2 })
+        .decorations(
+            view,
+            app.session.body_space_for_view(view).unwrap(),
+            RowRange { start: 0, end: 2 },
+        )
         .unwrap();
     assert!(!decorations.iter().any(|decoration| {
         decoration.start.char_index == 0
@@ -1750,7 +1761,11 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
             faces: app.session.faces(),
         };
         let decorations = query
-            .decorations(view, RowRange { start: 0, end: 1 })
+            .decorations(
+                view,
+                app.session.body_space_for_view(view).unwrap(),
+                RowRange { start: 0, end: 1 },
+            )
             .unwrap();
         if decorations.iter().any(|d| d.end.char_index == 4) {
             break;
@@ -1768,7 +1783,11 @@ async fn rust_highlighting_is_parsed_and_updated_in_background() {
         faces: app.session.faces(),
     };
     let decorations = query
-        .decorations(view, RowRange { start: 0, end: 1 })
+        .decorations(
+            view,
+            app.session.body_space_for_view(view).unwrap(),
+            RowRange { start: 0, end: 1 },
+        )
         .unwrap();
     assert!(
         decorations.iter().any(|decoration| {
@@ -1805,7 +1824,11 @@ async fn markdown_and_fenced_rust_are_highlighted() {
             faces: app.session.faces(),
         };
         let decorations = query
-            .decorations(view, RowRange { start: 0, end: 6 })
+            .decorations(
+                view,
+                app.session.body_space_for_view(view).unwrap(),
+                RowRange { start: 0, end: 6 },
+            )
             .unwrap();
         if !decorations.is_empty() {
             break;
@@ -1823,7 +1846,11 @@ async fn markdown_and_fenced_rust_are_highlighted() {
         faces: app.session.faces(),
     };
     let decorations = query
-        .decorations(view, RowRange { start: 0, end: 6 })
+        .decorations(
+            view,
+            app.session.body_space_for_view(view).unwrap(),
+            RowRange { start: 0, end: 6 },
+        )
         .unwrap();
     assert!(decorations.iter().any(|decoration| {
         decoration.start.char_index == 0
@@ -1874,7 +1901,11 @@ async fn runtime_polls_worker_results_without_input() {
     // fallback because worker cold start (V8 isolate + tree-sitter wasm
     // compile) is slow on 2-core CI runners.
     let view = view_id(&app, app.session.focused());
-    app.frontend.wait_for_decorations = Some((view, RowRange { start: 0, end: 1 }));
+    app.frontend.wait_for_decorations = Some((
+        view,
+        app.session.body_space_for_view(view).unwrap(),
+        RowRange { start: 0, end: 1 },
+    ));
     app.frontend.next_event_at =
         Some(tokio::time::Instant::now() + std::time::Duration::from_secs(120));
 
@@ -1887,7 +1918,11 @@ async fn runtime_polls_worker_results_without_input() {
         faces: app.session.faces(),
     };
     let decorations = query
-        .decorations(view, RowRange { start: 0, end: 1 })
+        .decorations(
+            view,
+            app.session.body_space_for_view(view).unwrap(),
+            RowRange { start: 0, end: 1 },
+        )
         .unwrap();
     assert!(app.frontend.renders >= 2);
     assert!(decorations.iter().any(|decoration| {
@@ -1913,7 +1948,11 @@ async fn rust_highlighting_survives_crlf_comment_edits() {
             faces: app.session.faces(),
         };
         let decorations = query
-            .decorations(view, RowRange { start: 0, end: 2 })
+            .decorations(
+                view,
+                app.session.body_space_for_view(view).unwrap(),
+                RowRange { start: 0, end: 2 },
+            )
             .unwrap();
         if !decorations.is_empty() {
             break;
@@ -1938,7 +1977,11 @@ async fn rust_highlighting_survives_crlf_comment_edits() {
             faces: app.session.faces(),
         };
         let decorations = query
-            .decorations(view, RowRange { start: 0, end: 2 })
+            .decorations(
+                view,
+                app.session.body_space_for_view(view).unwrap(),
+                RowRange { start: 0, end: 2 },
+            )
             .unwrap();
         if decorations
             .iter()
@@ -1959,7 +2002,11 @@ async fn rust_highlighting_survives_crlf_comment_edits() {
         faces: app.session.faces(),
     };
     let decorations = query
-        .decorations(view, RowRange { start: 0, end: 2 })
+        .decorations(
+            view,
+            app.session.body_space_for_view(view).unwrap(),
+            RowRange { start: 0, end: 2 },
+        )
         .unwrap();
     assert!(
         decorations.iter().any(|decoration| {
@@ -2376,7 +2423,12 @@ fn content_query_reads_buffer_and_view() {
             .unwrap(),
         ContentData::TextRows(vec!["hi".to_string()])
     );
-    let view = query.view(focused_view).unwrap();
+    let view = query
+        .view(
+            focused_view,
+            app.session.body_space_for_view(focused_view).unwrap(),
+        )
+        .unwrap();
     let text = text_presentation(&view);
     assert_eq!(text.selections.primary().head().char_index, 2);
     assert_eq!(text.cursor_style, CursorStyle::Block);
@@ -2412,7 +2464,7 @@ fn content_query_reads_buffer_and_view() {
         Err(RenderQueryError::MissingContent(ContentId(1)))
     );
     assert_eq!(
-        query.decorations(ViewId(99), RowRange { start: 0, end: 1 }),
+        query.decorations(ViewId(99), SpaceId(0), RowRange { start: 0, end: 1 }),
         Err(RenderQueryError::MissingView(ViewId(99)))
     );
 }
@@ -2500,7 +2552,12 @@ fn recursive_mode_command_chain_stops_at_the_execution_limit() {
         faces: app.session.faces(),
     };
     assert_eq!(
-        text_presentation(&query.view(view).unwrap()).cursor_style,
+        text_presentation(
+            &query
+                .view(view, app.session.body_space_for_view(view).unwrap())
+                .unwrap()
+        )
+        .cursor_style,
         CursorStyle::Default
     );
 }
@@ -2783,7 +2840,12 @@ async fn failed_capture_output_restores_the_pre_input_mode_state() {
         faces: app.session.faces(),
     };
     assert_eq!(
-        text_presentation(&query.view(view).unwrap()).cursor_style,
+        text_presentation(
+            &query
+                .view(view, app.session.body_space_for_view(view).unwrap())
+                .unwrap()
+        )
+        .cursor_style,
         CursorStyle::Default
     );
 }
@@ -2816,7 +2878,12 @@ fn failed_timeout_output_restores_the_pre_timeout_mode_state() {
         faces: app.session.faces(),
     };
     assert_eq!(
-        text_presentation(&query.view(view).unwrap()).cursor_style,
+        text_presentation(
+            &query
+                .view(view, app.session.body_space_for_view(view).unwrap())
+                .unwrap()
+        )
+        .cursor_style,
         CursorStyle::Default
     );
 }
@@ -2884,7 +2951,12 @@ async fn stale_view_presentation_layer_is_not_observed() {
         faces: app.session.faces(),
     };
     assert_eq!(
-        text_presentation(&query.view(view).unwrap()).cursor_style,
+        text_presentation(
+            &query
+                .view(view, app.session.body_space_for_view(view).unwrap())
+                .unwrap()
+        )
+        .cursor_style,
         CursorStyle::Bar
     );
 
@@ -2896,20 +2968,23 @@ async fn stale_view_presentation_layer_is_not_observed() {
         faces: app.session.faces(),
     };
     assert_eq!(
-        text_presentation(&query.view(view).unwrap()).cursor_style,
+        text_presentation(
+            &query
+                .view(view, app.session.body_space_for_view(view).unwrap())
+                .unwrap()
+        )
+        .cursor_style,
         CursorStyle::Default
     );
 }
 
 #[test]
-fn status_bar_view_data_has_no_text_selection_or_mode_cursor() {
+fn status_pane_query_returns_status_bar_presentation() {
     let app = make_app(vec![], None);
-    let status_view = app
-        .session
-        .views()
-        .iter()
-        .find_map(|(id, view)| view.is_status_bar().then_some(*id))
-        .expect("status bar view exists");
+    let editor = view_id(&app, app.session.focused());
+    let status = app
+        .status_bar_for_view(editor)
+        .expect("default editor has a status bar");
     let query = AppQuery {
         contents: app.kernel.contents(),
         views: app.session.views(),
@@ -2917,8 +2992,99 @@ fn status_bar_view_data_has_no_text_selection_or_mode_cursor() {
         faces: app.session.faces(),
     };
 
-    let view = query.view(status_view).unwrap();
+    let view = query.view(status.target_view, status.space).unwrap();
     assert!(matches!(view.presentation, ViewPresentation::StatusBar(_)));
+}
+
+#[test]
+fn switch_target_resolves_nearest_switchable_ancestor() {
+    let mut app = make_app(vec![], None);
+    let left_space = app.session.focused();
+    let left = view_id(&app, left_space);
+    let right_space = app
+        .split_space(left_space, editor_cid(), true, SplitDirection::Right, false)
+        .unwrap()
+        .new_space;
+    let right = view_id(&app, right_space);
+    let coordinator_space = app
+        .split_space(right_space, editor_cid(), true, SplitDirection::Down, false)
+        .unwrap()
+        .new_space;
+    let coordinator = view_id(&app, coordinator_space);
+
+    // 独立 BufferView 默认 switchable：切换目标是焦点 view 自身。
+    assert_eq!(app.switch_target(), Some(left));
+
+    // DiffView 语义树的结构模型：left/right 作为复合 view 的子 view 不可
+    // 切换，coordinator 充当复合 view（无需真实 diff 数据即可验证解析）。
+    for child in [left, right] {
+        let view = app.session.view_mut(child).unwrap();
+        view.set_switchable(false);
+        view.set_parent(Some(coordinator));
+    }
+    let parent = app.session.view_mut(coordinator).unwrap();
+    parent.push_child(left);
+    parent.push_child(right);
+
+    // 焦点位于任一子 view 的 Pane 时，通用切换作用于整个复合 view。
+    assert_eq!(app.session.switch_target(left_space), Some(coordinator));
+    assert_eq!(app.session.switch_target(right_space), Some(coordinator));
+    assert_eq!(
+        app.session.switch_target(coordinator_space),
+        Some(coordinator)
+    );
+
+    // 整条 parent 链都不可切换时没有切换目标。
+    app.session
+        .view_mut(coordinator)
+        .unwrap()
+        .set_switchable(false);
+    assert_eq!(app.session.switch_target(left_space), None);
+}
+
+#[test]
+fn compound_view_children_keep_independent_selections() {
+    let mut app = make_app(vec![], None);
+    let left_space = app.session.focused();
+    let left = view_id(&app, left_space);
+    let right_space = app
+        .split_space(left_space, editor_cid(), true, SplitDirection::Right, false)
+        .unwrap()
+        .new_space;
+    let right = view_id(&app, right_space);
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("shared".to_string())),
+        view: left,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    // 与复合 view 相同的绑定形态：两个子 view 共享 content，但 selection
+    // 相互独立（子 view 各自持有完整 ContentViewState）。
+    app.session
+        .apply_view_action(
+            right,
+            ViewAction::SetSelections(Selections::single(Selection::collapsed(TextOffset {
+                char_index: 3,
+            }))),
+            app.kernel.contents(),
+        )
+        .unwrap();
+
+    let left_head = app.session.views()[&left]
+        .selections()
+        .unwrap()
+        .primary()
+        .head()
+        .char_index;
+    let right_head = app.session.views()[&right]
+        .selections()
+        .unwrap()
+        .primary()
+        .head()
+        .char_index;
+    assert_eq!(left_head, "shared".chars().count());
+    assert_eq!(right_head, 3);
 }
 
 #[test]
@@ -2931,14 +3097,12 @@ fn status_bar_is_globally_shared_by_default_and_can_be_hidden() {
 
     assert_eq!(app.status_bar_placement(), StatusBarPlacement::Global);
     assert_eq!(app.status_bars_for_content(editor_cid()), vec![status]);
-    assert_eq!(app.status_bar_for_view(status.view), None);
     assert_eq!(app.status_bar_for_view(ViewId(99)), None);
 
     app.set_status_bar_visible(None, false).unwrap();
 
-    let status_space = space_for_view(app.session.scene(), status.view).unwrap();
     assert!(matches!(
-        app.session.scene().node(status_space).space.sizing,
+        app.session.scene().node(status.space).space.sizing,
         Sizing::Fixed(0)
     ));
 }
@@ -2961,17 +3125,12 @@ fn global_status_bar_retargets_after_close_and_replace() {
     app.close_space(right_space).unwrap();
 
     let status = app.status_bar_for_view(left_view).unwrap();
-    assert_eq!(
-        app.session.views()[&status.view].status_target(),
-        Some(left_view)
-    );
+    assert_eq!(status.target_view, left_view);
 
     app.replace_space_content(left_space, other, true).unwrap();
     let replacement = view_id(&app, left_space);
-    assert_eq!(
-        app.session.views()[&status.view].status_target(),
-        Some(replacement)
-    );
+    let status = app.status_bar_for_view(replacement).unwrap();
+    assert_eq!(status.target_view, replacement);
 }
 
 #[test]
@@ -2982,7 +3141,7 @@ fn managed_status_bar_spaces_reject_layout_mutations() {
         let editor_space = app.session.focused();
         let editor = view_id(&app, editor_space);
         let status = app.status_bar_for_view(editor).unwrap();
-        let status_space = space_for_view(app.session.scene(), status.view).unwrap();
+        let status_space = status.space;
         let revision = app.session.scene_revision();
         let next_view = app.session.next_view_id_for_test();
 
@@ -3135,8 +3294,8 @@ fn per_pane_status_bars_are_distinct_and_independently_hidden() {
         .unwrap();
     app.set_status_bar_visible(Some(queried_left_status.target_view), false)
         .unwrap();
-    let left_status_space = space_for_view(app.session.scene(), left_status.view).unwrap();
-    let right_status_space = space_for_view(app.session.scene(), right_status.view).unwrap();
+    let left_status_space = left_status.space;
+    let right_status_space = right_status.space;
     assert!(matches!(
         app.session.scene().node(left_status_space).space.sizing,
         Sizing::Fixed(0)
@@ -3197,7 +3356,11 @@ editor.modes.define({
         faces: app.session.faces(),
     };
 
-    let presentation = match query.view(status.view).unwrap().presentation {
+    let presentation = match query
+        .view(status.target_view, status.space)
+        .unwrap()
+        .presentation
+    {
         ViewPresentation::StatusBar(presentation) => presentation,
         ViewPresentation::Text(_) => panic!("expected status-bar presentation"),
     };
@@ -3253,7 +3416,10 @@ fn status_texts(app: &App<ScriptedFrontend>) -> (Vec<String>, Vec<String>, Vec<S
         presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
-    let ViewPresentation::StatusBar(presentation) = query.view(status.view).unwrap().presentation
+    let ViewPresentation::StatusBar(presentation) = query
+        .view(status.target_view, status.space)
+        .unwrap()
+        .presentation
     else {
         panic!("expected status-bar presentation");
     };
@@ -3315,8 +3481,12 @@ async fn two_views_of_one_buffer_keep_independent_mode_instances() {
         faces: app.session.faces(),
     };
     let right_id = view_id(&app, right);
-    let left_view = query.view(left_id).unwrap();
-    let right_view = query.view(right_id).unwrap();
+    let left_view = query
+        .view(left_id, app.session.body_space_for_view(left_id).unwrap())
+        .unwrap();
+    let right_view = query
+        .view(right_id, app.session.body_space_for_view(right_id).unwrap())
+        .unwrap();
     let left_text = text_presentation(&left_view);
     let right_text = text_presentation(&right_view);
 
@@ -3365,7 +3535,6 @@ fn one_mode_can_attach_canonical_adapter_to_buffer_content() {
         .session
         .views()
         .iter()
-        .filter(|(_, view)| !view.is_status_bar())
         .map(|(id, view)| (*id, app.kernel.contents().kind(view.content()).unwrap()))
     {
         assert_eq!(
@@ -3457,7 +3626,7 @@ async fn content_mode_binding_is_shared_and_coexists_with_view_modes() {
         faces: app.session.faces(),
     };
     for space in [left, right] {
-        let view = query.view(view_id(&app, space)).unwrap();
+        let view = query.view(view_id(&app, space), space).unwrap();
         assert_eq!(text_presentation(&view).cursor_style, CursorStyle::Block);
     }
 
@@ -3995,9 +4164,7 @@ fn reload_buffer_guards_dirty_text_and_force_installs_disk_state() {
         .session
         .views()
         .iter()
-        .find(|(candidate, state)| {
-            **candidate != view && !state.is_status_bar() && state.content() == content
-        })
+        .find(|(candidate, state)| **candidate != view && state.content() == content)
         .unwrap()
         .0;
     app.execute_command(DispatchCommand::ModeOperations {
@@ -4012,7 +4179,7 @@ fn reload_buffer_guards_dirty_text_and_force_installs_disk_state() {
         .session
         .views()
         .values()
-        .filter(|view| !view.is_status_bar() && view.content() == content)
+        .filter(|view| view.content() == content)
         .map(|view| view.selections().unwrap().primary().head().char_index)
         .collect::<Vec<_>>();
     before_heads.sort_unstable();
@@ -4032,7 +4199,7 @@ fn reload_buffer_guards_dirty_text_and_force_installs_disk_state() {
         .session
         .views()
         .values()
-        .filter(|view| !view.is_status_bar() && view.content() == content)
+        .filter(|view| view.content() == content)
         .map(|view| view.selections().unwrap().primary().head().char_index)
         .collect::<Vec<_>>();
     reloaded_heads.sort_unstable();
@@ -4526,10 +4693,16 @@ fn mode_decorations_are_resolved_through_named_faces() {
         faces: app.session.faces(),
     };
 
-    let view_data = query.view(view).unwrap();
+    let view_data = query
+        .view(view, app.session.body_space_for_view(view).unwrap())
+        .unwrap();
     let presentation = text_presentation(&view_data);
     let decorations = query
-        .decorations(view, RowRange { start: 0, end: 1 })
+        .decorations(
+            view,
+            app.session.body_space_for_view(view).unwrap(),
+            RowRange { start: 0, end: 1 },
+        )
         .unwrap();
 
     assert_eq!(decorations.len(), 1);
@@ -4718,7 +4891,11 @@ fn passive_mode_failure_does_not_rollback_text_and_suspends_presentation() {
         };
         assert_eq!(
             query
-                .decorations(view, RowRange { start: 0, end: 1 })
+                .decorations(
+                    view,
+                    app.session.body_space_for_view(view).unwrap(),
+                    RowRange { start: 0, end: 1 }
+                )
                 .unwrap()
                 .len(),
             1
@@ -4741,7 +4918,11 @@ fn passive_mode_failure_does_not_rollback_text_and_suspends_presentation() {
     };
     assert!(
         query
-            .decorations(view, RowRange { start: 0, end: 1 })
+            .decorations(
+                view,
+                app.session.body_space_for_view(view).unwrap(),
+                RowRange { start: 0, end: 1 }
+            )
             .unwrap()
             .is_empty()
     );
@@ -4782,7 +4963,11 @@ fn mode_factory_failures_suspend_only_the_failed_attachments() {
     };
     assert!(
         query
-            .decorations(view, RowRange { start: 0, end: 1 })
+            .decorations(
+                view,
+                app.session.body_space_for_view(view).unwrap(),
+                RowRange { start: 0, end: 1 }
+            )
             .unwrap()
             .is_empty()
     );
@@ -6038,7 +6223,11 @@ async fn ctrl_s_saves_file_and_marks_saved() {
         presentation: app.session.presentation(),
         faces: app.session.faces(),
     };
-    let presentation = match query.view(status.view).unwrap().presentation {
+    let presentation = match query
+        .view(status.target_view, status.space)
+        .unwrap()
+        .presentation
+    {
         ViewPresentation::StatusBar(presentation) => presentation,
         ViewPresentation::Text(_) => panic!("expected status-bar presentation"),
     };
@@ -7961,27 +8150,6 @@ fn raw_view_mode_content_action_maps_its_source_view() {
 }
 
 #[test]
-fn status_bar_view_content_operation_targets_its_bound_content() {
-    let mut app = make_app(vec![], None);
-    let status_view = app
-        .session
-        .views()
-        .iter()
-        .find_map(|(id, view)| view.is_status_bar().then_some(*id))
-        .unwrap();
-    let change = TextChangeSet::from_edits(0, vec![TextEdit::new(0..0, "x")]).unwrap();
-
-    app.execute_command(DispatchCommand::ModeOperations {
-        operations: vec![view_content(ContentAction::Text(change))],
-        view: status_view,
-        content: editor_cid(),
-    })
-    .unwrap();
-
-    assert_eq!(text_rows(&app, editor_cid()), vec!["x"]);
-}
-
-#[test]
 fn content_scoped_origin_cannot_smuggle_a_view_operation() {
     let mut app = make_app(vec![], None);
     let request = crate::operation::OperationRequest::View {
@@ -9677,7 +9845,7 @@ editor.commands.register("test.resumeClosed", async () => {
         std::slice::from_ref(&capture_id),
     );
     let original_view = view_id(&app, app.session.focused());
-    let original_space = space_for_view(app.session.scene(), original_view).unwrap();
+    let original_space = app.session.body_space_for_view(original_view).unwrap();
     app.execute_command(DispatchCommand::Registered {
         invocation: CommandInvocation::new(CommandId::new("splitHorizontal").unwrap(), Vec::new()),
         view: original_view,

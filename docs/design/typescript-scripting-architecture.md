@@ -113,7 +113,8 @@ Buffer adapter 获得静态 context。Buffer context 暴露
 资源名、路径、载体状态、脏状态、保存结果和文本统计。
 状态栏呈现不经过 adapter：buffer mode 通过
 `viewState.viewPolicy.statusBar` 定制左、中、右分段及 Face，
-app 在 render query 层组装。Buffer context 不暴露状态栏目标 ID。
+app 在 render query 层按状态栏 Pane 组装。Buffer context 不暴露
+Pane 或 Space 标识。
 
 ## 5. ScriptMode 与状态
 

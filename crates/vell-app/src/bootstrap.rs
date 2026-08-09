@@ -341,7 +341,8 @@ mod tests {
         );
 
         assert_eq!(session.views()[&ViewId(0)].content(), editor);
-        assert_eq!(session.next_view_id_for_test(), 2);
+        // 状态栏是 editor view 的直属 Pane，不再消耗 view id。
+        assert_eq!(session.next_view_id_for_test(), 1);
     }
 
     #[test]

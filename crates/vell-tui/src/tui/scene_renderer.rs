@@ -69,18 +69,23 @@ impl SceneRenderer {
         let resolved: &ResolvedScene = self.engine.layout(scene, scene_revision);
         let live_views: HashSet<ViewId> = resolved.items.iter().map(|item| item.view_id).collect();
         self.viewports.retain(|view, _| live_views.contains(view));
-        let views: HashMap<ViewId, ViewData> = resolved
+        // 同一 view 可占据多个 Space（正文 + gutter/bar），展示数据按 Space 拉取。
+        let views: HashMap<SpaceId, ViewData> = resolved
             .items
             .iter()
-            .map(|item| query.view(item.view_id).map(|view| (item.view_id, view)))
+            .map(|item| {
+                query
+                    .view(item.view_id, item.space_id)
+                    .map(|view| (item.space_id, view))
+            })
             .collect::<Result<_, RenderQueryError>>()
             .map_err(io::Error::other)?;
         canvas.hide_cursor()?;
         // 焦点 viewport 跟随
         let focused_item = resolved.items.iter().find(|item| item.space_id == focused);
         let focused_view = views
-            .get(&focused_item.expect("focused item exists").view_id)
-            .expect("focused view has render data");
+            .get(&focused_item.expect("focused item exists").space_id)
+            .expect("focused space has render data");
         let focused_text = match &focused_view.presentation {
             ViewPresentation::Text(text) => Some(text),
             ViewPresentation::StatusBar(_) => None,
@@ -128,7 +133,7 @@ impl SceneRenderer {
                 item,
                 query,
                 views
-                    .get(&item.view_id)
+                    .get(&item.space_id)
                     .expect("resolved item has view data"),
                 &self.viewports,
                 canvas,
@@ -166,12 +171,12 @@ impl SceneRenderer {
         &mut self,
         scene: &Scene,
         scene_revision: Revision,
-        view: ViewId,
+        space: SpaceId,
         cursor_row: usize,
         command: ViewportCommand,
     ) -> ResolvedViewportCommand {
         let resolved = self.engine.layout(scene, scene_revision);
-        let Some(item) = resolved.items.iter().find(|item| item.view_id == view) else {
+        let Some(item) = resolved.items.iter().find(|item| item.space_id == space) else {
             return ResolvedViewportCommand::Scroll {
                 direction: ViewportMoveDirection::Down,
                 lines: 0,
@@ -468,6 +473,7 @@ fn paint_text_item(
     let text_decorations = query
         .decorations(
             vid,
+            item.space_id,
             RowRange {
                 start,
                 end: start + height,
@@ -955,7 +961,7 @@ mod tests {
                 }),
             })
         }
-        fn view(&self, view: ViewId) -> Result<ViewData, RenderQueryError> {
+        fn view(&self, view: ViewId, _space: SpaceId) -> Result<ViewData, RenderQueryError> {
             Ok(if view == ViewId(1) {
                 status_view(ContentId(1))
             } else {
@@ -988,7 +994,7 @@ mod tests {
             }
         }
 
-        fn view(&self, view: ViewId) -> Result<ViewData, RenderQueryError> {
+        fn view(&self, view: ViewId, _space: SpaceId) -> Result<ViewData, RenderQueryError> {
             Err(RenderQueryError::MissingView(view))
         }
     }
@@ -1029,7 +1035,7 @@ mod tests {
             })
         }
 
-        fn view(&self, view: ViewId) -> Result<ViewData, RenderQueryError> {
+        fn view(&self, view: ViewId, _space: SpaceId) -> Result<ViewData, RenderQueryError> {
             Ok(self
                 .selections
                 .get(&view)
@@ -1326,6 +1332,83 @@ mod tests {
         assert!(s.contains("f.txt"), "{s}");
     }
 
+    /// 正文与状态栏 Space 共用同一 ViewId 时，presentation 按来源 Space 区分。
+    struct PaneQuery {
+        lines: Vec<String>,
+        selections: Selections,
+    }
+
+    impl RenderQuery for PaneQuery {
+        fn content(
+            &self,
+            cid: ContentId,
+            query: ContentQuery,
+        ) -> Result<ContentData, RenderQueryError> {
+            Ok(match query {
+                ContentQuery::TextRows(range) => ContentData::TextRows(
+                    self.lines
+                        .iter()
+                        .skip(range.start)
+                        .take(range.end.saturating_sub(range.start))
+                        .cloned()
+                        .collect(),
+                ),
+                ContentQuery::TextPoints(offsets) => {
+                    ContentData::TextPoints(points_for_lines(&self.lines, offsets))
+                }
+                ContentQuery::ResourceName => ContentData::ResourceName(Some("f.txt".to_owned())),
+                ContentQuery::ResourcePath => ContentData::ResourcePath(None),
+                ContentQuery::BackingState => {
+                    ContentData::BackingState(BufferBackingState::Materialized)
+                }
+                ContentQuery::DirtyState => ContentData::DirtyState(DirtyState::Clean),
+                ContentQuery::SaveState => ContentData::SaveState(SaveState::Idle),
+                ContentQuery::TextMetrics => {
+                    let _ = cid;
+                    ContentData::TextMetrics(TextMetrics {
+                        line_count: self.lines.len(),
+                        char_count: self.lines.iter().map(|line| line.chars().count()).sum(),
+                    })
+                }
+            })
+        }
+
+        fn view(&self, _view: ViewId, space: SpaceId) -> Result<ViewData, RenderQueryError> {
+            Ok(if space == SpaceId(1) {
+                status_view(ContentId(0))
+            } else {
+                text_view(ContentId(0), self.selections.clone(), CursorStyle::Default)
+            })
+        }
+    }
+
+    #[test]
+    fn one_view_renders_distinct_presentations_per_pane() {
+        // editor_scene 的两个 Content Space（SpaceId 0 正文 / SpaceId 1 状态栏）
+        // 引用同一个 ViewId。
+        let (scene, editor) = editor_scene(40, 5, ViewId(0), ViewId(0));
+        let query = PaneQuery {
+            lines: vec!["hello".to_string()],
+            selections: Selections::single(Selection::collapsed(TextOffset::origin())),
+        };
+        let mut renderer = SceneRenderer::new();
+        let mut out = Output::new(Vec::new());
+
+        renderer
+            .render(
+                &scene,
+                Revision(0),
+                &query,
+                editor,
+                &mut out as &mut dyn Canvas,
+            )
+            .unwrap();
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert!(output.contains("hello"), "body pane: {output}");
+        assert!(output.contains("f.txt"), "status pane: {output}");
+    }
+
     #[test]
     fn viewport_follows_cursor_below() {
         let (scene, ed) = editor_scene(40, 5, ViewId(0), ViewId(1));
@@ -1353,7 +1436,7 @@ mod tests {
 
     #[test]
     fn viewport_commands_resolve_half_and_full_page_from_layout_height() {
-        let (scene, _editor) = editor_scene(40, 5, ViewId(0), ViewId(1));
+        let (scene, editor) = editor_scene(40, 5, ViewId(0), ViewId(1));
         let mut renderer = SceneRenderer::new();
         renderer.viewports.insert(
             ViewId(0),
@@ -1368,16 +1451,14 @@ mod tests {
             ViewportMoveAmount::HalfPage,
             crate::protocol::viewport::ViewportCursorBehavior::Move,
         );
-        let half =
-            renderer.resolve_viewport_command(&scene, Revision(0), ViewId(0), 0, half_command);
+        let half = renderer.resolve_viewport_command(&scene, Revision(0), editor, 0, half_command);
         renderer.apply_viewport_command(ViewId(0), half);
         let full_command = ViewportCommand::new(
             ViewportMoveDirection::Down,
             ViewportMoveAmount::FullPage,
             crate::protocol::viewport::ViewportCursorBehavior::Move,
         );
-        let full =
-            renderer.resolve_viewport_command(&scene, Revision(0), ViewId(0), 0, full_command);
+        let full = renderer.resolve_viewport_command(&scene, Revision(0), editor, 0, full_command);
         renderer.apply_viewport_command(ViewId(0), full);
 
         assert_eq!(
@@ -1399,20 +1480,20 @@ mod tests {
 
     #[test]
     fn viewport_alignment_uses_cursor_row_and_layout_height() {
-        let (scene, _editor) = editor_scene(40, 5, ViewId(0), ViewId(1));
+        let (scene, editor) = editor_scene(40, 5, ViewId(0), ViewId(1));
         let mut renderer = SceneRenderer::new();
 
         let center = renderer.resolve_viewport_command(
             &scene,
             Revision(0),
-            ViewId(0),
+            editor,
             10,
             ViewportCommand::align(ViewportAlignment::Center),
         );
         let bottom = renderer.resolve_viewport_command(
             &scene,
             Revision(0),
-            ViewId(0),
+            editor,
             10,
             ViewportCommand::align(ViewportAlignment::Bottom),
         );

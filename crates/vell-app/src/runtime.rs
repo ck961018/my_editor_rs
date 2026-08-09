@@ -1585,10 +1585,17 @@ impl<F: Frontend> App<F> {
                         } else {
                             0
                         };
+                        let body_space =
+                            self.session.body_space_for_view(view).ok_or_else(|| {
+                                recoverable_message(
+                                    io::ErrorKind::InvalidInput,
+                                    "viewport command targets a view without a body pane",
+                                )
+                            })?;
                         let resolved = self.frontend.resolve_viewport_command(
                             self.session.scene(),
                             self.session.scene_revision(),
-                            view,
+                            body_space,
                             cursor_row,
                             command,
                         )?;

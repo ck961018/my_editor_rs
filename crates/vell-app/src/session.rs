@@ -7,7 +7,7 @@ use crate::command_resolver::default_global_keymap;
 use crate::dispatcher::{DispatchInput, DispatchOutcome, Dispatcher, DispatcherInputSnapshot};
 use crate::layout::{
     LayoutError, NewView, StatusBarHandle, StatusBarPlacement, create_view, focusable_view_count,
-    resolve_focus, scene_views, space_for_view, view_for_space, view_space_focusable,
+    resolve_focus, resolve_switch_target, scene_views, view_for_space, view_space_focusable,
 };
 use crate::mode::{
     CursorDomain, FaceRegistry, ModeAttachmentError, ModeContentContext, ModeContentStore,
@@ -16,7 +16,7 @@ use crate::mode::{
 use crate::presentation::PresentationLayerStore;
 use crate::scene_model::{CloseResult, SceneBuilder, SceneError, SplitResult, build_editor_scene};
 use crate::theme::{FaceEnvironment, SessionFaces};
-use crate::view::View;
+use crate::view::{BODY_PANE, STATUS_PANE, View};
 use vell_core::content::ContentChange;
 use vell_core::content_store::ContentStore;
 use vell_core::content_view_state::ContentViewStateError;
@@ -41,8 +41,11 @@ pub(super) struct ClientSession {
     focused: SpaceId,
     dispatcher: Dispatcher,
     status_placement: StatusBarPlacement,
-    global_status_view: Option<ViewId>,
-    status_by_editor: HashMap<ViewId, ViewId>,
+    /// Global 布局下的状态栏 Space；它始终是当前焦点 editor view 的
+    /// STATUS_PANE 直属 Pane，不再是独立 view。
+    global_status_space: Option<SpaceId>,
+    /// PerPane 布局下每个 editor view 的状态栏 Space。
+    status_by_editor: HashMap<ViewId, SpaceId>,
 }
 
 pub(super) struct InitialView {
@@ -68,10 +71,6 @@ impl ClientSession {
     ) -> Self {
         let editor = create_view(init.editor.content, contents, &init.editor.modes)
             .expect("editor content exists");
-        // 状态栏呈现位绑定 editor 的内容，标记其服务目标；不再需要独立的
-        // StatusBar content 类型（见 ADR 0001）。从 next_view_id 分配 id。
-        let status_view_id = ViewId(init.next_view_id);
-        let status = View::status_bar(init.editor.content, init.editor.view);
         let default_mode_profiles = HashMap::from([(
             vell_core::content::ContentKind::Buffer,
             init.editor.modes.clone(),
@@ -107,16 +106,22 @@ impl ClientSession {
             mode.register_faces(&mut faces);
             view_modes.insert(init.editor.view, mode);
         }
-        views.insert(status_view_id, status);
         let mut scene_builder = SceneBuilder::new();
-        let (scene, editor_space) = build_editor_scene(
+        // 正文与状态栏是同一 editor view 的两个直属 Pane（见 ADR 0001 与
+        // Vell 架构改造设计文档）；状态栏不再占用独立 view id。
+        let (scene, editor_space, status_space) = build_editor_scene(
             &mut scene_builder,
             width as i32,
             height as i32,
             init.editor.view,
-            status_view_id,
-        )
-        .expect("valid editor scene");
+        );
+        {
+            let view = views
+                .get_mut(&init.editor.view)
+                .expect("editor view exists");
+            view.assign_pane(editor_space, BODY_PANE);
+            view.assign_pane(status_space, STATUS_PANE);
+        }
         let focused = resolve_focus(&scene, editor_space, Some(editor_space))
             .expect("initial scene has a focusable content space");
         let mut session = Self {
@@ -129,11 +134,11 @@ impl ClientSession {
             view_modes,
             faces: SessionFaces::new(faces, face_environment),
             presentation: PresentationLayerStore::default(),
-            next_view_id: init.next_view_id.checked_add(1).expect("view id overflow"),
+            next_view_id: init.next_view_id,
             focused,
             dispatcher: Dispatcher::new(default_global_keymap()),
             status_placement: StatusBarPlacement::Global,
-            global_status_view: Some(status_view_id),
+            global_status_space: Some(status_space),
             status_by_editor: HashMap::new(),
         };
         session.refresh_presentation(contents, mode_contents);
@@ -161,20 +166,20 @@ impl ClientSession {
     }
 
     pub(super) fn status_bar_for_view(&self, editor: ViewId) -> Option<StatusBarHandle> {
-        let editor_view = self.views.get(&editor)?;
-        if editor_view.is_status_bar() {
+        if !self.views.contains_key(&editor) {
             return None;
         }
-        let view = match self.status_placement {
-            StatusBarPlacement::Global => self.global_status_view?,
+        let space = match self.status_placement {
+            StatusBarPlacement::Global => self.global_status_space?,
             StatusBarPlacement::PerPane => *self.status_by_editor.get(&editor)?,
         };
-        let status_view = self.views.get(&view)?;
-        let target_view = status_view.status_target()?;
+        // Global 状态栏始终服务当前焦点 editor：以 Space 实际引用的 view 为准。
+        let target_view = view_for_space(&self.scene, space)?;
+        let content = self.views.get(&target_view)?.content();
         Some(StatusBarHandle {
-            view,
-            content: status_view.content(),
+            space,
             target_view,
+            content,
         })
     }
 
@@ -183,95 +188,91 @@ impl ClientSession {
             .views
             .iter()
             .filter_map(|(view, data)| {
-                (!data.is_status_bar() && data.content() == content)
+                (data.content() == content)
                     .then(|| self.status_bar_for_view(*view))
                     .flatten()
             })
             .collect::<Vec<_>>();
-        bars.sort_by_key(|bar| bar.view.0);
-        bars.dedup_by_key(|bar| bar.view);
+        bars.sort_by_key(|bar| bar.space.0);
+        bars.dedup_by_key(|bar| bar.space);
         bars
     }
 
-    fn status_view_for_target(&self, target_view: ViewId, target_content: ContentId) -> NewView {
-        NewView {
-            view: View::status_bar(target_content, target_view),
-            mode_names: Vec::new(),
+    /// 把状态栏 Space 移交给另一个 editor view：改写 Space 的 view 引用并
+    /// 同步双方的 Pane 归属。取代旧的状态栏 view 重定向与内容重绑定。
+    fn retarget_status_space(&mut self, space: SpaceId, editor: ViewId) {
+        let previous =
+            view_for_space(&self.scene, space).expect("status space hosts a content view");
+        if previous == editor {
+            return;
         }
+        self.scene_builder
+            .replace_view(&mut self.scene, space, editor, false)
+            .expect("status space is a content leaf");
+        if let Some(view) = self.views.get_mut(&previous) {
+            view.release_pane_space(space);
+        }
+        self.views
+            .get_mut(&editor)
+            .expect("status target view exists")
+            .assign_pane(space, STATUS_PANE);
     }
 
-    fn retarget_status_view(&mut self, status: ViewId, editor: ViewId) {
-        let target_content = self.views[&editor].content();
-        let view = self.views.get_mut(&status).expect("status view exists");
-        // set_status_target / set_content 各自在变化时 touch；无需重复计数。
-        view.set_status_target(editor);
-        view.set_content(target_content);
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "placement conversion coordinates session-owned scene and mode stores"
-    )]
     pub(super) fn set_status_bar_placement(
         &mut self,
         placement: StatusBarPlacement,
-        registry: &ModeRegistry,
-        content_modes: &mut ModeContentStore,
-        contents: &ContentStore,
     ) -> Result<(), LayoutError> {
         if placement == self.status_placement {
             return Ok(());
         }
         match placement {
             StatusBarPlacement::PerPane => {
-                let global = self.global_status_view.expect("global status view exists");
-                let global_space = space_for_view(&self.scene, global)
-                    .expect("global status view belongs to scene");
+                let global_space = self
+                    .global_status_space
+                    .expect("global status space exists");
+                let global_target = view_for_space(&self.scene, global_space)
+                    .expect("global status space hosts a view");
                 self.scene_builder.close(&mut self.scene, global_space)?;
-                let editors = scene_views(&self.scene)
-                    .into_iter()
-                    .filter(|(_, view)| !self.views[view].is_status_bar())
-                    .collect::<Vec<_>>();
+                self.views
+                    .get_mut(&global_target)
+                    .expect("global status target exists")
+                    .release_pane_space(global_space);
+                self.global_status_space = None;
+                // 全局状态栏关闭后，剩余 Content Space 全部是 editor 正文。
+                let editors = scene_views(&self.scene);
                 self.status_by_editor.clear();
-                for (index, (editor_space, editor_view)) in editors.into_iter().enumerate() {
-                    let status_view = if index == 0 {
-                        global
-                    } else {
-                        let target_content = self.views[&editor_view].content();
-                        let status = self.status_view_for_target(editor_view, target_content);
-                        self.insert_view(status, registry, content_modes, contents)?
-                    };
-                    self.retarget_status_view(status_view, editor_view);
-                    self.scene_builder.wrap_with_status(
+                for (editor_space, editor_view) in editors {
+                    let pane = self.scene_builder.wrap_with_status(
                         &mut self.scene,
                         editor_space,
-                        status_view,
+                        editor_view,
                     )?;
-                    self.status_by_editor.insert(editor_view, status_view);
+                    self.views
+                        .get_mut(&editor_view)
+                        .expect("editor view exists")
+                        .assign_pane(pane.status_space, STATUS_PANE);
+                    self.status_by_editor.insert(editor_view, pane.status_space);
                 }
-                self.global_status_view = None;
             }
             StatusBarPlacement::Global => {
                 let focused_editor = self
                     .view_for_space(self.focused)
                     .expect("focused space hosts editor view");
-                let chosen = self.status_by_editor[&focused_editor];
-                let bars = self.status_by_editor.values().copied().collect::<Vec<_>>();
-                for status in &bars {
-                    let space = space_for_view(&self.scene, *status)
-                        .expect("per-pane status view belongs to scene");
+                let bars = std::mem::take(&mut self.status_by_editor);
+                for (editor, space) in bars {
                     self.scene_builder.close(&mut self.scene, space)?;
-                }
-                for status in bars {
-                    if status != chosen {
-                        self.remove_view(status, content_modes);
+                    if let Some(view) = self.views.get_mut(&editor) {
+                        view.release_pane_space(space);
                     }
                 }
-                self.status_by_editor.clear();
-                self.retarget_status_view(chosen, focused_editor);
-                self.scene_builder
-                    .attach_global_status(&mut self.scene, chosen)?;
-                self.global_status_view = Some(chosen);
+                let status_space = self
+                    .scene_builder
+                    .attach_global_status(&mut self.scene, focused_editor)?;
+                self.views
+                    .get_mut(&focused_editor)
+                    .expect("focused editor exists")
+                    .assign_pane(status_space, STATUS_PANE);
+                self.global_status_space = Some(status_space);
             }
         }
         self.status_placement = placement;
@@ -285,14 +286,13 @@ impl ClientSession {
         editor: Option<ViewId>,
         visible: bool,
     ) -> Result<(), LayoutError> {
-        let status = match self.status_placement {
-            StatusBarPlacement::Global => self.global_status_view,
+        let space = match self.status_placement {
+            StatusBarPlacement::Global => self.global_status_space,
             StatusBarPlacement::PerPane => {
                 editor.and_then(|editor| self.status_by_editor.get(&editor).copied())
             }
         }
         .ok_or(LayoutError::NoStatusBar)?;
-        let space = space_for_view(&self.scene, status).ok_or(LayoutError::NoStatusBar)?;
         self.scene_builder.set_sizing(
             &mut self.scene,
             space,
@@ -498,7 +498,7 @@ impl ClientSession {
 
     pub(super) fn touch_content_views(&mut self, content: ContentId) {
         for view in self.views.values_mut() {
-            if view_targets_content(view, content) {
+            if view.content() == content {
                 view.touch();
             }
         }
@@ -507,9 +507,7 @@ impl ClientSession {
     pub(super) fn content_view_revisions(&self, content: ContentId) -> Vec<(ViewId, Revision)> {
         self.views
             .iter()
-            .filter_map(|(id, view)| {
-                view_targets_content(view, content).then_some((*id, view.revision()))
-            })
+            .filter_map(|(id, view)| (view.content() == content).then_some((*id, view.revision())))
             .collect()
     }
 
@@ -562,7 +560,7 @@ impl ClientSession {
     > {
         self.views
             .iter()
-            .filter(|(_, view)| !view.is_status_bar() && view.content() == content)
+            .filter(|(_, view)| view.content() == content)
             .filter_map(|(id, view)| {
                 view.selections()
                     .cloned()
@@ -644,6 +642,16 @@ impl ClientSession {
 
     pub(super) fn view_for_space(&self, space: SpaceId) -> Option<ViewId> {
         view_for_space(&self.scene, space)
+    }
+
+    /// 通用切换目标：焦点 Pane 所属 view 的最近 switchable 祖先。
+    pub(super) fn switch_target(&self, space: SpaceId) -> Option<ViewId> {
+        resolve_switch_target(&self.scene, &self.views, space)
+    }
+
+    /// view 的正文 Space（BODY_PANE 直属 Pane）。
+    pub(super) fn body_space_for_view(&self, view: ViewId) -> Option<SpaceId> {
+        self.views.get(&view)?.panes().space_for_key(BODY_PANE)
     }
 
     pub(super) fn resize(&mut self, width: u16, height: u16) {
@@ -791,33 +799,12 @@ impl ClientSession {
         change: &ContentChange,
     ) -> Result<(), ContentViewStateError> {
         for (view_id, view) in &mut self.views {
-            if Some(*view_id) == except || view.is_status_bar() || view.content() != content {
+            if Some(*view_id) == except || view.content() != content {
                 continue;
             }
             if contents.transform_view_state(content, view.state_mut(), change)? {
                 view.touch();
             }
-        }
-        // 状态栏 view 绑定的是它服务的 editor view 的内容；当目标内容
-        // 变化时 touch，让状态栏重绘。
-        let affected: Vec<ViewId> = self
-            .views
-            .iter()
-            .filter_map(|(id, view)| {
-                view.status_target()
-                    .is_some_and(|target| {
-                        self.views
-                            .get(&target)
-                            .is_some_and(|target| target.content() == content)
-                    })
-                    .then_some(*id)
-            })
-            .collect();
-        for id in affected {
-            self.views
-                .get_mut(&id)
-                .expect("collected view exists")
-                .touch();
         }
         Ok(())
     }
@@ -860,9 +847,7 @@ impl ClientSession {
         let views: Vec<_> = self
             .views
             .iter()
-            .filter_map(|(view, data)| {
-                (!data.is_status_bar() && data.content() == content).then_some(*view)
-            })
+            .filter_map(|(view, data)| (data.content() == content).then_some(*view))
             .collect();
         for view in &views {
             let view_data = &self.views[view];
@@ -938,33 +923,34 @@ impl ClientSession {
         let next_view_id = self.next_view_id;
         let view = self.insert_view(view, registry, content_modes, contents)?;
         let result = match self.status_placement {
-            StatusBarPlacement::Global => {
-                self.scene_builder
-                    .split(&mut self.scene, target, view, focusable, direction)
-            }
-            StatusBarPlacement::PerPane => {
-                let status = self.status_view_for_target(view, self.views[&view].content());
-                let status = self.insert_view(status, registry, content_modes, contents)?;
-                match self.scene_builder.split_pane(
+            StatusBarPlacement::Global => self
+                .scene_builder
+                .split(&mut self.scene, target, view, focusable, direction)
+                .inspect(|result| {
+                    self.views
+                        .get_mut(&view)
+                        .expect("inserted view exists")
+                        .assign_pane(result.new_space, BODY_PANE);
+                }),
+            StatusBarPlacement::PerPane => self
+                .scene_builder
+                .split_pane(
                     &mut self.scene,
                     target_pane.expect("per-pane split prevalidates its target pane"),
                     view,
-                    status,
+                    view,
                     focusable,
                     direction,
-                ) {
-                    Ok(pane) => {
-                        self.status_by_editor.insert(view, status);
-                        Ok(SplitResult {
-                            new_space: pane.editor_space,
-                        })
+                )
+                .map(|pane| {
+                    let view_data = self.views.get_mut(&view).expect("inserted view exists");
+                    view_data.assign_pane(pane.editor_space, BODY_PANE);
+                    view_data.assign_pane(pane.status_space, STATUS_PANE);
+                    self.status_by_editor.insert(view, pane.status_space);
+                    SplitResult {
+                        new_space: pane.editor_space,
                     }
-                    Err(error) => {
-                        self.remove_view(status, content_modes);
-                        Err(error)
-                    }
-                }
-            }
+                }),
         };
         let result = match result {
             Ok(result) => result,
@@ -1021,14 +1007,32 @@ impl ClientSession {
             .view_for_space(target)
             .expect("validated close target hosts a view");
         if self.status_placement == StatusBarPlacement::PerPane
-            && let Some(status) = self.status_by_editor.remove(&removed_view)
+            && let Some(status_space) = self.status_by_editor.remove(&removed_view)
         {
-            let status_space =
-                space_for_view(&self.scene, status).expect("per-pane status view belongs to scene");
             self.scene_builder.close(&mut self.scene, status_space)?;
-            self.remove_view(status, content_modes);
+            self.views
+                .get_mut(&removed_view)
+                .expect("removed view still exists")
+                .release_pane_space(status_space);
         }
         let result = self.scene_builder.close(&mut self.scene, target)?;
+        let preferred = if target == previous_focus {
+            result.surviving_neighbor
+        } else {
+            Some(previous_focus)
+        };
+        // Global 状态栏若仍指向将被移除的 view，先移交给下一个焦点 editor，
+        // 避免 Scene 短暂引用已销毁的 view。
+        if let Some(space) = self.global_status_space
+            && view_for_space(&self.scene, space) == Some(removed_view)
+        {
+            let next_focus = resolve_focus(&self.scene, previous_focus, preferred)
+                .expect("ClientSession rejects layouts without focusable content spaces");
+            let next_editor = self
+                .view_for_space(next_focus)
+                .expect("focused space hosts a view");
+            self.retarget_status_space(space, next_editor);
+        }
         let content = self.views[&removed_view].content();
         let view_data = &self.views[&removed_view];
         self.dispatcher.invalidate_view(
@@ -1040,11 +1044,7 @@ impl ClientSession {
             contents,
         );
         self.remove_view(removed_view, content_modes);
-        self.reconcile_layout(if target == previous_focus {
-            result.surviving_neighbor
-        } else {
-            Some(previous_focus)
-        });
+        self.reconcile_layout(preferred);
         self.sync_global_status_target();
         if self.focused != previous_focus {
             self.sync_changed_input_source(previous_content, content_modes, contents);
@@ -1095,11 +1095,24 @@ impl ClientSession {
             self.next_view_id = new_view.0;
             return Err(error.into());
         }
+        // 移交 Pane：正文 Space 归新 view；旧 view 的状态栏 Space 一并移交。
+        if let Some(old) = self.views.get_mut(&old_view) {
+            old.release_pane_space(target);
+        }
+        self.views
+            .get_mut(&new_view)
+            .expect("inserted view exists")
+            .assign_pane(target, BODY_PANE);
         if self.status_placement == StatusBarPlacement::PerPane
-            && let Some(status) = self.status_by_editor.remove(&old_view)
+            && let Some(status_space) = self.status_by_editor.remove(&old_view)
         {
-            self.status_by_editor.insert(new_view, status);
-            self.retarget_status_view(status, new_view);
+            self.status_by_editor.insert(new_view, status_space);
+            self.retarget_status_space(status_space, new_view);
+        }
+        if let Some(space) = self.global_status_space
+            && view_for_space(&self.scene, space) == Some(old_view)
+        {
+            self.retarget_status_space(space, new_view);
         }
         let content = self.views[&old_view].content();
         let view_data = &self.views[&old_view];
@@ -1147,20 +1160,22 @@ impl ClientSession {
         if self.status_placement != StatusBarPlacement::Global {
             return;
         }
-        let Some(status) = self.global_status_view else {
+        let Some(space) = self.global_status_space else {
             return;
         };
         let Some(editor) = self.view_for_space(self.focused) else {
             return;
         };
-        self.retarget_status_view(status, editor);
+        self.retarget_status_space(space, editor);
     }
 
+    /// 布局操作只接受 view 的正文 Pane；状态栏等其他直属 Pane 由所属 view
+    /// 的生命周期管理，不可单独 split/close/replace。
     fn reject_status_bar_space(&self, target: SpaceId) -> Result<(), LayoutError> {
         let view = self
             .view_for_space(target)
             .ok_or(SceneError::ExpectedContentLeaf(target))?;
-        if self.views[&view].is_status_bar() {
+        if self.views[&view].panes().key_for_space(target) != Some(BODY_PANE) {
             return Err(LayoutError::StatusBarSpace(target));
         }
         Ok(())
@@ -1205,20 +1220,25 @@ impl ClientSession {
 
     fn remove_view(&mut self, view: ViewId, mode_contents: &mut ModeContentStore) {
         self.faces.remove_view_remaps(view);
-        let content = self
-            .views
-            .remove(&view)
-            .expect("removed view exists")
-            .content();
+        let removed = self.views.remove(&view).expect("removed view exists");
+        let content = removed.content();
+        let children = removed.children().to_vec();
+        if let Some(parent) = removed.parent()
+            && let Some(parent_view) = self.views.get_mut(&parent)
+        {
+            parent_view.remove_child(view);
+        }
         let removed_modes = self.view_modes.remove(view);
         for mode in &removed_modes {
             mode_contents.detach_view(content, *mode);
         }
-        if !self
-            .views
-            .values()
-            .any(|view| !view.is_status_bar() && view.content() == content)
-        {
+        // 复合 view 的子 view 没有独立生命周期：随父 view 递归销毁。
+        for child in children {
+            if self.views.contains_key(&child) {
+                self.remove_view(child, mode_contents);
+            }
+        }
+        if !self.views.values().any(|view| view.content() == content) {
             self.faces.remove_content_remaps(content);
         }
         for mode in removed_modes {
@@ -1248,10 +1268,4 @@ impl ClientSession {
     pub(super) fn next_view_id_for_test(&self) -> u64 {
         self.next_view_id
     }
-}
-
-// 状态栏 view 的 content 与其服务的 editor view 同步（retarget_status_view
-// 同时更新 status_target 与 content），因此按 content 相等即可覆盖状态栏。
-fn view_targets_content(view: &View, content: ContentId) -> bool {
-    view.content() == content
 }

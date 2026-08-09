@@ -77,13 +77,17 @@ impl<W: io::Write> Frontend for TuiFrontend<W> {
         &mut self,
         scene: &Scene,
         scene_revision: Revision,
-        view: ViewId,
+        space: SpaceId,
         cursor_row: usize,
         command: ViewportCommand,
     ) -> io::Result<ResolvedViewportCommand> {
-        Ok(self
-            .renderer
-            .resolve_viewport_command(scene, scene_revision, view, cursor_row, command))
+        Ok(self.renderer.resolve_viewport_command(
+            scene,
+            scene_revision,
+            space,
+            cursor_row,
+            command,
+        ))
     }
 
     fn apply_viewport_command(&mut self, view: ViewId, command: ResolvedViewportCommand) {

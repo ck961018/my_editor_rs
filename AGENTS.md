@@ -92,8 +92,10 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
   presentation cache。当前生产路径是一对一 `Kernel + ClientSession`。
 - `ContentStore` 是唯一 Content 表。`Content` 与 `ContentViewState` 都是
   和 `ContentKind` 对齐的封闭枚举。
-- `View` 只持有 `ContentId`、`ContentViewState` 和 revision；不持有 Mode、
-  history、viewport 或渲染缓存。
+- `View` 持有 `ContentId`、`ContentViewState`、revision、直属 Pane 映射
+  （SpaceId ↔ PaneKey）、`switchable` 与语义 parent/children；不持有
+  Mode、history、viewport 或渲染缓存。同一 View 可占据多个 Content
+  Space（正文 `body` + 状态栏 `builtin.status` 等）。
 - selection 使用 `anchor/head`；collapsed cursor 等于 primary selection
   的 `head`。不要添加冗余方向字段。
 - Mode content state 按 `(ModeId, ContentId)` 共享，view state 按
@@ -127,9 +129,9 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
   不得内部创建或消耗另一个 builder。
 - 新增 ContentKind 必须同时扩展 `Content`、`ContentViewState`、
   `ContentStore` 静态分派、Mode adapter context 和 render query 配对。
-- `ContentKind` 目前只包含 `Buffer`。状态栏是 View 的附属呈现位，
-  不是 Content：状态栏 view 通过 `View::status_bar` 创建并持有
-  `status_target`（服务的 editor view），呈现数据来自目标 view 的
+- `ContentKind` 目前只包含 `Buffer`。状态栏是 editor view 的直属 Pane，
+  不是 Content 也不是独立 View：状态栏 Space 直接引用 editor view，
+  按 PaneKey `builtin.status` 渲染，呈现数据来自该 view 的
   `viewPolicy.statusBar`，不进入切换列表或 buffer 编号。
 - app 不得借出或匹配 `Buffer` 等具体 Content 变体。
 - 不要恢复全局 `HeadlessFrontend`。app 集成测试继续使用测试模块内的

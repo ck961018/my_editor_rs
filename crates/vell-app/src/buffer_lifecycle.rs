@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::application::App;
 use crate::kernel::FileBaseline;
-use crate::layout::{focusable_view_count, space_for_view, view_space_focusable};
+use crate::layout::{focusable_view_count, view_space_focusable};
 use vell_core::content::{
     Content, ContentEffect, ContentInput, ContentKind, ContentResult, SaveSnapshot,
 };
@@ -364,9 +364,11 @@ impl<F: Frontend> App<F> {
             .session
             .views()
             .iter()
-            .filter(|(_, view)| !view.is_status_bar() && view.content() == content)
+            .filter(|(_, view)| view.content() == content)
             .filter_map(|(view, _)| {
-                space_for_view(self.session.scene(), *view).map(|space| (*view, space))
+                self.session
+                    .body_space_for_view(*view)
+                    .map(|space| (*view, space))
             })
             .collect::<Vec<_>>();
         let target_focusable = target_views
@@ -393,8 +395,8 @@ impl<F: Frontend> App<F> {
             .session
             .views()
             .iter()
-            .filter(|(_, view)| !view.is_status_bar() && view.content() == content)
-            .filter_map(|(view, _)| space_for_view(self.session.scene(), *view))
+            .filter(|(_, view)| view.content() == content)
+            .filter_map(|(view, _)| self.session.body_space_for_view(*view))
             .collect::<Vec<_>>();
         for space in target_spaces {
             self.close_space(space)

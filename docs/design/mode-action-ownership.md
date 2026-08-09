@@ -22,8 +22,8 @@ View 保存与一个 Content 绑定的会话状态；app 解析目标并原子�
 - attachment ordering 约束；
 - named Face 默认值。
 
-`ModeAdapters` 当前只包含 Buffer slot（状态栏是 View 附属呈现，
-不是 adapter slot）。native Mode 可以直接
+`ModeAdapters` 当前只包含 Buffer slot（状态栏是 editor view 的直属
+Pane，不是 adapter slot）。native Mode 可以直接
 实现 `Mode`，也可以通过 `TypedMode` 与 `ErasedMode` 在静态状态类型和
 运行时类型擦除之间建立单一 adapter。TypeScript Mode 使用相同的 erased
 contract。

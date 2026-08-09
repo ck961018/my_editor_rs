@@ -1,7 +1,7 @@
 #![allow(dead_code)] // Semantic wire contract; transport integration is intentionally deferred.
 
 use crate::content_query::{ContentData, ContentQuery, ViewData};
-use crate::ids::{ContentId, ViewId};
+use crate::ids::{ContentId, SpaceId, ViewId};
 use crate::revision::Revision;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -111,6 +111,8 @@ pub fn require_capability(welcome: &Welcome, capability: Capability) -> Result<(
 pub enum RequestData {
     View {
         view: ViewId,
+        /// 查询来源 Pane：同一 view 的不同 Content Space 返回不同 presentation。
+        space: SpaceId,
     },
     Content {
         content: ContentId,
@@ -128,6 +130,7 @@ pub struct Request {
 pub enum ResponseData {
     View {
         view: ViewId,
+        space: SpaceId,
         revision: Revision,
         data: ViewData,
     },

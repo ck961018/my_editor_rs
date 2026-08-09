@@ -984,15 +984,11 @@ mod tests {
         let mut modes = ModeRegistry::new();
         modes.register(DispatcherTestMode::new()).unwrap();
         let mut builder = SceneBuilder::new();
-        let (scene, focused) =
-            build_editor_scene(&mut builder, 40, 5, ViewId(0), ViewId(1)).unwrap();
-        let views = HashMap::from([
-            (
-                ViewId(0),
-                View::new(editor, contents.create_view_state(editor).unwrap()),
-            ),
-            (ViewId(1), View::status_bar(editor, ViewId(0))),
-        ]);
+        let (scene, focused, status_space) = build_editor_scene(&mut builder, 40, 5, ViewId(0));
+        let mut editor_view = View::new(editor, contents.create_view_state(editor).unwrap());
+        editor_view.assign_pane(focused, crate::view::BODY_PANE);
+        editor_view.assign_pane(status_space, crate::view::STATUS_PANE);
+        let views = HashMap::from([(ViewId(0), editor_view)]);
         let mut view_modes = ModeViewStore::default();
         let mode = modes
             .instantiate(&ModeName::new("dispatcher-test"))
@@ -1319,8 +1315,24 @@ mod tests {
 
     #[test]
     fn invalidating_an_unrelated_view_keeps_the_focused_views_sequence() {
-        let (mut dispatcher, scene, focused, views, mut view_modes, mut content_modes, _, contents) =
-            fixture();
+        let (
+            mut dispatcher,
+            scene,
+            focused,
+            views,
+            mut view_modes,
+            mut content_modes,
+            _,
+            mut contents,
+        ) = fixture();
+        let unrelated_content = ContentId(1);
+        contents
+            .insert(unrelated_content, Content::Buffer(Buffer::new()))
+            .unwrap();
+        let unrelated = View::new(
+            unrelated_content,
+            contents.create_view_state(unrelated_content).unwrap(),
+        );
         let now = Instant::now();
         assert_eq!(
             dispatcher.dispatch(
@@ -1338,8 +1350,8 @@ mod tests {
 
         dispatcher.invalidate_view(
             ViewId(1),
-            &views[&ViewId(1)],
-            ContentId(1),
+            &unrelated,
+            unrelated_content,
             &mut view_modes,
             &mut content_modes,
             &contents,

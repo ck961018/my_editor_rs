@@ -1,19 +1,70 @@
-//! 视图实例的交互会话：绑定一个 content，并持有独立 content view state。
-//! 按 ViewId 索引（App.views），同一 Content 可被多个独立 View 绑定。
+//! 视图实例的交互会话：绑定一个 content，持有独立 content view state，并
+//! 控制一个或多个直属 Pane（正文、状态栏等）。按 ViewId 索引（App.views），
+//! 同一 Content 可被多个独立 View 绑定；同一 View 可占据多个 Content Space。
+
+use std::collections::HashMap;
 
 use vell_core::content_view_state::ContentViewState;
-use vell_protocol::ids::{ContentId, ViewId};
+use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 use vell_protocol::revision::Revision;
 use vell_protocol::selection::Selections;
+
+/// View 内部识别直属 Pane 的稳定语义键；布局协议仍只使用 SpaceId。
+pub type PaneKey = String;
+
+/// 正文 Pane：view 的主编辑区域。
+pub const BODY_PANE: &str = "body";
+/// 内建状态栏 Pane。
+pub const STATUS_PANE: &str = "builtin.status";
+
+/// SpaceId 与 PaneKey 的双向映射。每个 PaneKey 在一个 view 内唯一，
+/// 每个 Space 同一时刻只属于一个 view 的一个 Pane。
+#[derive(Default)]
+pub struct ViewPaneMap {
+    by_space: HashMap<SpaceId, PaneKey>,
+    by_key: HashMap<PaneKey, SpaceId>,
+}
+
+impl ViewPaneMap {
+    pub fn key_for_space(&self, space: SpaceId) -> Option<&str> {
+        self.by_space.get(&space).map(String::as_str)
+    }
+
+    pub fn space_for_key(&self, key: &str) -> Option<SpaceId> {
+        self.by_key.get(key).copied()
+    }
+
+    pub fn spaces(&self) -> impl Iterator<Item = SpaceId> + '_ {
+        self.by_space.keys().copied()
+    }
+
+    fn insert(&mut self, space: SpaceId, key: PaneKey) {
+        if let Some(previous_key) = self.by_space.insert(space, key.clone()) {
+            self.by_key.remove(&previous_key);
+        }
+        if let Some(previous_space) = self.by_key.insert(key, space) {
+            self.by_space.remove(&previous_space);
+        }
+    }
+
+    fn remove_space(&mut self, space: SpaceId) -> Option<PaneKey> {
+        let key = self.by_space.remove(&space)?;
+        self.by_key.remove(&key);
+        Some(key)
+    }
+}
 
 pub struct View {
     /// 绑定的 content；当前仅 View::new 写入，同一 content 可由多个 View 独立呈现。
     content: ContentId,
     state: ContentViewState,
     revision: Revision,
-    /// 状态栏 view 的服务目标：Some(editor_view) 表示本 view 是绑定在
-    /// editor_view 上的状态栏呈现位；None 表示普通内容 view。
-    status_target: Option<ViewId>,
+    panes: ViewPaneMap,
+    /// 通用 View 切换操作是否可替换本实例；DiffView 等复合 view 的子 view 为 false。
+    switchable: bool,
+    /// 语义父 view（复合 view 的组合关系），不同于 Space 布局父子。
+    parent: Option<ViewId>,
+    children: Vec<ViewId>,
 }
 
 impl View {
@@ -22,22 +73,10 @@ impl View {
             content,
             state,
             revision: Revision::default(),
-            status_target: None,
-        }
-    }
-
-    /// 创建一个状态栏呈现位：绑定 editor_view 的内容，呈现该 editor view
-    /// 的状态栏，而不是作为可聚焦内容 view。
-    ///
-    /// 状态栏 view 使用普通的 BufferViewState（含默认 selection），但该
-    /// selection 永不使用：所有遍历内容 view 的路径都以 `is_status_bar()`
-    /// 排除状态栏位，`transform_content_views` 也跳过其 selection 变换。
-    pub fn status_bar(content: ContentId, target_view: ViewId) -> Self {
-        Self {
-            content,
-            state: ContentViewState::buffer(),
-            revision: Revision::default(),
-            status_target: Some(target_view),
+            panes: ViewPaneMap::default(),
+            switchable: true,
+            parent: None,
+            children: Vec::new(),
         }
     }
 
@@ -45,31 +84,50 @@ impl View {
         self.content
     }
 
-    /// 本 view 是否承载状态栏呈现（而非内容 view）。
-    pub fn is_status_bar(&self) -> bool {
-        self.status_target.is_some()
+    pub fn panes(&self) -> &ViewPaneMap {
+        &self.panes
     }
 
-    /// 状态栏 view 服务的 editor view；普通 view 返回 None。
-    pub fn status_target(&self) -> Option<ViewId> {
-        self.status_target
+    /// 登记直属 Pane：space 由本 view 决定显示内容。
+    pub fn assign_pane(&mut self, space: SpaceId, key: impl Into<PaneKey>) {
+        self.panes.insert(space, key.into());
     }
 
-    /// 重定向状态栏 view 的服务目标；仅在状态栏 view 上调用。
-    pub fn set_status_target(&mut self, target_view: ViewId) {
-        if self.status_target != Some(target_view) {
-            self.status_target = Some(target_view);
-            self.touch();
+    /// 释放 space 的 Pane 归属（space 关闭或移交给其他 view）。
+    pub fn release_pane_space(&mut self, space: SpaceId) -> Option<PaneKey> {
+        self.panes.remove_space(space)
+    }
+
+    pub fn switchable(&self) -> bool {
+        self.switchable
+    }
+
+    pub fn set_switchable(&mut self, switchable: bool) {
+        self.switchable = switchable;
+    }
+
+    pub fn parent(&self) -> Option<ViewId> {
+        self.parent
+    }
+
+    pub fn set_parent(&mut self, parent: Option<ViewId>) {
+        self.parent = parent;
+    }
+
+    pub fn children(&self) -> &[ViewId] {
+        &self.children
+    }
+
+    pub fn push_child(&mut self, child: ViewId) {
+        if !self.children.contains(&child) {
+            self.children.push(child);
         }
     }
 
-    /// 重绑定状态栏 view 的内容（跟随其服务目标的内容变化）。
-    pub fn set_content(&mut self, content: ContentId) {
-        if self.content != content {
-            self.content = content;
-            self.touch();
-        }
+    pub fn remove_child(&mut self, child: ViewId) {
+        self.children.retain(|candidate| *candidate != child);
     }
+
     pub fn selections(&self) -> Option<&Selections> {
         self.state.selections()
     }
@@ -109,19 +167,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn status_bar_view_marks_its_target() {
-        let v = View::status_bar(ContentId(1), ViewId(1));
-        assert_eq!(v.content(), ContentId(1));
-        assert!(v.is_status_bar());
-        assert_eq!(v.status_target(), Some(ViewId(1)));
-        assert!(v.selections().is_some());
+    fn pane_map_tracks_spaces_and_keys_bidirectionally() {
+        let mut view = View::new(ContentId(1), ContentViewState::buffer());
+        view.assign_pane(SpaceId(0), BODY_PANE);
+        view.assign_pane(SpaceId(1), STATUS_PANE);
+
+        assert_eq!(view.panes().key_for_space(SpaceId(0)), Some(BODY_PANE));
+        assert_eq!(view.panes().space_for_key(STATUS_PANE), Some(SpaceId(1)));
+        assert_eq!(
+            view.release_pane_space(SpaceId(1)),
+            Some(STATUS_PANE.to_owned())
+        );
+        assert_eq!(view.panes().space_for_key(STATUS_PANE), None);
     }
 
     #[test]
-    fn retarget_updates_status_bar_target() {
-        let mut v = View::status_bar(ContentId(1), ViewId(1));
-        v.set_status_target(ViewId(2));
-        assert_eq!(v.status_target(), Some(ViewId(2)));
+    fn reassigning_a_pane_key_moves_it_to_the_new_space() {
+        let mut view = View::new(ContentId(1), ContentViewState::buffer());
+        view.assign_pane(SpaceId(1), STATUS_PANE);
+        view.assign_pane(SpaceId(9), STATUS_PANE);
+
+        assert_eq!(view.panes().space_for_key(STATUS_PANE), Some(SpaceId(9)));
+        assert_eq!(view.panes().key_for_space(SpaceId(1)), None);
+    }
+
+    #[test]
+    fn views_default_to_switchable_without_semantic_parent() {
+        let view = View::new(ContentId(0), ContentViewState::buffer());
+
+        assert!(view.switchable());
+        assert_eq!(view.parent(), None);
+        assert!(view.children().is_empty());
     }
 
     #[test]

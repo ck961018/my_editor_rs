@@ -27,17 +27,6 @@ impl MutableScene {
     }
 }
 
-fn contains_view_except(
-    scene: &MutableScene,
-    view: ViewId,
-    excluded_space: Option<SpaceId>,
-) -> bool {
-    scene.nodes.iter().any(|(space, node)| {
-        Some(*space) != excluded_space
-            && matches!(&node.space.kind, SpaceKind::Content { view: current, .. } if *current == view)
-    })
-}
-
 fn is_tree_valid(scene: &MutableScene) -> bool {
     let Some(root) = scene.nodes.get(&scene.root) else {
         return false;
@@ -46,8 +35,9 @@ fn is_tree_valid(scene: &MutableScene) -> bool {
         return false;
     }
 
+    // 同一 ViewId 允许出现在多个 Content Space：一个 view 可以控制正文与
+    // gutter/bar 等多个直属 Pane。Pane 身份由 view 侧的 ViewPaneMap 维护。
     let mut visited = HashSet::new();
-    let mut views = HashSet::new();
     let mut stack = vec![scene.root];
     while let Some(space) = stack.pop() {
         if !visited.insert(space) {
@@ -72,7 +62,6 @@ fn is_tree_valid(scene: &MutableScene) -> bool {
                 }
             }
             SpaceKind::Content { .. } if !node.children.is_empty() => return false,
-            SpaceKind::Content { view, .. } if !views.insert(*view) => return false,
             SpaceKind::Content { .. } => {}
         }
     }
@@ -100,7 +89,6 @@ fn subtree_contains_focusable(scene: &MutableScene, root: SpaceId) -> bool {
 pub enum SceneError {
     UnknownSpace(SpaceId),
     ExpectedContentLeaf(SpaceId),
-    DuplicateView(ViewId),
     CannotCloseRoot(SpaceId),
     InvalidTree,
 }
@@ -253,9 +241,6 @@ impl SceneBuilder {
         {
             return Err(SceneError::ExpectedContentLeaf(target));
         }
-        if contains_view_except(scene, view, None) {
-            return Err(SceneError::DuplicateView(view));
-        }
 
         let new_space = self.add_view(scene, view, focusable, Sizing::Grow(1));
         self.insert_split_node(scene, target, new_space, direction)?;
@@ -369,9 +354,6 @@ impl SceneBuilder {
         if !matches!(editor_node.space.kind, SpaceKind::Content { .. }) {
             return Err(SceneError::ExpectedContentLeaf(editor_space));
         }
-        if contains_view_except(draft, status_view, None) {
-            return Err(SceneError::DuplicateView(status_view));
-        }
         let parent = editor_node.parent;
         let sizing = editor_node.space.sizing.clone();
         let parent_index = parent.and_then(|parent| {
@@ -429,9 +411,6 @@ impl SceneBuilder {
         if !is_tree_valid(draft) {
             return Err(SceneError::InvalidTree);
         }
-        if contains_view_except(draft, status_view, None) {
-            return Err(SceneError::DuplicateView(status_view));
-        }
         let workspace = draft.root;
         draft.nodes.get_mut(&workspace).unwrap().space.sizing = Sizing::Grow(1);
         let status = self.add_view(draft, status_view, false, Sizing::Fixed(1));
@@ -486,11 +465,6 @@ impl SceneBuilder {
         }
         if !draft.nodes.contains_key(&target_pane) {
             return Err(SceneError::UnknownSpace(target_pane));
-        }
-        if contains_view_except(draft, editor_view, None)
-            || contains_view_except(draft, status_view, None)
-        {
-            return Err(SceneError::DuplicateView(editor_view));
         }
         let editor_space = self.add_view(draft, editor_view, focusable, Sizing::Grow(1));
         let status_space = self.add_view(draft, status_view, false, Sizing::Fixed(1));
@@ -666,9 +640,6 @@ impl SceneBuilder {
         if !node.children.is_empty() || !matches!(&node.space.kind, SpaceKind::Content { .. }) {
             return Err(SceneError::ExpectedContentLeaf(target));
         }
-        if contains_view_except(scene, view, Some(target)) {
-            return Err(SceneError::DuplicateView(view));
-        }
 
         let node = scene.nodes.get_mut(&target).expect("validated node exists");
         let SpaceKind::Content {
@@ -723,23 +694,22 @@ impl Default for SceneBuilder {
     }
 }
 
+/// 标准编辑器布局：正文与状态栏是同一 editor view 的两个直属 Pane。
+/// 返回 (scene, 正文 space, 状态栏 space)；Pane 身份由调用方登记到
+/// view 的 ViewPaneMap。
 pub fn build_editor_scene(
     builder: &mut SceneBuilder,
     width: i32,
     height: i32,
     editor: ViewId,
-    status: ViewId,
-) -> Result<(Scene, SpaceId), SceneError> {
-    if editor == status {
-        return Err(SceneError::DuplicateView(editor));
-    }
+) -> (Scene, SpaceId, SpaceId) {
     let mut scene = MutableScene {
         root: SpaceId(u64::MAX),
         size: Size { width, height },
         nodes: HashMap::new(),
     };
     let editor_space = builder.add_view(&mut scene, editor, true, Sizing::Grow(1));
-    let status_space = builder.add_view(&mut scene, status, false, Sizing::Fixed(1));
+    let status_space = builder.add_view(&mut scene, editor, false, Sizing::Fixed(1));
     let root = builder.add_container(
         &mut scene,
         Arrangement::Flex {
@@ -752,7 +722,7 @@ pub fn build_editor_scene(
     scene.root = root;
     builder.set_children(&mut scene, root, &[editor_space, status_space]);
     debug_assert!(is_tree_valid(&scene));
-    Ok((scene.into_scene(), editor_space))
+    (scene.into_scene(), editor_space, status_space)
 }
 
 #[cfg(test)]
@@ -772,50 +742,39 @@ mod tests {
     #[test]
     fn standard_scene_marks_editor_focusable_and_status_inert() {
         let mut builder = SceneBuilder::new();
-        let (scene, editor) =
-            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
+        let (scene, editor, status) = build_editor_scene(&mut builder, 80, 24, ViewId(0));
 
         assert!(content_focusable(&scene, editor));
-        let status = scene.node(scene.root()).children[1];
         assert!(!content_focusable(&scene, status));
     }
 
     #[test]
-    fn duplicate_view_is_rejected_without_mutating_the_scene() {
+    fn one_view_may_occupy_multiple_content_spaces() {
         let mut builder = SceneBuilder::new();
-        let (mut scene, editor) =
-            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
-        let root_children = scene.node(scene.root()).children.clone();
-
-        assert_eq!(
-            builder.split(&mut scene, editor, ViewId(1), true, SplitDirection::Right,),
-            Err(SceneError::DuplicateView(ViewId(1)))
-        );
-        assert_eq!(scene.node(scene.root()).children, root_children);
-        assert_tree_valid(&scene);
-    }
-
-    #[test]
-    fn standard_scene_rejects_duplicate_view_ids_before_allocating_spaces() {
-        let mut builder = SceneBuilder::new();
-
-        assert!(matches!(
-            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(0)),
-            Err(SceneError::DuplicateView(ViewId(0)))
-        ));
-        let (scene, editor) =
-            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
+        let (scene, editor, status) = build_editor_scene(&mut builder, 80, 24, ViewId(0));
 
         assert_eq!(editor, SpaceId(0));
+        assert!(matches!(
+            scene.node(editor).space.kind,
+            SpaceKind::Content {
+                view: ViewId(0),
+                ..
+            }
+        ));
+        assert!(matches!(
+            scene.node(status).space.kind,
+            SpaceKind::Content {
+                view: ViewId(0),
+                ..
+            }
+        ));
         assert_tree_valid(&scene);
     }
 
     #[test]
     fn split_on_matching_axis_inserts_a_sibling_and_advances_id() {
         let mut builder = SceneBuilder::new();
-        let (mut scene, _) =
-            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
-        let status = scene.node(scene.root()).children[1];
+        let (mut scene, _, status) = build_editor_scene(&mut builder, 80, 24, ViewId(0));
 
         let result = builder
             .split(&mut scene, status, ViewId(2), false, SplitDirection::Down)
@@ -832,8 +791,7 @@ mod tests {
     #[test]
     fn split_on_different_axis_wraps_target_in_a_new_container() {
         let mut builder = SceneBuilder::new();
-        let (mut scene, editor) =
-            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
+        let (mut scene, editor, _) = build_editor_scene(&mut builder, 80, 24, ViewId(0));
 
         let result = builder
             .split(&mut scene, editor, ViewId(2), true, SplitDirection::Right)
@@ -856,9 +814,7 @@ mod tests {
     #[test]
     fn close_collapses_single_child_container_and_updates_root() {
         let mut builder = SceneBuilder::new();
-        let (mut scene, editor) =
-            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
-        let status = scene.node(scene.root()).children[1];
+        let (mut scene, editor, status) = build_editor_scene(&mut builder, 80, 24, ViewId(0));
 
         let closed = builder.close(&mut scene, status).unwrap();
 
@@ -871,8 +827,7 @@ mod tests {
     #[test]
     fn replace_view_keeps_space_id_and_changes_focusability() {
         let mut builder = SceneBuilder::new();
-        let (mut scene, editor) =
-            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
+        let (mut scene, editor, _) = build_editor_scene(&mut builder, 80, 24, ViewId(0));
 
         builder
             .replace_view(&mut scene, editor, ViewId(9), false)
@@ -890,9 +845,7 @@ mod tests {
     #[test]
     fn set_sizing_changes_only_the_requested_space() {
         let mut builder = SceneBuilder::new();
-        let (mut scene, editor) =
-            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
-        let status = scene.node(scene.root()).children[1];
+        let (mut scene, editor, status) = build_editor_scene(&mut builder, 80, 24, ViewId(0));
 
         builder
             .set_sizing(&mut scene, editor, Sizing::Fixed(12))
@@ -905,9 +858,7 @@ mod tests {
     #[test]
     fn orthogonal_split_keeps_parent_axis_sizing_on_wrapper() {
         let mut builder = SceneBuilder::new();
-        let (mut scene, _) =
-            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
-        let status = scene.node(scene.root()).children[1];
+        let (mut scene, _, status) = build_editor_scene(&mut builder, 80, 24, ViewId(0));
 
         let split = builder
             .split(&mut scene, status, ViewId(2), false, SplitDirection::Right)
@@ -925,9 +876,7 @@ mod tests {
     #[test]
     fn closing_orthogonal_split_restores_wrapper_sizing_to_survivor() {
         let mut builder = SceneBuilder::new();
-        let (mut scene, _) =
-            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
-        let status = scene.node(scene.root()).children[1];
+        let (mut scene, _, status) = build_editor_scene(&mut builder, 80, 24, ViewId(0));
         let split = builder
             .split(&mut scene, status, ViewId(2), false, SplitDirection::Right)
             .unwrap();
@@ -941,8 +890,7 @@ mod tests {
     #[test]
     fn failed_split_leaves_tree_and_next_id_unchanged() {
         let mut builder = SceneBuilder::new();
-        let (mut scene, editor) =
-            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
+        let (mut scene, editor, _) = build_editor_scene(&mut builder, 80, 24, ViewId(0));
 
         assert_eq!(
             builder.split(
@@ -964,8 +912,7 @@ mod tests {
     #[test]
     fn deleted_space_ids_are_not_reused() {
         let mut builder = SceneBuilder::new();
-        let (mut scene, editor) =
-            build_editor_scene(&mut builder, 80, 24, ViewId(0), ViewId(1)).unwrap();
+        let (mut scene, editor, _) = build_editor_scene(&mut builder, 80, 24, ViewId(0));
         let first = builder
             .split(&mut scene, editor, ViewId(2), true, SplitDirection::Right)
             .unwrap();

@@ -41,12 +41,13 @@ pub trait Frontend {
         focused: SpaceId,
     ) -> io::Result<()>;
 
-    /// 根据实际布局尺寸解析视口命令，不修改前端状态。
+    /// 根据实际布局尺寸解析视口命令，不修改前端状态。同一 view 可占据多个
+    /// Space，几何量取自其正文 Pane 的 space。
     fn resolve_viewport_command(
         &mut self,
         scene: &Scene,
         scene_revision: Revision,
-        view: ViewId,
+        space: SpaceId,
         cursor_row: usize,
         command: ViewportCommand,
     ) -> io::Result<ResolvedViewportCommand>;
