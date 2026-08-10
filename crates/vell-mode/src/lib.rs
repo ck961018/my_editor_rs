@@ -1,4 +1,5 @@
 pub mod action;
+mod attachment;
 pub mod command;
 pub mod command_registry;
 pub mod editing;
@@ -8,5 +9,6 @@ pub mod presentation;
 mod runtime;
 mod typed;
 
+pub use attachment::*;
 pub use runtime::*;
 pub use typed::*;

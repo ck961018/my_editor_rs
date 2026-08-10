@@ -292,11 +292,11 @@ seam 应围绕 View spec、事件、operation 和 presentation 形成。
 
 ```ts
 editor.modes.define({
-  id: "example.typescript",
+  name: "example.typescript",
   attach: {
     view: "core.buffer",
     binding: "document",
-    language: "typescript",
+    languages: ["typescript"],
   },
   on: { /* input and lifecycle handlers */ },
 });
@@ -423,6 +423,8 @@ View replacement 明确分离。关闭 Content 会忽略同批删除的 document
 
 ### M4：ModeResolver 和 attachment 生命周期
 
+实现状态：已完成。
+
 目标：集中回答“这个 View 需要哪些 Mode”。
 
 工作：
@@ -435,6 +437,22 @@ View replacement 明确分离。关闭 Content 会忽略同批删除的 document
 
 验收：同一 Content 的两个 BufferView 可以有不同 Mode attachment，
 但共享符合约定的 content analysis state。
+
+实现结果：`ContentClassifier` 统一根据 ContentKind、资源名和显式覆盖产生
+带来源的分类结果。Mode definition 冻结 View、可选 binding 和 languages
+规则，`ModeResolver` 结合 View definition、具名 binding、分类及
+Content/View override 生成有序计划。安装器按计划增量保留、添加、删除和
+重排 attachment；保留项继续使用原 view state，同一 `(ModeId, ContentId)`
+的 content state 由引用计数共享。计划携带 binding revision，过期计划在
+改动 state 前失败。TypeScript `attach` 已开放，省略时兼容为
+`core.buffer/document` 的任意语言；Tree-sitter 插件已改为声明其语言集合。
+计划模型已经能表示不依赖 Content 的 View-only Mode。当前 Mode context
+仍只安装 BufferView 的 `document` binding；View-only Mode 和直接附加到
+复合 View 的非 document binding 留待 Native DiffView 验证实际需求。
+
+View 顺序覆盖按部分优先列表解释：列出的活动 Mode 按用户顺序置前，未列出
+的 Mode 保持静态拓扑顺序。顺序覆盖不隐式启用 Mode，未知项和重复项会产生
+结构化错误。
 
 ### M5：用 Native DiffView 验证 contract
 

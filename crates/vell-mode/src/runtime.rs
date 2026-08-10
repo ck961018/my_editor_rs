@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::attachment::ModeAttachmentRule;
 use crate::command::{Command, ModeValue};
 use crate::mode_name::{ModeActionName, ModeName};
 use crate::operation::OperationRequest;
@@ -1158,6 +1159,9 @@ pub trait Mode {
     fn before(&self) -> Option<&ModeName> {
         None
     }
+    fn attachment(&self) -> ModeAttachmentRule {
+        ModeAttachmentRule::buffer_document()
+    }
     fn faces(&self) -> Vec<(FaceName, Face)> {
         Vec::new()
     }
@@ -1418,9 +1422,31 @@ pub trait ModeBackground {
     fn poll_background(&self) -> bool;
 }
 
+#[derive(Clone, Copy)]
+pub struct ModeResolutionDefinition<'a> {
+    name: &'a ModeName,
+    before: Option<&'a ModeName>,
+    attachment: &'a ModeAttachmentRule,
+}
+
+impl<'a> ModeResolutionDefinition<'a> {
+    pub fn name(self) -> &'a ModeName {
+        self.name
+    }
+
+    pub fn before(self) -> Option<&'a ModeName> {
+        self.before
+    }
+
+    pub fn attachment(self) -> &'a ModeAttachmentRule {
+        self.attachment
+    }
+}
+
 pub struct ModeRegistry {
     definitions: HashMap<ModeId, Rc<ModeRegistration>>,
     ids_by_name: HashMap<ModeName, ModeId>,
+    registration_order: Vec<ModeId>,
     backgrounds: Vec<Box<dyn ModeBackground>>,
     next_id: u32,
 }
@@ -1431,6 +1457,8 @@ struct ModeRegistration {
     adapters: RegisteredModeAdapters,
     action_names: Vec<ModeActionName>,
     actions: HashMap<ModeActionName, ModeActionId>,
+    before: Option<ModeName>,
+    attachment: ModeAttachmentRule,
 }
 
 struct RegisteredModeAdapters {
@@ -1450,6 +1478,7 @@ impl ModeRegistry {
         Self {
             definitions: HashMap::new(),
             ids_by_name: HashMap::new(),
+            registration_order: Vec::new(),
             backgrounds: Vec::new(),
             next_id: 0,
         }
@@ -1490,6 +1519,8 @@ impl ModeRegistry {
             return Err(ModeRegistrationError::DuplicateMode(name));
         }
         let declared_adapters = definition.adapters();
+        let before = definition.before().cloned();
+        let attachment = definition.attachment();
         if declared_adapters.is_empty() {
             return Err(ModeRegistrationError::MissingAdapter(name));
         }
@@ -1516,10 +1547,24 @@ impl ModeRegistry {
             adapters,
             action_names,
             actions,
+            before,
+            attachment,
         });
         self.ids_by_name.insert(name, id);
         self.definitions.insert(id, registered);
+        self.registration_order.push(id);
         Ok(id)
+    }
+
+    pub fn resolution_definitions(&self) -> impl Iterator<Item = ModeResolutionDefinition<'_>> {
+        self.registration_order.iter().map(|id| {
+            let registration = &self.definitions[id];
+            ModeResolutionDefinition {
+                name: registration.mode().name(),
+                before: registration.before.as_ref(),
+                attachment: &registration.attachment,
+            }
+        })
     }
 
     pub fn resolve_mode(&self, name: &ModeName) -> Option<ModeId> {
@@ -1617,18 +1662,41 @@ impl ModeRegistry {
         let id = self
             .resolve_mode(name)
             .ok_or_else(|| ModeAttachmentError::UnknownMode(name.clone()))?;
-        let registered = self
-            .definitions
-            .get(&id)
-            .expect("resolved mode exists")
-            .clone();
-        if registered.adapter(kind).is_none() {
+        if self.adapter(id, kind).is_none() {
             return Err(ModeAttachmentError::UnsupportedContent {
                 mode: name.clone(),
                 content,
                 kind,
             });
         }
+        Ok(self.instantiate_registered_with_context(
+            id,
+            content,
+            kind,
+            mode_contents,
+            content_context,
+            view_context,
+        ))
+    }
+
+    pub fn instantiate_registered_with_context(
+        &self,
+        id: ModeId,
+        content: ContentId,
+        kind: ContentKind,
+        mode_contents: &mut ModeContentStore,
+        content_context: &ModeContentContext<'_>,
+        view_context: &ModeViewContext<'_>,
+    ) -> ModeViewInstance {
+        let registered = self
+            .definitions
+            .get(&id)
+            .expect("registered ModeId exists")
+            .clone();
+        assert!(
+            registered.adapter(kind).is_some(),
+            "registered ModeId supports the prevalidated ContentKind"
+        );
         let mut mode = ModeViewInstance {
             state: Box::new(()),
             registered,
@@ -1637,7 +1705,7 @@ impl ModeRegistry {
             revision: Revision::default(),
         };
         mode_contents.attach_view_with_context(content, &mut mode, content_context, view_context);
-        Ok(mode)
+        mode
     }
 }
 
@@ -1890,6 +1958,25 @@ impl ModeContentStore {
         content_context: &ModeContentContext<'_>,
         view_context: &ModeViewContext<'_>,
     ) {
+        self.attach_retained_view_with_context(content, mode, content_context);
+        let id = mode.registered.id;
+        let content_state = self
+            .instances
+            .get(&(id, content))
+            .expect("attached mode has content state");
+        mode.initialize(
+            content_state.state.as_ref(),
+            content_state.fault.is_some(),
+            view_context,
+        );
+    }
+
+    pub fn attach_retained_view_with_context(
+        &mut self,
+        content: ContentId,
+        mode: &ModeViewInstance,
+        content_context: &ModeContentContext<'_>,
+    ) {
         let id = mode.registered.id;
         if let Some(existing) = self.instances.get_mut(&(id, content)) {
             existing.attachments += 1;
@@ -1920,15 +2007,6 @@ impl ModeContentStore {
                 },
             );
         }
-        let content_state = self
-            .instances
-            .get(&(id, content))
-            .expect("attached mode has content state");
-        mode.initialize(
-            content_state.state.as_ref(),
-            content_state.fault.is_some(),
-            view_context,
-        );
     }
 
     pub fn detach_view(&mut self, content: ContentId, mode: ModeId) {
@@ -2192,6 +2270,10 @@ impl ModeViewStore {
         Some(self.instances.get(&(mode, view))?.revision)
     }
 
+    pub fn instance(&self, mode: ModeId, view: ViewId) -> Option<&ModeViewInstance> {
+        self.instances.get(&(mode, view))
+    }
+
     pub fn insert(&mut self, view: ViewId, mode: ModeViewInstance) {
         let id = mode.registered.id;
         let chain = self.chains.entry(view).or_default();
@@ -2209,6 +2291,38 @@ impl ModeViewStore {
             self.instances.remove(&(*mode, view));
         }
         modes
+    }
+
+    pub fn remove_mode(&mut self, view: ViewId, mode: ModeId) -> Option<ModeViewInstance> {
+        let chain = self.chains.get_mut(&view)?;
+        let index = chain.iter().position(|candidate| *candidate == mode)?;
+        chain.remove(index);
+        if chain.is_empty() {
+            self.chains.remove(&view);
+        }
+        self.instances.remove(&(mode, view))
+    }
+
+    pub fn set_chain_order(&mut self, view: ViewId, order: Vec<ModeId>) {
+        assert!(
+            order
+                .iter()
+                .all(|mode| self.instances.contains_key(&(*mode, view)))
+        );
+        assert_eq!(
+            order
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            order.len(),
+            "a mode may only appear once in a view chain"
+        );
+        if order.is_empty() {
+            self.chains.remove(&view);
+        } else {
+            self.chains.insert(view, order);
+        }
     }
 
     pub fn mode_ids(&self, view: ViewId) -> &[ModeId] {

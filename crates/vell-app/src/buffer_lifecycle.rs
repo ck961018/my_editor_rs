@@ -122,10 +122,7 @@ impl std::error::Error for BufferLifecycleError {
 
 impl<F: Frontend> App<F> {
     pub fn new_buffer(&mut self) -> ContentId {
-        let content = self.kernel.create_content(ContentKind::Buffer);
-        self.session
-            .register_content_profile(content, ContentKind::Buffer);
-        content
+        self.kernel.create_content(ContentKind::Buffer)
     }
 
     pub fn open_buffer(
@@ -186,8 +183,6 @@ impl<F: Frontend> App<F> {
                 content: existing,
             });
         }
-        self.session
-            .register_content_profile(content, ContentKind::Buffer);
         Ok(content)
     }
 
@@ -394,23 +389,28 @@ impl<F: Frontend> App<F> {
                 .find(|buffer| buffer.content != content)
                 .map(|buffer| buffer.content)
                 .unwrap_or_else(|| self.new_buffer());
-            let mode_names = self.session.mode_chain_for_new_view(replacement_content);
             Some(
                 create_view(
                     replacement_content,
                     self.kernel.contents(),
                     self.kernel.buffer_view_definition(),
-                    &mode_names,
                 )
                 .expect("replacement content exists"),
             )
         } else {
             None
         };
-        let (contents, modes, content_modes) = self.kernel.mode_attachment_parts();
+        let (contents, modes, classifier, content_modes) = self.kernel.attachment_runtime_parts();
         let mutation = self
             .session
-            .close_content_views(content, replacement, modes, content_modes, contents)
+            .close_content_views(
+                content,
+                replacement,
+                modes,
+                classifier,
+                content_modes,
+                contents,
+            )
             .map_err(|error| BufferLifecycleError::Layout(error.to_string()))?;
         for removed in mutation.removed {
             if let Some(content) = removed.document

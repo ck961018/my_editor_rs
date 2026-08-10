@@ -12,6 +12,7 @@ use super::command_resolver::default_global_keymap;
 use super::dispatcher::{DispatchCommand, Dispatcher};
 use super::layout::{LayoutError, NewView, StatusBarPlacement};
 use super::message::{AppMessage, OpenedBuffer, OpenedPath};
+use super::mode_resolver::AttachmentPlanError;
 use super::query::AppQuery;
 use super::view::View;
 use super::view_workspace::{focusable_view_count, resolve_focus, scene_views, view_for_space};
@@ -22,9 +23,9 @@ use crate::command::{
 };
 use crate::kernel::FileBaseline;
 use crate::mode::{
-    Mode, ModeActionScope, ModeAdapters, ModeAttachmentError, ModeContentContext, ModeError,
-    ModeFaultPhase, ModeResult, ModeState, ModeViewContext, ModeViewInstance, ModeViewPolicy,
-    NamedStatusBarPresentation, NamedStatusBarSegment,
+    LanguageId, Mode, ModeActionScope, ModeAdapters, ModeAttachmentError, ModeAttachmentRule,
+    ModeContentContext, ModeError, ModeFaultPhase, ModeResult, ModeState, ModeViewContext,
+    ModeViewInstance, ModeViewPolicy, NamedStatusBarPresentation, NamedStatusBarSegment,
 };
 use crate::mode_name::{ModeActionName, ModeName};
 use crate::operation::{
@@ -122,6 +123,21 @@ struct SharedContentMode {
     name: ModeName,
     actions: Vec<ModeActionName>,
     keymap: Keymap<Command>,
+}
+
+struct RebindViewStateProbeMode {
+    name: ModeName,
+    create_view_calls: Rc<Cell<usize>>,
+}
+
+struct ClassifiedAttachmentMode {
+    name: ModeName,
+    language: LanguageId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RebindViewStateProbe {
+    created_by_call: usize,
 }
 
 struct AdapterProbeMode {
@@ -751,6 +767,48 @@ impl Mode for SharedContentMode {
             2 => history(TransactionIntent::Redo),
             _ => save(),
         }]))
+    }
+}
+
+impl Mode for RebindViewStateProbeMode {
+    fn name(&self) -> &ModeName {
+        &self.name
+    }
+
+    fn actions(&self) -> &[ModeActionName] {
+        &[]
+    }
+
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer()
+    }
+
+    fn create_view_state(
+        &self,
+        _content_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) -> Result<Box<dyn ModeState>, ModeError> {
+        let created_by_call = self.create_view_calls.get() + 1;
+        self.create_view_calls.set(created_by_call);
+        Ok(Box::new(RebindViewStateProbe { created_by_call }))
+    }
+}
+
+impl Mode for ClassifiedAttachmentMode {
+    fn name(&self) -> &ModeName {
+        &self.name
+    }
+
+    fn actions(&self) -> &[ModeActionName] {
+        &[]
+    }
+
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer()
+    }
+
+    fn attachment(&self) -> ModeAttachmentRule {
+        ModeAttachmentRule::buffer_document().with_languages([self.language.clone()])
     }
 }
 
@@ -2082,17 +2140,8 @@ fn text_presentation(view: &ViewData) -> &TextPresentation {
 async fn sessions_sharing_one_kernel_keep_client_state_independent() {
     let mut app = make_app(vec![], None);
     let first_view = view_id(&app, app.session.focused());
-    let editor_modes = app.session.view_modes().mode_names(first_view);
     let (contents, modes, mode_contents) = app.kernel.mode_attachment_parts();
-    let mut second = create_editor_session(
-        contents,
-        modes,
-        mode_contents,
-        80,
-        20,
-        editor_cid(),
-        editor_modes,
-    );
+    let mut second = create_editor_session(contents, modes, mode_contents, 80, 20, editor_cid());
     let second_view = view_for_space(second.scene(), second.focused()).unwrap();
 
     second.resize(100, 30);
@@ -2524,16 +2573,16 @@ fn recursive_mode_command_chain_stops_at_the_execution_limit() {
         .create_view_state(editor_cid())
         .unwrap();
     let focused = app.session.focused();
-    let (contents, modes, content_modes) = app.kernel.mode_attachment_parts();
+    let (contents, modes, classifier, content_modes) = app.kernel.attachment_runtime_parts();
     app.session
         .replace_space_content(
             focused,
             NewView {
                 view: View::buffer(editor_cid(), state),
-                mode_names: vec![mode_name.clone()],
             },
             true,
             modes,
+            classifier,
             content_modes,
             contents,
         )
@@ -3823,7 +3872,7 @@ fn one_mode_can_attach_canonical_adapter_to_buffer_content() {
 }
 
 #[test]
-fn attach_to_missing_content_is_structured_and_leaves_no_partial_profile() {
+fn attach_to_missing_content_is_structured_and_leaves_no_partial_attachment() {
     let mut app = make_app(vec![], None);
     let name = ModeName::new("buffer-only");
     app.kernel
@@ -3838,20 +3887,28 @@ fn attach_to_missing_content_is_structured_and_leaves_no_partial_profile() {
         })
         .unwrap();
     let missing = ContentId(1);
-    let profile_before = app.session.mode_chain_for_new_view(missing);
+    let view = view_id(&app, app.session.focused());
+    let chain_before = app.session.view_modes().mode_names(view);
 
     let error = app.attach_mode_to_content(missing, &name).unwrap_err();
 
-    assert_eq!(error, ModeAttachmentError::UnknownContent(missing));
-    assert_eq!(app.session.mode_chain_for_new_view(missing), profile_before);
+    assert_eq!(
+        error,
+        AttachmentPlanError::Attachment(ModeAttachmentError::UnknownContent(missing))
+    );
+    assert_eq!(app.session.view_modes().mode_names(view), chain_before);
 
     assert_eq!(
         app.attach_mode_to_content(editor_cid(), &ModeName::new("missing")),
-        Err(ModeAttachmentError::UnknownMode(ModeName::new("missing")))
+        Err(AttachmentPlanError::Attachment(
+            ModeAttachmentError::UnknownMode(ModeName::new("missing"))
+        ))
     );
     assert_eq!(
         app.attach_mode_to_content(ContentId(99), &name),
-        Err(ModeAttachmentError::UnknownContent(ContentId(99)))
+        Err(AttachmentPlanError::Attachment(
+            ModeAttachmentError::UnknownContent(ContentId(99))
+        ))
     );
 }
 
@@ -3931,9 +3988,119 @@ async fn content_mode_binding_is_shared_and_coexists_with_view_modes() {
 }
 
 #[test]
-fn new_buffers_have_unique_ids_and_the_default_mode_profile() {
+fn two_views_can_diverge_without_splitting_shared_mode_content_state() {
     let mut app = make_app(vec![], None);
-    let expected_modes = app.session.mode_chain_for_new_view(editor_cid());
+    let mode = ModeName::new("shared-content");
+    let mode_id = app
+        .kernel
+        .modes_mut()
+        .register(SharedContentMode::new())
+        .unwrap();
+    app.attach_mode_to_content(editor_cid(), &mode).unwrap();
+
+    let left_space = app.session.focused();
+    let right_space = app
+        .split_space(left_space, editor_cid(), true, SplitDirection::Right, true)
+        .unwrap()
+        .new_space;
+    let left = view_id(&app, left_space);
+    let right = view_id(&app, right_space);
+
+    let (contents, modes, classifier, content_modes) = app.kernel.attachment_runtime_parts();
+    app.session
+        .set_view_mode_enabled(
+            right,
+            mode.clone(),
+            false,
+            modes,
+            classifier,
+            content_modes,
+            contents,
+        )
+        .unwrap();
+
+    assert!(app.session.view_modes().mode_names(left).contains(&mode));
+    assert!(!app.session.view_modes().mode_names(right).contains(&mode));
+    assert_eq!(
+        app.kernel
+            .content_modes()
+            .state_for_test::<SharedContentState>(mode_id, editor_cid())
+            .unwrap()
+            .executions,
+        0
+    );
+
+    let command = ModeCommand::new(mode.clone(), ModeActionName::new("advance"));
+    assert_eq!(
+        app.kernel
+            .execute_mode_content_action(editor_cid(), &command)
+            .unwrap(),
+        ModeResult::operations(vec![history(TransactionIntent::Undo)])
+    );
+
+    let (contents, modes, classifier, content_modes) = app.kernel.attachment_runtime_parts();
+    app.session
+        .set_view_mode_enabled(
+            right,
+            mode.clone(),
+            true,
+            modes,
+            classifier,
+            content_modes,
+            contents,
+        )
+        .unwrap();
+    assert!(app.session.view_modes().mode_names(right).contains(&mode));
+    assert_eq!(
+        app.kernel
+            .content_modes()
+            .state_for_test::<SharedContentState>(mode_id, editor_cid())
+            .unwrap()
+            .executions,
+        1
+    );
+}
+
+#[test]
+fn stale_attachment_plan_is_rejected_before_mode_state_changes() {
+    let mut app = make_app(vec![], None);
+    let mode = ModeName::new("shared-content");
+    app.kernel
+        .modes_mut()
+        .register(SharedContentMode::new())
+        .unwrap();
+    app.attach_mode_to_content(editor_cid(), &mode).unwrap();
+    let view = view_id(&app, app.session.focused());
+    let plan = {
+        let (contents, modes, classifier, _) = app.kernel.attachment_runtime_parts();
+        app.session
+            .resolve_attachment_plan(view, modes, classifier, contents)
+            .unwrap()
+    };
+    let previous_modes = app.session.view_modes().mode_names(view);
+    let other = app.new_buffer();
+    let state = app.kernel.contents().create_view_state(other).unwrap();
+    app.session
+        .view_mut(view)
+        .unwrap()
+        .rebind(&BindingKey::new(DOCUMENT_BINDING), other, Some(state))
+        .unwrap();
+
+    let (contents, modes, _, content_modes) = app.kernel.attachment_runtime_parts();
+    let error = app
+        .session
+        .apply_attachment_plan(plan, modes, content_modes, contents)
+        .unwrap_err();
+
+    assert!(matches!(error, AttachmentPlanError::StaleBindings { .. }));
+    assert_eq!(app.session.view_modes().mode_names(view), previous_modes);
+}
+
+#[test]
+fn new_buffers_have_unique_ids_and_resolve_modes_when_viewed() {
+    let mut app = make_app(vec![], None);
+    let original_view = view_id(&app, app.session.focused());
+    let expected_modes = app.session.view_modes().mode_names(original_view);
 
     let first = app.new_buffer();
     let second = app.new_buffer();
@@ -3942,8 +4109,11 @@ fn new_buffers_have_unique_ids_and_the_default_mode_profile() {
     assert!(app.kernel.contents().contains(first));
     assert!(app.kernel.contents().contains(second));
     assert_eq!(app.kernel.contents().kind(first), Some(ContentKind::Buffer));
-    assert_eq!(app.session.mode_chain_for_new_view(first), expected_modes);
-    assert_eq!(app.session.mode_chain_for_new_view(second), expected_modes);
+    let switched = switch_focused_view(&mut app, first).unwrap();
+    assert_eq!(
+        app.session.view_modes().mode_names(switched),
+        expected_modes
+    );
     let info = app
         .buffers()
         .into_iter()
@@ -4340,6 +4510,18 @@ fn typed_view_focus_targets_an_existing_view() {
 fn typed_document_rebind_preserves_view_identity_instead_of_switching() {
     let mut app = make_app(vec![], None);
     let view = view_id(&app, app.session.focused());
+    let mode_name = ModeName::new("rebind-view-state-probe");
+    let create_view_calls = Rc::new(Cell::new(0));
+    let mode = app
+        .kernel
+        .modes_mut()
+        .register(RebindViewStateProbeMode {
+            name: mode_name.clone(),
+            create_view_calls: create_view_calls.clone(),
+        })
+        .unwrap();
+    app.attach_mode_to_content(editor_cid(), &mode_name)
+        .unwrap();
     let replacement = app.new_buffer();
     let scene_revision = app.session.scene_revision();
     let view_revision = app.session.view(view).unwrap().revision();
@@ -4368,6 +4550,25 @@ fn typed_document_rebind_preserves_view_identity_instead_of_switching() {
         Revision(view_revision.0 + 1)
     );
     assert!(app.kernel.contents().contains(editor_cid()));
+    assert_eq!(create_view_calls.get(), 1);
+    assert_eq!(
+        app.session
+            .view_modes()
+            .state_for_test::<RebindViewStateProbe>(mode, view),
+        Some(&RebindViewStateProbe { created_by_call: 1 })
+    );
+    assert!(
+        app.kernel
+            .content_modes()
+            .state_for_test::<()>(mode, editor_cid())
+            .is_none()
+    );
+    assert!(
+        app.kernel
+            .content_modes()
+            .state_for_test::<()>(mode, replacement)
+            .is_some()
+    );
 }
 
 #[test]
@@ -4702,12 +4903,7 @@ fn switching_the_focused_view_replaces_it_and_is_idempotent() {
 fn close_buffer_rejects_dirty_content_and_force_replaces_its_last_view() {
     let mut app = make_app(vec![], None);
     let view = view_id(&app, app.session.focused());
-    let content_modes = app
-        .session
-        .mode_chain_for_new_view(editor_cid())
-        .iter()
-        .map(|name| app.kernel.modes().resolve_mode(name).unwrap())
-        .collect::<Vec<_>>();
+    let content_modes = app.session.view_modes().mode_ids(view).to_vec();
     app.execute_command(DispatchCommand::ModeOperations {
         operations: vec![OperationRequest::Face(FaceOperation::SetBase {
             target: FaceRemapTarget::CurrentContent,
@@ -4749,7 +4945,6 @@ fn close_buffer_rejects_dirty_content_and_force_replaces_its_last_view() {
         app.kernel.history_behavior_for_test(editor_cid()),
         (false, None, 0, 0)
     );
-    assert!(app.session.mode_chain_for_new_view(editor_cid()).is_empty());
     assert!(content_modes.into_iter().all(|mode| {
         app.kernel
             .content_modes()
@@ -4945,7 +5140,7 @@ fn switching_to_a_buffer_view_rejects_missing_content() {
 }
 
 #[test]
-fn dynamic_attachment_profiles_content_before_its_first_view() {
+fn dynamic_attachment_override_applies_before_the_contents_first_view() {
     let mut app = make_app(vec![], None);
     let mode = ModeName::new("shared-content");
     app.kernel
@@ -4971,7 +5166,9 @@ fn dynamic_attachment_profiles_content_before_its_first_view() {
         .new_space;
     let view = view_id(&app, space);
 
-    assert_eq!(app.session.view_modes().mode_names(view), vec![mode]);
+    let attached = app.session.view_modes().mode_names(view);
+    assert!(attached.contains(&ModeName::new("vim")));
+    assert!(attached.contains(&mode));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -7156,6 +7353,38 @@ async fn save_as_updates_the_path_only_after_success() {
         Some(expected_path.as_str())
     );
     assert_eq!(dirty_state(&app, editor_cid()), DirtyState::Clean);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn save_as_reconciles_language_attachments_in_both_directions() {
+    let directory = tempfile::tempdir().unwrap();
+    let rust_path = directory.path().join("classified.rs");
+    let text_path = directory.path().join("classified.txt");
+    let mut app = make_app(vec![], None);
+    let name = ModeName::new("rust-classification-probe");
+    app.kernel
+        .modes_mut()
+        .register(ClassifiedAttachmentMode {
+            name: name.clone(),
+            language: LanguageId::new("rust"),
+        })
+        .unwrap();
+    let view = view_id(&app, app.session.focused());
+    assert!(!app.session.view_modes().mode_names(view).contains(&name));
+
+    assert!(app.save_buffer_as(editor_cid(), &rust_path, false).unwrap());
+    while app.kernel.has_pending_save(editor_cid()) {
+        let message = app.kernel.receive_message().await.unwrap();
+        app.handle_app_message(message).unwrap();
+    }
+    assert!(app.session.view_modes().mode_names(view).contains(&name));
+
+    assert!(app.save_buffer_as(editor_cid(), &text_path, false).unwrap());
+    while app.kernel.has_pending_save(editor_cid()) {
+        let message = app.kernel.receive_message().await.unwrap();
+        app.handle_app_message(message).unwrap();
+    }
+    assert!(!app.session.view_modes().mode_names(view).contains(&name));
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -230,6 +230,47 @@ compiler bundle 随源码管理，构建不调用网络、Node 或 pnpm。来源
 
 [bundle]: ../crates/vell-plugin-v8/vendor/typescript/README.md
 
+## 声明 Mode 附加目标
+
+插件作者不需要遍历 Content，也不需要根据文件后缀寻找 View。定义 Mode 时，
+只回答三个问题：
+
+1. 行为属于哪种 View，例如 `core.buffer`；
+2. 是否需要某个 binding 提供数据，例如 `document`；
+3. 是否只适用于某些宿主 language id。
+
+例如，一个只处理 Rust 与 Markdown 文档的 Mode 写成：
+
+```ts
+editor.modes.define({
+  name: "outline",
+  attach: {
+    view: "core.buffer",
+    binding: "document",
+    languages: ["markdown", "rust"],
+  },
+  on: {
+    buffer: {
+      state: () => ({ headings: [] }),
+    },
+  },
+});
+```
+
+宿主先分类 binding 指向的 Content，再由 `ModeResolver` 决定每个具体 View
+的有序 Mode chain。文件后缀只是宿主分类信号之一，不应在每个插件里重复
+`endsWith()` 分派。分类和 attachment 是两件事：同一 Content 可以出现在
+两个 View 中，而这两个 View 可以有不同的 Mode attachment；如果都附加了
+同一 Mode，它们共享 Content state，但各自拥有 View state。
+
+`attach` 省略时，为兼容现有插件，等价于匹配
+`core.buffer` 的 `document` binding 且不限制语言。新插件应显式声明
+`attach`，让读者只看 definition 就能理解 Mode 的适用范围。当前运行时只
+安装指向 BufferView `document` binding 的 Mode。省略 `attach.binding`
+可以声明纯 View 行为，但要等 Native View contract 验证后才会实际安装；
+复合 View 的其他 binding 也在该阶段开放。`languages` 依赖 Content 分类，
+因此只能和 `binding` 一起声明。
+
 ## 定义 Mode
 
 ```ts

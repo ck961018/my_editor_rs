@@ -1,15 +1,13 @@
-use std::collections::{BTreeSet, HashMap};
-use std::fmt;
 use std::io;
 
 use crate::kernel::Kernel;
-use crate::mode::{Mode, ModeId, ModeRegistry};
+use crate::mode::{Mode, ModeRegistry};
 #[cfg(test)]
 use crate::mode_name::ModeName;
 use crate::session::{ClientSession, EditorSessionInit, InitialView};
 use crate::theme::FaceEnvironment;
 use vell_core::buffer::Buffer;
-use vell_core::content::{Content, ContentKind};
+use vell_core::content::Content;
 use vell_core::content_store::ContentStore;
 use vell_protocol::content_query::{FaceOverride, ThemeName};
 use vell_protocol::ids::{ContentId, ViewId};
@@ -23,24 +21,6 @@ pub(super) struct EditorBootstrap {
 struct BootstrapIds {
     next_content: u64,
     next_view: u64,
-}
-
-struct ConfiguredMode {
-    name: crate::mode_name::ModeName,
-    before: Option<crate::mode_name::ModeName>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum ModeOrderError {
-    Duplicate(crate::mode_name::ModeName),
-    UnknownBefore {
-        mode: crate::mode_name::ModeName,
-        before: crate::mode_name::ModeName,
-    },
-    Cycle {
-        kind: ContentKind,
-        blocked: Vec<crate::mode_name::ModeName>,
-    },
 }
 
 impl BootstrapIds {
@@ -83,45 +63,25 @@ pub(super) fn bootstrap_editor_with_theme(
     let mut ids = BootstrapIds::default();
     let editor_content = ids.content();
     let editor_view = ids.view();
-    let configured = configured_modes
-        .iter()
-        .map(|mode| ConfiguredMode {
-            name: mode.name().clone(),
-            before: mode.before().cloned(),
-        })
-        .collect::<Vec<_>>();
-    let indexes = validate_mode_order(&configured)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-
     let mut contents = ContentStore::default();
     contents
         .insert(editor_content, Content::Buffer(buffer))
         .expect("bootstrap allocates unique content ids");
     let mut modes = ModeRegistry::new();
-    let mut registered = Vec::with_capacity(configured_modes.len());
     for mode in configured_modes {
-        registered.push(modes.register_boxed(mode).map_err(io::Error::other)?);
+        modes
+            .register_boxed(mode)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     }
-    let editor_order = stable_mode_order(
-        &configured,
-        &indexes,
-        &registered,
-        &modes,
-        ContentKind::Buffer,
-    )
-    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    let editor_modes = editor_order
-        .into_iter()
-        .map(|index| configured[index].name.clone())
-        .collect();
     let mut kernel = Kernel::new(contents, modes);
     let buffer_definition = kernel.buffer_view_definition().clone();
-    let (contents, modes, mode_contents) = kernel.mode_attachment_parts();
+    let (contents, modes, classifier, mode_contents) = kernel.attachment_runtime_parts();
     let face_environment =
         FaceEnvironment::with_overrides(theme, face_overrides).map_err(io::Error::other)?;
     let session = ClientSession::editor(
         contents,
         modes,
+        classifier,
         mode_contents,
         width,
         height,
@@ -129,124 +89,15 @@ pub(super) fn bootstrap_editor_with_theme(
             editor: InitialView {
                 view: editor_view,
                 content: editor_content,
-                modes: editor_modes,
             },
             next_view_id: ids.next_view,
             buffer_definition,
         },
         face_environment,
-    );
+    )
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     Ok(EditorBootstrap { kernel, session })
 }
-
-fn validate_mode_order(
-    modes: &[ConfiguredMode],
-) -> Result<HashMap<crate::mode_name::ModeName, usize>, ModeOrderError> {
-    let mut indexes = HashMap::with_capacity(modes.len());
-    for (index, mode) in modes.iter().enumerate() {
-        if indexes.insert(mode.name.clone(), index).is_some() {
-            return Err(ModeOrderError::Duplicate(mode.name.clone()));
-        }
-    }
-    for mode in modes {
-        if let Some(before) = &mode.before
-            && !indexes.contains_key(before)
-        {
-            return Err(ModeOrderError::UnknownBefore {
-                mode: mode.name.clone(),
-                before: before.clone(),
-            });
-        }
-    }
-    Ok(indexes)
-}
-
-fn stable_mode_order(
-    modes: &[ConfiguredMode],
-    indexes: &HashMap<crate::mode_name::ModeName, usize>,
-    registered: &[ModeId],
-    registry: &ModeRegistry,
-    kind: ContentKind,
-) -> Result<Vec<usize>, ModeOrderError> {
-    let members = modes
-        .iter()
-        .enumerate()
-        .filter_map(|(index, _)| registry.adapter(registered[index], kind).map(|_| index))
-        .collect::<Vec<_>>();
-    let local_indexes = members
-        .iter()
-        .enumerate()
-        .map(|(local, global)| (*global, local))
-        .collect::<HashMap<_, _>>();
-    let mut outgoing = vec![Vec::new(); members.len()];
-    let mut indegree = vec![0usize; members.len()];
-    for (source_local, source_global) in members.iter().copied().enumerate() {
-        let Some(before) = &modes[source_global].before else {
-            continue;
-        };
-        let target_global = indexes[before];
-        let Some(&target_local) = local_indexes.get(&target_global) else {
-            continue;
-        };
-        outgoing[source_local].push(target_local);
-        indegree[target_local] += 1;
-    }
-
-    let mut ready = indegree
-        .iter()
-        .enumerate()
-        .filter_map(|(index, &degree)| (degree == 0).then_some(index))
-        .collect::<BTreeSet<_>>();
-    let mut ordered = Vec::with_capacity(members.len());
-    while let Some(index) = ready.pop_first() {
-        ordered.push(members[index]);
-        for &target in &outgoing[index] {
-            indegree[target] -= 1;
-            if indegree[target] == 0 {
-                ready.insert(target);
-            }
-        }
-    }
-    if ordered.len() != members.len() {
-        let blocked = indegree
-            .iter()
-            .enumerate()
-            .filter(|(_, degree)| **degree > 0)
-            .map(|(local, _)| modes[members[local]].name.clone())
-            .collect();
-        return Err(ModeOrderError::Cycle { kind, blocked });
-    }
-    Ok(ordered)
-}
-
-impl fmt::Display for ModeOrderError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Duplicate(mode) => {
-                write!(formatter, "mode '{}' is already registered", mode.as_str())
-            }
-            Self::UnknownBefore { mode, before } => write!(
-                formatter,
-                "mode '{}' declares unknown before target '{}'",
-                mode.as_str(),
-                before.as_str()
-            ),
-            Self::Cycle { kind, blocked } => {
-                let names = blocked
-                    .iter()
-                    .map(|mode| format!("'{}'", mode.as_str()))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                write!(
-                    formatter,
-                    "{kind:?} mode ordering contains a cycle; blocked modes: {names}"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for ModeOrderError {}
 
 #[cfg(test)]
 #[allow(
@@ -260,14 +111,15 @@ pub(super) fn create_editor_session(
     width: usize,
     height: usize,
     editor_content: ContentId,
-    editor_modes: Vec<ModeName>,
 ) -> ClientSession {
     let mut ids = BootstrapIds::default();
     let editor_view = ids.view();
     let buffer_definition = vell_protocol::view::ViewDefinition::buffer();
+    let classifier = crate::content_classifier::ContentClassifier::default();
     ClientSession::editor(
         contents,
         modes,
+        &classifier,
         mode_contents,
         width,
         height,
@@ -275,13 +127,13 @@ pub(super) fn create_editor_session(
             editor: InitialView {
                 view: editor_view,
                 content: editor_content,
-                modes: editor_modes,
             },
             next_view_id: ids.next_view,
             buffer_definition,
         },
         FaceEnvironment::new(None).expect("built-in themes must be valid"),
     )
+    .expect("test session attachment plan is valid")
 }
 
 #[cfg(test)]
@@ -334,15 +186,7 @@ mod tests {
         let modes = ModeRegistry::new();
         let mut mode_contents = crate::mode::ModeContentStore::default();
 
-        let session = create_editor_session(
-            &contents,
-            &modes,
-            &mut mode_contents,
-            40,
-            5,
-            editor,
-            Vec::new(),
-        );
+        let session = create_editor_session(&contents, &modes, &mut mode_contents, 40, 5, editor);
 
         assert_eq!(session.views()[&ViewId(0)].require_document(), editor);
         // 状态栏是 editor view 的直属 Pane，不再消耗 view id。
@@ -405,7 +249,7 @@ mod tests {
         assert!(
             unknown
                 .to_string()
-                .contains("unknown before target 'missing'")
+                .contains("orders before unknown mode 'missing'")
         );
 
         let cycle = bootstrap_editor(
@@ -423,8 +267,8 @@ mod tests {
         assert!(
             cycle
                 .to_string()
-                .contains("Buffer mode ordering contains a cycle")
+                .contains("mode attachment ordering contains a cycle")
         );
-        assert!(cycle.to_string().contains("'first', 'second'"));
+        assert!(cycle.to_string().contains("first, second"));
     }
 }

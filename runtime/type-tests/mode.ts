@@ -2,6 +2,11 @@
 
 editor.modes.define({
 	name: "pairs",
+	attach: {
+		view: "core.buffer",
+		binding: "document",
+		languages: ["rust", "typescript"],
+	},
 	faces: {
 		"plugin.pairs.match": {
 			inherits: ["syntax.string"],
@@ -94,6 +99,7 @@ editor.modes.define<{
 	items: string[];
 }>({
 	name: "typed-state",
+	attach: { view: "test.diff" },
 	on: {
 		buffer: {
 			state: () => ({
@@ -117,6 +123,13 @@ editor.modes.define({
 			},
 		},
 	},
+});
+
+editor.modes.define({
+	name: "invalid-view-only-language",
+	// @ts-expect-error Language matching needs a Content binding to classify.
+	attach: { view: "test.diff", languages: ["rust"] },
+	on: { buffer: {} },
 });
 
 editor.theme.use("catppuccin-mocha");

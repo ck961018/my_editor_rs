@@ -1,7 +1,7 @@
 //! TypeScript runtime owned by the application layer.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,8 @@ use vell_mode::command::ModeValue;
 use vell_mode::mode_name::{ModeActionName, ModeName};
 use vell_mode::operation::MAX_MODE_CALLBACK_OPERATIONS;
 use vell_mode::{
-    Mode, ModeBackground, ModeContentContext, ModeError, ModeResult, ModeState, ModeViewContext,
+    LanguageId, Mode, ModeAttachmentRule, ModeBackground, ModeContentContext, ModeError,
+    ModeResult, ModeState, ModeViewContext,
 };
 use vell_protocol::content_query::{
     Color, Face, FaceDefinition, FaceName, FaceOverride, FacePatch, FaceValue, NamedTextDecoration,
@@ -23,6 +24,7 @@ use vell_protocol::content_query::{
 };
 use vell_protocol::ids::ContentId;
 use vell_protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
+use vell_protocol::view::{BindingKey, ViewDefinitionId};
 
 mod bridge;
 mod command_line;
@@ -165,6 +167,7 @@ struct ScriptModeDefinition {
     name: ModeName,
     face_definitions: Vec<FaceDefinition>,
     before: Option<ModeName>,
+    attachment: ModeAttachmentRule,
     adapters: ScriptAdapterDefinitions,
 }
 
@@ -1148,6 +1151,11 @@ editor.modes.define({{
 editor.modes.define({
   name: "pairs",
   before: "base-mode",
+  attach: {
+    view: "core.buffer",
+    binding: "document",
+    languages: ["rust", "markdown"],
+  },
   on: {
     buffer: {
       state: () => ({ calls: 0 }),
@@ -1178,6 +1186,17 @@ editor.modes.define({
         let mode = modes.pop().unwrap();
         assert_eq!(mode.name().as_str(), "pairs");
         assert_eq!(mode.before().unwrap().as_str(), "base-mode");
+        let attachment = mode.attachment();
+        assert_eq!(attachment.view().as_str(), "core.buffer");
+        assert_eq!(attachment.binding().unwrap().as_str(), "document");
+        assert_eq!(
+            attachment
+                .languages()
+                .unwrap()
+                .map(LanguageId::as_str)
+                .collect::<Vec<_>>(),
+            ["markdown", "rust"]
+        );
 
         let content_id = ContentId(0);
         let mut contents = ContentStore::default();
@@ -1228,6 +1247,76 @@ editor.modes.define({
                 ..
             }] if text == "\"\""
         ));
+    }
+
+    #[test]
+    fn rejects_malformed_mode_attachment_definition() {
+        let mut host = ScriptHost::new();
+        let error = host
+            .execute_typescript(
+                "file:///invalid-attachment.ts",
+                r#"
+editor.modes.define({
+  name: "invalid-attachment",
+  attach: {
+    view: "core.buffer",
+    binding: "document",
+    languages: "rust",
+  },
+  on: { buffer: {} },
+});
+"#,
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("mode attach languages must be an array"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn parses_view_only_mode_attachment_without_a_content_binding() {
+        let mut host = ScriptHost::new();
+        host.execute_typescript(
+            "file:///view-only-attachment.ts",
+            r#"
+editor.modes.define({
+  name: "diff-navigation",
+  attach: { view: "example.diff" },
+  on: { buffer: {} },
+});
+"#,
+        )
+        .unwrap();
+        let host = Rc::new(RefCell::new(host));
+        let mode = ScriptHost::script_modes(&host).pop().unwrap();
+
+        assert_eq!(mode.attachment().view().as_str(), "example.diff");
+        assert!(mode.attachment().binding().is_none());
+    }
+
+    #[test]
+    fn rejects_language_matching_without_a_content_binding() {
+        let error = ScriptHost::new()
+            .execute_typescript(
+                "file:///view-only-language.ts",
+                r#"
+editor.modes.define({
+  name: "invalid-view-only-language",
+  attach: { view: "example.diff", languages: ["rust"] },
+  on: { buffer: {} },
+});
+"#,
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("mode attach languages require a binding"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2040,7 +2129,11 @@ editor.modes.define({{
                 .iter()
                 .map(|definition| definition.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["vim", "syntax-highlighting"]
+            vec![
+                "vim",
+                "syntax-highlighting-markdown",
+                "syntax-highlighting-rust"
+            ]
         );
         let vim = definitions
             .iter()
@@ -2056,7 +2149,7 @@ editor.modes.define({{
         );
         let highlighting = definitions
             .iter()
-            .find(|definition| definition.name.as_str() == "syntax-highlighting")
+            .find(|definition| definition.name.as_str() == "syntax-highlighting-rust")
             .unwrap();
         let adapter = highlighting.adapters.buffer.as_ref().unwrap();
         assert!(adapter.create_content.is_some());

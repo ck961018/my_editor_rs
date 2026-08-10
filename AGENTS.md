@@ -86,10 +86,12 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
 
 ## 所有权与执行约定
 
-- `Kernel` 持有 `ContentStore`、`ModeRegistry`、`ViewDefinitionRegistry`、
-  共享 Mode content state、`TransactionManager`、保存任务和 Mode 后台任务。
-- `ClientSession` 持有 `ViewWorkspace`、Mode view state、输入状态、Face 与
-  presentation cache。当前生产路径是一对一 `Kernel + ClientSession`。
+- `Kernel` 持有 `ContentStore`、`ContentClassifier`、`ModeRegistry`、
+  `ViewDefinitionRegistry`、共享 Mode content state、`TransactionManager`、
+  保存任务和 Mode 后台任务。
+- `ClientSession` 持有 `ViewWorkspace`、`ModeResolver`、Mode view state、
+  输入状态、Face 与 presentation cache。当前生产路径是一对一
+  `Kernel + ClientSession`。
 - `ViewWorkspace` 是 View 语义树、直属 Pane 映射、Scene、SceneBuilder、
   结构 ID、焦点和状态栏结构的唯一所有者。创建、替换和关闭先在完整结构
   草稿上校验，再一次发布；调用方只消费 View 生命周期事件。
@@ -107,6 +109,9 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
   的 `head`。不要添加冗余方向字段。
 - Mode content state 按 `(ModeId, ContentId)` 共享，view state 按
   `(ModeId, ViewId)` 隔离；一个 View 可以附加多个有序 Mode。
+- Mode definition 声明 View definition、可选 binding 和 language 匹配；
+  `ModeResolver` 是 attachment 排序与 override 的唯一所有者。计划必须通过
+  binding revision 校验后才能增量安装。
 - Native Mode 与 TypeScript Mode 共用 `vell-mode` 的 adapter、state、
   operation 和 presentation contract。
 - Mode callback 只能写自身 draft，并返回有序 typed operation；不得借出

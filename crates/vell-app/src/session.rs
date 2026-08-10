@@ -4,12 +4,14 @@ use std::time::Instant;
 use crate::action::ViewAction;
 use crate::command::ModeCommand;
 use crate::command_resolver::default_global_keymap;
+use crate::content_classifier::ContentClassifier;
 use crate::dispatcher::{DispatchInput, DispatchOutcome, Dispatcher, DispatcherInputSnapshot};
 use crate::layout::{LayoutError, NewView, StatusBarHandle, StatusBarPlacement, create_view};
 use crate::mode::{
     CursorDomain, FaceRegistry, ModeAttachmentError, ModeContentContext, ModeContentStore,
-    ModeDraftJournal, ModeError, ModeRegistry, ModeResult, ModeViewStore,
+    ModeDraftJournal, ModeError, ModeId, ModeRegistry, ModeResult, ModeViewStore,
 };
+use crate::mode_resolver::{AttachmentPlanError, ModeAttachmentPlan, ModeOverride, ModeResolver};
 use crate::presentation::PresentationLayerStore;
 use crate::scene_model::{CloseResult, SplitResult};
 use crate::theme::{FaceEnvironment, SessionFaces};
@@ -29,9 +31,7 @@ use vell_protocol::view::{BindingKey, DOCUMENT_BINDING};
 
 pub(super) struct ClientSession {
     workspace: ViewWorkspace,
-    mode_profiles: HashMap<ContentId, Vec<crate::mode_name::ModeName>>,
-    default_mode_profiles:
-        HashMap<vell_core::content::ContentKind, Vec<crate::mode_name::ModeName>>,
+    mode_resolver: ModeResolver,
     view_modes: ModeViewStore,
     faces: SessionFaces,
     presentation: PresentationLayerStore,
@@ -41,7 +41,6 @@ pub(super) struct ClientSession {
 pub(super) struct InitialView {
     pub view: ViewId,
     pub content: ContentId,
-    pub modes: Vec<crate::mode_name::ModeName>,
 }
 
 pub(super) struct EditorSessionInit {
@@ -61,27 +60,22 @@ pub(super) struct RemovedSessionView {
 }
 
 impl ClientSession {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "session bootstrap receives independent app-owned stores"
+    )]
     pub(super) fn editor(
         contents: &ContentStore,
         modes: &ModeRegistry,
+        classifier: &ContentClassifier,
         mode_contents: &mut ModeContentStore,
         width: usize,
         height: usize,
         init: EditorSessionInit,
         face_environment: FaceEnvironment,
-    ) -> Self {
-        let editor = create_view(
-            init.editor.content,
-            contents,
-            &init.buffer_definition,
-            &init.editor.modes,
-        )
-        .expect("editor content exists");
-        let default_mode_profiles = HashMap::from([(
-            vell_core::content::ContentKind::Buffer,
-            init.editor.modes.clone(),
-        )]);
-        let mode_profiles = HashMap::from([(init.editor.content, init.editor.modes)]);
+    ) -> Result<Self, AttachmentPlanError> {
+        let editor = create_view(init.editor.content, contents, &init.buffer_definition)
+            .expect("editor content exists");
         let workspace = ViewWorkspace::editor(
             width,
             height,
@@ -89,45 +83,25 @@ impl ClientSession {
             editor.view,
             init.next_view_id,
         );
-        let mut view_modes = ModeViewStore::default();
-        let mut faces = FaceRegistry::default();
-        let editor_content = workspace
-            .view(init.editor.view)
-            .expect("initial editor view exists")
-            .require_document();
-        for name in editor.mode_names {
-            let content_context = ModeContentContext::new(editor_content, contents);
-            let view_data = workspace
-                .view(init.editor.view)
-                .expect("initial editor view exists");
-            let view_context = require_mode_view_context(init.editor.view, view_data, contents)
-                .expect("editor view state matches editor content");
-            let mode = modes
-                .instantiate_with_context(
-                    &name,
-                    editor_content,
-                    contents
-                        .kind(editor_content)
-                        .expect("editor content exists"),
-                    mode_contents,
-                    &content_context,
-                    &view_context,
-                )
-                .expect("initial mode must be registered");
-            mode.register_faces(&mut faces);
-            view_modes.insert(init.editor.view, mode);
-        }
+        let view_modes = ModeViewStore::default();
+        let faces = FaceRegistry::default();
         let mut session = Self {
             workspace,
-            mode_profiles,
-            default_mode_profiles,
+            mode_resolver: ModeResolver::new(modes)?,
             view_modes,
             faces: SessionFaces::new(faces, face_environment),
             presentation: PresentationLayerStore::default(),
             dispatcher: Dispatcher::new(default_global_keymap()),
         };
+        session.reconcile_view_modes(
+            init.editor.view,
+            modes,
+            classifier,
+            mode_contents,
+            contents,
+        )?;
         session.refresh_presentation(contents, mode_contents);
-        session
+        Ok(session)
     }
 
     pub(super) fn scene(&self) -> &Scene {
@@ -181,36 +155,300 @@ impl ClientSession {
         &mut self.view_modes
     }
 
-    pub(super) fn register_content_profile(
-        &mut self,
-        content: ContentId,
-        kind: vell_core::content::ContentKind,
-    ) {
-        let profile = self
-            .default_mode_profiles
-            .get(&kind)
-            .cloned()
-            .unwrap_or_default();
-        self.mode_profiles.insert(content, profile);
-    }
-
     pub(super) fn forget_content(&mut self, content: ContentId) {
-        self.mode_profiles.remove(&content);
+        self.mode_resolver.forget_content(content);
         self.faces.remove_content_remaps(content);
-    }
-
-    pub(super) fn mode_chain_for_new_view(
-        &self,
-        content: ContentId,
-    ) -> Vec<crate::mode_name::ModeName> {
-        self.mode_profiles
-            .get(&content)
-            .cloned()
-            .unwrap_or_default()
     }
 
     pub(super) fn commit_mode_drafts(&mut self, drafts: &mut ModeDraftJournal) {
         drafts.commit_views(&mut self.view_modes);
+    }
+
+    pub(super) fn resolve_attachment_plan(
+        &self,
+        view: ViewId,
+        registry: &ModeRegistry,
+        classifier: &ContentClassifier,
+        contents: &ContentStore,
+    ) -> Result<ModeAttachmentPlan, AttachmentPlanError> {
+        let view_data = self.workspace.view(view).ok_or({
+            ModeAttachmentError::InvalidViewContext(
+                crate::mode::ModeContextError::MissingDocument { view },
+            )
+        })?;
+        self.mode_resolver
+            .resolve(view, view_data, registry, classifier, contents)
+            .map_err(Into::into)
+    }
+
+    pub(super) fn apply_attachment_plan(
+        &mut self,
+        plan: ModeAttachmentPlan,
+        registry: &ModeRegistry,
+        mode_contents: &mut ModeContentStore,
+        contents: &ContentStore,
+    ) -> Result<bool, AttachmentPlanError> {
+        let view_data = self
+            .workspace
+            .view(plan.view)
+            .ok_or({
+                ModeAttachmentError::InvalidViewContext(
+                    crate::mode::ModeContextError::MissingDocument { view: plan.view },
+                )
+            })?
+            .clone();
+        let target =
+            self.validate_attachment_plan_for_view(&plan, &view_data, registry, contents)?;
+        Ok(
+            self.install_attachment_plan(
+                plan,
+                target,
+                view_data,
+                registry,
+                mode_contents,
+                contents,
+            ),
+        )
+    }
+
+    fn validate_attachment_plan_for_view(
+        &self,
+        plan: &ModeAttachmentPlan,
+        view_data: &View,
+        registry: &ModeRegistry,
+        contents: &ContentStore,
+    ) -> Result<Vec<ModeId>, AttachmentPlanError> {
+        if view_data.binding_revision() != plan.binding_revision {
+            return Err(AttachmentPlanError::StaleBindings {
+                view: plan.view,
+                expected: plan.binding_revision,
+                actual: view_data.binding_revision(),
+            });
+        }
+        let mut target = Vec::with_capacity(plan.entries.len());
+        for entry in &plan.entries {
+            let (Some(binding), Some(content)) = (&entry.binding, entry.content) else {
+                return Err(AttachmentPlanError::UnsupportedBinding {
+                    mode: entry.mode.clone(),
+                    binding: entry.binding.clone(),
+                });
+            };
+            if binding.as_str() != DOCUMENT_BINDING || view_data.document_content() != Some(content)
+            {
+                return Err(AttachmentPlanError::UnsupportedBinding {
+                    mode: entry.mode.clone(),
+                    binding: entry.binding.clone(),
+                });
+            }
+            let mode = registry
+                .resolve_mode(&entry.mode)
+                .ok_or_else(|| ModeAttachmentError::UnknownMode(entry.mode.clone()))?;
+            registry.ensure_adapter(
+                &entry.mode,
+                content,
+                contents
+                    .kind(content)
+                    .ok_or(ModeAttachmentError::UnknownContent(content))?,
+            )?;
+            if target.contains(&mode) {
+                return Err(AttachmentPlanError::DuplicateMode(entry.mode.clone()));
+            }
+            target.push(mode);
+        }
+        if !target.is_empty() || self.view_modes.is_active(plan.view) {
+            require_mode_view_context(plan.view, view_data, contents)
+                .map_err(ModeAttachmentError::from)?;
+        }
+        Ok(target)
+    }
+
+    fn install_attachment_plan(
+        &mut self,
+        plan: ModeAttachmentPlan,
+        target: Vec<ModeId>,
+        view_data: View,
+        registry: &ModeRegistry,
+        mode_contents: &mut ModeContentStore,
+        contents: &ContentStore,
+    ) -> bool {
+        let current = self.view_modes.mode_ids(plan.view).to_vec();
+        if current == target {
+            return false;
+        }
+        let context = require_mode_view_context(plan.view, &view_data, contents)
+            .expect("attachment plan View context was prevalidated");
+        let mut additions = Vec::new();
+        for (entry, mode) in plan.entries.iter().zip(&target) {
+            if current.contains(mode) {
+                continue;
+            }
+            let content = entry
+                .content
+                .expect("attachment plan content was prevalidated");
+            let content_context = ModeContentContext::new(content, contents);
+            let instance = registry.instantiate_registered_with_context(
+                *mode,
+                content,
+                contents
+                    .kind(content)
+                    .expect("attachment content was prevalidated"),
+                mode_contents,
+                &content_context,
+                &context,
+            );
+            additions.push(instance);
+        }
+        self.dispatcher.invalidate_view(
+            plan.view,
+            &view_data,
+            &mut self.view_modes,
+            mode_contents,
+            contents,
+        );
+        let removed = current
+            .iter()
+            .copied()
+            .filter(|mode| !target.contains(mode))
+            .collect::<Vec<ModeId>>();
+        let document = view_data
+            .document_content()
+            .expect("active Mode chain has a document binding");
+        for mode in &removed {
+            self.view_modes.remove_mode(plan.view, *mode);
+            mode_contents.detach_view(document, *mode);
+        }
+        for instance in additions {
+            instance.register_faces(self.faces.registry_mut());
+            self.view_modes.insert(plan.view, instance);
+        }
+        self.view_modes.set_chain_order(plan.view, target);
+        self.workspace
+            .view_mut(plan.view)
+            .expect("planned View still exists")
+            .touch();
+        for mode in removed {
+            if !self.view_modes.contains_mode(mode) {
+                self.faces.remove_mode_remaps(mode);
+            }
+        }
+        true
+    }
+
+    pub(super) fn reconcile_view_modes(
+        &mut self,
+        view: ViewId,
+        registry: &ModeRegistry,
+        classifier: &ContentClassifier,
+        mode_contents: &mut ModeContentStore,
+        contents: &ContentStore,
+    ) -> Result<bool, AttachmentPlanError> {
+        let plan = self.resolve_attachment_plan(view, registry, classifier, contents)?;
+        self.apply_attachment_plan(plan, registry, mode_contents, contents)
+    }
+
+    pub(super) fn reconcile_content_modes(
+        &mut self,
+        content: ContentId,
+        registry: &ModeRegistry,
+        classifier: &ContentClassifier,
+        mode_contents: &mut ModeContentStore,
+        contents: &ContentStore,
+    ) -> Result<bool, AttachmentPlanError> {
+        let views = self
+            .workspace
+            .views()
+            .iter()
+            .filter_map(|(view, data)| data.references(content).then_some(*view))
+            .collect::<Vec<_>>();
+        let mut prepared = Vec::with_capacity(views.len());
+        for view in views {
+            let view_data = self
+                .workspace
+                .view(view)
+                .expect("referencing View exists")
+                .clone();
+            let plan = self
+                .mode_resolver
+                .resolve(view, &view_data, registry, classifier, contents)?;
+            let target =
+                self.validate_attachment_plan_for_view(&plan, &view_data, registry, contents)?;
+            prepared.push((plan, target, view_data));
+        }
+        let mut changed = false;
+        for (plan, target, view_data) in prepared {
+            changed |= self.install_attachment_plan(
+                plan,
+                target,
+                view_data,
+                registry,
+                mode_contents,
+                contents,
+            );
+        }
+        Ok(changed)
+    }
+
+    #[allow(
+        dead_code,
+        clippy::too_many_arguments,
+        reason = "per-View override receives independent app-owned stores"
+    )]
+    pub(super) fn set_view_mode_enabled(
+        &mut self,
+        view: ViewId,
+        mode: crate::mode_name::ModeName,
+        enabled: bool,
+        registry: &ModeRegistry,
+        classifier: &ContentClassifier,
+        mode_contents: &mut ModeContentStore,
+        contents: &ContentStore,
+    ) -> Result<bool, AttachmentPlanError> {
+        if registry.resolve_mode(&mode).is_none() {
+            return Err(ModeAttachmentError::UnknownMode(mode).into());
+        }
+        let value = if enabled {
+            ModeOverride::Enable
+        } else {
+            ModeOverride::Disable
+        };
+        let mut candidate = self.mode_resolver.clone();
+        candidate.set_view_override(view, mode, value);
+        let view_data = self.workspace.view(view).ok_or({
+            ModeAttachmentError::InvalidViewContext(
+                crate::mode::ModeContextError::MissingDocument { view },
+            )
+        })?;
+        let plan = candidate.resolve(view, view_data, registry, classifier, contents)?;
+        let changed = self.apply_attachment_plan(plan, registry, mode_contents, contents)?;
+        self.mode_resolver = candidate;
+        Ok(changed)
+    }
+
+    #[allow(
+        dead_code,
+        clippy::too_many_arguments,
+        reason = "per-View order override receives independent app-owned stores"
+    )]
+    pub(super) fn set_view_mode_order(
+        &mut self,
+        view: ViewId,
+        order: Vec<crate::mode_name::ModeName>,
+        registry: &ModeRegistry,
+        classifier: &ContentClassifier,
+        mode_contents: &mut ModeContentStore,
+        contents: &ContentStore,
+    ) -> Result<bool, AttachmentPlanError> {
+        let mut candidate = self.mode_resolver.clone();
+        candidate.set_view_order_override(view, order);
+        let view_data = self.workspace.view(view).ok_or({
+            ModeAttachmentError::InvalidViewContext(
+                crate::mode::ModeContextError::MissingDocument { view },
+            )
+        })?;
+        let plan = candidate.resolve(view, view_data, registry, classifier, contents)?;
+        let changed = self.apply_attachment_plan(plan, registry, mode_contents, contents)?;
+        self.mode_resolver = candidate;
+        Ok(changed)
     }
 
     pub(super) fn commit_view_touches(&mut self, touches: HashMap<ViewId, Revision>) {
@@ -713,54 +951,46 @@ impl ClientSession {
         content: ContentId,
         name: &crate::mode_name::ModeName,
         registry: &ModeRegistry,
+        classifier: &ContentClassifier,
         mode_contents: &mut ModeContentStore,
         contents: &ContentStore,
-    ) -> Result<(), ModeAttachmentError> {
+    ) -> Result<(), AttachmentPlanError> {
         let kind = contents
             .kind(content)
             .ok_or(ModeAttachmentError::UnknownContent(content))?;
         if registry.resolve_mode(name).is_none() {
-            return Err(ModeAttachmentError::UnknownMode(name.clone()));
+            return Err(ModeAttachmentError::UnknownMode(name.clone()).into());
         }
         registry.ensure_adapter(name, content, kind)?;
-        let views: Vec<_> = self
+        let views = self
             .workspace
             .views()
             .iter()
             .filter_map(|(view, data)| (data.document_content() == Some(content)).then_some(*view))
-            .collect();
+            .collect::<Vec<_>>();
         for view in &views {
             let view_data = self.workspace.view(*view).expect("target view exists");
-            require_mode_view_context(*view, view_data, contents)?;
+            require_mode_view_context(*view, view_data, contents)
+                .map_err(ModeAttachmentError::from)?;
         }
-        let profile = self.mode_profiles.entry(content).or_default();
-        if !profile.contains(name) {
-            profile.push(name.clone());
+        let mut candidate = self.mode_resolver.clone();
+        candidate.set_content_override(content, name.clone(), ModeOverride::Enable);
+        let plans = views
+            .iter()
+            .map(|view| {
+                candidate.resolve(
+                    *view,
+                    self.workspace.view(*view).expect("target view exists"),
+                    registry,
+                    classifier,
+                    contents,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for plan in plans {
+            self.apply_attachment_plan(plan, registry, mode_contents, contents)?;
         }
-        for view in views {
-            if self.view_modes.contains(view, name) {
-                continue;
-            }
-            let content_context = ModeContentContext::new(content, contents);
-            let view_data = self.workspace.view(view).expect("target view exists");
-            let view_context = require_mode_view_context(view, view_data, contents)
-                .expect("attachment prevalidated view context");
-            let mode = registry.instantiate_with_context(
-                name,
-                content,
-                kind,
-                mode_contents,
-                &content_context,
-                &view_context,
-            )?;
-            mode.register_faces(self.faces.registry_mut());
-            self.view_modes.insert(view, mode);
-            self.dispatcher.invalidate_mode_chain(view);
-            self.workspace
-                .view_mut(view)
-                .expect("mode owner exists")
-                .touch();
-        }
+        self.mode_resolver = candidate;
         Ok(())
     }
 
@@ -776,6 +1006,7 @@ impl ClientSession {
         direction: SplitDirection,
         focus_new: bool,
         registry: &ModeRegistry,
+        classifier: &ContentClassifier,
         content_modes: &mut ModeContentStore,
         contents: &ContentStore,
     ) -> Result<SplitResult, LayoutError> {
@@ -783,11 +1014,21 @@ impl ClientSession {
         let previous_view = self
             .view_for_space(previous)
             .expect("focused space hosts a view");
-        let NewView { view, mode_names } = view;
+        let NewView { view } = view;
+        let planned_view = self.workspace.next_view_id();
+        let plan = self
+            .mode_resolver
+            .resolve(planned_view, &view, registry, classifier, contents)
+            .map_err(|error| LayoutError::ModeAttachment(error.to_string()))?;
+        let workspace_before = self.workspace.clone();
         let (view, result) = self
             .workspace
             .split(target, view, focusable, direction, focus_new)?;
-        self.attach_new_view_modes(view, mode_names, registry, content_modes, contents);
+        assert_eq!(view, planned_view, "workspace allocated the planned ViewId");
+        if let Err(error) = self.apply_attachment_plan(plan, registry, content_modes, contents) {
+            self.workspace = workspace_before;
+            return Err(LayoutError::ModeAttachment(error.to_string()));
+        }
         if focus_new {
             let view_data = self
                 .workspace
@@ -849,12 +1090,17 @@ impl ClientSession {
         self.workspace.blocking_content_reference(content)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "session mutation receives independent app-owned stores"
+    )]
     pub(super) fn rebind_view_content(
         &mut self,
         view: ViewId,
         binding: &BindingKey,
         content: ContentId,
         registry: &ModeRegistry,
+        classifier: &ContentClassifier,
         content_modes: &mut ModeContentStore,
         contents: &ContentStore,
     ) -> Result<ContentId, LayoutError> {
@@ -887,29 +1133,70 @@ impl ClientSession {
         } else {
             None
         };
-        let mode_names = if document_rebind {
-            self.mode_chain_for_new_view(content)
-        } else {
-            Vec::new()
-        };
+        let mut planned_view = previous_view.clone();
+        planned_view
+            .rebind(binding, content, state.clone())
+            .map_err(|error| LayoutError::ModeAttachment(format!("{error:?}")))?;
+        let plan = self
+            .mode_resolver
+            .resolve(view, &planned_view, registry, classifier, contents)
+            .map_err(|error| LayoutError::ModeAttachment(error.to_string()))?;
+        let current_modes = self.view_modes.mode_ids(view).to_vec();
+        let target_modes = self
+            .validate_attachment_plan_for_view(&plan, &planned_view, registry, contents)
+            .map_err(|error| LayoutError::ModeAttachment(error.to_string()))?;
+        let retained_modes = current_modes
+            .iter()
+            .copied()
+            .filter(|mode| target_modes.contains(mode))
+            .collect::<Vec<_>>();
+        let removed_modes = current_modes
+            .iter()
+            .copied()
+            .filter(|mode| !target_modes.contains(mode))
+            .collect::<Vec<_>>();
 
         self.workspace.rebind(view, binding, content, state)?;
-        if !document_rebind {
-            return Ok(previous_content);
+        if document_rebind {
+            self.dispatcher.invalidate_view(
+                view,
+                &previous_view,
+                &mut self.view_modes,
+                content_modes,
+                contents,
+            );
+            let content_context = ModeContentContext::new(content, contents);
+            for mode in &retained_modes {
+                let instance = self
+                    .view_modes
+                    .instance(*mode, view)
+                    .expect("retained Mode is attached to the View");
+                content_modes.attach_retained_view_with_context(
+                    content,
+                    instance,
+                    &content_context,
+                );
+            }
+            for mode in &current_modes {
+                content_modes.detach_view(previous_content, *mode);
+            }
+            for mode in &removed_modes {
+                self.view_modes.remove_mode(view, *mode);
+            }
         }
-
-        self.dispatcher.invalidate_view(
-            view,
-            &previous_view,
-            &mut self.view_modes,
+        let rebound_view = self
+            .workspace
+            .view(view)
+            .expect("rebound View remains installed")
+            .clone();
+        self.install_attachment_plan(
+            plan,
+            target_modes,
+            rebound_view,
+            registry,
             content_modes,
             contents,
         );
-        let removed_modes = self.view_modes.remove(view);
-        for mode in &removed_modes {
-            content_modes.detach_view(previous_content, *mode);
-        }
-        self.attach_new_view_modes(view, mode_names, registry, content_modes, contents);
         if !self
             .workspace
             .views()
@@ -934,6 +1221,7 @@ impl ClientSession {
         content: ContentId,
         replacement: Option<NewView>,
         registry: &ModeRegistry,
+        classifier: &ContentClassifier,
         content_modes: &mut ModeContentStore,
         contents: &ContentStore,
     ) -> Result<SessionWorkspaceMutation<Option<ViewId>>, LayoutError> {
@@ -941,12 +1229,32 @@ impl ClientSession {
         let previous_view = self
             .view_for_space(previous_focus)
             .expect("focused space hosts a view");
-        let (replacement, mode_names) = replacement.map_or((None, Vec::new()), |replacement| {
-            (Some(replacement.view), replacement.mode_names)
-        });
+        let planned_view = self.workspace.next_view_id();
+        let (replacement, plan) = match replacement {
+            Some(replacement) => {
+                let plan = self
+                    .mode_resolver
+                    .resolve(
+                        planned_view,
+                        &replacement.view,
+                        registry,
+                        classifier,
+                        contents,
+                    )
+                    .map_err(|error| LayoutError::ModeAttachment(error.to_string()))?;
+                (Some(replacement.view), Some(plan))
+            }
+            None => (None, None),
+        };
+        let workspace_before = self.workspace.clone();
         let mutation = self.workspace.close_content_views(content, replacement)?;
-        if let Some(view) = mutation.output {
-            self.attach_new_view_modes(view, mode_names, registry, content_modes, contents);
+        if let (Some(view), Some(plan)) = (mutation.output, plan) {
+            assert_eq!(view, planned_view, "workspace allocated the planned ViewId");
+            if let Err(error) = self.apply_attachment_plan(plan, registry, content_modes, contents)
+            {
+                self.workspace = workspace_before;
+                return Err(LayoutError::ModeAttachment(error.to_string()));
+            }
         }
         let removed = self.cleanup_removed_views(mutation.removed, content_modes, contents);
         if removed.iter().any(|removed| removed.view == previous_view) {
@@ -958,12 +1266,17 @@ impl ClientSession {
         })
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "session mutation receives independent app-owned stores"
+    )]
     pub(super) fn replace_space_content(
         &mut self,
         target: SpaceId,
         view: NewView,
         focusable: bool,
         registry: &ModeRegistry,
+        classifier: &ContentClassifier,
         content_modes: &mut ModeContentStore,
         contents: &ContentStore,
     ) -> Result<SessionWorkspaceMutation<ViewId>, LayoutError> {
@@ -971,15 +1284,22 @@ impl ClientSession {
         let previous_view = self
             .view_for_space(previous_focus)
             .expect("focused space hosts a view");
-        let NewView { view, mode_names } = view;
+        let NewView { view } = view;
+        let planned_view = self.workspace.next_view_id();
+        let plan = self
+            .mode_resolver
+            .resolve(planned_view, &view, registry, classifier, contents)
+            .map_err(|error| LayoutError::ModeAttachment(error.to_string()))?;
+        let workspace_before = self.workspace.clone();
         let mutation = self.workspace.replace(target, view, focusable)?;
-        self.attach_new_view_modes(
-            mutation.output,
-            mode_names,
-            registry,
-            content_modes,
-            contents,
+        assert_eq!(
+            mutation.output, planned_view,
+            "workspace allocated the planned ViewId"
         );
+        if let Err(error) = self.apply_attachment_plan(plan, registry, content_modes, contents) {
+            self.workspace = workspace_before;
+            return Err(LayoutError::ModeAttachment(error.to_string()));
+        }
         let removed = self.cleanup_removed_views(mutation.removed, content_modes, contents);
         if removed.iter().any(|removed| removed.view == previous_view) {
             self.sync_changed_input_source(content_modes, contents);
@@ -1006,46 +1326,6 @@ impl ClientSession {
         self.sync_focused_input(Instant::now(), content_modes, contents);
     }
 
-    fn attach_new_view_modes(
-        &mut self,
-        id: ViewId,
-        mode_names: Vec<crate::mode_name::ModeName>,
-        registry: &ModeRegistry,
-        mode_contents: &mut ModeContentStore,
-        contents: &ContentStore,
-    ) {
-        let view = self
-            .workspace
-            .view(id)
-            .expect("workspace published new view");
-        let Some(content) = view.document_content() else {
-            assert!(
-                mode_names.is_empty(),
-                "non-document View cannot attach Modes yet"
-            );
-            return;
-        };
-        let kind = contents.kind(content).expect("new-view content exists");
-        for name in mode_names {
-            let content_context = ModeContentContext::new(content, contents);
-            let view_data = self.workspace.view(id).expect("new view exists");
-            let view_context = require_mode_view_context(id, view_data, contents)
-                .expect("new view state matches content kind");
-            let mode = registry
-                .instantiate_with_context(
-                    &name,
-                    content,
-                    kind,
-                    mode_contents,
-                    &content_context,
-                    &view_context,
-                )
-                .expect("new-view mode must be registered");
-            mode.register_faces(self.faces.registry_mut());
-            self.view_modes.insert(id, mode);
-        }
-    }
-
     fn cleanup_removed_views(
         &mut self,
         removed: Vec<RemovedView>,
@@ -1064,6 +1344,7 @@ impl ClientSession {
                 contents,
             );
             self.faces.remove_view_remaps(id);
+            self.mode_resolver.forget_view(id);
             for mode in self.view_modes.remove(id) {
                 if let Some(content) = view.document_content() {
                     mode_contents.detach_view(content, mode);

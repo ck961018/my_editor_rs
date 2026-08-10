@@ -32,9 +32,7 @@ use crate::theme::{FaceRemapOwner, ResolvedFaceOperation};
 use crate::transaction::{TransactionData, TransactionRecord, ViewTransactionData};
 use vell_core::clipboard::ClipboardPayload;
 use vell_core::command::EditCommand;
-use vell_core::content::{
-    ContentActionResult, ContentEffect, ContentInput, ContentKind, ContentResult,
-};
+use vell_core::content::{ContentActionResult, ContentEffect, ContentInput, ContentResult};
 use vell_core::search::SearchDirection;
 use vell_core::transaction::TransactionDirection;
 use vell_frontend::Frontend;
@@ -991,14 +989,10 @@ impl<F: Frontend> App<F> {
                         .iter()
                         .map(|target| target.space)
                         .collect::<Vec<_>>();
-                    let (content, installed) = self
+                    let (content, _installed) = self
                         .kernel
                         .install_open(completion)
                         .expect("validated async open installs once");
-                    if installed {
-                        self.session
-                            .register_content_profile(content, ContentKind::Buffer);
-                    }
                     for target in targets {
                         self.replace_space_content(target, content, true)
                             .expect("validated async view target remains available");

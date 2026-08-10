@@ -329,10 +329,6 @@ impl Dispatcher {
         }
     }
 
-    pub(crate) fn invalidate_mode_chain(&mut self, view: ViewId) {
-        self.invalidate_view_binding(view);
-    }
-
     pub fn next_deadline(
         &self,
         views: &HashMap<ViewId, View>,

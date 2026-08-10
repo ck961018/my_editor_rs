@@ -2,7 +2,7 @@
 
 **状态：** 当前实现
 
-**更新日期：** 2026-07-22
+**更新日期：** 2026-08-10
 
 ## 1. 文档定位
 
@@ -22,16 +22,18 @@ presentation cache。Rust 内核不按 Vim、Tree-sitter 或语言名称分支�
 ModeRegistry
 ├── ModeId -> Mode definition
 ├── ContentKind -> frozen adapter support
+├── frozen attachment rules
 └── qualified command names
 
 Kernel
 ├── ModeContentStore: (ModeId, ContentId) -> state
+├── ContentClassifier
 └── background job slots
 
 ClientSession
 ├── ModeViewStore: (ModeId, ViewId) -> state
 ├── ViewId -> ordered ModeId[]
-├── ContentId -> new-View profile
+├── ModeResolver + Content/View overrides
 ├── per-View input state
 ├── FaceRegistry
 └── PresentationLayerStore
@@ -80,21 +82,35 @@ editor view 的 `viewPolicy.statusBar`，在 app 的 render query 层组装
 为 `ViewPresentation::StatusBar`。Context 不借出可变 Content、View、
 ContentStore 或 App。
 
-## 5. Chain 与 profile
+## 5. Chain、分类与解析
 
-每个 View 有一条有序 Mode chain。每个 Content 有一个新 View profile；
-split 和 replace 根据该 profile 建立新 chain。
+每个 View 有一条有序 Mode chain。Mode definition 的 attachment rule 声明：
 
-启动时，session 对每种 ContentKind 单独解析 `before` 约束：
+- 目标 View definition；
+- 可选的待读取 binding；
+- 可选 language id 集合。
 
-- 排序是稳定拓扑排序；
-- 前向引用合法；
-- 无约束的 Mode 保持注册顺序；
-- 不支持当前 ContentKind 的目标不形成排序边；
-- 目标缺失或同一 ContentKind 内成环时，启动失败并返回结构化错误。
+`ContentClassifier` 根据 ContentKind、资源名和显式覆盖产生带来源的分类结果。
+分类只描述 Content，不会自动创建 attachment。`ModeResolver` 针对一个具体
+View，结合 definition、binding、分类及 Content/View override 生成
+`ModeAttachmentPlan`。
 
-动态 attachment 先验证目标 Content、adapter 和该 Content 的全部现有 View，
-再提交 profile、state、chain 与 Face。验证失败不留下部分状态。
+Resolver 对 `before` 约束做稳定拓扑排序：前向引用合法，无约束 Mode 保持
+注册顺序；目标缺失或成环时返回结构化错误。adapter 支持和 attachment rule
+在排序后参与具体 View 的筛选。Rust bootstrap 不再维护第二套排序逻辑。
+最后应用 View 局部的用户顺序覆盖。它是部分优先列表：列出的活动 Mode 按
+用户顺序置前，未列出的 Mode 保持稳定拓扑顺序；列表不启用已被筛掉的 Mode。
+未知项和重复项返回结构化错误。
+
+计划携带 View 的 binding revision。安装前 revision 不一致会直接拒绝，
+不改动 Mode state。有效计划按 diff 增量安装：保留项继续使用原 view state，
+新增项初始化 state，删除项降低共享 content state 的引用计数，最后按计划
+重排 chain。准备失败会撤销本次新增项，不留下部分 attachment。
+
+省略 binding 的 rule 表示只依赖 View definition，计划中不伪造 Content。
+当前 Mode context 只支持 BufferView 的 `document` binding。Resolver 的
+规则模型可表达 View-only 和其他 binding，但安装器在 Native 复合 View 验证
+contract 前会明确拒绝它们。
 
 ## 6. 输入处理
 

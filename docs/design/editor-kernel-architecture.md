@@ -2,7 +2,7 @@
 
 **状态：** 当前实现架构
 
-**更新日期：** 2026-07-22
+**更新日期：** 2026-08-10
 
 ## 1. 文档定位
 
@@ -52,6 +52,7 @@ App<F: Frontend>
 ├── Kernel
 │   ├── ContentStore
 │   ├── ModeRegistry
+│   ├── ContentClassifier
 │   ├── ModeContentStore
 │   ├── TransactionManager
 │   ├── mode jobs + save tasks
@@ -63,7 +64,7 @@ App<F: Frontend>
 │   │   ├── ViewPaneMap + status structure
 │   │   └── ViewId allocation + focused SpaceId
 │   ├── ModeViewStore + Mode chains
-│   ├── ContentId -> new View Mode profile
+│   ├── ModeResolver + attachment overrides
 │   ├── Dispatcher
 │   ├── FaceRegistry
 │   └── PresentationLayerStore
@@ -104,7 +105,8 @@ gutter/bar 等直属 Pane 各占一个 Content Space，view 端的
 SpaceId。同一 `ContentId` 可以由多个 View 通过不同角色引用；这些 View
 拥有独立 revision、viewport 和 Mode view state，同时共享 Content 与
 Mode content state。BufferView 的 `document` binding 还拥有独立
-selections。
+selections。View 另有 binding revision；只有 bindings 实际变化时递增，
+用于拒绝过期的 Mode attachment plan。
 
 ## 5. Content 与 View
 
@@ -206,7 +208,7 @@ app 可按 View 查询单个状态栏，也可按 Content 查询全部对应
 ModeContentStore: (ModeId, ContentId) -> shared content state
 ModeViewStore:    (ModeId, ViewId)    -> independent view state
 Mode chain:       ViewId             -> ordered ModeId[]
-Mode profile:     ContentId          -> ordered ModeName[]
+Attachment rule:  ModeId             -> View + optional binding/languages
 ```
 
 每个 View 可以附加多个有序 Mode。native 与 TypeScript Mode 实现同一个
@@ -216,11 +218,11 @@ Mode profile:     ContentId          -> ordered ModeName[]
 Mode definition 的 adapter。runtime callback 只从已注册 adapter
 进入。
 
-初始 profile 对 `before` 约束做稳定拓扑排序。
-前向引用有效；无约束且同时可用的 Mode 保持配置
-顺序。目标不存在或同一 ContentKind 的约束成环时，启动返回
-结构化错误。目标不支持当前
-ContentKind 时，该约束不影响这条 ModeChain。
+`ModeResolver` 对 `before` 约束做稳定拓扑排序。前向引用有效；无约束的
+Mode 保持注册顺序。目标不存在或约束成环时返回结构化错误。具体 View 的
+chain 还要根据 attachment rule、binding 对应 Content 的分类、adapter 支持
+以及 Content/View override 筛选。View 顺序覆盖在筛选后作为部分优先列表
+应用，不启用已被筛掉的 Mode；未列出的 Mode 仍保持稳定拓扑顺序。
 
 `ModeContentContext` 和 `ModeViewContext` 都是按 `ContentKind` 封闭的
 enum。Buffer variant 仅提供强类型文本查询、细粒度资源事实、snapshot
@@ -236,12 +238,12 @@ scope 不能产生 View operation，view scope 可以作用于绑定 View 与 Co
 脚本 primitive 和 native Mode 都直接创建 `OperationRequest`。`ModeResult`
 只携带有序的 typed operation，不保留第二套 effect algebra。
 
-新 View 的 Mode profile 属于 `ClientSession`。动态 attachment 先验证
-Content、Mode、adapter 和所有已有 View 的 `(ContentKind, ViewState)`
-配对，再更新 profile 和该 Content 的 View；失败以
-`ModeAttachmentError` 返回，不创建 state、不注册 face，也不保留部分
-profile。split 与 replace 都从同一 profile 创建 chain。`Kernel` 不保存新
-View 创建策略。
+`Kernel` 的 `ContentClassifier` 统一产生 Content 分类；`ClientSession` 的
+`ModeResolver` 为每个具体 View 生成带 binding revision 的有序 attachment
+plan。split、replace 和 rebind 都先为候选 View 解析计划，再与 View 结构一起
+发布。安装器按 diff 保留、添加、删除并重排 chain；失败不创建部分 state，
+过期计划不改动任何 Mode state。content state 按 `(ModeId, ContentId)` 引用
+计数共享，保留 attachment 的 view state 不会因重新解析而重建。
 
 Mode state 的可变 callback 不直接发布持久状态。第一次写时，
 `ModeDraftJournal` 用 `clone_box()` 建立 owned draft；同一 execution frame

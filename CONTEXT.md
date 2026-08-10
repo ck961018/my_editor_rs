@@ -82,6 +82,24 @@ _Avoid_: 面板（易与派生呈现混淆）
 行号属于此类；它们是 View 的属性，不是对象。
 _Avoid_: 状态栏、行号栏、gutter（当作对象指称时）
 
+**Content classification**：
+宿主根据 ContentKind、资源事实和显式覆盖得到的稳定分类结果，例如
+`language = rust`。它是 Mode 解析的输入，不代表 Mode 已经附加。
+_Avoid_: 文件后缀规则、Content Mode
+
+**Mode attachment rule**：
+Mode definition 声明自己适用的 View definition、可选 binding 和可选语言
+集合。省略 binding 表示纯 View 行为；插件描述需求，不遍历 Content，也不
+自行决定具体 View 的 attachment。
+_Avoid_: Content profile、自动扫描子 View
+
+**Mode attachment plan**：
+`ModeResolver` 为一个具体 View 产生的有序 attachment 目标，带该 View 的
+binding revision。安装器只发布仍然有效的计划，并增量保留已有 state。
+用户顺序覆盖是 View 局部的部分优先列表：列出的活动 Mode 置前，未列出的
+Mode 保持静态拓扑顺序；它不会启用原本被筛掉的 Mode。
+_Avoid_: Mode 列表缓存、启动 Mode 顺序
+
 ## Rules
 
 - Content 是"可以打开和关闭的东西"；派生呈现永远
@@ -95,5 +113,7 @@ _Avoid_: 状态栏、行号栏、gutter（当作对象指称时）
   存活的 binding 引用；引用者必须先 rebind 或关闭。
 - Mode attachment 位于 View；多个 attachment 可以按
   Content 共享 Mode state。
+- ContentClassifier 只负责分类；ModeResolver 结合 View、binding、分类、
+  override 和 Mode 规则产生 attachment plan。
 - 用户可见编号只对 listed content 派生；插件 API
   使用不透明 ContentId。

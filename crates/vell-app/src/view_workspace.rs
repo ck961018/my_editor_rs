@@ -99,6 +99,10 @@ impl ViewWorkspace {
         self.views.iter_mut()
     }
 
+    pub(super) fn next_view_id(&self) -> ViewId {
+        ViewId(self.next_view_id)
+    }
+
     pub(super) fn status_bar_placement(&self) -> StatusBarPlacement {
         self.status_placement
     }

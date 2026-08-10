@@ -84,18 +84,16 @@ impl<F: Frontend> App<F> {
             .and_then(|view| view.document())
             .filter(|(document, _)| *document == content)
             .map(|(_, state)| state.clone());
-        let mode_names = self.session.mode_chain_for_new_view(content);
         let mut view = create_view(
             content,
             self.kernel.contents(),
             self.kernel.buffer_view_definition(),
-            &mode_names,
         )
         .ok_or(LayoutError::MissingContent(content))?;
         if let Some(state) = inherited_state {
             *view.view.require_document_state_mut() = state;
         }
-        let (contents, modes, content_modes) = self.kernel.mode_attachment_parts();
+        let (contents, modes, classifier, content_modes) = self.kernel.attachment_runtime_parts();
         let result = self.session.split_space(
             target,
             view,
@@ -103,6 +101,7 @@ impl<F: Frontend> App<F> {
             direction,
             focus_new,
             modes,
+            classifier,
             content_modes,
             contents,
         )?;
@@ -134,20 +133,19 @@ impl<F: Frontend> App<F> {
         content: ContentId,
         focusable: bool,
     ) -> Result<ViewId, LayoutError> {
-        let mode_names = self.session.mode_chain_for_new_view(content);
         let view = create_view(
             content,
             self.kernel.contents(),
             self.kernel.buffer_view_definition(),
-            &mode_names,
         )
         .ok_or(LayoutError::MissingContent(content))?;
-        let (contents, modes, content_modes) = self.kernel.mode_attachment_parts();
+        let (contents, modes, classifier, content_modes) = self.kernel.attachment_runtime_parts();
         let mutation = self.session.replace_space_content(
             target,
             view,
             focusable,
             modes,
+            classifier,
             content_modes,
             contents,
         )?;
@@ -188,12 +186,13 @@ impl<F: Frontend> App<F> {
         binding: &BindingKey,
         content: ContentId,
     ) -> Result<ContentId, LayoutError> {
-        let (contents, modes, content_modes) = self.kernel.mode_attachment_parts();
+        let (contents, modes, classifier, content_modes) = self.kernel.attachment_runtime_parts();
         let previous = self.session.rebind_view_content(
             view,
             binding,
             content,
             modes,
+            classifier,
             content_modes,
             contents,
         )?;
@@ -230,6 +229,7 @@ pub(super) enum LayoutError {
     MissingContent(ContentId),
     MissingView(ViewId),
     MissingBinding { view: ViewId, binding: BindingKey },
+    ModeAttachment(String),
     WouldRemoveLastFocusable(SpaceId),
     NoFocusableSpace,
     NoStatusBar,
@@ -248,6 +248,7 @@ impl fmt::Display for LayoutError {
             Self::MissingBinding { view, binding } => {
                 write!(formatter, "view {} has no {binding} binding", view.0)
             }
+            Self::ModeAttachment(message) => formatter.write_str(message),
             Self::WouldRemoveLastFocusable(space) => {
                 write!(formatter, "space {} is the last focusable space", space.0)
             }
@@ -276,7 +277,6 @@ pub(super) fn create_view(
     content: ContentId,
     contents: &ContentStore,
     definition: &ViewDefinition,
-    mode_names: &[crate::mode_name::ModeName],
 ) -> Option<NewView> {
     if !contents.contains(content) {
         return None;
@@ -291,11 +291,9 @@ pub(super) fn create_view(
             Some(state),
         )
         .expect("BufferView definition and bindings are valid"),
-        mode_names: mode_names.to_vec(),
     })
 }
 
 pub(super) struct NewView {
     pub(super) view: View,
-    pub(super) mode_names: Vec<crate::mode_name::ModeName>,
 }

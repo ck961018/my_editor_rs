@@ -8,8 +8,9 @@ use crate::bootstrap::{bootstrap_editor, bootstrap_editor_with_theme};
 use crate::buffer_lifecycle::normalize_path;
 use crate::diagnostics::RuntimeDiagnostic;
 use crate::kernel::{FileBaseline, Kernel};
-use crate::mode::{Mode, ModeAttachmentError, ModeBackground};
+use crate::mode::{Mode, ModeBackground};
 use crate::mode_name::ModeName;
+use crate::mode_resolver::AttachmentPlanError;
 use crate::session::ClientSession;
 use vell_core::buffer::Buffer;
 use vell_core::transaction::TextStateId;
@@ -225,10 +226,16 @@ impl<F: Frontend> App<F> {
         &mut self,
         content: ContentId,
         mode: &ModeName,
-    ) -> Result<(), ModeAttachmentError> {
-        let (contents, modes, mode_contents) = self.kernel.mode_attachment_parts();
-        self.session
-            .attach_mode_to_content_views(content, mode, modes, mode_contents, contents)?;
+    ) -> Result<(), AttachmentPlanError> {
+        let (contents, modes, classifier, mode_contents) = self.kernel.attachment_runtime_parts();
+        self.session.attach_mode_to_content_views(
+            content,
+            mode,
+            modes,
+            classifier,
+            mode_contents,
+            contents,
+        )?;
         self.session
             .sync_focused_input(Instant::now(), mode_contents, contents);
         self.kernel.schedule_mode_jobs();

@@ -6,8 +6,9 @@ use vell_core::keymap::Keymap;
 use vell_mode::command::{Command, ModeCommand, ModeValue};
 use vell_mode::mode_name::{ModeActionName, ModeName};
 use vell_mode::{
-    Mode, ModeAdapters, ModeBackground, ModeContentContext, ModeError, ModeJobRequest,
-    ModeJobResult, ModeJobSlot, ModeResult, ModeState, ModeViewContext, ModeViewPolicy,
+    Mode, ModeAdapters, ModeAttachmentRule, ModeBackground, ModeContentContext, ModeError,
+    ModeJobRequest, ModeJobResult, ModeJobSlot, ModeResult, ModeState, ModeViewContext,
+    ModeViewPolicy,
 };
 use vell_protocol::content_query::{FaceDefinition, NamedTextDecoration, RowRange};
 use vell_protocol::key_event::KeyEvent;
@@ -41,6 +42,7 @@ pub(super) struct ScriptMode {
     adapters: ScriptAdapters,
     face_definitions: Vec<FaceDefinition>,
     before: Option<ModeName>,
+    attachment: ModeAttachmentRule,
     owns_worker_decorations: bool,
 }
 
@@ -116,6 +118,7 @@ impl ScriptMode {
             adapters,
             face_definitions: definition.face_definitions,
             before: definition.before,
+            attachment: definition.attachment,
             owns_worker_decorations,
         }
     }
@@ -145,6 +148,10 @@ impl Mode for ScriptMode {
 
     fn before(&self) -> Option<&ModeName> {
         self.before.as_ref()
+    }
+
+    fn attachment(&self) -> ModeAttachmentRule {
+        self.attachment.clone()
     }
 
     fn face_definitions(&self) -> Vec<FaceDefinition> {

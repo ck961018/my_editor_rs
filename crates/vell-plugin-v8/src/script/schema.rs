@@ -236,6 +236,7 @@ fn parse_mode_definition(
         .map_err(|_| ScriptError::new("editor.modes.define expects an object"))?;
     let name = required_string(scope, object, "name")?;
     let before = optional_string(scope, object, "before")?.map(ModeName::new);
+    let attachment = parse_attachment(scope, object)?;
     let face_definitions = parse_face_definitions(scope, object)?;
     let adapters = match property(scope, object, "on") {
         Some(value) if !value.is_null_or_undefined() => parse_adapters(scope, object, value)?,
@@ -247,8 +248,72 @@ fn parse_mode_definition(
         name: ModeName::new(name),
         face_definitions,
         before,
+        attachment,
         adapters,
     })
+}
+
+fn parse_attachment(
+    scope: &mut v8::PinScope,
+    definition: v8::Local<v8::Object>,
+) -> Result<ModeAttachmentRule, ScriptError> {
+    let Some(value) = property(scope, definition, "attach") else {
+        return Ok(ModeAttachmentRule::buffer_document());
+    };
+    if value.is_null_or_undefined() {
+        return Ok(ModeAttachmentRule::buffer_document());
+    }
+    let object = v8::Local::<v8::Object>::try_from(value)
+        .map_err(|_| ScriptError::new("mode attach must be an object"))?;
+    let view = required_string(scope, object, "view")?;
+    let binding = optional_string(scope, object, "binding")?;
+    if view.is_empty() {
+        return Err(ScriptError::new("mode attach view must not be empty"));
+    }
+    if binding.as_ref().is_some_and(String::is_empty) {
+        return Err(ScriptError::new("mode attach binding must not be empty"));
+    }
+    let rule = match binding {
+        Some(binding) => {
+            ModeAttachmentRule::new(ViewDefinitionId::new(view), BindingKey::new(binding))
+        }
+        None => ModeAttachmentRule::for_view(ViewDefinitionId::new(view)),
+    };
+    let Some(languages) = property(scope, object, "languages") else {
+        return Ok(rule);
+    };
+    if languages.is_null_or_undefined() {
+        return Ok(rule);
+    }
+    if rule.binding().is_none() {
+        return Err(ScriptError::new("mode attach languages require a binding"));
+    }
+    let languages = v8::Local::<v8::Array>::try_from(languages)
+        .map_err(|_| ScriptError::new("mode attach languages must be an array"))?;
+    let mut parsed = BTreeSet::new();
+    for index in 0..languages.length() {
+        let language = languages
+            .get_index(scope, index)
+            .ok_or_else(|| ScriptError::new("failed to read mode attach language"))?;
+        if !language.is_string() {
+            return Err(ScriptError::new(
+                "mode attach language identifiers must be strings",
+            ));
+        }
+        let language = language.to_rust_string_lossy(scope);
+        if language.is_empty() {
+            return Err(ScriptError::new(
+                "mode attach language identifier must not be empty",
+            ));
+        }
+        let language = LanguageId::new(language);
+        if !parsed.insert(language) {
+            return Err(ScriptError::new(
+                "mode attach language identifiers must be unique",
+            ));
+        }
+    }
+    Ok(rule.with_languages(parsed))
 }
 
 fn parse_adapters(

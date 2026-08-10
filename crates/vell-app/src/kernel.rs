@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::buffer_lifecycle::normalize_path;
 use crate::command::ModeCommand;
+use crate::content_classifier::ContentClassifier;
 use crate::message::{AppMessage, OpenedBuffer, OpenedPath};
 use crate::mode::{
     ModeBackground, ModeContentStore, ModeDraftJournal, ModeError, ModeId, ModeJobKey,
@@ -53,6 +54,7 @@ struct BufferPathRecord {
 
 pub(super) struct Kernel {
     contents: ContentStore,
+    classifier: ContentClassifier,
     buffer_paths: HashMap<ContentId, BufferPathRecord>,
     path_contents: HashMap<PathBuf, ContentId>,
     reserved_paths: HashMap<PathBuf, ContentId>,
@@ -83,6 +85,7 @@ impl Kernel {
         let (message_tx, message_rx) = mpsc::unbounded_channel();
         Self {
             contents,
+            classifier: ContentClassifier::default(),
             buffer_paths: HashMap::new(),
             path_contents: HashMap::new(),
             reserved_paths: HashMap::new(),
@@ -277,6 +280,22 @@ impl Kernel {
         &mut self,
     ) -> (&ContentStore, &ModeRegistry, &mut ModeContentStore) {
         (&self.contents, &self.modes, &mut self.content_modes)
+    }
+
+    pub(super) fn attachment_runtime_parts(
+        &mut self,
+    ) -> (
+        &ContentStore,
+        &ModeRegistry,
+        &ContentClassifier,
+        &mut ModeContentStore,
+    ) {
+        (
+            &self.contents,
+            &self.modes,
+            &self.classifier,
+            &mut self.content_modes,
+        )
     }
 
     pub(super) fn execute_mode_content_action_in_draft(
@@ -663,6 +682,7 @@ impl Kernel {
         {
             self.command_transaction = None;
         }
+        self.classifier.forget(content);
         self.contents.remove(content)
     }
 

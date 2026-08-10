@@ -119,8 +119,12 @@ Pane 或 Space 标识。
 ## 5. ScriptMode 与状态
 
 脚本定义中的 callback 保存在 V8 callback registry。`ScriptMode` 只保存稳定
-callback identity、静态 keymap/adapter 元数据和共享 host，不保存可变 App、
-Content 或 View 引用。
+callback identity、静态 keymap/adapter 元数据、attachment rule 和共享
+host，不保存可变 App、Content 或 View 引用。schema 把 `attach.view`、
+可选 `attach.binding` 和 `attach.languages` 转成通用
+`ModeAttachmentRule`；省略 `attach` 时使用 BufferView `document` 的兼容
+默认值。分类与具体 View 的 attachment 决策留在 app 的
+`ContentClassifier` 和 `ModeResolver`，V8 adapter 不重复实现。
 
 正式脚本状态只有：
 

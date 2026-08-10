@@ -1,4 +1,5 @@
 use std::io;
+use std::time::Instant;
 
 use crate::application::App;
 use crate::message::AppMessage;
@@ -42,6 +43,32 @@ impl<F: Frontend> App<F> {
                 if content_changed {
                     self.session.clear_status_message();
                     self.session.touch_content_views(content);
+                    let attachment_result = {
+                        let (contents, modes, classifier, mode_contents) =
+                            self.kernel.attachment_runtime_parts();
+                        let changed = self.session.reconcile_content_modes(
+                            content,
+                            modes,
+                            classifier,
+                            mode_contents,
+                            contents,
+                        );
+                        if changed.as_ref().is_ok_and(|changed| *changed) {
+                            self.session.sync_focused_input(
+                                Instant::now(),
+                                mode_contents,
+                                contents,
+                            );
+                        }
+                        changed
+                    };
+                    match attachment_result {
+                        Ok(true) => {
+                            self.kernel.schedule_mode_jobs();
+                        }
+                        Ok(false) => {}
+                        Err(error) => self.record_recoverable_error(io::Error::other(error)),
+                    }
                 }
                 if let Some((snapshot, force)) = queued {
                     self.kernel.queue_save(content, snapshot, force);

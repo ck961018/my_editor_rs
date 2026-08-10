@@ -2,7 +2,7 @@
 
 **状态：** 当前实现
 
-**更新日期：** 2026-07-22
+**更新日期：** 2026-08-10
 
 ## 1. 核心规则
 
@@ -20,6 +20,7 @@ View 保存与一个 Content 绑定的会话状态；app 解析目标并原子�
 - 支持的 `ModeAdapters`；
 - keymap、输入与 callback；
 - attachment ordering 约束；
+- View definition、可选 binding 和 language 匹配；
 - named Face 默认值。
 
 `ModeAdapters` 当前只包含 Buffer slot（状态栏是 editor view 的直属
@@ -37,17 +38,14 @@ contract。
 ModeContentStore: (ModeId, ContentId) -> Mode content state
 ModeViewStore:    (ModeId, ViewId)    -> Mode view state
 Mode chain:       ViewId             -> ordered ModeId[]
-Mode profile:     ContentId          -> ordered ModeName[]
+Attachment rule:  ModeId             -> View + optional binding/languages
 ```
 
 Mode content state 在同一 Content 的所有 View 间共享。Mode view state、
 key sequence、capture 和 timeout 按 View 隔离。
 
-`View` 自身只持有：
-
-- `ContentId`；
-- 与 ContentKind 对齐的 `ContentViewState`；
-- View revision。
+`View` 自身只持有 definition id、具名 Content bindings、可选 document
+`ContentViewState`、View/binding revision、直属 Pane 映射和语义结构。
 
 View 不持有 Mode instance、history、viewport 或 presentation layer。
 Space 只标识 Scene 布局节点，也不拥有 View 或 Mode 状态。
@@ -107,17 +105,23 @@ Mode state 不属于 undo/redo history。TypeScript 模块全局与 V8 heap 状�
 
 ## 7. Attachment 与排序
 
-每个 Content 的新 View profile 由 `ClientSession` 管理。初始 profile 按
-ContentKind 对 Mode 的 `before` 约束执行稳定拓扑排序：
+`Kernel` 的 `ContentClassifier` 根据 ContentKind、资源事实和显式覆盖生成
+分类。`ClientSession` 的 `ModeResolver` 针对具体 View 读取 definition、
+具名 binding、分类、Content/View override 和 Mode attachment rule，输出
+带 binding revision 的有序计划。
+
+Mode 的 `before` 约束执行稳定拓扑排序：
 
 - 前向引用有效；
 - 无约束 Mode 保持注册顺序；
-- 目标不支持当前 ContentKind 时，该边不进入这条 chain；
-- 缺失目标和同一 ContentKind 的环返回结构化启动错误。
+- 缺失目标和约束环返回结构化错误；
+- adapter 支持与 attachment rule 在排序后筛选具体 View 的 chain。
+- View 顺序覆盖最后应用；它只重排活动 Mode，未列出的 Mode 保持稳定顺序。
 
-动态 attachment 先验证 Content、adapter 和所有已有 View 的
-ContentKind/ViewState 配对，再一次性更新 profile、chain、state 与 Face。
-失败时不留下部分 attachment。
+安装器校验计划的 binding revision，再按 diff 保留、添加、删除和重排
+attachment。保留项继续使用原 view state；content state 按
+`(ModeId, ContentId)` 引用计数共享。新增项准备失败或计划过期时不留下部分
+attachment。当前只安装指向 BufferView `document` binding 的 Mode。
 
 ## 8. Presentation 与后台任务
 

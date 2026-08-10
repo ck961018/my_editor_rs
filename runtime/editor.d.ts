@@ -521,12 +521,26 @@ interface BufferAdapterDefinition<ContentState, ViewState> {
 	): void;
 }
 
+type ModeAttachmentDefinition = {
+	readonly view: string;
+} & (
+	| {
+		readonly binding: string;
+		readonly languages?: readonly string[];
+	}
+	| {
+		readonly binding?: never;
+		readonly languages?: never;
+	}
+);
+
 interface ModeDefinition<
 	BufferState = ScriptData,
 	BufferViewState = ScriptData,
 > {
 	name: string;
 	before?: string;
+	attach?: ModeAttachmentDefinition;
 	faces?: Record<string, EditorModeFace>;
 	on: {
 		buffer?: BufferAdapterDefinition<BufferState, BufferViewState>;

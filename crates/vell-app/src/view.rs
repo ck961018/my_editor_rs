@@ -124,6 +124,7 @@ pub struct View {
     definition: ViewDefinitionId,
     bindings: ContentBindings,
     document_state: Option<ContentViewState>,
+    binding_revision: Revision,
     revision: Revision,
     panes: ViewPaneMap,
     /// 通用 View 切换操作是否可替换本实例；DiffView 等复合 view 的子 view 为 false。
@@ -157,6 +158,7 @@ impl View {
             definition: definition.id().clone(),
             bindings,
             document_state,
+            binding_revision: Revision::default(),
             revision: Revision::default(),
             panes: ViewPaneMap::default(),
             switchable: true,
@@ -186,6 +188,10 @@ impl View {
     }
 
     /// 当前只适用于必须是 BufferView 的内部执行路径。
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "test and BufferView assertions")
+    )]
     pub(crate) fn require_document(&self) -> ContentId {
         self.document_content()
             .expect("BufferView has a document binding")
@@ -216,6 +222,7 @@ impl View {
             self.document_state = Some(state);
         }
         self.bindings.rebind(key, content)?;
+        self.binding_revision.next();
         self.touch();
         Ok(previous)
     }
@@ -315,6 +322,9 @@ impl View {
     pub fn revision(&self) -> Revision {
         self.revision
     }
+    pub fn binding_revision(&self) -> Revision {
+        self.binding_revision
+    }
     pub fn touch(&mut self) {
         self.revision.next();
     }
@@ -349,6 +359,7 @@ impl View {
         self.definition = replacement.definition;
         self.bindings = replacement.bindings;
         self.document_state = replacement.document_state;
+        self.binding_revision.next();
         Ok(())
     }
 }
@@ -422,6 +433,7 @@ mod tests {
         assert_eq!(view.binding("left"), Some(ContentId(1)));
         assert_eq!(view.binding("right"), Some(ContentId(3)));
         assert_eq!(view.definition().as_str(), "test.diff");
+        assert_eq!(view.binding_revision(), Revision(1));
         assert_eq!(view.revision(), Revision(1));
     }
 

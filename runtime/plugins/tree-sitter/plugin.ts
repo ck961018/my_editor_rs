@@ -1,15 +1,7 @@
-interface HighlightState {
-  language: "markdown" | "rust" | null;
-}
+type HighlightLanguage = "markdown" | "rust";
 
-function languageFor(fileName?: string): HighlightState["language"] {
-  const name = fileName?.toLowerCase();
-  if (name?.endsWith(".rs")) {
-    return "rust";
-  }
-  return name?.endsWith(".md") || name?.endsWith(".markdown")
-    ? "markdown"
-    : null;
+interface HighlightState {
+  language: HighlightLanguage;
 }
 
 interface HighlightResult {
@@ -27,25 +19,31 @@ worker.onmessage = (event: MessageEvent<HighlightResult>) => {
   editor.writeDecorations(contentId, revision, spans);
 };
 
-editor.modes.define<HighlightState, null>({
-  name: "syntax-highlighting",
-  on: {
-    buffer: {
-      state(context) {
-        return {
-          language: languageFor(context.resourceName),
-        };
-      },
-      changed(context) {
-        const language = context.state.language;
-        if (language === null) return;
-        const contentId = context.contentId;
-        const text = context.text;
-        const revision = context.revision;
-        if (text === undefined || revision === undefined) return;
+function defineHighlightMode(language: HighlightLanguage): void {
+  editor.modes.define<HighlightState, null>({
+    name: `syntax-highlighting-${language}`,
+    attach: {
+      view: "core.buffer",
+      binding: "document",
+      languages: [language],
+    },
+    on: {
+      buffer: {
+        state() {
+          return { language };
+        },
+        changed(context) {
+          const contentId = context.contentId;
+          const text = context.text;
+          const revision = context.revision;
+          if (text === undefined || revision === undefined) return;
 
-        worker.postMessage({ contentId, language, revision, text });
+          worker.postMessage({ contentId, language, revision, text });
+        },
       },
     },
-  },
-});
+  });
+}
+
+defineHighlightMode("markdown");
+defineHighlightMode("rust");
