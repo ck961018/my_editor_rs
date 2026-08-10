@@ -93,6 +93,7 @@ pub enum SceneError {
     InvalidTree,
 }
 
+#[derive(Clone)]
 pub struct SceneBuilder {
     next_space_id: u64,
 }

@@ -10,12 +10,11 @@ use super::behavior::{
 use super::bootstrap::{bootstrap_editor, create_editor_session};
 use super::command_resolver::default_global_keymap;
 use super::dispatcher::{DispatchCommand, Dispatcher};
-use super::layout::{
-    LayoutError, NewView, StatusBarPlacement, focusable_view_count, resolve_focus, view_for_space,
-};
+use super::layout::{LayoutError, NewView, StatusBarPlacement};
 use super::message::{AppMessage, OpenedBuffer, OpenedPath};
 use super::query::AppQuery;
 use super::view::View;
+use super::view_workspace::{focusable_view_count, resolve_focus, scene_views, view_for_space};
 use crate::action::{TransactionIntent, ViewAction};
 use crate::buffer_lifecycle::normalize_path;
 use crate::command::{
@@ -3028,14 +3027,9 @@ fn switch_target_resolves_nearest_switchable_ancestor() {
 
     // DiffView 语义树的结构模型：left/right 作为复合 view 的子 view 不可
     // 切换，coordinator 充当复合 view（无需真实 diff 数据即可验证解析）。
-    for child in [left, right] {
-        let view = app.session.view_mut(child).unwrap();
-        view.set_switchable(false);
-        view.set_parent(Some(coordinator));
-    }
-    let parent = app.session.view_mut(coordinator).unwrap();
-    parent.push_child(left);
-    parent.push_child(right);
+    app.session
+        .compose_views_for_test(coordinator, &[(left, false), (right, false)])
+        .unwrap();
 
     // 焦点位于任一子 view 的 Pane 时，通用切换作用于整个复合 view。
     assert_eq!(app.session.switch_target(left_space), Some(coordinator));
@@ -3047,14 +3041,13 @@ fn switch_target_resolves_nearest_switchable_ancestor() {
 
     // 整条 parent 链都不可切换时没有切换目标。
     app.session
-        .view_mut(coordinator)
-        .unwrap()
-        .set_switchable(false);
+        .set_view_switchable_for_test(coordinator, false)
+        .unwrap();
     assert_eq!(app.session.switch_target(left_space), None);
 }
 
 #[test]
-fn compound_view_switch_is_rejected_until_subtree_lifecycle_is_atomic() {
+fn compound_view_switch_replaces_the_complete_subtree_atomically() {
     let mut app = make_app(vec![], None);
     let left_space = app.session.focused();
     let left = view_id(&app, left_space);
@@ -3068,43 +3061,245 @@ fn compound_view_switch_is_rejected_until_subtree_lifecycle_is_atomic() {
         .unwrap()
         .new_space;
     let coordinator = view_id(&app, coordinator_space);
-    for child in [left, right] {
-        let view = app.session.view_mut(child).unwrap();
-        view.set_switchable(false);
-        view.set_parent(Some(coordinator));
-    }
-    let parent = app.session.view_mut(coordinator).unwrap();
-    parent.push_child(left);
-    parent.push_child(right);
+    app.session
+        .compose_views_for_test(coordinator, &[(left, false), (right, false)])
+        .unwrap();
     let replacement = app.new_buffer();
     let scene_revision = app.session.scene_revision();
-    let view_count = app.session.views().len();
     let buffer_count = app.buffers().len();
 
-    let error = app
-        .execute_command(DispatchCommand::ModeOperations {
-            operations: vec![OperationRequest::ViewLifecycle(
-                ViewLifecycleOperation::Switch {
-                    spec: ViewSpec::buffer(replacement),
-                },
-            )],
-            view: left,
-            content: editor_cid(),
-        })
-        .unwrap_err();
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::ViewLifecycle(
+            ViewLifecycleOperation::Switch {
+                spec: ViewSpec::buffer(replacement),
+            },
+        )],
+        view: left,
+        content: editor_cid(),
+    })
+    .unwrap();
 
-    assert!(error.to_string().contains("compound view replacement"));
-    assert_eq!(app.session.scene_revision(), scene_revision);
-    assert_eq!(app.session.views().len(), view_count);
+    let replacement_view = view_id(&app, coordinator_space);
+    assert_eq!(app.session.scene_revision(), Revision(scene_revision.0 + 1));
+    assert_eq!(app.session.views().len(), 1);
     assert_eq!(app.buffers().len(), buffer_count);
-    for (space, expected) in [
+    assert_eq!(app.session.focused(), coordinator_space);
+    assert_eq!(
+        app.session.view(replacement_view).unwrap().content(),
+        replacement
+    );
+    for removed in [left, right, coordinator] {
+        assert!(app.session.view(removed).is_none());
+        assert!(app.session.view_modes().mode_ids(removed).is_empty());
+    }
+    assert!(!app.session.scene().contains(left_space));
+    assert!(!app.session.scene().contains(right_space));
+    assert!(app.session.scene().contains(coordinator_space));
+    assert!(
+        scene_views(app.session.scene())
+            .into_iter()
+            .all(|(_, view)| view == replacement_view)
+    );
+    let replacement = app.session.view(replacement_view).unwrap();
+    assert!(
+        replacement
+            .panes()
+            .spaces()
+            .all(|space| view_for_space(app.session.scene(), space) == Some(replacement_view))
+    );
+}
+
+#[test]
+fn same_content_switch_still_replaces_a_compound_view_with_a_leaf() {
+    let mut app = make_app(vec![], None);
+    let left_space = app.session.focused();
+    let left = view_id(&app, left_space);
+    let right_space = app
+        .split_space(left_space, editor_cid(), true, SplitDirection::Right, false)
+        .unwrap()
+        .new_space;
+    let right = view_id(&app, right_space);
+    let coordinator_space = app
+        .split_space(right_space, editor_cid(), true, SplitDirection::Down, false)
+        .unwrap()
+        .new_space;
+    let coordinator = view_id(&app, coordinator_space);
+    app.session
+        .compose_views_for_test(coordinator, &[(left, false), (right, false)])
+        .unwrap();
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::ViewLifecycle(
+            ViewLifecycleOperation::Switch {
+                spec: ViewSpec::buffer(editor_cid()),
+            },
+        )],
+        view: left,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    let replacement = view_id(&app, coordinator_space);
+    assert!(![left, right, coordinator].contains(&replacement));
+    assert_eq!(app.session.views().len(), 1);
+    assert!(app.session.view(replacement).unwrap().children().is_empty());
+    assert!(!app.session.scene().contains(left_space));
+    assert!(!app.session.scene().contains(right_space));
+}
+
+#[test]
+fn compound_view_switch_removes_descendant_per_pane_status_bars() {
+    let mut app = make_app(vec![], None);
+    app.set_status_bar_placement(StatusBarPlacement::PerPane)
+        .unwrap();
+    let left_space = app.session.focused();
+    let left = view_id(&app, left_space);
+    let left_status = app.status_bar_for_view(left).unwrap().space;
+    let right_space = app
+        .split_space(left_space, editor_cid(), true, SplitDirection::Right, false)
+        .unwrap()
+        .new_space;
+    let right = view_id(&app, right_space);
+    let right_status = app.status_bar_for_view(right).unwrap().space;
+    let coordinator_space = app
+        .split_space(right_space, editor_cid(), true, SplitDirection::Down, false)
+        .unwrap()
+        .new_space;
+    let coordinator = view_id(&app, coordinator_space);
+    let coordinator_status = app.status_bar_for_view(coordinator).unwrap().space;
+    app.session
+        .compose_views_for_test(coordinator, &[(left, false), (right, false)])
+        .unwrap();
+    let replacement = app.new_buffer();
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::ViewLifecycle(
+            ViewLifecycleOperation::Switch {
+                spec: ViewSpec::buffer(replacement),
+            },
+        )],
+        view: left,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    let replacement_view = view_id(&app, coordinator_space);
+    assert_eq!(
+        app.status_bar_for_view(replacement_view).unwrap().space,
+        coordinator_status
+    );
+    for removed in [left_space, left_status, right_space, right_status] {
+        assert!(!app.session.scene().contains(removed));
+    }
+    assert_eq!(scene_views(app.session.scene()).len(), 2);
+    assert!(
+        scene_views(app.session.scene())
+            .into_iter()
+            .all(|(_, view)| view == replacement_view)
+    );
+}
+
+#[test]
+fn content_close_removes_overlapping_compound_view_targets_atomically() {
+    let mut app = make_app(vec![], None);
+    let left_space = app.session.focused();
+    let left = view_id(&app, left_space);
+    let right_space = app
+        .split_space(left_space, editor_cid(), true, SplitDirection::Right, false)
+        .unwrap()
+        .new_space;
+    let right = view_id(&app, right_space);
+    let coordinator_space = app
+        .split_space(right_space, editor_cid(), true, SplitDirection::Down, false)
+        .unwrap()
+        .new_space;
+    let coordinator = view_id(&app, coordinator_space);
+    app.session
+        .compose_views_for_test(coordinator, &[(left, false), (right, false)])
+        .unwrap();
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::ContentLifecycle(
+            ContentLifecycleOperation::Close {
+                target: ContentTarget::Id(editor_cid()),
+                force: true,
+            },
+        )],
+        view: left,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    let replacement = view_id(&app, coordinator_space);
+    assert!(!app.kernel.contents().contains(editor_cid()));
+    assert_eq!(app.session.views().len(), 1);
+    assert_ne!(
+        app.session.view(replacement).unwrap().content(),
+        editor_cid()
+    );
+    assert_eq!(app.session.focused(), coordinator_space);
+    for removed in [left, right, coordinator] {
+        assert!(app.session.view(removed).is_none());
+        assert!(app.session.view_modes().mode_ids(removed).is_empty());
+    }
+    assert!(!app.session.scene().contains(left_space));
+    assert!(!app.session.scene().contains(right_space));
+    assert!(
+        scene_views(app.session.scene())
+            .into_iter()
+            .all(|(_, view)| view == replacement)
+    );
+}
+
+#[test]
+fn closing_a_compound_view_removes_the_complete_subtree_atomically() {
+    let mut app = make_app(vec![], None);
+    let left_space = app.session.focused();
+    let left = view_id(&app, left_space);
+    let right_space = app
+        .split_space(left_space, editor_cid(), true, SplitDirection::Right, false)
+        .unwrap()
+        .new_space;
+    let right = view_id(&app, right_space);
+    let coordinator_space = app
+        .split_space(right_space, editor_cid(), true, SplitDirection::Down, false)
+        .unwrap()
+        .new_space;
+    let coordinator = view_id(&app, coordinator_space);
+    let survivor_space = app
+        .split_space(
+            coordinator_space,
+            editor_cid(),
+            true,
+            SplitDirection::Right,
+            false,
+        )
+        .unwrap()
+        .new_space;
+    let survivor = view_id(&app, survivor_space);
+    app.session
+        .compose_views_for_test(coordinator, &[(left, false), (right, false)])
+        .unwrap();
+
+    app.close_space(coordinator_space).unwrap();
+
+    assert_eq!(app.session.focused(), survivor_space);
+    assert_eq!(app.session.views().len(), 1);
+    assert!(app.session.view(survivor).is_some());
+    for (space, removed) in [
         (left_space, left),
         (right_space, right),
         (coordinator_space, coordinator),
     ] {
-        assert_eq!(view_id(&app, space), expected);
-        assert!(app.session.view(expected).is_some());
+        assert!(!app.session.scene().contains(space));
+        assert!(app.session.view(removed).is_none());
+        assert!(app.session.view_modes().mode_ids(removed).is_empty());
     }
+    assert!(
+        scene_views(app.session.scene())
+            .into_iter()
+            .all(|(_, view)| view == survivor)
+    );
 }
 
 #[test]

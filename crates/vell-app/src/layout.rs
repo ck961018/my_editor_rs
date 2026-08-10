@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fmt;
 
 use crate::application::App;
@@ -7,8 +6,7 @@ use crate::view::View;
 use vell_core::content_store::ContentStore;
 use vell_frontend::Frontend;
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
-use vell_protocol::scene::Scene;
-use vell_protocol::space::{Sizing, SpaceKind, SplitDirection};
+use vell_protocol::space::{Sizing, SplitDirection};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StatusBarPlacement {
@@ -107,23 +105,17 @@ impl<F: Frontend> App<F> {
     }
 
     pub(super) fn close_space(&mut self, target: SpaceId) -> Result<CloseResult, LayoutError> {
-        let removed = self
-            .session
-            .view_for_space(target)
-            .and_then(|view| self.session.view(view).map(|data| (view, data.content())));
         let (contents, content_modes) = self.kernel.mode_runtime_parts();
-        let result = self.session.close_space(target, content_modes, contents)?;
-        if let Some((view, content)) = removed
-            && self.kernel.active_transaction_owner(content) == Some(Some(view))
-        {
-            self.kernel.commit_transaction(content);
-        }
-        if let Some((view, _)) = removed {
+        let mutation = self.session.close_space(target, content_modes, contents)?;
+        for (view, content) in mutation.removed {
+            if self.kernel.active_transaction_owner(content) == Some(Some(view)) {
+                self.kernel.commit_transaction(content);
+            }
             self.cancel_pending_commands_for_view(view);
         }
         self.session
             .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
-        Ok(result)
+        Ok(mutation.output)
     }
 
     pub(super) fn replace_space_content(
@@ -131,16 +123,12 @@ impl<F: Frontend> App<F> {
         target: SpaceId,
         content: ContentId,
         focusable: bool,
-    ) -> Result<(), LayoutError> {
+    ) -> Result<ViewId, LayoutError> {
         let mode_names = self.session.mode_chain_for_new_view(content);
         let view = create_view(content, self.kernel.contents(), &mode_names)
             .ok_or(LayoutError::MissingContent(content))?;
-        let removed = self
-            .session
-            .view_for_space(target)
-            .and_then(|view| self.session.view(view).map(|data| (view, data.content())));
         let (contents, modes, content_modes) = self.kernel.mode_attachment_parts();
-        self.session.replace_space_content(
+        let mutation = self.session.replace_space_content(
             target,
             view,
             focusable,
@@ -148,18 +136,16 @@ impl<F: Frontend> App<F> {
             content_modes,
             contents,
         )?;
-        if let Some((view, _)) = removed {
+        for (view, content) in mutation.removed {
             self.cancel_pending_commands_for_view(view);
+            if self.kernel.active_transaction_owner(content) == Some(Some(view)) {
+                self.kernel.commit_transaction(content);
+            }
         }
         self.kernel.schedule_mode_jobs();
-        if let Some((view, content)) = removed
-            && self.kernel.active_transaction_owner(content) == Some(Some(view))
-        {
-            self.kernel.commit_transaction(content);
-        }
         self.session
             .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
-        Ok(())
+        Ok(mutation.output)
     }
 
     pub(super) fn switch_view_at(
@@ -170,7 +156,7 @@ impl<F: Frontend> App<F> {
         if self
             .session
             .view(target)
-            .is_some_and(|view| view.content() == content)
+            .is_some_and(|view| view.content() == content && view.children().is_empty())
         {
             return Ok(target);
         }
@@ -178,10 +164,7 @@ impl<F: Frontend> App<F> {
             .session
             .body_space_for_view(target)
             .ok_or(LayoutError::MissingView(target))?;
-        self.replace_space_content(space, content, true)?;
-        self.session
-            .view_for_space(space)
-            .ok_or(LayoutError::MissingReplacementView)
+        self.replace_space_content(space, content, true)
     }
 
     #[cfg_attr(
@@ -204,11 +187,11 @@ impl<F: Frontend> App<F> {
 pub(super) enum LayoutError {
     MissingContent(ContentId),
     MissingView(ViewId),
-    MissingReplacementView,
     WouldRemoveLastFocusable(SpaceId),
     NoFocusableSpace,
     NoStatusBar,
     StatusBarSpace(SpaceId),
+    InvalidWorkspace(String),
     Scene(SceneError),
 }
 
@@ -219,7 +202,6 @@ impl fmt::Display for LayoutError {
                 write!(formatter, "content {} does not exist", content.0)
             }
             Self::MissingView(view) => write!(formatter, "view {} does not exist", view.0),
-            Self::MissingReplacementView => formatter.write_str("replacement view is missing"),
             Self::WouldRemoveLastFocusable(space) => {
                 write!(formatter, "space {} is the last focusable space", space.0)
             }
@@ -227,6 +209,9 @@ impl fmt::Display for LayoutError {
             Self::NoStatusBar => write!(formatter, "status bar does not exist"),
             Self::StatusBarSpace(space) => {
                 write!(formatter, "space {} is managed by the status bar", space.0)
+            }
+            Self::InvalidWorkspace(message) => {
+                write!(formatter, "ViewWorkspace invariant failed: {message}")
             }
             Self::Scene(error) => write!(formatter, "scene mutation failed: {error:?}"),
         }
@@ -261,105 +246,4 @@ pub(super) fn create_view(
 pub(super) struct NewView {
     pub(super) view: View,
     pub(super) mode_names: Vec<crate::mode_name::ModeName>,
-}
-
-fn collect_view_spaces(scene: &Scene, sid: SpaceId, out: &mut Vec<(SpaceId, ViewId)>) {
-    let node = scene.node(sid);
-    match &node.space.kind {
-        SpaceKind::Content { view, .. } => {
-            out.push((sid, *view));
-        }
-        SpaceKind::Container { .. } => {
-            for child in &node.children {
-                collect_view_spaces(scene, *child, out);
-            }
-        }
-    }
-}
-
-pub(super) fn scene_views(scene: &Scene) -> Vec<(SpaceId, ViewId)> {
-    let mut views = Vec::new();
-    collect_view_spaces(scene, scene.root(), &mut views);
-    views
-}
-
-pub(super) fn view_for_space(scene: &Scene, space: SpaceId) -> Option<ViewId> {
-    if !scene.contains(space) {
-        return None;
-    }
-    match &scene.node(space).space.kind {
-        SpaceKind::Content { view, .. } => Some(*view),
-        SpaceKind::Container { .. } => None,
-    }
-}
-
-/// 通用 View 切换的目标解析：从焦点 Pane 所属 view 沿语义 parent 链向上，
-/// 第一个 switchable 的 view 即切换目标。
-pub(super) fn resolve_switch_target(
-    scene: &Scene,
-    views: &HashMap<ViewId, View>,
-    focused: SpaceId,
-) -> Option<ViewId> {
-    resolve_switch_target_from_view(views, view_for_space(scene, focused)?)
-}
-
-pub(super) fn resolve_switch_target_from_view(
-    views: &HashMap<ViewId, View>,
-    mut current: ViewId,
-) -> Option<ViewId> {
-    loop {
-        let view = views.get(&current)?;
-        if view.switchable() {
-            return Some(current);
-        }
-        current = view.parent()?;
-    }
-}
-
-pub(super) fn view_space_focusable(scene: &Scene, space: SpaceId) -> Option<bool> {
-    if !scene.contains(space) {
-        return None;
-    }
-    match &scene.node(space).space.kind {
-        SpaceKind::Content { focusable, .. } => Some(*focusable),
-        SpaceKind::Container { .. } => None,
-    }
-}
-
-pub(super) fn focusable_view_count(scene: &Scene) -> usize {
-    scene_views(scene)
-        .into_iter()
-        .filter(|(space, _)| view_space_focusable(scene, *space) == Some(true))
-        .count()
-}
-
-pub(super) fn resolve_focus(
-    scene: &Scene,
-    previous: SpaceId,
-    preferred: Option<SpaceId>,
-) -> Option<SpaceId> {
-    preferred
-        .and_then(|space| first_focusable_at_or_below(scene, space))
-        .or_else(|| (view_space_focusable(scene, previous) == Some(true)).then_some(previous))
-        .or_else(|| {
-            scene_views(scene)
-                .into_iter()
-                .map(|(space, _)| space)
-                .find(|space| view_space_focusable(scene, *space) == Some(true))
-        })
-}
-
-fn first_focusable_at_or_below(scene: &Scene, space: SpaceId) -> Option<SpaceId> {
-    if !scene.contains(space) {
-        return None;
-    }
-    if view_space_focusable(scene, space) == Some(true) {
-        return Some(space);
-    }
-    let mut views = Vec::new();
-    collect_view_spaces(scene, space, &mut views);
-    views
-        .into_iter()
-        .map(|(space, _)| space)
-        .find(|space| view_space_focusable(scene, *space) == Some(true))
 }

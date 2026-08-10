@@ -57,23 +57,27 @@ App<F: Frontend>
 │   ├── mode jobs + save tasks
 │   └── AppMessage channel
 ├── ClientSession
-│   ├── Scene + SceneBuilder + scene revision
-│   ├── HashMap<ViewId, View>
+│   ├── ViewWorkspace
+│   │   ├── Scene + SceneBuilder + scene revision
+│   │   ├── HashMap<ViewId, View> + semantic tree
+│   │   ├── ViewPaneMap + status structure
+│   │   └── ViewId allocation + focused SpaceId
 │   ├── ModeViewStore + Mode chains
 │   ├── ContentId -> new View Mode profile
-│   ├── Dispatcher + focused SpaceId
+│   ├── Dispatcher
 │   ├── FaceRegistry
 │   └── PresentationLayerStore
 └── F: Frontend
 ```
 
 `Kernel` 保存可跨 session 共享的内容、Mode content state、history 和后台
-任务。`ClientSession` 保存 Scene、View、Mode view state、输入状态和呈现
-缓存。当前仍是一对一组合，没有 session registry 或并发共享容器。
+任务。`ViewWorkspace` 保存 View 与 Scene 的完整结构状态；
+`ClientSession` 组合 workspace、Mode view state、输入状态和呈现缓存。
+当前仍是一对一组合，没有 session registry 或并发共享容器。
 
 根二进制先加载内建与用户 TypeScript Mode，再由 `vell-app::bootstrap`
 分配 editor 的 `ContentId` 与初始 `ViewId`。
-每个 `ClientSession` 持有唯一 `SceneBuilder`。TUI 的 `SceneRenderer` 按
+每个 `ViewWorkspace` 持有唯一 `SceneBuilder`。TUI 的 `SceneRenderer` 按
 `ViewId` 持有 viewport；后端 session 不保存终端滚动位置。
 
 ## 4. 身份与共享范围
@@ -170,7 +174,7 @@ history。Mode chain、输入状态和呈现缓存由 `ClientSession` 中的
 
 状态栏不是 Content（ADR 0001），也不是独立 View：状态栏 Space 直接
 引用其服务的 editor view，并在该 view 的 `ViewPaneMap` 中登记为
-`builtin.status` Pane。`ClientSession` 支持两种布局策略：全局策略
+`builtin.status` Pane。`ViewWorkspace` 支持两种布局策略：全局策略
 只有一个状态栏 Space，焦点变化时把它移交给新的焦点 editor view
 （改写 Space 的 view 引用）；per-pane 策略为每个 Buffer View 维护
 独立状态栏 Space。状态栏可通过把对应 Space 高度设为零独立隐藏。
@@ -306,9 +310,12 @@ App 在 `tokio::select!` 中等待 Frontend event、最近输入 deadline、后�
 
 ## 10. Scene、布局与 pull 渲染
 
-`protocol::scene` 只保存 Scene 快照和只读访问。split、close、replace、树
-修复和 ID 分配属于 `app::scene_model::SceneBuilder`。布局由 TUI 的
-`TaffyEngine` 负责，并按 scene revision 缓存 resolved scene。
+`protocol::scene` 只保存 Scene 快照和只读访问。`ViewWorkspace` 使用
+`app::scene_model::SceneBuilder` 生成快照，并统一拥有 split、close、
+replace、View 子树修复、焦点修复和 ID 分配。结构操作先在 workspace
+副本中完成；Scene、View tree 与 Pane map 全部校验成功后才一次发布。
+布局由 TUI 的 `TaffyEngine` 负责，并按 scene revision 缓存 resolved
+scene。
 
 呈现刷新与绘制分离：
 
@@ -375,7 +382,8 @@ render(&Scene, Revision, &dyn RenderQuery, focused)
 - `TransactionManager` 是 history 生命周期的唯一所有者；
 - Buffer 不保存 View selections、history stack 或 history cursor；
 - SpaceId、ViewId、ContentId 不互相替代；
-- SceneBuilder 属于 app，布局和 viewport 属于 TUI；
+- View 子树、Pane、Scene、焦点和结构 ID 只由 ViewWorkspace 修改；
+- SceneBuilder 封装在 ViewWorkspace，布局和 viewport 属于 TUI；
 - 渲染使用 pull query，render path 不调用 Mode；
 - 异步结果必须通过 revision/version 校验后安装；
 - native 和 script Mode 共享注册、执行和生命周期模型。

@@ -1906,15 +1906,6 @@ impl<F: Frontend> App<F> {
                                 .ok_or_else(|| {
                                     invalid_operation("view switch has no switchable target")
                                 })?;
-                        if self
-                            .session
-                            .view(target)
-                            .is_some_and(|view| !view.children().is_empty())
-                        {
-                            return Err(invalid_operation(
-                                "compound view replacement requires ViewWorkspace subtree lifecycle",
-                            ));
-                        }
                         let spec = match spec {
                             ViewSpec::Buffer {
                                 source: BufferViewSource::Content(content),

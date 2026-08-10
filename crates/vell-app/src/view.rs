@@ -1,6 +1,7 @@
 //! 视图实例的交互会话：绑定一个 content，持有独立 content view state，并
-//! 控制一个或多个直属 Pane（正文、状态栏等）。按 ViewId 索引（App.views），
-//! 同一 Content 可被多个独立 View 绑定；同一 View 可占据多个 Content Space。
+//! 控制一个或多个直属 Pane（正文、状态栏等）。由 `ViewWorkspace` 按
+//! ViewId 索引，同一 Content 可被多个独立 View 绑定；同一 View 可占据
+//! 多个 Content Space。
 
 use std::collections::HashMap;
 
@@ -19,7 +20,7 @@ pub const STATUS_PANE: &str = "builtin.status";
 
 /// SpaceId 与 PaneKey 的双向映射。每个 PaneKey 在一个 view 内唯一，
 /// 每个 Space 同一时刻只属于一个 view 的一个 Pane。
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ViewPaneMap {
     by_space: HashMap<SpaceId, PaneKey>,
     by_key: HashMap<PaneKey, SpaceId>,
@@ -54,6 +55,7 @@ impl ViewPaneMap {
     }
 }
 
+#[derive(Clone)]
 pub struct View {
     /// 绑定的 content；当前仅 View::new 写入，同一 content 可由多个 View 独立呈现。
     content: ContentId,
@@ -89,12 +91,12 @@ impl View {
     }
 
     /// 登记直属 Pane：space 由本 view 决定显示内容。
-    pub fn assign_pane(&mut self, space: SpaceId, key: impl Into<PaneKey>) {
+    pub(crate) fn assign_pane(&mut self, space: SpaceId, key: impl Into<PaneKey>) {
         self.panes.insert(space, key.into());
     }
 
     /// 释放 space 的 Pane 归属（space 关闭或移交给其他 view）。
-    pub fn release_pane_space(&mut self, space: SpaceId) -> Option<PaneKey> {
+    pub(crate) fn release_pane_space(&mut self, space: SpaceId) -> Option<PaneKey> {
         self.panes.remove_space(space)
     }
 
@@ -102,7 +104,11 @@ impl View {
         self.switchable
     }
 
-    pub fn set_switchable(&mut self, switchable: bool) {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "reserved for ViewWorkspace compound creation")
+    )]
+    pub(crate) fn set_switchable(&mut self, switchable: bool) {
         self.switchable = switchable;
     }
 
@@ -110,7 +116,7 @@ impl View {
         self.parent
     }
 
-    pub fn set_parent(&mut self, parent: Option<ViewId>) {
+    pub(crate) fn set_parent(&mut self, parent: Option<ViewId>) {
         self.parent = parent;
     }
 
@@ -118,14 +124,30 @@ impl View {
         &self.children
     }
 
-    pub fn push_child(&mut self, child: ViewId) {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "reserved for ViewWorkspace compound creation")
+    )]
+    pub(crate) fn push_child(&mut self, child: ViewId) {
         if !self.children.contains(&child) {
             self.children.push(child);
         }
     }
 
-    pub fn remove_child(&mut self, child: ViewId) {
+    pub(crate) fn remove_child(&mut self, child: ViewId) {
         self.children.retain(|candidate| *candidate != child);
+    }
+
+    pub(crate) fn replace_child(&mut self, current: ViewId, replacement: ViewId) -> bool {
+        let Some(child) = self
+            .children
+            .iter_mut()
+            .find(|candidate| **candidate == current)
+        else {
+            return false;
+        };
+        *child = replacement;
+        true
     }
 
     pub fn selections(&self) -> Option<&Selections> {

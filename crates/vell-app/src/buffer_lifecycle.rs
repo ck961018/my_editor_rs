@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::application::App;
 use crate::kernel::FileBaseline;
-use crate::layout::{focusable_view_count, view_space_focusable};
+use crate::layout::create_view;
 use vell_core::content::{
     Content, ContentEffect, ContentInput, ContentKind, ContentResult, SaveSnapshot,
 };
@@ -360,47 +360,38 @@ impl<F: Frontend> App<F> {
     ) -> Result<(), BufferLifecycleError> {
         self.validate_close_buffer(content, force)?;
 
-        let target_views = self
+        let needs_replacement = self
             .session
-            .views()
-            .iter()
-            .filter(|(_, view)| view.content() == content)
-            .filter_map(|(view, _)| {
-                self.session
-                    .body_space_for_view(*view)
-                    .map(|space| (*view, space))
-            })
-            .collect::<Vec<_>>();
-        let target_focusable = target_views
-            .iter()
-            .filter(|(_, space)| view_space_focusable(self.session.scene(), *space) == Some(true))
-            .count();
-        if target_focusable == focusable_view_count(self.session.scene())
-            && let Some((_, replacement_space)) = target_views
-                .iter()
-                .find(|(_, space)| view_space_focusable(self.session.scene(), *space) == Some(true))
-                .copied()
-        {
-            let replacement = self
+            .closing_content_needs_replacement(content)
+            .map_err(|error| BufferLifecycleError::Layout(error.to_string()))?;
+        let replacement = if needs_replacement {
+            let replacement_content = self
                 .buffers()
                 .into_iter()
                 .find(|buffer| buffer.content != content)
                 .map(|buffer| buffer.content)
                 .unwrap_or_else(|| self.new_buffer());
-            self.replace_space_content(replacement_space, replacement, true)
-                .map_err(|error| BufferLifecycleError::Layout(error.to_string()))?;
-        }
-
-        let target_spaces = self
+            let mode_names = self.session.mode_chain_for_new_view(replacement_content);
+            Some(
+                create_view(replacement_content, self.kernel.contents(), &mode_names)
+                    .expect("replacement content exists"),
+            )
+        } else {
+            None
+        };
+        let (contents, modes, content_modes) = self.kernel.mode_attachment_parts();
+        let mutation = self
             .session
-            .views()
-            .iter()
-            .filter(|(_, view)| view.content() == content)
-            .filter_map(|(view, _)| self.session.body_space_for_view(*view))
-            .collect::<Vec<_>>();
-        for space in target_spaces {
-            self.close_space(space)
-                .map_err(|error| BufferLifecycleError::Layout(error.to_string()))?;
+            .close_content_views(content, replacement, modes, content_modes, contents)
+            .map_err(|error| BufferLifecycleError::Layout(error.to_string()))?;
+        for (view, removed_content) in mutation.removed {
+            if self.kernel.active_transaction_owner(removed_content) == Some(Some(view)) {
+                self.kernel.commit_transaction(removed_content);
+            }
+            self.cancel_pending_commands_for_view(view);
+        }
+        if mutation.output.is_some() {
+            self.kernel.schedule_mode_jobs();
         }
         self.session.forget_content(content);
         if !self.kernel.remove_content(content) {

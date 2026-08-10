@@ -28,6 +28,7 @@ mod tasks;
 mod theme;
 mod transaction;
 mod view;
+mod view_workspace;
 
 pub(crate) use vell_mode as mode;
 pub(crate) use vell_mode::{action, command, mode_name, presentation};

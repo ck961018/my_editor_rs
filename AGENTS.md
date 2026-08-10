@@ -88,8 +88,11 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
 
 - `Kernel` 持有 `ContentStore`、`ModeRegistry`、共享 Mode content state、
   `TransactionManager`、保存任务和 Mode 后台任务。
-- `ClientSession` 持有 Scene、View、Mode view state、输入状态、Face 与
+- `ClientSession` 持有 `ViewWorkspace`、Mode view state、输入状态、Face 与
   presentation cache。当前生产路径是一对一 `Kernel + ClientSession`。
+- `ViewWorkspace` 是 View 语义树、直属 Pane 映射、Scene、SceneBuilder、
+  结构 ID、焦点和状态栏结构的唯一所有者。创建、替换和关闭先在完整结构
+  草稿上校验，再一次发布；调用方只消费 View 生命周期事件。
 - `ContentStore` 是唯一 Content 表。`Content` 与 `ContentViewState` 都是
   和 `ContentKind` 对齐的封闭枚举。
 - `View` 持有 `ContentId`、`ContentViewState`、revision、直属 Pane 映射
@@ -111,7 +114,8 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
   prepared frontend/save effects。
 - `TransactionManager` 是 undo/redo 生命周期的唯一所有者；Mode state、
   viewport、focus 和布局不进入文本历史。
-- `SceneBuilder` 属于 app；布局和 viewport 状态属于 TUI。
+- `SceneBuilder` 封装在 app 的 `ViewWorkspace` 中；布局和 viewport 状态
+  属于 TUI。
 - 渲染是 fallible pull 模型。`RenderQuery` 返回 owned 数据或
   `RenderQueryError`；渲染路径不得调用 Mode、V8 或 worker。
 - 异步任务只接收 owned snapshot，请求结果回到 app 后必须通过 revision、
@@ -125,8 +129,9 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
   Ctrl、Alt 或 Shift 特化回 `KeyCode`。
 - `vell_protocol::scene` 只保存 Scene 快照和只读访问；split、close、
   replace、树修复和 ID 分配属于 `vell_app::scene_model`。
-- `ClientSession` 持有唯一 `SceneBuilder`。新增 Space 必须通过该
-  builder 分配。
+- `ViewWorkspace` 持有唯一 `SceneBuilder`。新增 Space 必须由 workspace
+  生命周期操作通过该 builder 分配；`ClientSession` 不分步清理 Pane 或
+  Space。
 - `build_editor_scene` 只在传入的 builder 上创建标准布局并 snapshot，
   不得内部创建或消耗另一个 builder。
 - 新增 ContentKind 必须同时扩展 `Content`、`ContentViewState`、

@@ -376,6 +376,8 @@ Content、input、history 和准备中的副作用。复合 View 子树的实际
 
 ### M2：深化 ViewWorkspace
 
+实现状态：已完成。
+
 目标：让完整 View 子树成为唯一的结构生命周期单位。
 
 工作：
@@ -387,6 +389,14 @@ Content、input、history 和准备中的副作用。复合 View 子树的实际
 
 验收：删除或替换复合 View 后，没有孤儿 Space、Pane 映射、焦点或
 Mode view state。
+
+实现结果：`ViewWorkspace` 已成为 View 语义树、直属 Pane、Scene、焦点与
+结构 ID 的唯一所有者。split、close、replace 和状态栏结构变更均先在完整
+workspace 副本中执行并校验，再一次发布。`ClientSession` 只根据成功发布的
+removed-view 事件清理 Mode、输入与 Face；App 再清理事务 owner 和 pending
+command。
+复合 View 的 switch 与 close 回归测试同时检查 Scene leaf、Pane 所有权、
+焦点和 Mode view state，不再保留 M1 的临时拒绝路径。
 
 ### M3：命名 Content bindings
 
