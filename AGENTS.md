@@ -96,6 +96,8 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
   （SpaceId ↔ PaneKey）、`switchable` 与语义 parent/children；不持有
   Mode、history、viewport 或渲染缓存。同一 View 可占据多个 Content
   Space（正文 `body` + 状态栏 `builtin.status` 等）。
+- 上一条描述 M3 前的当前实现。目标领域模型允许 View 使用命名 binding
+  绑定零个或多个 Content；在 M3 完成前，不得把该目标当作已实现 contract。
 - selection 使用 `anchor/head`；collapsed cursor 等于 primary selection
   的 `head`。不要添加冗余方向字段。
 - Mode content state 按 `(ModeId, ContentId)` 共享，view state 按
