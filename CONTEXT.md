@@ -21,10 +21,34 @@ View 可以绑定零个或多个 Content、控制多个直属
 Pane，并可组合其他完整 View。
 _Avoid_: 窗口、pane（vim 中 window 的角色）
 
+**View definition**：
+声明一种 View 的稳定身份、binding schema 与结构规则。
+由 Kernel registry 唯一持有；实例只保存稳定 definition id。
+实例的 ViewId 可以变化，definition id 不随实例变化。
+_Avoid_: View 类型字符串、Mode（definition 自己保证结构）
+
 **Content binding**：
 View 以命名角色使用某个 Content 的关系。改变绑定
 保留原 View，不属于 View switch。
 _Avoid_: 切换 buffer、切换 Content
+
+**Binding key**：
+View definition 声明的稳定角色名，例如 `document`、
+`left` 或 `right`。它说明 Content 在该 View 中的用途，
+不是 Pane 名，也不是 ContentKind。
+_Avoid_: slot 编号、PaneKey
+
+**Document binding**：
+保留的 `document` binding，表示 View 直接编辑和进行
+文本呈现的 Content。BufferView 始终拥有它；复合 View
+不会因为间接引用 Content 自动获得 document binding。
+_Avoid_: 当前 buffer、主 Content
+
+**Rebind**：
+替换一个既有 binding key 指向的 Content，同时保留
+ViewId、View definition、其他 binding 与结构。rebind
+不是 View switch。
+_Avoid_: 切换 View、替换 View
 
 **Pane**：
 由 View 控制的显示与事件区域。Pane 不拥有独立数据、
@@ -67,6 +91,8 @@ _Avoid_: 状态栏、行号栏、gutter（当作对象指称时）
 - Buffer 是 ContentKind，不是用户操作或命令的目标。
 - 通用切换只替换最近的 Switchable View；改变 Content
   binding 必须由具体 View 的行为表达。
+- `content.close --force` 只覆盖脏数据保护，不覆盖仍会
+  存活的 binding 引用；引用者必须先 rebind 或关闭。
 - Mode attachment 位于 View；多个 attachment 可以按
   Content 共享 Mode state。
 - 用户可见编号只对 listed content 派生；插件 API

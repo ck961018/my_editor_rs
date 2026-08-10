@@ -198,6 +198,9 @@ impl fmt::Display for ModeFault {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModeContextError {
+    MissingDocument {
+        view: ViewId,
+    },
     MissingContent {
         view: ViewId,
         content: ContentId,
@@ -213,6 +216,9 @@ pub enum ModeContextError {
 impl fmt::Display for ModeContextError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MissingDocument { view } => {
+                write!(formatter, "view {} has no document binding", view.0)
+            }
             Self::MissingContent { view, content } => write!(
                 formatter,
                 "view {} references missing content {}",

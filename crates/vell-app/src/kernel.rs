@@ -17,6 +17,7 @@ use crate::tasks::AppTasks;
 use crate::transaction::{
     TransactionManager, TransactionManagerError, TransactionRecord, TransactionSnapshot,
 };
+use crate::view_definition::ViewDefinitionRegistry;
 use vell_core::action::{ContentAction, ContentEditPlan};
 use vell_core::clipboard::{ClipboardKind, ClipboardPayload, PastePlacement};
 use vell_core::content::{
@@ -58,6 +59,7 @@ pub(super) struct Kernel {
     pending_opens: HashMap<ContentId, PendingOpen>,
     latest_opens: HashMap<SpaceId, ContentId>,
     modes: ModeRegistry,
+    view_definitions: ViewDefinitionRegistry,
     commands: CommandRegistry,
     content_modes: ModeContentStore,
     transactions: TransactionManager,
@@ -87,6 +89,7 @@ impl Kernel {
             pending_opens: HashMap::new(),
             latest_opens: HashMap::new(),
             modes,
+            view_definitions: ViewDefinitionRegistry::new(),
             commands: native_command_registry(),
             content_modes: ModeContentStore::default(),
             transactions: TransactionManager::default(),
@@ -227,6 +230,23 @@ impl Kernel {
 
     pub(super) fn modes(&self) -> &ModeRegistry {
         &self.modes
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "M4 ModeResolver will read View definitions")
+    )]
+    pub(super) fn view_definitions(&self) -> &ViewDefinitionRegistry {
+        &self.view_definitions
+    }
+
+    pub(super) fn buffer_view_definition(&self) -> &vell_protocol::view::ViewDefinition {
+        self.view_definitions.buffer()
+    }
+
+    #[cfg(test)]
+    pub(super) fn view_definitions_mut_for_test(&mut self) -> &mut ViewDefinitionRegistry {
+        &mut self.view_definitions
     }
 
     pub(super) fn commands(&self) -> &CommandRegistry {

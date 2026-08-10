@@ -229,19 +229,21 @@ impl BehaviorSnapshot {
             .session
             .views()
             .iter()
-            .map(|(view, state)| ViewBehavior {
-                view: *view,
-                content: state.content(),
-                revision: state.revision(),
-                selections: state.selections().cloned(),
-                modes: app
-                    .session
-                    .view_modes()
-                    .mode_names(*view)
-                    .into_iter()
-                    .map(|mode| mode.as_str().to_owned())
-                    .collect(),
-                focused: Some(*view) == focused_view,
+            .filter_map(|(view, state)| {
+                state.document_content().map(|content| ViewBehavior {
+                    view: *view,
+                    content,
+                    revision: state.revision(),
+                    selections: state.selections().cloned(),
+                    modes: app
+                        .session
+                        .view_modes()
+                        .mode_names(*view)
+                        .into_iter()
+                        .map(|mode| mode.as_str().to_owned())
+                        .collect(),
+                    focused: Some(*view) == focused_view,
+                })
             })
             .collect();
         views.sort_by_key(|view| view.view.0);

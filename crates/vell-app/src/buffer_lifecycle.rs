@@ -14,7 +14,8 @@ use vell_frontend::Frontend;
 use vell_protocol::content_query::{
     BufferBackingState, ContentData, ContentQuery, DirtyState, SaveState,
 };
-use vell_protocol::ids::ContentId;
+use vell_protocol::ids::{ContentId, ViewId};
+use vell_protocol::view::BindingKey;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BufferInfo {
@@ -52,9 +53,23 @@ pub enum BufferLifecycleError {
     Dirty(ContentId),
     PendingSave(ContentId),
     NoPath(ContentId),
-    ExternalConflict { content: ContentId, path: PathBuf },
-    PathOccupied { path: PathBuf, content: ContentId },
-    Io { path: PathBuf, source: io::Error },
+    ExternalConflict {
+        content: ContentId,
+        path: PathBuf,
+    },
+    PathOccupied {
+        path: PathBuf,
+        content: ContentId,
+    },
+    ContentInUse {
+        content: ContentId,
+        view: ViewId,
+        binding: BindingKey,
+    },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
     Layout(String),
 }
 
@@ -79,6 +94,14 @@ impl fmt::Display for BufferLifecycleError {
                 formatter,
                 "path {} is already open as buffer {content:?}",
                 path.display()
+            ),
+            Self::ContentInUse {
+                content,
+                view,
+                binding,
+            } => write!(
+                formatter,
+                "content {content:?} is still bound as {binding} by view {view:?}"
             ),
             Self::Io { path, source } => {
                 write!(formatter, "{}: {source}", path.display())
@@ -373,8 +396,13 @@ impl<F: Frontend> App<F> {
                 .unwrap_or_else(|| self.new_buffer());
             let mode_names = self.session.mode_chain_for_new_view(replacement_content);
             Some(
-                create_view(replacement_content, self.kernel.contents(), &mode_names)
-                    .expect("replacement content exists"),
+                create_view(
+                    replacement_content,
+                    self.kernel.contents(),
+                    self.kernel.buffer_view_definition(),
+                    &mode_names,
+                )
+                .expect("replacement content exists"),
             )
         } else {
             None
@@ -384,11 +412,13 @@ impl<F: Frontend> App<F> {
             .session
             .close_content_views(content, replacement, modes, content_modes, contents)
             .map_err(|error| BufferLifecycleError::Layout(error.to_string()))?;
-        for (view, removed_content) in mutation.removed {
-            if self.kernel.active_transaction_owner(removed_content) == Some(Some(view)) {
-                self.kernel.commit_transaction(removed_content);
+        for removed in mutation.removed {
+            if let Some(content) = removed.document
+                && self.kernel.active_transaction_owner(content) == Some(Some(removed.view))
+            {
+                self.kernel.commit_transaction(content);
             }
-            self.cancel_pending_commands_for_view(view);
+            self.cancel_pending_commands_for_view(removed.view);
         }
         if mutation.output.is_some() {
             self.kernel.schedule_mode_jobs();
@@ -413,6 +443,17 @@ impl<F: Frontend> App<F> {
         }
         if self.kernel.has_pending_save(content) {
             return Err(BufferLifecycleError::PendingSave(content));
+        }
+        if let Some((view, binding)) = self
+            .session
+            .blocking_content_reference(content)
+            .map_err(|error| BufferLifecycleError::Layout(error.to_string()))?
+        {
+            return Err(BufferLifecycleError::ContentInUse {
+                content,
+                view,
+                binding,
+            });
         }
         Ok(())
     }

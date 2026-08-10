@@ -23,8 +23,8 @@ use crate::operation::{
     ContentLifecycleOperation, ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget,
     ModeFlowPropagation, ModeTarget, OperationError, OperationOrigin, OperationOriginScope,
     OperationRequest, QueuedOperation, ResolvedContentLifecycleOperation, ResolvedModeScope,
-    ResolvedOperation, ResolvedViewLifecycleOperation, SearchOperation, ViewEditPlan,
-    ViewLifecycleOperation, ViewOperation, ViewPrecondition, ViewSpec, ViewTarget,
+    ResolvedOperation, ResolvedViewLifecycleOperation, SearchOperation, ViewBindingOperation,
+    ViewEditPlan, ViewLifecycleOperation, ViewOperation, ViewPrecondition, ViewSpec, ViewTarget,
     adapt_dispatch_command, prepend_operations,
 };
 use crate::query::AppQuery;
@@ -289,6 +289,7 @@ impl PreparedEffect {
             | Self::ContentCreate
             | Self::ContentOpen(_)
             | Self::ViewSwitch { .. }
+            | Self::ViewRebind { .. }
             | Self::ContentClose { .. } => EffectBehavior::Lifecycle,
             Self::Quit => EffectBehavior::Quit,
         }
@@ -543,7 +544,8 @@ impl<F: Frontend> App<F> {
                     .session
                     .view(view)
                     .ok_or_else(|| invalid_operation("focused view does not exist"))?
-                    .content();
+                    .document_content()
+                    .ok_or_else(|| invalid_operation("focused view has no document binding"))?;
                 self.execute_command(DispatchCommand::ContentWithView {
                     command: ContentCommand::Edit(EditCommand::InsertText(text)),
                     view,
@@ -598,7 +600,7 @@ impl<F: Frontend> App<F> {
         } else if self
             .session
             .view(start.view)
-            .is_none_or(|view| view.content() != start.content)
+            .is_none_or(|view| view.document_content() != Some(start.content))
         {
             Some("command target view no longer exists".to_owned())
         } else if expected_state.is_none() {
@@ -655,7 +657,7 @@ impl<F: Frontend> App<F> {
         let target_valid = self
             .session
             .view(invocation.view)
-            .is_some_and(|view| view.content() == invocation.content)
+            .is_some_and(|view| view.document_content() == Some(invocation.content))
             && self.kernel.contents().text_state_id(invocation.content)
                 == Some(invocation.expected_state);
         if !target_valid {
@@ -737,7 +739,7 @@ impl<F: Frontend> App<F> {
             let valid = self
                 .session
                 .view(invocation.view)
-                .is_some_and(|view| view.content() == invocation.content)
+                .is_some_and(|view| view.document_content() == Some(invocation.content))
                 && self.kernel.contents().text_state_id(invocation.content)
                     == Some(invocation.expected_state);
             if valid {
@@ -844,7 +846,11 @@ impl<F: Frontend> App<F> {
     ) -> io::Result<()> {
         let input_snapshot = self.session.snapshot_input();
         let view = self.session.view_for_space(self.session.focused());
-        let content = view.and_then(|view| self.session.view(view).map(|view| view.content()));
+        let content = view.and_then(|view| {
+            self.session
+                .view(view)
+                .and_then(|view| view.document_content())
+        });
         let mut frame = self.begin_execution_frame(
             content,
             Some(InputCheckpoint {
@@ -1056,6 +1062,14 @@ impl<F: Frontend> App<F> {
                         );
                     }
                 },
+                PreparedEffect::ViewRebind {
+                    view,
+                    binding,
+                    content,
+                } => {
+                    self.rebind_view_content(view, &binding, content)
+                        .expect("validated View binding remains available until frame commit");
+                }
                 PreparedEffect::ContentClose { content, force } => {
                     self.close_buffer(content, force)
                         .expect("validated content remains closeable until frame commit");
@@ -1166,7 +1180,11 @@ impl<F: Frontend> App<F> {
             let content = self
                 .session
                 .view_for_space(self.session.focused())
-                .and_then(|view| self.session.view(view).map(|view| view.content()));
+                .and_then(|view| {
+                    self.session
+                        .view(view)
+                        .and_then(|view| view.document_content())
+                });
             let mut frame = self.begin_execution_frame(
                 content,
                 Some(InputCheckpoint {
@@ -1449,7 +1467,10 @@ impl<F: Frontend> App<F> {
                                 .session
                                 .view(view)
                                 .ok_or_else(|| invalid_operation("focused view does not exist"))?
-                                .content();
+                                .document_content()
+                                .ok_or_else(|| {
+                                    invalid_operation("focused view has no document binding")
+                                })?;
                             self.prepare_topology_effect(
                                 frame,
                                 PreparedEffect::Split {
@@ -1578,6 +1599,26 @@ impl<F: Frontend> App<F> {
                             .map(|_| ())
                         }
                     }
+                }
+                ResolvedOperation::ViewBinding {
+                    view,
+                    binding,
+                    content,
+                } => {
+                    if !frame.can_prepare_lifecycle() || !queue.is_empty() {
+                        return Err(invalid_operation(
+                            "a View rebind must be the only operation in its frame",
+                        ));
+                    }
+                    self.prepare_topology_effect(
+                        frame,
+                        PreparedEffect::ViewRebind {
+                            view,
+                            binding,
+                            content,
+                        },
+                    )
+                    .map(|_| ())
                 }
                 ResolvedOperation::Content { content, operation } => match operation {
                     ContentOperation::Apply(action) => {
@@ -1919,6 +1960,46 @@ impl<F: Frontend> App<F> {
                 };
                 Ok(ResolvedOperation::ViewLifecycle(operation))
             }
+            OperationRequest::ViewBinding { target, operation } => {
+                if origin.scope != OperationOriginScope::View {
+                    return Err(invalid_operation(
+                        "View binding operation requires a view-scoped origin",
+                    ));
+                }
+                let view = match target {
+                    ViewTarget::Current => origin
+                        .view
+                        .ok_or_else(|| invalid_operation("operation has no current view"))?,
+                    ViewTarget::Id(view) => view,
+                };
+                let view_data = self
+                    .session
+                    .view(view)
+                    .ok_or_else(|| invalid_operation("operation targets missing view"))?;
+                if target == ViewTarget::Current
+                    && view_data
+                        .document_content()
+                        .is_some_and(|content| origin.content != Some(content))
+                {
+                    return Err(invalid_operation("view/content target mismatch"));
+                }
+                match operation {
+                    ViewBindingOperation::Rebind { binding, content } => {
+                        if view_data.binding(binding.as_str()).is_none() {
+                            return Err(invalid_operation(format!(
+                                "view {} has no {binding} binding",
+                                view.0
+                            )));
+                        }
+                        let content = self.resolve_content_target(content, origin)?;
+                        Ok(ResolvedOperation::ViewBinding {
+                            view,
+                            binding,
+                            content,
+                        })
+                    }
+                }
+            }
             OperationRequest::Face(operation) => {
                 let owner = origin
                     .mode
@@ -2152,7 +2233,8 @@ impl<F: Frontend> App<F> {
             .session
             .view(view)
             .ok_or_else(|| invalid_operation("operation targets missing view"))?
-            .content();
+            .document_content()
+            .ok_or_else(|| invalid_operation("operation targets a non-document view"))?;
         if target == ViewTarget::Current
             && origin.content.is_some_and(|expected| expected != content)
         {
@@ -2770,7 +2852,7 @@ impl<F: Frontend> App<F> {
             && self
                 .session
                 .view(*view)
-                .is_some_and(|data| data.content() == record.target)
+                .is_some_and(|data| data.document_content() == Some(record.target))
         {
             self.apply_view_action(*view, ViewAction::SetSelections(selections.clone()), frame)?;
         }
@@ -2814,8 +2896,8 @@ impl<F: Frontend> App<F> {
         let content = self
             .session
             .view(view)
-            .expect("target view exists")
-            .content();
+            .and_then(|view| view.document_content())
+            .ok_or_else(|| invalid_operation("view action targets a non-document view"))?;
         self.checkpoint_target(frame, content);
         self.session
             .apply_view_action(view, action, self.kernel.contents())

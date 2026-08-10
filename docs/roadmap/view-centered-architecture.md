@@ -400,6 +400,8 @@ command。
 
 ### M3：命名 Content bindings
 
+实现状态：已完成。
+
 目标：支持一个 View 使用多个 Content，同时保持明确语义。
 
 工作：
@@ -410,6 +412,14 @@ command。
 - 为 close Content 增加引用校验和明确的失败语义。
 
 验收：重绑 DiffView 的 `right` 不会重建 DiffView，也不会影响 `left`。
+
+实现结果：Kernel 的 definition registry 唯一持有 binding schema，View
+实例只保存稳定的 definition id 和 `BindingKey -> ContentId` 映射。
+BufferView 使用保留的 `document` binding；只有该 binding 携带与
+ContentKind 对齐的 ContentViewState。typed rebind 在唯一的
+ExecutionFrame 中原子发布，保留 ViewId、Pane 和其他 binding，并与完整
+View replacement 明确分离。关闭 Content 会忽略同批删除的 document View
+子树，但拒绝任何仍存活的 binding 引用，`force` 也不能绕过。
 
 ### M4：ModeResolver 和 attachment 生命周期
 

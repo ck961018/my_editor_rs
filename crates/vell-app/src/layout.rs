@@ -7,6 +7,8 @@ use vell_core::content_store::ContentStore;
 use vell_frontend::Frontend;
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 use vell_protocol::space::{Sizing, SplitDirection};
+use vell_protocol::view::ViewDefinition;
+use vell_protocol::view::{BindingKey, DOCUMENT_BINDING};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StatusBarPlacement {
@@ -79,13 +81,19 @@ impl<F: Frontend> App<F> {
             .session
             .view_for_space(target)
             .and_then(|view| self.session.view(view))
-            .filter(|view| view.content() == content)
-            .map(|view| view.state().clone());
+            .and_then(|view| view.document())
+            .filter(|(document, _)| *document == content)
+            .map(|(_, state)| state.clone());
         let mode_names = self.session.mode_chain_for_new_view(content);
-        let mut view = create_view(content, self.kernel.contents(), &mode_names)
-            .ok_or(LayoutError::MissingContent(content))?;
+        let mut view = create_view(
+            content,
+            self.kernel.contents(),
+            self.kernel.buffer_view_definition(),
+            &mode_names,
+        )
+        .ok_or(LayoutError::MissingContent(content))?;
         if let Some(state) = inherited_state {
-            *view.view.state_mut() = state;
+            *view.view.require_document_state_mut() = state;
         }
         let (contents, modes, content_modes) = self.kernel.mode_attachment_parts();
         let result = self.session.split_space(
@@ -107,11 +115,13 @@ impl<F: Frontend> App<F> {
     pub(super) fn close_space(&mut self, target: SpaceId) -> Result<CloseResult, LayoutError> {
         let (contents, content_modes) = self.kernel.mode_runtime_parts();
         let mutation = self.session.close_space(target, content_modes, contents)?;
-        for (view, content) in mutation.removed {
-            if self.kernel.active_transaction_owner(content) == Some(Some(view)) {
+        for removed in mutation.removed {
+            if let Some(content) = removed.document
+                && self.kernel.active_transaction_owner(content) == Some(Some(removed.view))
+            {
                 self.kernel.commit_transaction(content);
             }
-            self.cancel_pending_commands_for_view(view);
+            self.cancel_pending_commands_for_view(removed.view);
         }
         self.session
             .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
@@ -125,8 +135,13 @@ impl<F: Frontend> App<F> {
         focusable: bool,
     ) -> Result<ViewId, LayoutError> {
         let mode_names = self.session.mode_chain_for_new_view(content);
-        let view = create_view(content, self.kernel.contents(), &mode_names)
-            .ok_or(LayoutError::MissingContent(content))?;
+        let view = create_view(
+            content,
+            self.kernel.contents(),
+            self.kernel.buffer_view_definition(),
+            &mode_names,
+        )
+        .ok_or(LayoutError::MissingContent(content))?;
         let (contents, modes, content_modes) = self.kernel.mode_attachment_parts();
         let mutation = self.session.replace_space_content(
             target,
@@ -136,9 +151,11 @@ impl<F: Frontend> App<F> {
             content_modes,
             contents,
         )?;
-        for (view, content) in mutation.removed {
-            self.cancel_pending_commands_for_view(view);
-            if self.kernel.active_transaction_owner(content) == Some(Some(view)) {
+        for removed in mutation.removed {
+            self.cancel_pending_commands_for_view(removed.view);
+            if let Some(content) = removed.document
+                && self.kernel.active_transaction_owner(content) == Some(Some(removed.view))
+            {
                 self.kernel.commit_transaction(content);
             }
         }
@@ -153,11 +170,9 @@ impl<F: Frontend> App<F> {
         target: ViewId,
         content: ContentId,
     ) -> Result<ViewId, LayoutError> {
-        if self
-            .session
-            .view(target)
-            .is_some_and(|view| view.content() == content && view.children().is_empty())
-        {
+        if self.session.view(target).is_some_and(|view| {
+            view.document_content() == Some(content) && view.children().is_empty()
+        }) {
             return Ok(target);
         }
         let space = self
@@ -165,6 +180,33 @@ impl<F: Frontend> App<F> {
             .body_space_for_view(target)
             .ok_or(LayoutError::MissingView(target))?;
         self.replace_space_content(space, content, true)
+    }
+
+    pub(super) fn rebind_view_content(
+        &mut self,
+        view: ViewId,
+        binding: &BindingKey,
+        content: ContentId,
+    ) -> Result<ContentId, LayoutError> {
+        let (contents, modes, content_modes) = self.kernel.mode_attachment_parts();
+        let previous = self.session.rebind_view_content(
+            view,
+            binding,
+            content,
+            modes,
+            content_modes,
+            contents,
+        )?;
+        if previous != content && binding.as_str() == DOCUMENT_BINDING {
+            if self.kernel.active_transaction_owner(previous) == Some(Some(view)) {
+                self.kernel.commit_transaction(previous);
+            }
+            self.cancel_pending_commands_for_view(view);
+            self.kernel.schedule_mode_jobs();
+        }
+        self.session
+            .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
+        Ok(previous)
     }
 
     #[cfg_attr(
@@ -187,6 +229,7 @@ impl<F: Frontend> App<F> {
 pub(super) enum LayoutError {
     MissingContent(ContentId),
     MissingView(ViewId),
+    MissingBinding { view: ViewId, binding: BindingKey },
     WouldRemoveLastFocusable(SpaceId),
     NoFocusableSpace,
     NoStatusBar,
@@ -202,6 +245,9 @@ impl fmt::Display for LayoutError {
                 write!(formatter, "content {} does not exist", content.0)
             }
             Self::MissingView(view) => write!(formatter, "view {} does not exist", view.0),
+            Self::MissingBinding { view, binding } => {
+                write!(formatter, "view {} has no {binding} binding", view.0)
+            }
             Self::WouldRemoveLastFocusable(space) => {
                 write!(formatter, "space {} is the last focusable space", space.0)
             }
@@ -229,6 +275,7 @@ impl From<SceneError> for LayoutError {
 pub(super) fn create_view(
     content: ContentId,
     contents: &ContentStore,
+    definition: &ViewDefinition,
     mode_names: &[crate::mode_name::ModeName],
 ) -> Option<NewView> {
     if !contents.contains(content) {
@@ -238,7 +285,12 @@ pub(super) fn create_view(
         .create_view_state(content)
         .expect("existing content creates view state");
     Some(NewView {
-        view: View::new(content, state),
+        view: View::with_definition(
+            definition,
+            [(BindingKey::new(DOCUMENT_BINDING), content)],
+            Some(state),
+        )
+        .expect("BufferView definition and bindings are valid"),
         mode_names: mode_names.to_vec(),
     })
 }

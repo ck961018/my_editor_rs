@@ -44,7 +44,9 @@ impl RenderQuery for AppQuery<'_> {
             .views
             .get(&id)
             .ok_or(RenderQueryError::MissingView(id))?;
-        let content = view.content();
+        let content = view
+            .document_content()
+            .ok_or(RenderQueryError::MissingDocumentBinding(id))?;
         let _content_kind = self
             .contents
             .kind(content)
@@ -71,7 +73,9 @@ impl RenderQuery for AppQuery<'_> {
         if view.panes().key_for_space(space) != Some(BODY_PANE) {
             return Ok(Vec::new());
         }
-        let content = view.content();
+        let content = view
+            .document_content()
+            .ok_or(RenderQueryError::MissingDocumentBinding(id))?;
         let content_revision = self
             .contents
             .revision(content)
@@ -109,7 +113,11 @@ impl AppQuery<'_> {
         content: ContentId,
         view: &View,
     ) -> Result<ViewData, RenderQueryError> {
-        let ContentViewState::Buffer(state) = view.state();
+        let (_, document_state) = view
+            .document()
+            .filter(|(document, _)| *document == content)
+            .ok_or(RenderQueryError::IncompatibleContentViewState { view: id, content })?;
+        let ContentViewState::Buffer(state) = document_state;
         let presentation = {
             let content_revision = self
                 .contents
@@ -239,7 +247,8 @@ fn default_status_bar_presentation(
 
     let right = views
         .get(&view)
-        .and_then(|view| view.state().selections())
+        .and_then(|view| view.document())
+        .and_then(|(_, state)| state.selections())
         .and_then(|selections| {
             match contents.query(
                 content,

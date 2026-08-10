@@ -57,6 +57,7 @@ fn content_query_protocol_error(error: RenderQueryError) -> ProtocolError {
         RenderQueryError::UnsupportedContentQuery { .. } => ProtocolErrorCode::UnsupportedQuery,
         RenderQueryError::InvalidContentData { .. }
         | RenderQueryError::MissingView(_)
+        | RenderQueryError::MissingDocumentBinding(_)
         | RenderQueryError::UnmappedSpace { .. }
         | RenderQueryError::IncompatibleContentViewState { .. } => {
             ProtocolErrorCode::InvalidContentData
@@ -93,7 +94,7 @@ mod tests {
             contents
                 .insert(content, Content::Buffer(Buffer::new()))
                 .unwrap();
-            let mut view = View::new(content, contents.create_view_state(content).unwrap());
+            let mut view = View::buffer(content, contents.create_view_state(content).unwrap());
             view.assign_pane(SpaceId(0), crate::view::BODY_PANE);
             Self {
                 contents,

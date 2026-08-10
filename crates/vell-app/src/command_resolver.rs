@@ -23,14 +23,14 @@ pub(super) fn resolve_command(
             Some(DispatchCommand::ContentWithView {
                 command,
                 view,
-                content: views.get(&view)?.content(),
+                content: views.get(&view)?.document_content()?,
             })
         }
         Command::Content(command) => {
             let view = source.view_or(focused_view);
             Some(DispatchCommand::Content {
                 command,
-                content: views.get(&view)?.content(),
+                content: views.get(&view)?.document_content()?,
             })
         }
         Command::Mode(command) => {
@@ -38,7 +38,7 @@ pub(super) fn resolve_command(
             Some(DispatchCommand::Mode {
                 command,
                 view,
-                content: views.get(&view)?.content(),
+                content: views.get(&view)?.document_content()?,
             })
         }
         Command::ModeInput(input) => {
@@ -46,7 +46,7 @@ pub(super) fn resolve_command(
             Some(DispatchCommand::ModeInput {
                 input,
                 view,
-                content: views.get(&view)?.content(),
+                content: views.get(&view)?.document_content()?,
             })
         }
         Command::Registered(invocation) => {
@@ -54,7 +54,7 @@ pub(super) fn resolve_command(
             Some(DispatchCommand::Registered {
                 invocation,
                 view,
-                content: views.get(&view)?.content(),
+                content: views.get(&view)?.document_content()?,
             })
         }
         Command::Viewport(command) => {
@@ -62,7 +62,7 @@ pub(super) fn resolve_command(
             Some(DispatchCommand::Viewport {
                 command,
                 view,
-                content: views.get(&view)?.content(),
+                content: views.get(&view)?.document_content()?,
             })
         }
     }

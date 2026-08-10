@@ -8,12 +8,13 @@ use crate::dispatcher::{DispatchInput, DispatchOutcome, Dispatcher, DispatcherIn
 use crate::layout::{LayoutError, NewView, StatusBarHandle, StatusBarPlacement, create_view};
 use crate::mode::{
     CursorDomain, FaceRegistry, ModeAttachmentError, ModeContentContext, ModeContentStore,
-    ModeDraftJournal, ModeError, ModeRegistry, ModeResult, ModeViewContext, ModeViewStore,
+    ModeDraftJournal, ModeError, ModeRegistry, ModeResult, ModeViewStore,
 };
 use crate::presentation::PresentationLayerStore;
 use crate::scene_model::{CloseResult, SplitResult};
 use crate::theme::{FaceEnvironment, SessionFaces};
 use crate::view::View;
+use crate::view_context::require_mode_view_context;
 use crate::view_workspace::{RemovedView, ViewWorkspace};
 use vell_core::content::ContentChange;
 use vell_core::content_store::ContentStore;
@@ -23,6 +24,8 @@ use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 use vell_protocol::revision::Revision;
 use vell_protocol::scene::Scene;
 use vell_protocol::space::{Sizing, SplitDirection};
+use vell_protocol::view::ViewDefinition;
+use vell_protocol::view::{BindingKey, DOCUMENT_BINDING};
 
 pub(super) struct ClientSession {
     workspace: ViewWorkspace,
@@ -44,11 +47,17 @@ pub(super) struct InitialView {
 pub(super) struct EditorSessionInit {
     pub editor: InitialView,
     pub next_view_id: u64,
+    pub buffer_definition: ViewDefinition,
 }
 
 pub(super) struct SessionWorkspaceMutation<T> {
     pub output: T,
-    pub removed: Vec<(ViewId, ContentId)>,
+    pub removed: Vec<RemovedSessionView>,
+}
+
+pub(super) struct RemovedSessionView {
+    pub view: ViewId,
+    pub document: Option<ContentId>,
 }
 
 impl ClientSession {
@@ -61,8 +70,13 @@ impl ClientSession {
         init: EditorSessionInit,
         face_environment: FaceEnvironment,
     ) -> Self {
-        let editor = create_view(init.editor.content, contents, &init.editor.modes)
-            .expect("editor content exists");
+        let editor = create_view(
+            init.editor.content,
+            contents,
+            &init.buffer_definition,
+            &init.editor.modes,
+        )
+        .expect("editor content exists");
         let default_mode_profiles = HashMap::from([(
             vell_core::content::ContentKind::Buffer,
             init.editor.modes.clone(),
@@ -80,19 +94,14 @@ impl ClientSession {
         let editor_content = workspace
             .view(init.editor.view)
             .expect("initial editor view exists")
-            .content();
+            .require_document();
         for name in editor.mode_names {
             let content_context = ModeContentContext::new(editor_content, contents);
             let view_data = workspace
                 .view(init.editor.view)
                 .expect("initial editor view exists");
-            let view_context = ModeViewContext::new(
-                init.editor.view,
-                view_data.content(),
-                view_data.state(),
-                contents,
-            )
-            .expect("editor view state matches editor content");
+            let view_context = require_mode_view_context(init.editor.view, view_data, contents)
+                .expect("editor view state matches editor content");
             let mode = modes
                 .instantiate_with_context(
                     &name,
@@ -248,7 +257,9 @@ impl ClientSession {
         let mut visited_content = HashSet::new();
         self.presentation.begin_refresh();
         for (&view, view_data) in self.workspace.views() {
-            let content = view_data.content();
+            let Some((content, _)) = view_data.document() else {
+                continue;
+            };
             let order = self.view_modes.mode_ids(view).to_vec();
             self.presentation.set_view(view, content, order.clone());
             let source_rows =
@@ -280,9 +291,7 @@ impl ClientSession {
                         active_content.insert(content_key);
                     }
                 }
-                let Ok(context) =
-                    ModeViewContext::new(view, view_data.content(), view_data.state(), contents)
-                else {
+                let Ok(context) = require_mode_view_context(view, view_data, contents) else {
                     continue;
                 };
                 let view_key = (mode, view);
@@ -374,7 +383,7 @@ impl ClientSession {
 
     pub(super) fn touch_content_views(&mut self, content: ContentId) {
         for (_, view) in self.workspace.views_mut() {
-            if view.content() == content {
+            if view.document_content() == Some(content) {
                 view.touch();
             }
         }
@@ -384,7 +393,9 @@ impl ClientSession {
         self.workspace
             .views()
             .iter()
-            .filter_map(|(id, view)| (view.content() == content).then_some((*id, view.revision())))
+            .filter_map(|(id, view)| {
+                (view.document_content() == Some(content)).then_some((*id, view.revision()))
+            })
             .collect()
     }
 
@@ -396,12 +407,7 @@ impl ClientSession {
         drafts: &ModeDraftJournal,
     ) -> CursorDomain {
         let view_data = self.workspace.view(view).expect("target view exists");
-        let Ok(context) = crate::mode::ModeViewContext::new(
-            view,
-            view_data.content(),
-            view_data.state(),
-            contents,
-        ) else {
+        let Ok(context) = require_mode_view_context(view, view_data, contents) else {
             return CursorDomain::InsertionPoint;
         };
         self.view_modes
@@ -418,8 +424,9 @@ impl ClientSession {
     ) -> Option<bool> {
         let view = self.workspace.view_mut(view)?;
         match action {
-            ViewAction::SetSelections(selections) => contents
-                .selections_are_valid(view.content(), &selections)
+            ViewAction::SetSelections(selections) => view
+                .document_content()
+                .and_then(|content| contents.selections_are_valid(content, &selections))
                 .filter(|valid| *valid)
                 .map(|_| view.set_selections(selections)),
         }
@@ -438,7 +445,7 @@ impl ClientSession {
         self.workspace
             .views()
             .iter()
-            .filter(|(_, view)| view.content() == content)
+            .filter(|(_, view)| view.document_content() == Some(content))
             .filter_map(|(id, view)| {
                 view.selections()
                     .cloned()
@@ -474,13 +481,8 @@ impl ClientSession {
         drafts: &mut ModeDraftJournal,
     ) -> Result<ModeResult, ModeError> {
         let view_data = self.workspace.view(view).expect("target view exists");
-        let context = crate::mode::ModeViewContext::new(
-            view,
-            view_data.content(),
-            view_data.state(),
-            contents,
-        )
-        .map_err(ModeError::InvalidViewContext)?;
+        let context = require_mode_view_context(view, view_data, contents)
+            .map_err(ModeError::InvalidViewContext)?;
         self.view_modes.execute_with_context(
             view,
             registry,
@@ -501,13 +503,8 @@ impl ClientSession {
         drafts: &mut ModeDraftJournal,
     ) -> Result<ModeResult, ModeError> {
         let view_data = self.workspace.view(view).expect("target view exists");
-        let context = crate::mode::ModeViewContext::new(
-            view,
-            view_data.content(),
-            view_data.state(),
-            contents,
-        )
-        .map_err(ModeError::InvalidViewContext)?;
+        let context = require_mode_view_context(view, view_data, contents)
+            .map_err(ModeError::InvalidViewContext)?;
         self.view_modes.execute_input_with_context(
             view,
             registry,
@@ -559,11 +556,9 @@ impl ClientSession {
             .workspace
             .view(previous_view)
             .expect("focused view exists");
-        let previous_content = previous_data.content();
         let presentation_changed = self.dispatcher.invalidate_view(
             previous_view,
             previous_data,
-            previous_content,
             &mut self.view_modes,
             content_modes,
             contents,
@@ -575,7 +570,7 @@ impl ClientSession {
                 .touch();
         }
         self.workspace.focus(target)?;
-        self.sync_changed_input_source(previous_content, content_modes, contents);
+        self.sync_changed_input_source(content_modes, contents);
         Ok(())
     }
 
@@ -649,9 +644,7 @@ impl ClientSession {
             return;
         };
         let view = self.workspace.view(view_id).expect("focused view exists");
-        let Ok(context) =
-            crate::mode::ModeViewContext::new(view_id, view.content(), view.state(), contents)
-        else {
+        let Ok(context) = require_mode_view_context(view_id, view, contents) else {
             return;
         };
         for index in 0..self.view_modes.mode_ids(view_id).len() {
@@ -684,10 +677,10 @@ impl ClientSession {
         change: &ContentChange,
     ) -> Result<(), ContentViewStateError> {
         for (view_id, view) in self.workspace.views_mut() {
-            if Some(*view_id) == except || view.content() != content {
+            if Some(*view_id) == except || view.document_content() != Some(content) {
                 continue;
             }
-            if contents.transform_view_state(content, view.state_mut(), change)? {
+            if contents.transform_view_state(content, view.require_document_state_mut(), change)? {
                 view.touch();
             }
         }
@@ -703,10 +696,10 @@ impl ClientSession {
         drafts: &mut ModeDraftJournal,
     ) {
         self.view_modes.notify_changed(
-            self.workspace
-                .views()
-                .iter()
-                .map(|(&view, data)| (view, data.content(), data.state())),
+            self.workspace.views().iter().filter_map(|(&view, data)| {
+                data.document()
+                    .map(|(content, state)| (view, content, state))
+            }),
             content,
             mode_contents,
             contents,
@@ -734,11 +727,11 @@ impl ClientSession {
             .workspace
             .views()
             .iter()
-            .filter_map(|(view, data)| (data.content() == content).then_some(*view))
+            .filter_map(|(view, data)| (data.document_content() == Some(content)).then_some(*view))
             .collect();
         for view in &views {
             let view_data = self.workspace.view(*view).expect("target view exists");
-            ModeViewContext::new(*view, view_data.content(), view_data.state(), contents)?;
+            require_mode_view_context(*view, view_data, contents)?;
         }
         let profile = self.mode_profiles.entry(content).or_default();
         if !profile.contains(name) {
@@ -750,9 +743,8 @@ impl ClientSession {
             }
             let content_context = ModeContentContext::new(content, contents);
             let view_data = self.workspace.view(view).expect("target view exists");
-            let view_context =
-                ModeViewContext::new(view, view_data.content(), view_data.state(), contents)
-                    .expect("attachment prevalidated view context");
+            let view_context = require_mode_view_context(view, view_data, contents)
+                .expect("attachment prevalidated view context");
             let mode = registry.instantiate_with_context(
                 name,
                 content,
@@ -791,11 +783,6 @@ impl ClientSession {
         let previous_view = self
             .view_for_space(previous)
             .expect("focused space hosts a view");
-        let previous_content = self
-            .workspace
-            .view(previous_view)
-            .expect("focused view exists")
-            .content();
         let NewView { view, mode_names } = view;
         let (view, result) = self
             .workspace
@@ -809,7 +796,6 @@ impl ClientSession {
             let presentation_changed = self.dispatcher.invalidate_view(
                 previous_view,
                 view_data,
-                previous_content,
                 &mut self.view_modes,
                 content_modes,
                 contents,
@@ -822,7 +808,7 @@ impl ClientSession {
             }
         }
         if focus_new {
-            self.sync_changed_input_source(previous_content, content_modes, contents);
+            self.sync_changed_input_source(content_modes, contents);
         }
         Ok(result)
     }
@@ -834,15 +820,10 @@ impl ClientSession {
         contents: &ContentStore,
     ) -> Result<SessionWorkspaceMutation<CloseResult>, LayoutError> {
         let previous_focus = self.workspace.focused();
-        let previous_content = self
-            .view_for_space(previous_focus)
-            .and_then(|view| self.workspace.view(view))
-            .map(View::content)
-            .expect("focused space hosts a view");
         let mutation = self.workspace.close(target)?;
         let removed = self.cleanup_removed_views(mutation.removed, content_modes, contents);
         if self.workspace.focused() != previous_focus {
-            self.sync_changed_input_source(previous_content, content_modes, contents);
+            self.sync_changed_input_source(content_modes, contents);
         }
         Ok(SessionWorkspaceMutation {
             output: mutation.output,
@@ -861,6 +842,93 @@ impl ClientSession {
         self.workspace.closing_content_needs_replacement(content)
     }
 
+    pub(super) fn blocking_content_reference(
+        &self,
+        content: ContentId,
+    ) -> Result<Option<(ViewId, BindingKey)>, LayoutError> {
+        self.workspace.blocking_content_reference(content)
+    }
+
+    pub(super) fn rebind_view_content(
+        &mut self,
+        view: ViewId,
+        binding: &BindingKey,
+        content: ContentId,
+        registry: &ModeRegistry,
+        content_modes: &mut ModeContentStore,
+        contents: &ContentStore,
+    ) -> Result<ContentId, LayoutError> {
+        if !contents.contains(content) {
+            return Err(LayoutError::MissingContent(content));
+        }
+        let previous_view = self
+            .workspace
+            .view(view)
+            .ok_or(LayoutError::MissingView(view))?
+            .clone();
+        let previous_content =
+            previous_view
+                .binding(binding.as_str())
+                .ok_or_else(|| LayoutError::MissingBinding {
+                    view,
+                    binding: binding.clone(),
+                })?;
+        if previous_content == content {
+            return Ok(previous_content);
+        }
+
+        let document_rebind = binding.as_str() == DOCUMENT_BINDING;
+        let state = if document_rebind {
+            Some(
+                contents
+                    .create_view_state(content)
+                    .ok_or(LayoutError::MissingContent(content))?,
+            )
+        } else {
+            None
+        };
+        let mode_names = if document_rebind {
+            self.mode_chain_for_new_view(content)
+        } else {
+            Vec::new()
+        };
+
+        self.workspace.rebind(view, binding, content, state)?;
+        if !document_rebind {
+            return Ok(previous_content);
+        }
+
+        self.dispatcher.invalidate_view(
+            view,
+            &previous_view,
+            &mut self.view_modes,
+            content_modes,
+            contents,
+        );
+        let removed_modes = self.view_modes.remove(view);
+        for mode in &removed_modes {
+            content_modes.detach_view(previous_content, *mode);
+        }
+        self.attach_new_view_modes(view, mode_names, registry, content_modes, contents);
+        if !self
+            .workspace
+            .views()
+            .values()
+            .any(|view| view.references(previous_content))
+        {
+            self.faces.remove_content_remaps(previous_content);
+        }
+        for mode in removed_modes {
+            if !self.view_modes.contains_mode(mode) {
+                self.faces.remove_mode_remaps(mode);
+            }
+        }
+        if self.view_for_space(self.workspace.focused()) == Some(view) {
+            self.sync_changed_input_source(content_modes, contents);
+        }
+        Ok(previous_content)
+    }
+
     pub(super) fn close_content_views(
         &mut self,
         content: ContentId,
@@ -873,11 +941,6 @@ impl ClientSession {
         let previous_view = self
             .view_for_space(previous_focus)
             .expect("focused space hosts a view");
-        let previous_content = self
-            .workspace
-            .view(previous_view)
-            .expect("focused view exists")
-            .content();
         let (replacement, mode_names) = replacement.map_or((None, Vec::new()), |replacement| {
             (Some(replacement.view), replacement.mode_names)
         });
@@ -886,8 +949,8 @@ impl ClientSession {
             self.attach_new_view_modes(view, mode_names, registry, content_modes, contents);
         }
         let removed = self.cleanup_removed_views(mutation.removed, content_modes, contents);
-        if removed.iter().any(|(view, _)| *view == previous_view) {
-            self.sync_changed_input_source(previous_content, content_modes, contents);
+        if removed.iter().any(|removed| removed.view == previous_view) {
+            self.sync_changed_input_source(content_modes, contents);
         }
         Ok(SessionWorkspaceMutation {
             output: mutation.output,
@@ -908,11 +971,6 @@ impl ClientSession {
         let previous_view = self
             .view_for_space(previous_focus)
             .expect("focused space hosts a view");
-        let previous_content = self
-            .workspace
-            .view(previous_view)
-            .expect("focused view exists")
-            .content();
         let NewView { view, mode_names } = view;
         let mutation = self.workspace.replace(target, view, focusable)?;
         self.attach_new_view_modes(
@@ -923,8 +981,8 @@ impl ClientSession {
             contents,
         );
         let removed = self.cleanup_removed_views(mutation.removed, content_modes, contents);
-        if removed.iter().any(|(view, _)| *view == previous_view) {
-            self.sync_changed_input_source(previous_content, content_modes, contents);
+        if removed.iter().any(|removed| removed.view == previous_view) {
+            self.sync_changed_input_source(content_modes, contents);
         }
         Ok(SessionWorkspaceMutation {
             output: mutation.output,
@@ -942,11 +1000,9 @@ impl ClientSession {
 
     fn sync_changed_input_source(
         &mut self,
-        previous_content: ContentId,
         content_modes: &mut ModeContentStore,
         contents: &ContentStore,
     ) {
-        let _ = previous_content;
         self.sync_focused_input(Instant::now(), content_modes, contents);
     }
 
@@ -958,18 +1014,23 @@ impl ClientSession {
         mode_contents: &mut ModeContentStore,
         contents: &ContentStore,
     ) {
-        let content = self
+        let view = self
             .workspace
             .view(id)
-            .expect("workspace published new view")
-            .content();
+            .expect("workspace published new view");
+        let Some(content) = view.document_content() else {
+            assert!(
+                mode_names.is_empty(),
+                "non-document View cannot attach Modes yet"
+            );
+            return;
+        };
         let kind = contents.kind(content).expect("new-view content exists");
         for name in mode_names {
             let content_context = ModeContentContext::new(content, contents);
             let view_data = self.workspace.view(id).expect("new view exists");
-            let view_context =
-                ModeViewContext::new(id, view_data.content(), view_data.state(), contents)
-                    .expect("new view state matches content kind");
+            let view_context = require_mode_view_context(id, view_data, contents)
+                .expect("new view state matches content kind");
             let mode = registry
                 .instantiate_with_context(
                     &name,
@@ -990,34 +1051,39 @@ impl ClientSession {
         removed: Vec<RemovedView>,
         mode_contents: &mut ModeContentStore,
         contents: &ContentStore,
-    ) -> Vec<(ViewId, ContentId)> {
+    ) -> Vec<RemovedSessionView> {
         let mut removed_contents = HashSet::new();
         let mut removed_modes = HashSet::new();
         let mut result = Vec::with_capacity(removed.len());
         for RemovedView { id, view } in removed {
-            let content = view.content();
             self.dispatcher.invalidate_view(
                 id,
                 &view,
-                content,
                 &mut self.view_modes,
                 mode_contents,
                 contents,
             );
             self.faces.remove_view_remaps(id);
             for mode in self.view_modes.remove(id) {
-                mode_contents.detach_view(content, mode);
+                if let Some(content) = view.document_content() {
+                    mode_contents.detach_view(content, mode);
+                }
                 removed_modes.insert(mode);
             }
-            removed_contents.insert(content);
-            result.push((id, content));
+            if let Some(content) = view.document_content() {
+                removed_contents.insert(content);
+            }
+            result.push(RemovedSessionView {
+                view: id,
+                document: view.document_content(),
+            });
         }
         for content in removed_contents {
             if !self
                 .workspace
                 .views()
                 .values()
-                .any(|view| view.content() == content)
+                .any(|view| view.references(content))
             {
                 self.faces.remove_content_remaps(content);
             }

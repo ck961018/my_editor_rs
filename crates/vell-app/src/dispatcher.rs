@@ -5,6 +5,7 @@ use crate::command::{AppCommand, Command, ContentCommand, ModeCommand, ModeInput
 use crate::command_resolver::{focused_view_id, resolve_command};
 use crate::mode::{ModeContentStore, ModeDraftJournal, ModeViewContext, ModeViewStore};
 use crate::view::View;
+use crate::view_context::require_mode_view_context;
 use vell_core::content_store::ContentStore;
 use vell_core::input::{
     AwaitingSource, InputCoordinator, InputDecision, InputStatus, KeySequenceConfig, KeymapLayer,
@@ -217,12 +218,8 @@ impl Dispatcher {
                 let Some(view_data) = views.get(&focused_view) else {
                     return DispatchOutcome::Consumed;
                 };
-                let Ok(context) = ModeViewContext::new(
-                    focused_view,
-                    view_data.content(),
-                    view_data.state(),
-                    contents,
-                ) else {
+                let Ok(context) = require_mode_view_context(focused_view, view_data, contents)
+                else {
                     return DispatchOutcome::Consumed;
                 };
                 fallback(key, 0, &context, views, modes, content_modes, drafts)
@@ -301,15 +298,13 @@ impl Dispatcher {
         &mut self,
         view: ViewId,
         view_data: &View,
-        _content: ContentId,
         modes: &mut ModeViewStore,
         content_modes: &mut ModeContentStore,
         contents: &ContentStore,
     ) -> bool {
         let cancelled_view_mode = modes.is_active(view);
         if cancelled_view_mode
-            && let Ok(context) =
-                ModeViewContext::new(view, view_data.content(), view_data.state(), contents)
+            && let Ok(context) = require_mode_view_context(view, view_data, contents)
         {
             modes.cancel_chain(view, &context, content_modes, contents);
         }
@@ -379,16 +374,10 @@ impl Dispatcher {
         match due {
             AwaitingSource::Context(source) => {
                 if let CommandSource::Mode { view, index } = source {
-                    let content = views.get(&view).map(View::content);
+                    let content = views.get(&view).and_then(View::document_content);
                     let command = content.and_then(|content| {
                         let view_data = views.get(&view).expect("timeout view exists");
-                        let context = ModeViewContext::new(
-                            view,
-                            view_data.content(),
-                            view_data.state(),
-                            contents,
-                        )
-                        .ok()?;
+                        let context = require_mode_view_context(view, view_data, contents).ok()?;
                         modes
                             .timeout_at(view, index, &context, content_modes, drafts)
                             .map(|operations| {
@@ -515,9 +504,7 @@ impl Dispatcher {
         let Some(view) = views.get(&focused_view) else {
             return DispatchOutcome::Consumed;
         };
-        let Ok(context) =
-            ModeViewContext::new(focused_view, view.content(), view.state(), contents)
-        else {
+        let Ok(context) = require_mode_view_context(focused_view, view, contents) else {
             return DispatchOutcome::Consumed;
         };
         for index in start_mode..modes.mode_ids(focused_view).len() {
@@ -796,9 +783,7 @@ impl Dispatcher {
         match source {
             CommandSource::Mode { view, index } => {
                 let view_data = views.get(&view)?;
-                let context =
-                    ModeViewContext::new(view, view_data.content(), view_data.state(), contents)
-                        .ok()?;
+                let context = require_mode_view_context(view, view_data, contents).ok()?;
                 let keymap = modes.keymap_at(view, index, &context, content_modes, drafts)?;
                 Some(query(&KeymapLayer { source, keymap }))
             }
@@ -838,9 +823,7 @@ fn context_status(
     match source {
         CommandSource::Mode { view, index } => views
             .get(&view)
-            .and_then(|view_data| {
-                ModeViewContext::new(view, view_data.content(), view_data.state(), contents).ok()
-            })
+            .and_then(|view_data| require_mode_view_context(view, view_data, contents).ok())
             .map_or(InputStatus::Ready, |context| {
                 modes.status_at(view, index, &context, content_modes, drafts)
             }),
@@ -985,7 +968,7 @@ mod tests {
         modes.register(DispatcherTestMode::new()).unwrap();
         let mut builder = SceneBuilder::new();
         let (scene, focused, status_space) = build_editor_scene(&mut builder, 40, 5, ViewId(0));
-        let mut editor_view = View::new(editor, contents.create_view_state(editor).unwrap());
+        let mut editor_view = View::buffer(editor, contents.create_view_state(editor).unwrap());
         editor_view.assign_pane(focused, crate::view::BODY_PANE);
         editor_view.assign_pane(status_space, crate::view::STATUS_PANE);
         let views = HashMap::from([(ViewId(0), editor_view)]);
@@ -1305,7 +1288,6 @@ mod tests {
         dispatcher.invalidate_view(
             ViewId(0),
             &views[&ViewId(0)],
-            ContentId(0),
             &mut view_modes,
             &mut content_modes,
             &contents,
@@ -1330,7 +1312,7 @@ mod tests {
         contents
             .insert(unrelated_content, Content::Buffer(Buffer::new()))
             .unwrap();
-        let unrelated = View::new(
+        let unrelated = View::buffer(
             unrelated_content,
             contents.create_view_state(unrelated_content).unwrap(),
         );
@@ -1352,7 +1334,6 @@ mod tests {
         dispatcher.invalidate_view(
             ViewId(1),
             &unrelated,
-            unrelated_content,
             &mut view_modes,
             &mut content_modes,
             &contents,

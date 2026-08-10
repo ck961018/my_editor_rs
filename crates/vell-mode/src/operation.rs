@@ -8,6 +8,7 @@ use vell_protocol::content_query::{FaceExpr, FaceName, FaceRemapToken};
 use vell_protocol::ids::{ContentId, ViewId};
 use vell_protocol::revision::Revision;
 use vell_protocol::selection::Selections;
+use vell_protocol::view::BindingKey;
 use vell_protocol::viewport::ViewportCommand;
 
 /// Maximum number of operations one app execution frame will evaluate.
@@ -52,6 +53,10 @@ pub enum OperationRequest {
     View {
         target: ViewTarget,
         operation: ViewOperation,
+    },
+    ViewBinding {
+        target: ViewTarget,
+        operation: ViewBindingOperation,
     },
     History {
         target: ContentTarget,
@@ -223,6 +228,17 @@ impl ViewSpec {
 pub enum ViewLifecycleOperation {
     Focus { view: ViewId },
     Switch { spec: ViewSpec },
+}
+
+/// View-specific behavior uses this primitive to preserve the View while
+/// changing one role declared by its definition. It is not a generic user
+/// command and must not be confused with `view.switch`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ViewBindingOperation {
+    Rebind {
+        binding: BindingKey,
+        content: ContentTarget,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

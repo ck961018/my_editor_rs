@@ -588,6 +588,7 @@ pub enum ContentData {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderQueryError {
     MissingView(ViewId),
+    MissingDocumentBinding(ViewId),
     MissingContent(ContentId),
     /// space 不是该 view 的直属 Pane：view 无法决定此处的显示内容。
     UnmappedSpace {
@@ -612,6 +613,9 @@ impl fmt::Display for RenderQueryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingView(view) => write!(formatter, "view {} does not exist", view.0),
+            Self::MissingDocumentBinding(view) => {
+                write!(formatter, "view {} has no document binding", view.0)
+            }
             Self::MissingContent(content) => {
                 write!(formatter, "content {} does not exist", content.0)
             }

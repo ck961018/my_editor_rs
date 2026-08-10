@@ -8,4 +8,5 @@ pub mod revision;
 pub mod scene;
 pub mod selection;
 pub mod space;
+pub mod view;
 pub mod viewport;

@@ -19,6 +19,7 @@ use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 use vell_protocol::revision::Revision;
 use vell_protocol::selection::Selections;
 use vell_protocol::space::SplitDirection;
+use vell_protocol::view::BindingKey;
 use vell_protocol::viewport::ResolvedViewportCommand;
 
 const DEFAULT_NESTED_MODE_BUDGET: usize = 256;
@@ -99,6 +100,11 @@ pub(super) enum PreparedEffect {
     ViewSwitch {
         target: ViewId,
         spec: ViewSpec,
+    },
+    ViewRebind {
+        view: ViewId,
+        binding: BindingKey,
+        content: ContentId,
     },
     ContentClose {
         content: ContentId,

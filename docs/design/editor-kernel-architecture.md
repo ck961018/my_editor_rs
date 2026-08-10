@@ -70,8 +70,8 @@ App<F: Frontend>
 └── F: Frontend
 ```
 
-`Kernel` 保存可跨 session 共享的内容、Mode content state、history 和后台
-任务。`ViewWorkspace` 保存 View 与 Scene 的完整结构状态；
+`Kernel` 保存可跨 session 共享的内容、View definition、Mode content
+state、history 和后台任务。`ViewWorkspace` 保存 View 与 Scene 的完整结构状态；
 `ClientSession` 组合 workspace、Mode view state、输入状态和呈现缓存。
 当前仍是一对一组合，没有 session registry 或并发共享容器。
 
@@ -85,7 +85,9 @@ App<F: Frontend>
 ```text
 Scene:        SpaceId -> ViewId
 View pane:    (ViewId, SpaceId) -> PaneKey
-View:         ViewId -> ContentId + ContentViewState
+View:         ViewId -> ViewDefinitionId + BindingKey -> ContentId
+View def:     ViewDefinitionId -> binding schema
+Document:     ViewId -> optional ContentViewState
 Content:      ContentId -> Content
 Mode content: (ModeId, ContentId) -> ModeState
 Mode view:    (ModeId, ViewId) -> ModeState
@@ -99,9 +101,10 @@ Mode view:    (ModeId, ViewId) -> ModeState
 同一 `ViewId` 可以挂载到多个 Scene leaf：一个 view 的正文与
 gutter/bar 等直属 Pane 各占一个 Content Space，view 端的
 `ViewPaneMap` 维护 SpaceId 与 PaneKey 的映射，渲染查询携带来源
-SpaceId。同一 `ContentId` 可以由多个
-View 展示；这些 View 拥有独立 selections、revision、viewport 和 Mode
-view state，同时共享 Content 与 Mode content state。
+SpaceId。同一 `ContentId` 可以由多个 View 通过不同角色引用；这些 View
+拥有独立 revision、viewport 和 Mode view state，同时共享 Content 与
+Mode content state。BufferView 的 `document` binding 还拥有独立
+selections。
 
 ## 5. Content 与 View
 
@@ -151,22 +154,34 @@ decoration 查询都返回 `Result`；缺失 ID、不支持的查询、错误的
 
 ```text
 View
-├── ContentId
-├── ContentViewState
+├── ViewDefinitionId
+├── ContentBindings (BindingKey -> ContentId)
+├── optional document ContentViewState
 ├── Revision
 ├── ViewPaneMap (SpaceId <-> PaneKey)
 ├── switchable
 └── parent / children (语义树)
 ```
 
-`ContentViewState` 是与封闭 Content 对齐的显式枚举：Buffer View 持有
-`BufferViewState { selections }`，因此 Buffer View 始终有 selections。
+View definition 由 Kernel 的 `ViewDefinitionRegistry` 唯一持有，View
+实例只保存它的稳定 ID 和已经校验的 bindings。同 ID 的幂等注册允许完全
+相同的 schema，冲突 schema 会被拒绝。BufferView 使用
+`core.buffer` definition 与保留的 `document` binding；它的
+`ContentViewState` 是与封闭 Content 对齐的显式枚举，因此始终有
+`BufferViewState { selections }`。没有 `document` binding 的复合 View
+不伪造 ContentViewState。
 View 是完整的展示单元：它可以控制多个直属 Pane（正文 `body`、
 状态栏 `builtin.status` 等），`ViewPaneMap` 维护 SpaceId 与 PaneKey
 的双向映射；渲染与事件查询携带来源 SpaceId，由 view 决定该 Pane
 的 presentation。View 不保存 Mode instance、presentation layer 或
 history。Mode chain、输入状态和呈现缓存由 `ClientSession` 中的
 集中 store 管理。
+
+`ViewBindingOperation::Rebind` 只改变一个已声明 binding，保留 ViewId、
+definition、其他 bindings、Pane 和语义树。`document` rebind 会重建匹配
+新 Content 的 view state 和 Mode attachment；`view.switch` 则替换完整
+View。关闭 Content 时，`ViewWorkspace` 先计算会随 document View 删除的
+语义子树，再拒绝所有仍会存活的 binding 引用；`force` 不绕过引用保护。
 
 `switchable` 是实例属性：通用 View 切换沿焦点 Pane 所属 view 的
 语义 `parent` 链向上，第一个 switchable 的 view 即切换目标。语义

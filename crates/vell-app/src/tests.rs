@@ -31,7 +31,8 @@ use crate::operation::{
     AppOperation, BufferViewSource, ClipboardDestination, ClipboardOperation, ClipboardSource,
     ContentLifecycleOperation, ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget,
     ModeFlowPropagation, ModeInvocation, ModeTarget, OperationRequest, SearchOperation,
-    ViewEditPlan, ViewLifecycleOperation, ViewOperation, ViewPrecondition, ViewSpec, ViewTarget,
+    ViewBindingOperation, ViewEditPlan, ViewLifecycleOperation, ViewOperation, ViewPrecondition,
+    ViewSpec, ViewTarget,
 };
 use std::collections::VecDeque;
 use vell_core::action::ContentAction;
@@ -62,6 +63,7 @@ use vell_protocol::revision::Revision;
 use vell_protocol::scene::Scene;
 use vell_protocol::selection::{Selection, Selections, TextOffset, TextPoint};
 use vell_protocol::space::{Sizing, SpaceKind, SplitDirection};
+use vell_protocol::view::{BindingKey, DOCUMENT_BINDING, ViewDefinition, ViewDefinitionId};
 use vell_protocol::viewport::{
     ResolvedViewportCommand, ViewportCommand, ViewportCursorBehavior, ViewportMoveAmount,
     ViewportMoveDirection,
@@ -2046,7 +2048,7 @@ fn replace_view_mode_for_test(
     view: ViewId,
     mut mode: ModeViewInstance,
 ) {
-    let content = app.session.views()[&view].content();
+    let content = app.session.views()[&view].require_document();
     let removed = app.session.view_modes_mut_for_test().remove(view);
     {
         let (contents, mode_contents) = app.kernel.mode_runtime_parts();
@@ -2055,8 +2057,13 @@ fn replace_view_mode_for_test(
         }
         let content_context = ModeContentContext::new(content, contents);
         let view_data = &app.session.views()[&view];
-        let view_context =
-            ModeViewContext::new(view, view_data.content(), view_data.state(), contents).unwrap();
+        let view_context = ModeViewContext::new(
+            view,
+            view_data.require_document(),
+            view_data.require_document_state(),
+            contents,
+        )
+        .unwrap();
         mode_contents.attach_view_with_context(content, &mut mode, &content_context, &view_context);
     }
     app.session.view_modes_mut_for_test().insert(view, mode);
@@ -2096,8 +2103,14 @@ async fn sessions_sharing_one_kernel_keep_client_state_independent() {
         .await
         .unwrap();
 
-    assert_eq!(app.session.views()[&first_view].content(), editor_cid());
-    assert_eq!(second.views()[&second_view].content(), editor_cid());
+    assert_eq!(
+        app.session.views()[&first_view].require_document(),
+        editor_cid()
+    );
+    assert_eq!(
+        second.views()[&second_view].require_document(),
+        editor_cid()
+    );
     assert_eq!(app.session.scene().size.width, 40);
     assert_eq!(second.scene().size.width, 100);
     assert_eq!(
@@ -2516,7 +2529,7 @@ fn recursive_mode_command_chain_stops_at_the_execution_limit() {
         .replace_space_content(
             focused,
             NewView {
-                view: View::new(editor_cid(), state),
+                view: View::buffer(editor_cid(), state),
                 mode_names: vec![mode_name.clone()],
             },
             true,
@@ -3085,7 +3098,10 @@ fn compound_view_switch_replaces_the_complete_subtree_atomically() {
     assert_eq!(app.buffers().len(), buffer_count);
     assert_eq!(app.session.focused(), coordinator_space);
     assert_eq!(
-        app.session.view(replacement_view).unwrap().content(),
+        app.session
+            .view(replacement_view)
+            .unwrap()
+            .require_document(),
         replacement
     );
     for removed in [left, right, coordinator] {
@@ -3234,7 +3250,7 @@ fn content_close_removes_overlapping_compound_view_targets_atomically() {
     assert!(!app.kernel.contents().contains(editor_cid()));
     assert_eq!(app.session.views().len(), 1);
     assert_ne!(
-        app.session.view(replacement).unwrap().content(),
+        app.session.view(replacement).unwrap().require_document(),
         editor_cid()
     );
     assert_eq!(app.session.focused(), coordinator_space);
@@ -3791,12 +3807,12 @@ fn one_mode_can_attach_canonical_adapter_to_buffer_content() {
             kind: ContentKind::Buffer,
         })
     );
-    for (view, kind) in app
-        .session
-        .views()
-        .iter()
-        .map(|(id, view)| (*id, app.kernel.contents().kind(view.content()).unwrap()))
-    {
+    for (view, kind) in app.session.views().iter().map(|(id, view)| {
+        (
+            *id,
+            app.kernel.contents().kind(view.require_document()).unwrap(),
+        )
+    }) {
         assert_eq!(
             app.session
                 .view_modes()
@@ -3969,7 +3985,7 @@ async fn typed_content_open_does_not_switch_the_focused_view() {
         .content;
     let focused_view = view_id(&app, app.session.focused());
     assert_eq!(
-        app.session.view(focused_view).unwrap().content(),
+        app.session.view(focused_view).unwrap().require_document(),
         editor_cid()
     );
     assert_eq!(text_rows(&app, content), vec!["opened"]);
@@ -3998,7 +4014,7 @@ async fn typed_content_and_view_operations_cover_the_lifecycle() {
         .find(|content| *content != original)
         .unwrap();
     assert_ne!(created, original);
-    assert_eq!(app.session.views()[&view].content(), original);
+    assert_eq!(app.session.views()[&view].require_document(), original);
 
     app.execute_command(DispatchCommand::ModeOperations {
         operations: vec![OperationRequest::ViewLifecycle(
@@ -4011,7 +4027,7 @@ async fn typed_content_and_view_operations_cover_the_lifecycle() {
     })
     .unwrap();
     let view = view_id(&app, app.session.focused());
-    assert_eq!(app.session.views()[&view].content(), created);
+    assert_eq!(app.session.views()[&view].require_document(), created);
     app.execute_command(DispatchCommand::ModeOperations {
         operations: vec![OperationRequest::ViewLifecycle(
             ViewLifecycleOperation::Switch {
@@ -4269,7 +4285,7 @@ async fn async_open_ignores_superseded_and_stale_target_results() {
             .unwrap()
     );
     let focused_view = view_id(&app, target);
-    let focused_content = app.session.view(focused_view).unwrap().content();
+    let focused_content = app.session.view(focused_view).unwrap().require_document();
     assert_eq!(text_rows(&app, focused_content), vec!["second"]);
 
     let third_path = directory.path().join("third.txt");
@@ -4290,7 +4306,7 @@ async fn async_open_ignores_superseded_and_stale_target_results() {
             .view_for_space(target)
             .and_then(|view| app.session.view(view))
             .unwrap()
-            .content(),
+            .require_document(),
         replacement
     );
     assert!(!app.kernel.contents().contains(third));
@@ -4321,6 +4337,71 @@ fn typed_view_focus_targets_an_existing_view() {
 }
 
 #[test]
+fn typed_document_rebind_preserves_view_identity_instead_of_switching() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    let replacement = app.new_buffer();
+    let scene_revision = app.session.scene_revision();
+    let view_revision = app.session.view(view).unwrap().revision();
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::ViewBinding {
+            target: ViewTarget::Current,
+            operation: ViewBindingOperation::Rebind {
+                binding: BindingKey::new(DOCUMENT_BINDING),
+                content: ContentTarget::Id(replacement),
+            },
+        }],
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert_eq!(view_id(&app, app.session.focused()), view);
+    assert_eq!(
+        app.session.view(view).unwrap().document_content(),
+        Some(replacement)
+    );
+    assert_eq!(app.session.scene_revision(), scene_revision);
+    assert_eq!(
+        app.session.view(view).unwrap().revision(),
+        Revision(view_revision.0 + 1)
+    );
+    assert!(app.kernel.contents().contains(editor_cid()));
+}
+
+#[test]
+fn failed_mixed_frame_does_not_publish_an_earlier_rebind() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    let replacement = app.new_buffer();
+
+    let error = app
+        .execute_command(DispatchCommand::ModeOperations {
+            operations: vec![
+                OperationRequest::ViewBinding {
+                    target: ViewTarget::Current,
+                    operation: ViewBindingOperation::Rebind {
+                        binding: BindingKey::new(DOCUMENT_BINDING),
+                        content: ContentTarget::Id(replacement),
+                    },
+                },
+                view_edit(EditCommand::InsertText("unexpected".to_owned())),
+            ],
+            view,
+            content: editor_cid(),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("only operation"));
+    assert_eq!(
+        app.session.view(view).unwrap().document_content(),
+        Some(editor_cid())
+    );
+    assert_eq!(text_rows(&app, editor_cid()), vec![""]);
+}
+
+#[test]
 fn typed_view_switch_can_create_its_buffer_view_source() {
     let mut app = make_app(vec![], None);
     let original_view = view_id(&app, app.session.focused());
@@ -4340,7 +4421,10 @@ fn typed_view_switch_can_create_its_buffer_view_source() {
 
     let switched = view_id(&app, app.session.focused());
     assert_ne!(switched, original_view);
-    assert_ne!(app.session.view(switched).unwrap().content(), editor_cid());
+    assert_ne!(
+        app.session.view(switched).unwrap().require_document(),
+        editor_cid()
+    );
     assert_eq!(app.buffers().len(), 2);
 }
 
@@ -4516,7 +4600,7 @@ fn reload_buffer_guards_dirty_text_and_force_installs_disk_state() {
         .session
         .views()
         .iter()
-        .find(|(candidate, state)| **candidate != view && state.content() == content)
+        .find(|(candidate, state)| **candidate != view && state.document_content() == Some(content))
         .unwrap()
         .0;
     app.execute_command(DispatchCommand::ModeOperations {
@@ -4531,7 +4615,7 @@ fn reload_buffer_guards_dirty_text_and_force_installs_disk_state() {
         .session
         .views()
         .values()
-        .filter(|view| view.content() == content)
+        .filter(|view| view.document_content() == Some(content))
         .map(|view| view.selections().unwrap().primary().head().char_index)
         .collect::<Vec<_>>();
     before_heads.sort_unstable();
@@ -4551,7 +4635,7 @@ fn reload_buffer_guards_dirty_text_and_force_installs_disk_state() {
         .session
         .views()
         .values()
-        .filter(|view| view.content() == content)
+        .filter(|view| view.document_content() == Some(content))
         .map(|view| view.selections().unwrap().primary().head().char_index)
         .collect::<Vec<_>>();
     reloaded_heads.sort_unstable();
@@ -4607,7 +4691,10 @@ fn switching_the_focused_view_replaces_it_and_is_idempotent() {
 
     assert_ne!(switched, original);
     assert_eq!(view_id(&app, app.session.focused()), switched);
-    assert_eq!(app.session.view(switched).unwrap().content(), content);
+    assert_eq!(
+        app.session.view(switched).unwrap().require_document(),
+        content
+    );
     assert_eq!(switch_focused_view(&mut app, content).unwrap(), switched);
 }
 
@@ -4656,7 +4743,7 @@ fn close_buffer_rejects_dirty_content_and_force_replaces_its_last_view() {
         app.session
             .views()
             .values()
-            .all(|view| view.content() != editor_cid())
+            .all(|view| view.document_content() != Some(editor_cid()))
     );
     assert_eq!(
         app.kernel.history_behavior_for_test(editor_cid()),
@@ -4689,9 +4776,140 @@ fn close_buffer_removes_all_views_of_shared_content() {
         app.session
             .views()
             .values()
-            .all(|view| view.content() != editor_cid())
+            .all(|view| view.document_content() != Some(editor_cid()))
     );
     assert_eq!(focusable_view_count(app.session.scene()), 1);
+}
+
+#[test]
+fn close_content_rejects_surviving_named_binding_until_it_is_rebound() {
+    let mut app = make_app(vec![], None);
+    let view = view_id(&app, app.session.focused());
+    let right = app.new_buffer();
+    let replacement = app.new_buffer();
+    let right_binding = BindingKey::new("right");
+    let definition_id = ViewDefinitionId::new("test.buffer-with-right");
+    let definition = ViewDefinition::new(
+        definition_id.clone(),
+        [BindingKey::new(DOCUMENT_BINDING), right_binding.clone()],
+    )
+    .unwrap();
+    app.kernel
+        .view_definitions_mut_for_test()
+        .register(definition)
+        .unwrap();
+    let definition = app
+        .kernel
+        .view_definitions()
+        .get(&definition_id)
+        .unwrap()
+        .clone();
+    app.session
+        .view_mut(view)
+        .unwrap()
+        .set_definition_for_test(
+            definition,
+            [
+                (BindingKey::new(DOCUMENT_BINDING), editor_cid()),
+                (right_binding.clone(), right),
+            ],
+        )
+        .unwrap();
+
+    assert!(matches!(
+        app.close_buffer(right, true),
+        Err(super::BufferLifecycleError::ContentInUse {
+            content,
+            view: owner,
+            binding,
+        }) if content == right && owner == view && binding == right_binding
+    ));
+    assert!(app.kernel.contents().contains(right));
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::ViewBinding {
+            target: ViewTarget::Current,
+            operation: ViewBindingOperation::Rebind {
+                binding: right_binding,
+                content: ContentTarget::Id(replacement),
+            },
+        }],
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert_eq!(view_id(&app, app.session.focused()), view);
+    assert_eq!(
+        app.session.view(view).unwrap().binding("right"),
+        Some(replacement)
+    );
+    assert_eq!(
+        app.session.view(view).unwrap().document_content(),
+        Some(editor_cid())
+    );
+    app.close_buffer(right, true).unwrap();
+    assert!(!app.kernel.contents().contains(right));
+}
+
+#[test]
+fn non_document_view_survives_presentation_refresh_and_closes_cleanly() {
+    let mut app = make_app(vec![], None);
+    let generic_space = app.session.focused();
+    let generic_view = view_id(&app, generic_space);
+    app.split_space(
+        generic_space,
+        editor_cid(),
+        true,
+        SplitDirection::Right,
+        true,
+    )
+    .unwrap();
+
+    let removed_modes = app.session.view_modes_mut_for_test().remove(generic_view);
+    {
+        let (_, mode_contents) = app.kernel.mode_runtime_parts();
+        for mode in removed_modes {
+            mode_contents.detach_view(editor_cid(), mode);
+        }
+    }
+    let left = app.new_buffer();
+    let right = app.new_buffer();
+    let definition_id = ViewDefinitionId::new("test.diff");
+    let definition = ViewDefinition::new(
+        definition_id.clone(),
+        [BindingKey::new("left"), BindingKey::new("right")],
+    )
+    .unwrap();
+    app.kernel
+        .view_definitions_mut_for_test()
+        .register(definition)
+        .unwrap();
+    let definition = app
+        .kernel
+        .view_definitions()
+        .get(&definition_id)
+        .unwrap()
+        .clone();
+    app.session
+        .view_mut(generic_view)
+        .unwrap()
+        .set_definition_for_test(
+            definition,
+            [
+                (BindingKey::new("left"), left),
+                (BindingKey::new("right"), right),
+            ],
+        )
+        .unwrap();
+
+    app.session
+        .refresh_presentation(app.kernel.contents(), app.kernel.content_modes());
+    app.close_space(generic_space).unwrap();
+
+    assert!(app.session.view(generic_view).is_none());
+    assert!(app.kernel.contents().contains(left));
+    assert!(app.kernel.contents().contains(right));
 }
 
 #[test]
@@ -5537,7 +5755,7 @@ async fn replace_content_rebuilds_view_from_origin() {
         .unwrap();
 
     let view = view_at(&app, app.session.focused());
-    assert_eq!(view.content(), other);
+    assert_eq!(view.require_document(), other);
     assert_eq!(
         view.selections().unwrap().primary().head(),
         TextOffset::origin()
@@ -5734,7 +5952,7 @@ fn replacing_only_focusable_content_with_inert_space_is_rejected() {
     assert!(matches!(
         &app.session.scene().node(focused).space.kind,
         SpaceKind::Content { view, .. }
-            if app.session.views()[view].content() == editor_cid()
+            if app.session.views()[view].document_content() == Some(editor_cid())
     ));
 }
 
@@ -5829,7 +6047,10 @@ async fn vim_ctrl_w_s_and_v_split_the_focused_buffer() {
 
         assert_eq!(focusable_view_count(app.session.scene()), 2);
         assert_ne!(app.session.focused(), original);
-        assert_eq!(view_at(&app, app.session.focused()).content(), editor_cid());
+        assert_eq!(
+            view_at(&app, app.session.focused()).require_document(),
+            editor_cid()
+        );
         assert_eq!(
             view_at(&app, app.session.focused())
                 .selections()
@@ -7659,7 +7880,7 @@ async fn vim_undo_restores_edit_start_and_redo_restores_edit_end() {
     app.session
         .view_mut(view)
         .unwrap()
-        .state_mut()
+        .require_document_state_mut()
         .replace_selections(Selections::single(Selection::collapsed(TextOffset {
             char_index: 1,
         })))
@@ -8201,7 +8422,7 @@ fn editing_shared_content_reconciles_other_view_selections() {
     app.session
         .view_mut(left_view)
         .unwrap()
-        .state_mut()
+        .require_document_state_mut()
         .replace_selections(Selections::single(Selection {
             anchor: TextOffset::origin(),
             head: TextOffset { char_index: 3 },
@@ -8210,7 +8431,7 @@ fn editing_shared_content_reconciles_other_view_selections() {
     app.session
         .view_mut(right_view)
         .unwrap()
-        .state_mut()
+        .require_document_state_mut()
         .replace_selections(Selections::single(Selection::collapsed(TextOffset {
             char_index: 3,
         })))
@@ -8255,7 +8476,7 @@ fn shared_view_positions_follow_text_change_affinity() {
         app.session
             .view_mut(view)
             .unwrap()
-            .state_mut()
+            .require_document_state_mut()
             .replace_selections(Selections::single(Selection::collapsed(TextOffset {
                 char_index: 1,
             })))
@@ -8300,7 +8521,7 @@ fn shared_view_positions_follow_undo_and_redo_changes() {
     app.session
         .view_mut(right_view)
         .unwrap()
-        .state_mut()
+        .require_document_state_mut()
         .replace_selections(Selections::single(Selection::collapsed(TextOffset {
             char_index: 3,
         })))
@@ -8364,7 +8585,7 @@ fn shared_view_positions_remain_grapheme_boundaries_through_history() {
         app.session
             .view_mut(view)
             .unwrap()
-            .state_mut()
+            .require_document_state_mut()
             .replace_selections(Selections::single(Selection::collapsed(TextOffset {
                 char_index: 2,
             })))
@@ -8516,6 +8737,21 @@ fn content_scoped_origin_cannot_smuggle_view_operations() {
     let error = app
         .execute_command(DispatchCommand::ModeContentOperations {
             operations: vec![request],
+            content: editor_cid(),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("view-scoped origin"));
+
+    let error = app
+        .execute_command(DispatchCommand::ModeContentOperations {
+            operations: vec![OperationRequest::ViewBinding {
+                target: ViewTarget::Current,
+                operation: ViewBindingOperation::Rebind {
+                    binding: BindingKey::new(DOCUMENT_BINDING),
+                    content: ContentTarget::Current,
+                },
+            }],
             content: editor_cid(),
         })
         .unwrap_err();
@@ -9444,7 +9680,10 @@ async fn vim_command_line_calls_formal_commands_and_registered_shortcuts() {
 
     assert_eq!(app.buffers().len(), 3);
     let view = view_id(&app, app.session.focused());
-    assert_ne!(app.session.view(view).unwrap().content(), editor_cid());
+    assert_ne!(
+        app.session.view(view).unwrap().require_document(),
+        editor_cid()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -9577,7 +9816,7 @@ async fn vim_commands_drive_buffer_lifecycle_and_save_as() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "saved");
 
     send_vim_command(&mut app, "new").await;
-    let created = app.session.views()[&view_id(&app, app.session.focused())].content();
+    let created = app.session.views()[&view_id(&app, app.session.focused())].require_document();
     assert_ne!(created, editor_cid());
     send_vim_command(&mut app, "buffers").await;
     send_vim_command(&mut app, "b 0").await;
@@ -9608,7 +9847,7 @@ async fn vim_open_and_force_reload_commands_use_async_file_lifecycle() {
     .unwrap();
     app.handle_app_message(message).unwrap();
     let view = view_id(&app, app.session.focused());
-    let opened = app.session.views()[&view].content();
+    let opened = app.session.views()[&view].require_document();
     assert_eq!(text_rows(&app, opened), vec!["opened"]);
 
     std::fs::write(&path, "reloaded").unwrap();
@@ -9717,7 +9956,7 @@ fn registered_content_result_can_feed_nested_view_switch() {
     .unwrap();
 
     let focused_view = view_id(&app, app.session.focused());
-    let focused_content = app.session.view(focused_view).unwrap().content();
+    let focused_content = app.session.view(focused_view).unwrap().require_document();
     assert_ne!(focused_content, editor_cid());
     assert_eq!(app.buffers().len(), 2);
 }
@@ -9752,7 +9991,7 @@ editor.commands.register("test.newAndSwitch", () => {
 
     let focused_view = view_id(&app, app.session.focused());
     assert_ne!(
-        app.session.view(focused_view).unwrap().content(),
+        app.session.view(focused_view).unwrap().require_document(),
         editor_cid()
     );
     assert_eq!(app.buffers().len(), 2);
@@ -9799,7 +10038,7 @@ function newAndSwitch() {
 
     let focused_view = view_id(&app, app.session.focused());
     assert_ne!(
-        app.session.view(focused_view).unwrap().content(),
+        app.session.view(focused_view).unwrap().require_document(),
         editor_cid()
     );
     assert_eq!(app.buffers().len(), 2);
@@ -9942,7 +10181,7 @@ editor.commands.register("test.saveAndCapture", async () => {
         app.session
             .view_for_space(app.session.focused())
             .and_then(|view| app.session.view(view))
-            .map(|view| view.content()),
+            .and_then(|view| view.document_content()),
         Some(other)
     );
 }
@@ -10048,7 +10287,9 @@ editor.commands.register("test.failAfterSave", async () => {
     assert_eq!(std::fs::read_to_string(path).unwrap(), "saved before");
     assert_eq!(app.buffers().len(), 1);
     assert_eq!(
-        app.session.view(view).map(|view| view.content()),
+        app.session
+            .view(view)
+            .and_then(|view| view.document_content()),
         Some(editor_cid())
     );
     assert!(

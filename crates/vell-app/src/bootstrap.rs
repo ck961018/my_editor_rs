@@ -115,6 +115,7 @@ pub(super) fn bootstrap_editor_with_theme(
         .map(|index| configured[index].name.clone())
         .collect();
     let mut kernel = Kernel::new(contents, modes);
+    let buffer_definition = kernel.buffer_view_definition().clone();
     let (contents, modes, mode_contents) = kernel.mode_attachment_parts();
     let face_environment =
         FaceEnvironment::with_overrides(theme, face_overrides).map_err(io::Error::other)?;
@@ -131,6 +132,7 @@ pub(super) fn bootstrap_editor_with_theme(
                 modes: editor_modes,
             },
             next_view_id: ids.next_view,
+            buffer_definition,
         },
         face_environment,
     );
@@ -262,6 +264,7 @@ pub(super) fn create_editor_session(
 ) -> ClientSession {
     let mut ids = BootstrapIds::default();
     let editor_view = ids.view();
+    let buffer_definition = vell_protocol::view::ViewDefinition::buffer();
     ClientSession::editor(
         contents,
         modes,
@@ -275,6 +278,7 @@ pub(super) fn create_editor_session(
                 modes: editor_modes,
             },
             next_view_id: ids.next_view,
+            buffer_definition,
         },
         FaceEnvironment::new(None).expect("built-in themes must be valid"),
     )
@@ -340,7 +344,7 @@ mod tests {
             Vec::new(),
         );
 
-        assert_eq!(session.views()[&ViewId(0)].content(), editor);
+        assert_eq!(session.views()[&ViewId(0)].require_document(), editor);
         // 状态栏是 editor view 的直属 Pane，不再消耗 view id。
         assert_eq!(session.next_view_id_for_test(), 1);
     }

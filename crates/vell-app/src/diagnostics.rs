@@ -50,7 +50,7 @@ impl<F: Frontend> App<F> {
             .views()
             .iter()
             .filter_map(|(&view, view_data)| {
-                let content = view_data.content();
+                let content = view_data.document_content()?;
                 let content_revision = self.kernel.contents().revision(content)?;
                 let raw = self.session.presentation().diagnostics(
                     view,

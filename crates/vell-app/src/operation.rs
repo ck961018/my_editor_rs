@@ -7,6 +7,7 @@ use crate::dispatcher::DispatchCommand;
 use crate::mode::ModeId;
 use crate::theme::ResolvedFaceOperation;
 use vell_protocol::ids::{ContentId, ViewId};
+use vell_protocol::view::BindingKey;
 
 pub(crate) use vell_mode::operation::*;
 
@@ -40,6 +41,11 @@ pub enum ResolvedOperation {
         view: ViewId,
         content: ContentId,
         operation: ViewOperation,
+    },
+    ViewBinding {
+        view: ViewId,
+        binding: BindingKey,
+        content: ContentId,
     },
     History {
         content: ContentId,

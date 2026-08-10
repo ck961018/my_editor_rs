@@ -86,8 +86,8 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
 
 ## 所有权与执行约定
 
-- `Kernel` 持有 `ContentStore`、`ModeRegistry`、共享 Mode content state、
-  `TransactionManager`、保存任务和 Mode 后台任务。
+- `Kernel` 持有 `ContentStore`、`ModeRegistry`、`ViewDefinitionRegistry`、
+  共享 Mode content state、`TransactionManager`、保存任务和 Mode 后台任务。
 - `ClientSession` 持有 `ViewWorkspace`、Mode view state、输入状态、Face 与
   presentation cache。当前生产路径是一对一 `Kernel + ClientSession`。
 - `ViewWorkspace` 是 View 语义树、直属 Pane 映射、Scene、SceneBuilder、
@@ -95,12 +95,14 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
   草稿上校验，再一次发布；调用方只消费 View 生命周期事件。
 - `ContentStore` 是唯一 Content 表。`Content` 与 `ContentViewState` 都是
   和 `ContentKind` 对齐的封闭枚举。
-- `View` 持有 `ContentId`、`ContentViewState`、revision、直属 Pane 映射
-  （SpaceId ↔ PaneKey）、`switchable` 与语义 parent/children；不持有
-  Mode、history、viewport 或渲染缓存。同一 View 可占据多个 Content
-  Space（正文 `body` + 状态栏 `builtin.status` 等）。
-- 上一条描述 M3 前的当前实现。目标领域模型允许 View 使用命名 binding
-  绑定零个或多个 Content；在 M3 完成前，不得把该目标当作已实现 contract。
+- `View` 持有稳定的 `ViewDefinitionId`、具名 Content bindings、可选的
+  `document` ContentViewState、revision、直属 Pane 映射（SpaceId ↔
+  PaneKey）、`switchable` 与语义 parent/children；不持有 Mode、history、
+  viewport 或渲染缓存。同一 View 可占据多个 Content Space。
+- BufferView 使用保留的 `document` binding；只在明确要求 BufferView 的
+  内部路径读取它。rebind 保留 ViewId，`view.switch` 替换完整 View。
+- 关闭 Content 前必须拒绝仍会存活的具名 binding 引用；`force` 只覆盖脏
+  数据保护，不覆盖 binding 引用。
 - selection 使用 `anchor/head`；collapsed cursor 等于 primary selection
   的 `head`。不要添加冗余方向字段。
 - Mode content state 按 `(ModeId, ContentId)` 共享，view state 按

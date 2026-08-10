@@ -8,11 +8,13 @@ use std::collections::{HashMap, HashSet};
 
 use crate::layout::{LayoutError, StatusBarHandle, StatusBarPlacement};
 use crate::scene_model::{CloseResult, SceneBuilder, SceneError, SplitResult, build_editor_scene};
-use crate::view::{BODY_PANE, STATUS_PANE, View};
+use crate::view::{BODY_PANE, ContentBindingError, STATUS_PANE, View};
+use vell_core::content_view_state::ContentViewState;
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 use vell_protocol::revision::Revision;
 use vell_protocol::scene::Scene;
 use vell_protocol::space::{Sizing, SpaceKind, SplitDirection};
+use vell_protocol::view::BindingKey;
 
 #[derive(Clone)]
 pub(super) struct ViewWorkspace {
@@ -110,7 +112,7 @@ impl ViewWorkspace {
             StatusBarPlacement::PerPane => *self.status_by_editor.get(&editor)?,
         };
         let target_view = view_for_space(&self.scene, space)?;
-        let content = self.views.get(&target_view)?.content();
+        let content = self.views.get(&target_view)?.document_content()?;
         Some(StatusBarHandle {
             space,
             target_view,
@@ -123,7 +125,7 @@ impl ViewWorkspace {
             .views
             .iter()
             .filter_map(|(view, data)| {
-                (data.content() == content)
+                (data.document_content() == Some(content))
                     .then(|| self.status_bar_for_view(*view))
                     .flatten()
             })
@@ -246,6 +248,59 @@ impl ViewWorkspace {
 
     pub(super) fn body_space_for_view(&self, view: ViewId) -> Option<SpaceId> {
         self.views.get(&view)?.panes().space_for_key(BODY_PANE)
+    }
+
+    /// 原子改变一个具名 binding。Scene 和 ViewId 均保持不变。
+    pub(super) fn rebind(
+        &mut self,
+        view: ViewId,
+        binding: &BindingKey,
+        content: ContentId,
+        state: Option<ContentViewState>,
+    ) -> Result<ContentId, LayoutError> {
+        let mut draft = self.clone();
+        let previous =
+            draft
+                .views
+                .get_mut(&view)
+                .ok_or(LayoutError::MissingView(view))?
+                .rebind(binding, content, state)
+                .map_err(|error| match error {
+                    ContentBindingError::Unknown(binding) => {
+                        LayoutError::MissingBinding { view, binding }
+                    }
+                    ContentBindingError::Duplicate(binding)
+                    | ContentBindingError::Missing(binding) => LayoutError::InvalidWorkspace(
+                        format!("View {} has invalid binding schema at {binding}", view.0),
+                    ),
+                    ContentBindingError::DocumentStateMismatch => LayoutError::InvalidWorkspace(
+                        format!("View {} has invalid document state", view.0),
+                    ),
+                })?;
+        draft.validate()?;
+        *self = draft;
+        Ok(previous)
+    }
+
+    /// 返回关闭 Content 后仍会存活的第一个 binding 引用。
+    pub(super) fn blocking_content_reference(
+        &self,
+        content: ContentId,
+    ) -> Result<Option<(ViewId, BindingKey)>, LayoutError> {
+        let mut removed = HashSet::new();
+        for root in self.content_removal_roots(content)? {
+            removed.extend(self.semantic_subtree(root)?);
+        }
+        let mut views = self.views.iter().collect::<Vec<_>>();
+        views.sort_by_key(|(view, _)| view.0);
+        Ok(views.into_iter().find_map(|(view, data)| {
+            if removed.contains(view) {
+                return None;
+            }
+            data.bindings()
+                .iter()
+                .find_map(|(binding, target)| (target == content).then(|| (*view, binding.clone())))
+        }))
     }
 
     /// 建立一棵已存在 View 的语义子树。布局 Pane 可以先创建，但 parent、
@@ -716,7 +771,7 @@ impl ViewWorkspace {
         let targets = self
             .views
             .iter()
-            .filter_map(|(view, data)| (data.content() == content).then_some(*view))
+            .filter_map(|(view, data)| (data.document_content() == Some(content)).then_some(*view))
             .collect::<HashSet<_>>();
         let mut roots = Vec::new();
         for target in &targets {
