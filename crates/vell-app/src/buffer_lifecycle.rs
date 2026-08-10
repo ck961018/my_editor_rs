@@ -14,7 +14,7 @@ use vell_frontend::Frontend;
 use vell_protocol::content_query::{
     BufferBackingState, ContentData, ContentQuery, DirtyState, SaveState,
 };
-use vell_protocol::ids::{ContentId, SpaceId, ViewId};
+use vell_protocol::ids::ContentId;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BufferInfo {
@@ -426,32 +426,7 @@ impl<F: Frontend> App<F> {
         Ok(())
     }
 
-    pub fn switch_buffer(&mut self, content: ContentId) -> Result<ViewId, BufferLifecycleError> {
-        self.switch_buffer_at(self.session.focused(), content)
-    }
-
-    pub(super) fn switch_buffer_at(
-        &mut self,
-        space: SpaceId,
-        content: ContentId,
-    ) -> Result<ViewId, BufferLifecycleError> {
-        self.validate_switch_buffer(content)?;
-        if let Some(view) = self.session.view_for_space(space)
-            && self
-                .session
-                .view(view)
-                .is_some_and(|view| view.content() == content)
-        {
-            return Ok(view);
-        }
-        self.replace_space_content(space, content, true)
-            .map_err(|error| BufferLifecycleError::Layout(error.to_string()))?;
-        self.session
-            .view_for_space(space)
-            .ok_or_else(|| BufferLifecycleError::Layout("replacement view is missing".to_owned()))
-    }
-
-    pub(super) fn validate_switch_buffer(
+    pub(super) fn validate_buffer_view_content(
         &self,
         content: ContentId,
     ) -> Result<(), BufferLifecycleError> {

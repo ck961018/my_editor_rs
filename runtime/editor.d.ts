@@ -415,7 +415,6 @@ interface FacePrimitives {
 }
 
 interface AppPrimitives {
-	save(): void;
 	quit(): void;
 	closePane(): void;
 	splitHorizontal(): void;
@@ -426,15 +425,41 @@ interface AppPrimitives {
 	focusRight(): void;
 }
 
-interface BufferPrimitives {
+interface ContentPrimitives {
 	create(): void;
 	open(path: string): void;
 	list(): void;
-	switch(contentId: number): void;
 	close(contentId?: number, force?: boolean): void;
 	save(contentId?: number, force?: boolean): void;
 	saveAs(path: string, force?: boolean): void;
 	reload(contentId?: number, force?: boolean): void;
+}
+
+type BufferViewSpec =
+	| {
+		readonly type: "core.buffer";
+		readonly content: number;
+		readonly create?: never;
+		readonly path?: never;
+	}
+	| {
+		readonly type: "core.buffer";
+		readonly content?: never;
+		readonly create: true;
+		readonly path?: never;
+	}
+	| {
+		readonly type: "core.buffer";
+		readonly content?: never;
+		readonly create?: never;
+		readonly path: string;
+	};
+
+type ViewSpec = BufferViewSpec;
+
+interface ViewPrimitives {
+	focus(viewId: number): void;
+	switch(spec: ViewSpec): void;
 }
 
 interface BufferContentContext {
@@ -468,7 +493,8 @@ interface BufferCommandContext<ContentState, ViewState, Arguments = ScriptData>
 	readonly commands: CommandPrimitives;
 	readonly faces: FacePrimitives;
 	readonly app: AppPrimitives;
-	readonly buffers: BufferPrimitives;
+	readonly content: ContentPrimitives;
+	readonly view: ViewPrimitives;
 	state: ContentState;
 	viewState: ViewState;
 	pass(): Pass;

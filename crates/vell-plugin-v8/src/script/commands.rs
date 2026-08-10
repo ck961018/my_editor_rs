@@ -1067,7 +1067,7 @@ mod tests {
         let calls = Rc::new(RefCell::new(Vec::new()));
         let (_script, mut host) = configured_host(
             r#"
-function save() { editor.commands.capture("ordinary"); }
+function nativeAction() { editor.commands.capture("ordinary"); }
 editor.commands.register("test.inner", (object, closure, promise) => {
   if (object.answer === 42 && closure() === 7 && promise instanceof Promise) {
     editor.commands.capture("direct");
@@ -1075,12 +1075,12 @@ editor.commands.register("test.inner", (object, closure, promise) => {
   return promise;
 });
 editor.commands.register("test.run", () => {
-  save();
-  editor.commands.save("native");
+  nativeAction();
+  editor.commands.hostAction("native");
   return editor.commands.test.inner({ answer: 42 }, () => 7, Promise.resolve(1));
 });
 "#,
-            &["capture", "save"],
+            &["capture", "hostAction"],
             Rc::clone(&calls),
         );
 
@@ -1233,7 +1233,7 @@ replaceable("ok");
             .borrow_mut()
             .execute_typescript(
                 "file:///native-replacement.ts",
-                r#"editor.commands.register("save", (path: string) => path);"#,
+                r#"editor.commands.register("hostAction", (path: string) => path);"#,
             )
             .unwrap();
         let diagnostics = script
@@ -1242,10 +1242,10 @@ replaceable("ok");
             .diagnostics(
                 "file:///native-replacement-probe.ts",
                 r#"
-editor.commands.save();
-save();
-editor.commands.save("file.txt");
-save("file.txt");
+editor.commands.hostAction();
+hostAction();
+editor.commands.hostAction("file.txt");
+hostAction("file.txt");
 "#,
             )
             .unwrap();

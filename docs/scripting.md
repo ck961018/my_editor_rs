@@ -2,7 +2,7 @@
 
 **状态：** 当前插件作者指南
 
-**更新日期：** 2026-08-02
+**更新日期：** 2026-08-10
 
 宿主架构与信任边界见
 [`TypeScript 脚本架构`](design/typescript-scripting-architecture.md)。
@@ -85,12 +85,12 @@ function increment(value: number): number {
 }
 
 async function saveAndReport(): Promise<void> {
-  await save();
+  await content.save();
 }
 
 editor.commands.register(increment);
 editor.commands.register("math.increment", increment);
-editor.commands.register("save", saveAndReport);
+editor.commands.register("workspace.saveAndReport", saveAndReport);
 ```
 
 `register(namedFunction)` 使用函数名作为 ID，`register(id, callback)` 使用
@@ -107,9 +107,12 @@ editor.commands.math.increment(1);
 用户自己的 global 始终优先：
 
 ```ts
-save();                  // 没有同名绑定时解析为正式命令
-editor.commands.save();  // 始终是正式命令
+content.save();
+editor.commands.content.save();
 ```
+
+`content` 和 `view` 是宿主提供的领域命令命名空间。裸 global 只是便利入口；
+`editor.commands.content.save()` 始终明确调用正式命令。
 
 Rust 原生命令与 TypeScript 命令有完全相同的调用体验。当前原生命令的签名见
 [commands.generated.d.ts](../runtime/commands.generated.d.ts)。其中
@@ -124,7 +127,7 @@ Rust 原生命令与 TypeScript 命令有完全相同的调用体验。当前原
 editor.commands.shortcut("q", () => quit());
 
 editor.commands.shortcut("wq", async () => {
-  await save();
+  await content.save();
   quit();
 });
 ```
@@ -139,7 +142,7 @@ handler 只接收一个原始可选参数，类型为 `string | undefined`。分
 `:` 支持三条路径：
 
 ```text
-:save()                 单个正式命令调用
+:content.save()         单个正式命令调用
 :wq                     注册快捷命令
 :ts const value = 1     普通 TypeScript
 ```
@@ -148,7 +151,7 @@ handler 只接收一个原始可选参数，类型为 `string | undefined`。分
 仍是普通 TypeScript 表达式，可以调用普通函数和嵌套命令：
 
 ```text
-:switchBuffer(newBuffer())
+:view.switch({ type: "core.buffer", create: true })
 :math.increment(41)
 ```
 
@@ -171,7 +174,7 @@ script 使用动态 `import()`。异步入口写成普通函数：
 
 ```ts
 async function main(): Promise<void> {
-  await save();
+  await content.save();
 }
 
 main();
@@ -183,8 +186,8 @@ main();
 调用可以观察前序修改：
 
 ```ts
-const id = newBuffer();
-switchBuffer(id);
+const id = content.create();
+view.switch({ type: "core.buffer", content: id });
 ```
 
 未捕获异常回滚该同步段的 Content、View、input、history、Mode draft 和
@@ -195,12 +198,12 @@ prepared effect。以下状态不参与宿主回滚：JavaScript heap、global �
 恢复 continuation 时创建新 frame，并继续绑定命令启动时的 View 与 Content。
 等待期间切换焦点不会改变目标；目标关闭或 revision 失效时 Promise reject。
 
-`save()` 在实际保存完成时 resolve，在冲突或 IO 失败时 reject。组合保存与
-退出必须显式排序：
+`content.save()` 在实际保存完成时 resolve，在冲突或 IO 失败时 reject。
+组合保存与退出必须显式排序：
 
 ```ts
 async function writeQuit(): Promise<void> {
-  await save();
+  await content.save();
   quit();
 }
 ```
@@ -287,9 +290,15 @@ Buffer context 通过 `resourceName`、`resourcePath`、`backingState`、
 `viewPolicy.statusBar` 中定义带可选 Face 的 `left`、`center` 和 `right`
 分段，app 把目标 buffer view 的 policy 组装为状态栏呈现。
 
-`context.app` 除保存和退出外，还提供 `closePane()`、
-`splitHorizontal()`、`splitVertical()` 与四个 `focus*()` 原语。pane close、
-split 和 focus 与 viewport 一样，只在整个 execution frame 成功后发布。
+`context.content` 负责 Content 数据生命周期；`context.view` 负责聚焦已有
+View 或用 `ViewSpec` 替换最近的 switchable View。`context.app` 提供退出、
+`closePane()`、`splitHorizontal()`、`splitVertical()` 与四个 `focus*()`
+原语。pane close、split 和 focus 与 viewport 一样，只在整个 execution
+frame 成功后发布。
+
+Mode primitive 只暂存 operation，因此返回 `void`。需要立即取得新
+`ContentId` 并传给后续命令时，应调用正式命令 `content.create()`；它在同一
+frame 的 provisional journal 中创建 Content，并返回 ID。
 `closePane()` 关闭当前 pane；关闭最后一个可聚焦 pane 时退出应用。
 每个 execution frame 最多产生一个 split、close 或 focus；topology 原语
 不能与 viewport 原语在同一 frame 中混用。nested command 和 callback 也

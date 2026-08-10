@@ -23,14 +23,12 @@ pub const MAX_MODE_CALLBACK_OPERATIONS: usize = MAX_OPERATIONS_PER_FRAME - 1;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContentTarget {
     Current,
-    #[allow(dead_code, reason = "explicit cross-content requests are reserved")]
     Id(ContentId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewTarget {
     Current,
-    #[allow(dead_code, reason = "explicit cross-view requests are reserved")]
     Id(ViewId),
 }
 
@@ -76,7 +74,8 @@ pub enum OperationRequest {
         target: ViewTarget,
         operation: SearchOperation,
     },
-    Buffer(BufferOperation),
+    ContentLifecycle(ContentLifecycleOperation),
+    ViewLifecycle(ViewLifecycleOperation),
     App(AppOperation),
 }
 
@@ -175,15 +174,12 @@ pub enum FaceOperation {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BufferOperation {
-    New,
+pub enum ContentLifecycleOperation {
+    Create,
     Open {
         path: String,
     },
     List,
-    Switch {
-        content: ContentId,
-    },
     Close {
         target: ContentTarget,
         force: bool,
@@ -201,6 +197,32 @@ pub enum BufferOperation {
         target: ContentTarget,
         force: bool,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BufferViewSource {
+    Content(ContentId),
+    Create,
+    Open { path: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ViewSpec {
+    Buffer { source: BufferViewSource },
+}
+
+impl ViewSpec {
+    pub fn buffer(content: ContentId) -> Self {
+        Self::Buffer {
+            source: BufferViewSource::Content(content),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ViewLifecycleOperation {
+    Focus { view: ViewId },
+    Switch { spec: ViewSpec },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

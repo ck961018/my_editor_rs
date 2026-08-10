@@ -52,14 +52,19 @@ editor.modes.define({
 						{ kind: "literal", value: "needle" },
 						"replacement",
 					);
-					ctx.buffers.create();
-					ctx.buffers.open("file.rs");
+					ctx.content.create();
+					ctx.content.open("file.rs");
+					ctx.content.list();
+					ctx.content.close(undefined, true);
+					ctx.content.save();
+					ctx.content.saveAs("other.rs", true);
+					ctx.content.reload();
+					ctx.view.focus(ctx.viewId);
+					ctx.view.switch({ type: "core.buffer", content: 1 });
+					ctx.view.switch({ type: "core.buffer", create: true });
+					ctx.view.switch({ type: "core.buffer", path: "file.rs" });
+					// @ts-expect-error Buffer command primitives were removed.
 					ctx.buffers.list();
-					ctx.buffers.switch(1);
-					ctx.buffers.close(undefined, true);
-					ctx.buffers.save();
-					ctx.buffers.saveAs("other.rs", true);
-					ctx.buffers.reload();
 					const token = ctx.faces.addRelative(
 						"plugin.pairs.match",
 						["syntax.string", { underline: true }],

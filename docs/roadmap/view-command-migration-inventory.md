@@ -27,8 +27,9 @@ TypeScript 声明、内建插件、示例和测试。
 - `save()` 迁到 `content.save()`，目标默认为当前 View 的主要 binding。
 
 `view.switch` 不接受裸 ContentId。M1 先使用最小的封闭 BufferView spec，
-例如 `{ type: "buffer", content: contentId }`。M3 再把该字段演进为由 View
-definition 声明的 `document` binding，M1 不提前实现通用 binding contract。
+当前使用 `{ type: "core.buffer", content: contentId }`。M3 再把该字段
+演进为由 View definition 声明的 `document` binding，M1 不提前实现通用
+binding contract。
 
 ## 3. TypeScript Mode primitives
 

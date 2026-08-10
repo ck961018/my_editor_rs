@@ -331,7 +331,10 @@ mod tests {
     #[test]
     fn declarations_and_multiple_statements_are_not_command_calls() {
         assert!(matches!(classify("const value = 1"), LineKind::TypeScript));
-        assert!(matches!(classify("save(); quit()"), LineKind::TypeScript));
+        assert!(matches!(
+            classify("content.save(); quit()"),
+            LineKind::TypeScript
+        ));
     }
 
     #[test]
@@ -356,16 +359,18 @@ mod tests {
 
     #[test]
     fn non_empty_selection_wins_without_parsing_the_rest_of_the_buffer() {
-        let source = "not valid TypeScript !!!\nnewBuffer()";
-        let anchor = source[..source.find("newBuffer").unwrap()].chars().count();
+        let source = "not valid TypeScript !!!\ncontent.create()";
+        let anchor = source[..source.find("content.create").unwrap()]
+            .chars()
+            .count();
         let document = TextDocument {
             content: ContentId(1),
             resource_path: None,
             source: source.to_owned(),
             anchor,
-            head: anchor + "newBuffer()".chars().count(),
+            head: anchor + "content.create()".chars().count(),
         };
 
-        assert_eq!(document.selected_source().unwrap(), "newBuffer()");
+        assert_eq!(document.selected_source().unwrap(), "content.create()");
     }
 }

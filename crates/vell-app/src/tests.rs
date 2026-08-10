@@ -29,10 +29,10 @@ use crate::mode::{
 };
 use crate::mode_name::{ModeActionName, ModeName};
 use crate::operation::{
-    AppOperation, BufferOperation, ClipboardDestination, ClipboardOperation, ClipboardSource,
-    ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget, ModeFlowPropagation,
-    ModeInvocation, ModeTarget, OperationRequest, SearchOperation, ViewEditPlan, ViewOperation,
-    ViewPrecondition, ViewTarget,
+    AppOperation, BufferViewSource, ClipboardDestination, ClipboardOperation, ClipboardSource,
+    ContentLifecycleOperation, ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget,
+    ModeFlowPropagation, ModeInvocation, ModeTarget, OperationRequest, SearchOperation,
+    ViewEditPlan, ViewLifecycleOperation, ViewOperation, ViewPrecondition, ViewSpec, ViewTarget,
 };
 use std::collections::VecDeque;
 use vell_core::action::ContentAction;
@@ -2030,6 +2030,14 @@ fn view_id(app: &App<ScriptedFrontend>, space: SpaceId) -> ViewId {
     view_for_space(app.session.scene(), space).expect("space hosts a view")
 }
 
+fn switch_focused_view(
+    app: &mut App<ScriptedFrontend>,
+    content: ContentId,
+) -> Result<ViewId, LayoutError> {
+    let target = app.switch_target().expect("focused view is switchable");
+    app.switch_view_at(target, content)
+}
+
 fn view_at(app: &App<ScriptedFrontend>, space: SpaceId) -> &View {
     &app.session.views()[&view_id(app, space)]
 }
@@ -3046,6 +3054,60 @@ fn switch_target_resolves_nearest_switchable_ancestor() {
 }
 
 #[test]
+fn compound_view_switch_is_rejected_until_subtree_lifecycle_is_atomic() {
+    let mut app = make_app(vec![], None);
+    let left_space = app.session.focused();
+    let left = view_id(&app, left_space);
+    let right_space = app
+        .split_space(left_space, editor_cid(), true, SplitDirection::Right, false)
+        .unwrap()
+        .new_space;
+    let right = view_id(&app, right_space);
+    let coordinator_space = app
+        .split_space(right_space, editor_cid(), true, SplitDirection::Down, false)
+        .unwrap()
+        .new_space;
+    let coordinator = view_id(&app, coordinator_space);
+    for child in [left, right] {
+        let view = app.session.view_mut(child).unwrap();
+        view.set_switchable(false);
+        view.set_parent(Some(coordinator));
+    }
+    let parent = app.session.view_mut(coordinator).unwrap();
+    parent.push_child(left);
+    parent.push_child(right);
+    let replacement = app.new_buffer();
+    let scene_revision = app.session.scene_revision();
+    let view_count = app.session.views().len();
+    let buffer_count = app.buffers().len();
+
+    let error = app
+        .execute_command(DispatchCommand::ModeOperations {
+            operations: vec![OperationRequest::ViewLifecycle(
+                ViewLifecycleOperation::Switch {
+                    spec: ViewSpec::buffer(replacement),
+                },
+            )],
+            view: left,
+            content: editor_cid(),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("compound view replacement"));
+    assert_eq!(app.session.scene_revision(), scene_revision);
+    assert_eq!(app.session.views().len(), view_count);
+    assert_eq!(app.buffers().len(), buffer_count);
+    for (space, expected) in [
+        (left_space, left),
+        (right_space, right),
+        (coordinator_space, coordinator),
+    ] {
+        assert_eq!(view_id(&app, space), expected);
+        assert!(app.session.view(expected).is_some());
+    }
+}
+
+#[test]
 fn compound_view_children_keep_independent_selections() {
     let mut app = make_app(vec![], None);
     let left_space = app.session.focused();
@@ -3684,7 +3746,7 @@ fn new_buffers_have_unique_ids_and_the_default_mode_profile() {
 }
 
 #[tokio::test]
-async fn typed_buffer_open_switches_the_focused_view() {
+async fn typed_content_open_does_not_switch_the_focused_view() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("typed-open.txt");
     std::fs::write(&path, "opened").unwrap();
@@ -3692,9 +3754,11 @@ async fn typed_buffer_open_switches_the_focused_view() {
     let view = view_id(&app, app.session.focused());
 
     app.execute_command(DispatchCommand::ModeOperations {
-        operations: vec![OperationRequest::Buffer(BufferOperation::Open {
-            path: path.to_string_lossy().into_owned(),
-        })],
+        operations: vec![OperationRequest::ContentLifecycle(
+            ContentLifecycleOperation::Open {
+                path: path.to_string_lossy().into_owned(),
+            },
+        )],
         view,
         content: editor_cid(),
     })
@@ -3709,12 +3773,15 @@ async fn typed_buffer_open_switches_the_focused_view() {
         .unwrap()
         .content;
     let focused_view = view_id(&app, app.session.focused());
-    assert_eq!(app.session.view(focused_view).unwrap().content(), content);
+    assert_eq!(
+        app.session.view(focused_view).unwrap().content(),
+        editor_cid()
+    );
     assert_eq!(text_rows(&app, content), vec!["opened"]);
 }
 
 #[tokio::test]
-async fn typed_buffer_operations_cover_the_lifecycle() {
+async fn typed_content_and_view_operations_cover_the_lifecycle() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("typed-lifecycle.txt");
     let mut app = make_app(vec![], None);
@@ -3722,19 +3789,40 @@ async fn typed_buffer_operations_cover_the_lifecycle() {
     let view = view_id(&app, app.session.focused());
 
     app.execute_command(DispatchCommand::ModeOperations {
-        operations: vec![OperationRequest::Buffer(BufferOperation::New)],
+        operations: vec![OperationRequest::ContentLifecycle(
+            ContentLifecycleOperation::Create,
+        )],
         view,
         content: original,
     })
     .unwrap();
-    let created = app.session.views()[&view_id(&app, app.session.focused())].content();
+    let created = app
+        .buffers()
+        .into_iter()
+        .map(|buffer| buffer.content)
+        .find(|content| *content != original)
+        .unwrap();
     assert_ne!(created, original);
+    assert_eq!(app.session.views()[&view].content(), original);
 
-    let view = view_id(&app, app.session.focused());
     app.execute_command(DispatchCommand::ModeOperations {
-        operations: vec![OperationRequest::Buffer(BufferOperation::Switch {
-            content: original,
-        })],
+        operations: vec![OperationRequest::ViewLifecycle(
+            ViewLifecycleOperation::Switch {
+                spec: ViewSpec::buffer(created),
+            },
+        )],
+        view,
+        content: original,
+    })
+    .unwrap();
+    let view = view_id(&app, app.session.focused());
+    assert_eq!(app.session.views()[&view].content(), created);
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::ViewLifecycle(
+            ViewLifecycleOperation::Switch {
+                spec: ViewSpec::buffer(original),
+            },
+        )],
         view,
         content: created,
     })
@@ -3747,11 +3835,13 @@ async fn typed_buffer_operations_cover_the_lifecycle() {
     })
     .unwrap();
     app.execute_command(DispatchCommand::ModeOperations {
-        operations: vec![OperationRequest::Buffer(BufferOperation::SaveAs {
-            target: ContentTarget::Current,
-            path: path.to_string_lossy().into_owned(),
-            force: false,
-        })],
+        operations: vec![OperationRequest::ContentLifecycle(
+            ContentLifecycleOperation::SaveAs {
+                target: ContentTarget::Current,
+                path: path.to_string_lossy().into_owned(),
+                force: false,
+            },
+        )],
         view,
         content: original,
     })
@@ -3764,10 +3854,12 @@ async fn typed_buffer_operations_cover_the_lifecycle() {
 
     std::fs::write(&path, "external").unwrap();
     app.execute_command(DispatchCommand::ModeOperations {
-        operations: vec![OperationRequest::Buffer(BufferOperation::Reload {
-            target: ContentTarget::Current,
-            force: true,
-        })],
+        operations: vec![OperationRequest::ContentLifecycle(
+            ContentLifecycleOperation::Reload {
+                target: ContentTarget::Current,
+                force: true,
+            },
+        )],
         view,
         content: original,
     })
@@ -3781,10 +3873,12 @@ async fn typed_buffer_operations_cover_the_lifecycle() {
     .unwrap();
 
     app.execute_command(DispatchCommand::ModeOperations {
-        operations: vec![OperationRequest::Buffer(BufferOperation::Save {
-            target: ContentTarget::Current,
-            force: false,
-        })],
+        operations: vec![OperationRequest::ContentLifecycle(
+            ContentLifecycleOperation::Save {
+                target: ContentTarget::Current,
+                force: false,
+            },
+        )],
         view,
         content: original,
     })
@@ -3796,10 +3890,12 @@ async fn typed_buffer_operations_cover_the_lifecycle() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "external!");
 
     app.execute_command(DispatchCommand::ModeOperations {
-        operations: vec![OperationRequest::Buffer(BufferOperation::Close {
-            target: ContentTarget::Id(created),
-            force: false,
-        })],
+        operations: vec![OperationRequest::ContentLifecycle(
+            ContentLifecycleOperation::Close {
+                target: ContentTarget::Id(created),
+                force: false,
+            },
+        )],
         view,
         content: original,
     })
@@ -3819,30 +3915,34 @@ async fn typed_cross_buffer_save_and_reload_use_the_target_frame() {
     let view = view_id(&app, app.session.focused());
 
     app.execute_command(DispatchCommand::ModeOperations {
-        operations: vec![OperationRequest::Buffer(BufferOperation::Reload {
-            target: ContentTarget::Id(target),
-            force: true,
-        })],
+        operations: vec![OperationRequest::ContentLifecycle(
+            ContentLifecycleOperation::Reload {
+                target: ContentTarget::Id(target),
+                force: true,
+            },
+        )],
         view,
         content: origin,
     })
     .unwrap();
     assert_eq!(text_rows(&app, target), vec!["after"]);
 
-    let target_view = app.switch_buffer(target).unwrap();
+    let target_view = switch_focused_view(&mut app, target).unwrap();
     app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("!".to_owned())),
         view: target_view,
         content: target,
     })
     .unwrap();
-    app.switch_buffer(origin).unwrap();
+    switch_focused_view(&mut app, origin).unwrap();
     let origin_view = view_id(&app, app.session.focused());
     app.execute_command(DispatchCommand::ModeOperations {
-        operations: vec![OperationRequest::Buffer(BufferOperation::Save {
-            target: ContentTarget::Id(target),
-            force: false,
-        })],
+        operations: vec![OperationRequest::ContentLifecycle(
+            ContentLifecycleOperation::Save {
+                target: ContentTarget::Id(target),
+                force: false,
+            },
+        )],
         view: origin_view,
         content: origin,
     })
@@ -3861,14 +3961,14 @@ async fn mode_input_can_save_and_reload_an_explicit_buffer_target() {
     std::fs::write(&path, "before").unwrap();
     let mut app = make_app(vec![], None);
     let target = app.open_buffer(&path).unwrap();
-    let target_view = app.switch_buffer(target).unwrap();
+    let target_view = switch_focused_view(&mut app, target).unwrap();
     app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText("!".to_owned())),
         view: target_view,
         content: target,
     })
     .unwrap();
-    app.switch_buffer(editor_cid()).unwrap();
+    switch_focused_view(&mut app, editor_cid()).unwrap();
 
     let save_mode = ModeName::new("cross-save-probe");
     app.kernel
@@ -3876,10 +3976,12 @@ async fn mode_input_can_save_and_reload_an_explicit_buffer_target() {
         .register(ChainProbeMode::with_sequence(
             save_mode.as_str(),
             vec![KeyEvent::char('q')],
-            vec![OperationRequest::Buffer(BufferOperation::Save {
-                target: ContentTarget::Id(target),
-                force: false,
-            })],
+            vec![OperationRequest::ContentLifecycle(
+                ContentLifecycleOperation::Save {
+                    target: ContentTarget::Id(target),
+                    force: false,
+                },
+            )],
             false,
         ))
         .unwrap();
@@ -3902,10 +4004,12 @@ async fn mode_input_can_save_and_reload_an_explicit_buffer_target() {
         .register(ChainProbeMode::with_sequence(
             reload_mode.as_str(),
             vec![KeyEvent::char('r')],
-            vec![OperationRequest::Buffer(BufferOperation::Reload {
-                target: ContentTarget::Id(target),
-                force: true,
-            })],
+            vec![OperationRequest::ContentLifecycle(
+                ContentLifecycleOperation::Reload {
+                    target: ContentTarget::Id(target),
+                    force: true,
+                },
+            )],
             false,
         ))
         .unwrap();
@@ -3919,13 +4023,15 @@ async fn mode_input_can_save_and_reload_an_explicit_buffer_target() {
 }
 
 #[test]
-fn typed_buffer_list_surfaces_metadata() {
+fn typed_content_list_surfaces_metadata() {
     let mut app = make_app(vec![], None);
     let view = view_id(&app, app.session.focused());
     app.new_buffer();
 
     app.execute_command(DispatchCommand::ModeOperations {
-        operations: vec![OperationRequest::Buffer(BufferOperation::List)],
+        operations: vec![OperationRequest::ContentLifecycle(
+            ContentLifecycleOperation::List,
+        )],
         view,
         content: editor_cid(),
     })
@@ -3946,10 +4052,10 @@ async fn async_open_ignores_superseded_and_stale_target_results() {
     let expected_view = app.session.view_for_space(target);
     let first = app
         .kernel
-        .queue_open(target, expected_view, first_path.clone());
+        .queue_view_open(target, expected_view, first_path.clone());
     let second = app
         .kernel
-        .queue_open(target, expected_view, second_path.clone());
+        .queue_view_open(target, expected_view, second_path.clone());
     let opened = |path: &std::path::Path, text: &str| OpenedPath {
         path: path.to_owned(),
         identity: normalize_path(path).unwrap().1,
@@ -3975,9 +4081,10 @@ async fn async_open_ignores_superseded_and_stale_target_results() {
     let expected_view = app.session.view_for_space(target);
     let third = app
         .kernel
-        .queue_open(target, expected_view, third_path.clone());
+        .queue_view_open(target, expected_view, third_path.clone());
     let replacement = app.new_buffer();
-    app.switch_buffer_at(target, replacement).unwrap();
+    app.replace_space_content(target, replacement, true)
+        .unwrap();
 
     assert!(
         app.complete_async_open(third, Ok(opened(&third_path, "third")))
@@ -3996,7 +4103,54 @@ async fn async_open_ignores_superseded_and_stale_target_results() {
 }
 
 #[test]
-fn typed_buffer_operation_rejects_a_mixed_frame_before_mutating() {
+fn typed_view_focus_targets_an_existing_view() {
+    let mut app = make_app(vec![], None);
+    let left_space = app.session.focused();
+    let left = view_id(&app, left_space);
+    let right_space = app
+        .split_space(left_space, editor_cid(), true, SplitDirection::Right, false)
+        .unwrap()
+        .new_space;
+    let right = view_id(&app, right_space);
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::ViewLifecycle(
+            ViewLifecycleOperation::Focus { view: right },
+        )],
+        view: left,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert_eq!(app.session.focused(), right_space);
+}
+
+#[test]
+fn typed_view_switch_can_create_its_buffer_view_source() {
+    let mut app = make_app(vec![], None);
+    let original_view = view_id(&app, app.session.focused());
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::ViewLifecycle(
+            ViewLifecycleOperation::Switch {
+                spec: ViewSpec::Buffer {
+                    source: BufferViewSource::Create,
+                },
+            },
+        )],
+        view: original_view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    let switched = view_id(&app, app.session.focused());
+    assert_ne!(switched, original_view);
+    assert_ne!(app.session.view(switched).unwrap().content(), editor_cid());
+    assert_eq!(app.buffers().len(), 2);
+}
+
+#[test]
+fn typed_lifecycle_operation_rejects_a_mixed_frame_before_mutating() {
     let mut app = make_app(vec![], None);
     let view = view_id(&app, app.session.focused());
     let before = app.buffers().len();
@@ -4004,7 +4158,7 @@ fn typed_buffer_operation_rejects_a_mixed_frame_before_mutating() {
     let error = app
         .execute_command(DispatchCommand::ModeOperations {
             operations: vec![
-                OperationRequest::Buffer(BufferOperation::New),
+                OperationRequest::ContentLifecycle(ContentLifecycleOperation::Create),
                 view_edit(EditCommand::InsertText("unexpected".to_owned())),
             ],
             view,
@@ -4020,7 +4174,7 @@ fn typed_buffer_operation_rejects_a_mixed_frame_before_mutating() {
         .execute_command(DispatchCommand::ModeOperations {
             operations: vec![
                 view_edit(EditCommand::InsertText("unexpected".to_owned())),
-                OperationRequest::Buffer(BufferOperation::New),
+                OperationRequest::ContentLifecycle(ContentLifecycleOperation::Create),
             ],
             view,
             content: editor_cid(),
@@ -4148,7 +4302,7 @@ fn reload_buffer_guards_dirty_text_and_force_installs_disk_state() {
     std::fs::write(&path, "before").unwrap();
     let mut app = make_app(vec![], None);
     let content = app.open_buffer(&path).unwrap();
-    let view = app.switch_buffer(content).unwrap();
+    let view = switch_focused_view(&mut app, content).unwrap();
     app.split_space(
         app.session.focused(),
         content,
@@ -4249,17 +4403,17 @@ fn reload_buffer_rejects_an_untitled_buffer() {
 }
 
 #[test]
-fn switch_buffer_replaces_the_focused_view_and_is_idempotent() {
+fn switching_the_focused_view_replaces_it_and_is_idempotent() {
     let mut app = make_app(vec![], None);
     let original = view_id(&app, app.session.focused());
     let content = app.new_buffer();
 
-    let switched = app.switch_buffer(content).unwrap();
+    let switched = switch_focused_view(&mut app, content).unwrap();
 
     assert_ne!(switched, original);
     assert_eq!(view_id(&app, app.session.focused()), switched);
     assert_eq!(app.session.view(switched).unwrap().content(), content);
-    assert_eq!(app.switch_buffer(content).unwrap(), switched);
+    assert_eq!(switch_focused_view(&mut app, content).unwrap(), switched);
 }
 
 #[test]
@@ -4368,12 +4522,12 @@ fn close_buffer_rejects_a_pending_save_even_when_forced() {
 }
 
 #[test]
-fn switch_buffer_rejects_missing_content() {
+fn switching_to_a_buffer_view_rejects_missing_content() {
     let mut app = make_app(vec![], None);
 
     assert!(matches!(
-        app.switch_buffer(ContentId(u64::MAX)),
-        Err(super::BufferLifecycleError::MissingContent(_))
+        switch_focused_view(&mut app, ContentId(u64::MAX)),
+        Err(LayoutError::MissingContent(_))
     ));
 }
 
@@ -6560,11 +6714,13 @@ async fn save_as_updates_the_path_only_after_success() {
     let view = view_id(&app, app.session.focused());
     let error = app
         .execute_command(DispatchCommand::ModeOperations {
-            operations: vec![OperationRequest::Buffer(BufferOperation::SaveAs {
-                target: ContentTarget::Id(other),
-                path: path.to_string_lossy().into_owned(),
-                force: false,
-            })],
+            operations: vec![OperationRequest::ContentLifecycle(
+                ContentLifecycleOperation::SaveAs {
+                    target: ContentTarget::Id(other),
+                    path: path.to_string_lossy().into_owned(),
+                    force: false,
+                },
+            )],
             view,
             content: editor_cid(),
         })
@@ -8153,7 +8309,7 @@ fn raw_view_mode_content_action_maps_its_source_view() {
 }
 
 #[test]
-fn content_scoped_origin_cannot_smuggle_a_view_operation() {
+fn content_scoped_origin_cannot_smuggle_view_operations() {
     let mut app = make_app(vec![], None);
     let request = crate::operation::OperationRequest::View {
         target: crate::operation::ViewTarget::Current,
@@ -8165,6 +8321,19 @@ fn content_scoped_origin_cannot_smuggle_a_view_operation() {
     let error = app
         .execute_command(DispatchCommand::ModeContentOperations {
             operations: vec![request],
+            content: editor_cid(),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("view-scoped origin"));
+
+    let error = app
+        .execute_command(DispatchCommand::ModeContentOperations {
+            operations: vec![OperationRequest::ViewLifecycle(
+                ViewLifecycleOperation::Switch {
+                    spec: ViewSpec::buffer(editor_cid()),
+                },
+            )],
             content: editor_cid(),
         })
         .unwrap_err();
@@ -8571,7 +8740,7 @@ fn clipboard_cut_paste_crosses_buffers_and_is_undoable() {
     .unwrap();
 
     let other = app.new_buffer();
-    let other_view = app.switch_buffer(other).unwrap();
+    let other_view = switch_focused_view(&mut app, other).unwrap();
     app.execute_command(DispatchCommand::ModeOperations {
         operations: vec![clipboard(ClipboardOperation::Paste {
             source: ClipboardSource::Internal,
@@ -8660,7 +8829,7 @@ fn clipboard_write_failure_keeps_internal_payload_available() {
             .contains("clipboard write failed")
     );
     let other = app.new_buffer();
-    let other_view = app.switch_buffer(other).unwrap();
+    let other_view = switch_focused_view(&mut app, other).unwrap();
     app.frontend.fail_clipboard_read = true;
     app.execute_command(DispatchCommand::ModeOperations {
         operations: vec![clipboard(ClipboardOperation::Paste {
@@ -8725,7 +8894,7 @@ fn failed_frame_rolls_back_cut_and_discards_clipboard_effects() {
     assert!(app.frontend.clipboard_writes.is_empty());
 
     let other = app.new_buffer();
-    let other_view = app.switch_buffer(other).unwrap();
+    let other_view = switch_focused_view(&mut app, other).unwrap();
     app.execute_command(DispatchCommand::ModeOperations {
         operations: vec![clipboard(ClipboardOperation::Paste {
             source: ClipboardSource::Internal,
@@ -9062,9 +9231,9 @@ async fn vim_command_line_calls_formal_commands_and_registered_shortcuts() {
 
     send_vim_command(
         &mut app,
-        "ts function createBuffer() { return newBuffer(); }\
+        "ts function createContent() { return content.create(); }\
          editor.commands.shortcut('make-buffer', tail => {\
-         if (tail !== 'one two') throw new Error('wrong tail'); newBuffer(); })",
+         if (tail !== 'one two') throw new Error('wrong tail'); content.create(); })",
     )
     .await;
     send_vim_command(&mut app, "make-buffer   one two  ").await;
@@ -9072,7 +9241,11 @@ async fn vim_command_line_calls_formal_commands_and_registered_shortcuts() {
     assert_eq!(app.buffers().len(), 2);
     assert!(app.runtime_diagnostics().is_empty());
 
-    send_vim_command(&mut app, "switchBuffer(createBuffer())").await;
+    send_vim_command(
+        &mut app,
+        "view.switch({ type: 'core.buffer', content: createContent() })",
+    )
+    .await;
 
     assert_eq!(app.buffers().len(), 3);
     let view = view_id(&app, app.session.focused());
@@ -9093,7 +9266,7 @@ async fn vim_save_call_uses_the_formal_async_command() {
     })
     .unwrap();
 
-    send_vim_command(&mut app, "save()").await;
+    send_vim_command(&mut app, "content.save()").await;
 
     assert_eq!(app.pending_commands.len(), 1);
     let message = app.kernel.receive_message().await.unwrap();
@@ -9107,7 +9280,7 @@ async fn vim_ts_without_a_tail_executes_the_current_top_level_statement() {
     let view = view_id(&app, app.session.focused());
     app.execute_command(DispatchCommand::ContentWithView {
         command: ContentCommand::Edit(EditCommand::InsertText(
-            "const made = newBuffer();\n".to_owned(),
+            "const made = content.create();\n".to_owned(),
         )),
         view,
         content: editor_cid(),
@@ -9309,7 +9482,7 @@ async fn vim_save_conflict_preserves_external_file_and_reports_it() {
 }
 
 #[test]
-fn registered_new_buffer_result_can_feed_nested_switch() {
+fn registered_content_result_can_feed_nested_view_switch() {
     let mut app = make_app(vec![], None);
     let test_id = CommandId::new("test.newAndSwitch").unwrap();
     app.register_command(CommandEntry::new(
@@ -9321,7 +9494,7 @@ fn registered_new_buffer_result_can_feed_nested_switch() {
                 ));
             }
             let created = host.invoke_command(CommandInvocation::new(
-                CommandId::new("newBuffer").unwrap(),
+                CommandId::new("content.create").unwrap(),
                 Vec::new(),
             ))?;
             let content = match created {
@@ -9331,8 +9504,11 @@ fn registered_new_buffer_result_can_feed_nested_switch() {
                 }
             };
             host.invoke_command(CommandInvocation::new(
-                CommandId::new("switchBuffer").unwrap(),
-                vec![content],
+                CommandId::new("view.switch").unwrap(),
+                vec![serde_json::json!({
+                    "type": "core.buffer",
+                    "content": content,
+                })],
             ))
         },
     ));
@@ -9357,8 +9533,8 @@ fn script_command_calls_native_commands_in_the_same_frame() {
         "file:///commands.ts",
         r#"
 editor.commands.register("test.newAndSwitch", () => {
-  const content = newBuffer();
-  switchBuffer(content);
+  const created = content.create();
+  view.switch({ type: "core.buffer", content: created });
 });
 "#,
     )
@@ -9405,8 +9581,8 @@ fn persistent_global_script_calls_native_commands_in_its_frame() {
         invocation: vell_plugin_v8::GlobalScriptRequest::Interactive {
             source: r#"
 function newAndSwitch() {
-  const content = newBuffer();
-  switchBuffer(content);
+  const created = content.create();
+  view.switch({ type: "core.buffer", content: created });
 }
 "#
             .to_owned(),
@@ -9458,7 +9634,7 @@ async fn native_save_command_stays_pending_until_the_write_completes() {
     let view = view_id(&app, app.session.focused());
 
     app.execute_command(DispatchCommand::Registered {
-        invocation: CommandInvocation::new(CommandId::new("save").unwrap(), Vec::new()),
+        invocation: CommandInvocation::new(CommandId::new("content.save").unwrap(), Vec::new()),
         view,
         content: editor_cid(),
     })
@@ -9481,7 +9657,7 @@ async fn returned_save_promise_resumes_before_quit() {
         &mut app,
         r#"
 editor.commands.register("test.saveThenQuit", async () => {
-  await save();
+  await content.save();
   quit();
 });
 "#,
@@ -9538,7 +9714,7 @@ async fn async_command_resume_keeps_its_original_target_after_focus_changes() {
         &mut app,
         r#"
 editor.commands.register("test.saveAndCapture", async () => {
-  await save();
+  await content.save();
   return test.captureCurrent();
 });
 "#,
@@ -9561,7 +9737,7 @@ editor.commands.register("test.saveAndCapture", async () => {
     })
     .unwrap();
     let other = app.new_buffer();
-    app.switch_buffer(other).unwrap();
+    switch_focused_view(&mut app, other).unwrap();
 
     let message = app.kernel.receive_message().await.unwrap();
     app.handle_app_message(message).unwrap();
@@ -9596,7 +9772,7 @@ async fn text_change_while_awaiting_cancels_the_original_continuation() {
         &mut app,
         r#"
 editor.commands.register("test.saveAndResume", async () => {
-  await save();
+  await content.save();
   test.captureResume();
 });
 "#,
@@ -9646,9 +9822,9 @@ async fn post_await_exception_rolls_back_only_the_resumed_frame() {
         &mut app,
         r#"
 editor.commands.register("test.failAfterSave", async () => {
-  await save();
-  const created = newBuffer();
-  switchBuffer(created);
+  await content.save();
+  const created = content.create();
+  view.switch({ type: "core.buffer", content: created });
   throw new Error("after await");
 });
 "#,
@@ -9710,7 +9886,7 @@ async fn save_failure_rejects_the_script_promise() {
         r#"
 editor.commands.register("test.catchSave", async () => {
   try {
-    await save();
+    await content.save();
   } catch (error) {
     test.captureError(String(error));
   }
@@ -9764,7 +9940,7 @@ async fn promise_all_correlates_multiple_save_tasks_to_one_continuation() {
         &mut app,
         r#"
 editor.commands.register("test.saveAll", async () => {
-  await Promise.all([save(), save()]);
+  await Promise.all([content.save(), content.save()]);
   test.captureAll();
 });
 "#,
@@ -9797,7 +9973,7 @@ async fn unreturned_save_promise_does_not_suspend_the_command() {
         &mut app,
         r#"
 editor.commands.register("test.fireAndForget", () => {
-  save();
+  content.save();
 });
 "#,
         &[],
@@ -9841,7 +10017,7 @@ async fn closing_the_original_view_cancels_its_suspended_command() {
         &mut app,
         r#"
 editor.commands.register("test.resumeClosed", async () => {
-  await save();
+  await content.save();
   test.captureClosed();
 });
 "#,
@@ -9892,8 +10068,8 @@ async fn command_registered_after_await_is_published_to_the_host_registry() {
         &mut app,
         r#"
 editor.commands.register("test.installAfterSave", async () => {
-  await save();
-  editor.commands.register("test.installedAfterSave", () => newBuffer());
+  await content.save();
+  editor.commands.register("test.installedAfterSave", () => content.create());
 });
 "#,
         &[],
@@ -9943,7 +10119,7 @@ async fn global_typescript_evaluator_resumes_its_final_promise() {
         invocation: vell_plugin_v8::GlobalScriptRequest::Interactive {
             source: r#"
 async function saveThenQuitFromGlobal() {
-  await save();
+  await content.save();
   quit();
 }
 saveThenQuitFromGlobal();
@@ -9982,7 +10158,7 @@ fn save_conflict_is_exposed_to_typescript_as_a_rejected_promise() {
         &mut app,
         r#"
 editor.commands.register("test.captureConflict", async () => {
-  const pending = save();
+  const pending = content.save();
   test.capturePromise(pending instanceof Promise);
   try {
     await pending;
@@ -10024,7 +10200,7 @@ fn failed_registered_command_removes_provisional_content() {
         test_id.clone(),
         |host: &mut dyn CommandHost, _arguments: Vec<CommandValue>| {
             host.invoke_command(CommandInvocation::new(
-                CommandId::new("newBuffer").unwrap(),
+                CommandId::new("content.create").unwrap(),
                 Vec::new(),
             ))?;
             host.invoke_command(CommandInvocation::new(
@@ -10150,7 +10326,7 @@ fn registered_host_requests_share_the_frame_operation_budget() {
         |host: &mut dyn CommandHost, _arguments: Vec<CommandValue>| {
             for _ in 0..=vell_mode::operation::MAX_OPERATIONS_PER_FRAME {
                 host.invoke_command(CommandInvocation::new(
-                    CommandId::new("newBuffer").unwrap(),
+                    CommandId::new("content.create").unwrap(),
                     Vec::new(),
                 ))?;
             }

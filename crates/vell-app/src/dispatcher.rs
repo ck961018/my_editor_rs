@@ -1095,7 +1095,8 @@ mod tests {
         let (mut dispatcher, scene, focused, views, mut view_modes, mut content_modes, _, contents) =
             fixture();
         let key = KeyEvent::ctrl('x');
-        let invocation = CommandInvocation::new(CommandId::new("buffer.save").unwrap(), Vec::new());
+        let invocation =
+            CommandInvocation::new(CommandId::new("workspace.persist").unwrap(), Vec::new());
         dispatcher
             .global_keymap
             .bind(key, Command::Registered(invocation.clone()));

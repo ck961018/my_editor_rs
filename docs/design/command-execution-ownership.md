@@ -2,7 +2,7 @@
 
 **状态：** 当前实现
 
-**更新日期：** 2026-08-02
+**更新日期：** 2026-08-10
 
 ## 1. 结论
 
@@ -72,8 +72,10 @@ mutation 路径。
 
 `OperationRequest` 用 enum variant 把合法目标和 operation 绑定：
 
-- Content：应用 `ContentAction` 或保存；
+- Content：应用 `ContentAction` 或执行内部保存请求；
+- Content lifecycle：create、open、list、close、save、saveAs 或 reload；
 - View：编辑、View action、Content action 或 viewport；
+- View lifecycle：focus 已有 View，或按 `ViewSpec` 替换 View；
 - History：begin、commit、rollback、undo 或 redo；
 - Mode：调用当前 Content 或 View chain 中的 Mode command；
 - Mode input：把输入交给目标 View 的 Mode chain；
@@ -88,8 +90,9 @@ mutation 路径。
 View 与 Content 绑定以及 history owner。解析后才产生带具体 ID 的
 `ResolvedOperation`。
 
-content scope 不能伪造 View operation。view scope 只能作用于绑定的 View 与
-Content。保留的显式跨 ID target 在启用前也必须经过相同验证。
+content scope 不能伪造 View operation。普通 view operation 只能作用于来源
+View 与其绑定的 Content。Content/View lifecycle 中开放的显式 ID target
+仍须验证实体存在、ContentKind 与来源 capability。
 
 ## 4. 有序执行
 
@@ -148,14 +151,15 @@ Save、Quit、布局和 viewport 先记录为 prepared effect：
 
 - `Execute`：立即执行一个 typed `OperationRequest`；
 - `ExecuteAsync`：执行后返回 host task，交给 continuation；
-- `CreateBuffer`：创建 Content 并立即返回 `ContentId`；
+- `CreateContent`：创建 Content 并立即返回 `ContentId`；
 - `Query`：返回 owned 快照或 ID。
 
 host 不借出 App、Kernel、Session、Content 或 View。嵌套命令共享同一个
 host、frame、预算和 origin，因此后序命令可以观察前序 operation 形成的
-provisional 状态：`switchBuffer(newBuffer())` 在一个 frame 内成立。
+provisional 状态。比如先调用 `content.create()`，再把其结果放进
+`view.switch({ type: "core.buffer", content: id })`，仍在一个 frame 内成立。
 
-`CreateBuffer` 把新 Content 记入 frame 的 provisional journal，失败时随
+`CreateContent` 把新 Content 记入 frame 的 provisional journal，失败时随
 frame 一起回收。这里不建立第二个 ContentStore，也没有通用 shadow App；
 只有确实需要立即观察的 lifecycle operation 才提供 provisional 数据。
 
@@ -210,7 +214,8 @@ Mode state、viewport、focus、布局和 JavaScript heap 状态不进入文本�
 
 ## 10. 特殊路径
 
-- Save 是 Content operation，但不是 `ContentAction`。
+- 保存是 Content IO operation，不是 `ContentAction`；公开命令属于
+  `content.save`。
 - Undo/redo 是 History operation，不由 Buffer 私有栈处理。
 - Viewport 和布局是延迟 effect，不进入 Content 或 history。
 - Content event 可以更新 Content，无需伪造 Mode。

@@ -646,21 +646,41 @@ impl Kernel {
         self.contents.remove(content)
     }
 
-    pub(super) fn queue_open(
+    pub(super) fn queue_view_open(
         &mut self,
         target: SpaceId,
         expected_view: Option<ViewId>,
         requested_path: PathBuf,
     ) -> ContentId {
         self.detach_open_target(target);
+        self.queue_open(
+            HashMap::from([(target, expected_view)]),
+            false,
+            requested_path,
+        )
+    }
+
+    pub(super) fn queue_content_open(&mut self, requested_path: PathBuf) -> ContentId {
+        self.queue_open(HashMap::new(), true, requested_path)
+    }
+
+    fn queue_open(
+        &mut self,
+        targets: HashMap<SpaceId, Option<ViewId>>,
+        install_without_target: bool,
+        requested_path: PathBuf,
+    ) -> ContentId {
         let content = self.reserve_content_id();
+        for target in targets.keys() {
+            self.latest_opens.insert(*target, content);
+        }
         self.pending_opens.insert(
             content,
             PendingOpen {
-                targets: HashMap::from([(target, expected_view)]),
+                targets,
+                install_without_target,
             },
         );
-        self.latest_opens.insert(target, content);
         let tx = self.message_tx.clone();
         self.tasks.spawn_critical(async move {
             let result = tokio::task::spawn_blocking(move || {
@@ -717,7 +737,7 @@ impl Kernel {
                 })
             })
             .collect::<Vec<_>>();
-        if targets.is_empty() {
+        if targets.is_empty() && !pending.install_without_target {
             return Ok(None);
         }
         let opened = result?;
@@ -728,6 +748,7 @@ impl Kernel {
                 identity: opened.identity,
                 opened: None,
                 targets,
+                install_without_target: pending.install_without_target,
             }));
         }
         if self.reserved_paths.contains_key(&opened.identity) {
@@ -742,6 +763,7 @@ impl Kernel {
             identity: opened.identity,
             opened: Some(opened.buffer),
             targets,
+            install_without_target: pending.install_without_target,
         }))
     }
 
@@ -1006,10 +1028,12 @@ pub(super) struct OpenCompletion {
     pub identity: PathBuf,
     pub opened: Option<OpenedBuffer>,
     pub targets: Vec<OpenTarget>,
+    pub install_without_target: bool,
 }
 
 struct PendingOpen {
     targets: HashMap<SpaceId, Option<ViewId>>,
+    install_without_target: bool,
 }
 
 struct PendingSave {

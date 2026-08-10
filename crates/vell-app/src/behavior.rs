@@ -97,7 +97,7 @@ pub(super) enum EffectBehavior {
     },
     Face,
     Clipboard,
-    BufferLifecycle,
+    Lifecycle,
     Quit,
 }
 

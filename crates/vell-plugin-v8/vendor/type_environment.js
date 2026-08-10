@@ -192,30 +192,36 @@
       throw new Error("native command declarations missing");
     }
     const checker = program.getTypeChecker();
-    for (const statement of sourceFile.statements) {
-      if (!ts.isInterfaceDeclaration(statement) ||
-          statement.name.text !== "EditorCommands") continue;
-      for (const member of statement.members) {
-        if (!ts.isMethodSignature(member) && !ts.isPropertySignature(member)) {
-          continue;
-        }
-        const name = member.name &&
-          (ts.isIdentifier(member.name) || ts.isStringLiteral(member.name))
-          ? member.name.text
-          : undefined;
-        if (!name) continue;
-        const signature = ts.isMethodSignature(member)
-          ? checker.getSignatureFromDeclaration(member)
-          : undefined;
-        const signatures = signature
-          ? [signature]
-          : checker.getSignaturesOfType(
-            checker.getTypeAtLocation(member),
-            ts.SignatureKind.Call,
-          );
-        if (signatures.length > 0) {
-          commands.set(name, formatSignatures(signatures, checker, member));
-        }
+    const seeds = sourceFile.statements.find((statement) =>
+      ts.isInterfaceDeclaration(statement) &&
+      statement.name.text === "EditorCommandSeeds"
+    ) ?? sourceFile.statements.find((statement) =>
+      ts.isInterfaceDeclaration(statement) &&
+      statement.name.text === "EditorCommands"
+    );
+    if (!seeds) {
+      throw new Error("native command seed interface missing");
+    }
+    for (const member of seeds.members) {
+      if (!ts.isMethodSignature(member) && !ts.isPropertySignature(member)) {
+        continue;
+      }
+      const name = member.name &&
+        (ts.isIdentifier(member.name) || ts.isStringLiteral(member.name))
+        ? member.name.text
+        : undefined;
+      if (!name) continue;
+      const signature = ts.isMethodSignature(member)
+        ? checker.getSignatureFromDeclaration(member)
+        : undefined;
+      const signatures = signature
+        ? [signature]
+        : checker.getSignaturesOfType(
+          checker.getTypeAtLocation(member),
+          ts.SignatureKind.Call,
+        );
+      if (signatures.length > 0) {
+        commands.set(name, formatSignatures(signatures, checker, member));
       }
     }
     return null;

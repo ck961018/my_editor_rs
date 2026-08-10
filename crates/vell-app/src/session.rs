@@ -7,7 +7,8 @@ use crate::command_resolver::default_global_keymap;
 use crate::dispatcher::{DispatchInput, DispatchOutcome, Dispatcher, DispatcherInputSnapshot};
 use crate::layout::{
     LayoutError, NewView, StatusBarHandle, StatusBarPlacement, create_view, focusable_view_count,
-    resolve_focus, resolve_switch_target, scene_views, view_for_space, view_space_focusable,
+    resolve_focus, resolve_switch_target, resolve_switch_target_from_view, scene_views,
+    view_for_space, view_space_focusable,
 };
 use crate::mode::{
     CursorDomain, FaceRegistry, ModeAttachmentError, ModeContentContext, ModeContentStore,
@@ -107,8 +108,8 @@ impl ClientSession {
             view_modes.insert(init.editor.view, mode);
         }
         let mut scene_builder = SceneBuilder::new();
-        // 正文与状态栏是同一 editor view 的两个直属 Pane（见 ADR 0001 与
-        // Vell 架构改造设计文档）；状态栏不再占用独立 view id。
+        // 正文与状态栏是同一 editor view 的两个直属 Pane（见 ADR 0001）；
+        // 状态栏不再占用独立 view id。
         let (scene, editor_space, status_space) = build_editor_scene(
             &mut scene_builder,
             width as i32,
@@ -647,6 +648,10 @@ impl ClientSession {
     /// 通用切换目标：焦点 Pane 所属 view 的最近 switchable 祖先。
     pub(super) fn switch_target(&self, space: SpaceId) -> Option<ViewId> {
         resolve_switch_target(&self.scene, &self.views, space)
+    }
+
+    pub(super) fn switch_target_from_view(&self, view: ViewId) -> Option<ViewId> {
+        resolve_switch_target_from_view(&self.views, view)
     }
 
     /// view 的正文 Space（BODY_PANE 直属 Pane）。

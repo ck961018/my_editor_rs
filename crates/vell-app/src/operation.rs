@@ -68,20 +68,18 @@ pub enum ResolvedOperation {
         content: ContentId,
         operation: SearchOperation,
     },
-    Buffer(ResolvedBufferOperation),
+    ContentLifecycle(ResolvedContentLifecycleOperation),
+    ViewLifecycle(ResolvedViewLifecycleOperation),
     App(AppOperation),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ResolvedBufferOperation {
-    New,
+pub enum ResolvedContentLifecycleOperation {
+    Create,
     Open {
         path: String,
     },
     List,
-    Switch {
-        content: ContentId,
-    },
     Close {
         content: ContentId,
         force: bool,
@@ -99,6 +97,12 @@ pub enum ResolvedBufferOperation {
         content: ContentId,
         force: bool,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResolvedViewLifecycleOperation {
+    Focus { view: ViewId },
+    Switch { target: ViewId, spec: ViewSpec },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

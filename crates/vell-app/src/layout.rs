@@ -162,6 +162,28 @@ impl<F: Frontend> App<F> {
         Ok(())
     }
 
+    pub(super) fn switch_view_at(
+        &mut self,
+        target: ViewId,
+        content: ContentId,
+    ) -> Result<ViewId, LayoutError> {
+        if self
+            .session
+            .view(target)
+            .is_some_and(|view| view.content() == content)
+        {
+            return Ok(target);
+        }
+        let space = self
+            .session
+            .body_space_for_view(target)
+            .ok_or(LayoutError::MissingView(target))?;
+        self.replace_space_content(space, content, true)?;
+        self.session
+            .view_for_space(space)
+            .ok_or(LayoutError::MissingReplacementView)
+    }
+
     #[cfg_attr(
         not(test),
         expect(
@@ -181,6 +203,8 @@ impl<F: Frontend> App<F> {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum LayoutError {
     MissingContent(ContentId),
+    MissingView(ViewId),
+    MissingReplacementView,
     WouldRemoveLastFocusable(SpaceId),
     NoFocusableSpace,
     NoStatusBar,
@@ -194,6 +218,8 @@ impl fmt::Display for LayoutError {
             Self::MissingContent(content) => {
                 write!(formatter, "content {} does not exist", content.0)
             }
+            Self::MissingView(view) => write!(formatter, "view {} does not exist", view.0),
+            Self::MissingReplacementView => formatter.write_str("replacement view is missing"),
             Self::WouldRemoveLastFocusable(space) => {
                 write!(formatter, "space {} is the last focusable space", space.0)
             }
@@ -274,7 +300,13 @@ pub(super) fn resolve_switch_target(
     views: &HashMap<ViewId, View>,
     focused: SpaceId,
 ) -> Option<ViewId> {
-    let mut current = view_for_space(scene, focused)?;
+    resolve_switch_target_from_view(views, view_for_space(scene, focused)?)
+}
+
+pub(super) fn resolve_switch_target_from_view(
+    views: &HashMap<ViewId, View>,
+    mut current: ViewId,
+) -> Option<ViewId> {
     loop {
         let view = views.get(&current)?;
         if view.switchable() {

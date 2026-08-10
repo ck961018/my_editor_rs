@@ -368,8 +368,11 @@ presentation。
 - 移除公开 `buffer.*` 注册、类型声明和示例；
 - 保持一次命令对应一个 ExecutionFrame。
 
-验收：从嵌套 BufferView 执行 `view.switch` 会原子替换其 DiffView 父级，
-失败会恢复 View、Content、input、history 和准备中的副作用。
+验收：`view.switch` 从来源 View 解析到最近的 switchable 祖先，并只准备一个
+拓扑副作用；当前 `core.buffer` View 的替换保持原子性，失败会恢复 View、
+Content、input、history 和准备中的副作用。复合 View 子树的实际替换由 M2
+统一收口；M1 明确拒绝带子 View 的切换目标，避免在 `ViewWorkspace` 形成前
+维护两套分步清理协议或留下孤儿 Space。
 
 ### M2：深化 ViewWorkspace
 

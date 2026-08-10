@@ -316,7 +316,7 @@ pub enum CommandQuery {
 pub enum CommandRequest {
     Execute(OperationRequest),
     ExecuteAsync(OperationRequest),
-    CreateBuffer,
+    CreateContent,
     Query(CommandQuery),
 }
 
@@ -419,11 +419,23 @@ mod tests {
 
     #[test]
     fn validates_dot_separated_typescript_identifiers() {
-        for value in ["save", "buffer.save", "$tools._save2", "编辑器.保存"] {
+        for value in [
+            "persist",
+            "workspace.persist",
+            "$tools._save2",
+            "编辑器.保存",
+        ] {
             assert_eq!(CommandId::new(value).unwrap().as_str(), value);
         }
 
-        for value in ["", ".save", "save.", "buffer..save", "2save", "save-as"] {
+        for value in [
+            "",
+            ".persist",
+            "persist.",
+            "workspace..persist",
+            "2persist",
+            "save-as",
+        ] {
             let error = CommandId::new(value).unwrap_err();
             assert_eq!(error.value(), value);
         }

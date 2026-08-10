@@ -1270,6 +1270,18 @@ editor.modes.define({
             "view",
           );
         },
+        createContent(ctx) {
+          ctx.content.create();
+        },
+        saveContent(ctx) {
+          ctx.content.save(ctx.contentId, true);
+        },
+        focusView(ctx) {
+          ctx.view.focus(ctx.viewId);
+        },
+        switchView(ctx) {
+          ctx.view.switch({ type: "core.buffer", create: true });
+        },
       },
       keys: { "\"": "quote" },
     },
@@ -1385,6 +1397,50 @@ editor.modes.define({
                     expressions,
                 }
             )] if face.as_str() == "plugin.pairs.match" && expressions.len() == 2
+        ));
+
+        let mut execute = |action: &str| {
+            mode.execute_view_with_arguments(
+                content_state.as_mut(),
+                view_state.as_mut(),
+                &context,
+                &ModeActionName::new(action),
+                &ModeValue::Null,
+            )
+            .unwrap()
+            .into_parts()
+            .1
+        };
+        assert!(matches!(
+            execute("createContent").as_slice(),
+            [vell_mode::operation::OperationRequest::ContentLifecycle(
+                vell_mode::operation::ContentLifecycleOperation::Create
+            )]
+        ));
+        assert!(matches!(
+            execute("saveContent").as_slice(),
+            [vell_mode::operation::OperationRequest::ContentLifecycle(
+                vell_mode::operation::ContentLifecycleOperation::Save {
+                    target: vell_mode::operation::ContentTarget::Id(ContentId(0)),
+                    force: true,
+                }
+            )]
+        ));
+        assert!(matches!(
+            execute("focusView").as_slice(),
+            [vell_mode::operation::OperationRequest::ViewLifecycle(
+                vell_mode::operation::ViewLifecycleOperation::Focus { view: ViewId(0) }
+            )]
+        ));
+        assert!(matches!(
+            execute("switchView").as_slice(),
+            [vell_mode::operation::OperationRequest::ViewLifecycle(
+                vell_mode::operation::ViewLifecycleOperation::Switch {
+                    spec: vell_mode::operation::ViewSpec::Buffer {
+                        source: vell_mode::operation::BufferViewSource::Create,
+                    },
+                }
+            )]
         ));
     }
 

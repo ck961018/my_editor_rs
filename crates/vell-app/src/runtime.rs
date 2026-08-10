@@ -19,11 +19,12 @@ use crate::execution::{
 use crate::layout::LayoutError;
 use crate::mode::{CursorDomain, InputFlow};
 use crate::operation::{
-    AppOperation, BufferOperation, ClipboardDestination, ClipboardOperation, ClipboardSource,
-    ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget, ModeFlowPropagation,
-    ModeTarget, OperationError, OperationOrigin, OperationOriginScope, OperationRequest,
-    QueuedOperation, ResolvedBufferOperation, ResolvedModeScope, ResolvedOperation,
-    SearchOperation, ViewEditPlan, ViewOperation, ViewPrecondition, ViewTarget,
+    AppOperation, BufferViewSource, ClipboardDestination, ClipboardOperation, ClipboardSource,
+    ContentLifecycleOperation, ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget,
+    ModeFlowPropagation, ModeTarget, OperationError, OperationOrigin, OperationOriginScope,
+    OperationRequest, QueuedOperation, ResolvedContentLifecycleOperation, ResolvedModeScope,
+    ResolvedOperation, ResolvedViewLifecycleOperation, SearchOperation, ViewEditPlan,
+    ViewLifecycleOperation, ViewOperation, ViewPrecondition, ViewSpec, ViewTarget,
     adapt_dispatch_command, prepend_operations,
 };
 use crate::query::AppQuery;
@@ -79,7 +80,7 @@ impl<F: Frontend> CommandHost for ScopedCommandHost<'_, F> {
 
     fn request(&mut self, request: CommandRequest) -> CommandResult {
         match request {
-            CommandRequest::CreateBuffer => {
+            CommandRequest::CreateContent => {
                 self.consume_request()?;
                 let content = self.app.new_buffer();
                 self.frame.record_provisional_content(content);
@@ -133,7 +134,12 @@ impl<F: Frontend> ScopedCommandHost<'_, F> {
 
     fn execute_request(&mut self, operation: OperationRequest) -> Result<(), CommandError> {
         let switched_content = match &operation {
-            OperationRequest::Buffer(BufferOperation::Switch { content }) => Some(*content),
+            OperationRequest::ViewLifecycle(ViewLifecycleOperation::Switch {
+                spec:
+                    ViewSpec::Buffer {
+                        source: BufferViewSource::Content(content),
+                    },
+            }) => Some(*content),
             _ => None,
         };
         let queued = QueuedOperation {
@@ -278,12 +284,12 @@ impl PreparedEffect {
             Self::Face(_) => EffectBehavior::Face,
             Self::ClipboardStore { .. } => EffectBehavior::Clipboard,
             Self::ReloadCommit { .. }
-            | Self::AsyncOpenCommit(_)
-            | Self::BufferList(_)
-            | Self::BufferNew
-            | Self::BufferOpen(_)
-            | Self::BufferSwitch { .. }
-            | Self::BufferClose { .. } => EffectBehavior::BufferLifecycle,
+            | Self::ContentOpenCommit(_)
+            | Self::ContentList(_)
+            | Self::ContentCreate
+            | Self::ContentOpen(_)
+            | Self::ViewSwitch { .. }
+            | Self::ContentClose { .. } => EffectBehavior::Lifecycle,
             Self::Quit => EffectBehavior::Quit,
         }
     }
@@ -356,12 +362,12 @@ impl<F: Frontend> App<F> {
             self.session.is_focusable_space(target.space)
                 && self.session.view_for_space(target.space) == target.expected_view
         });
-        if completion.targets.is_empty() {
+        if completion.targets.is_empty() && !completion.install_without_target {
             return Ok(true);
         }
         let mut frame = self.begin_execution_frame(None, None);
         let result =
-            self.prepare_topology_effect(&mut frame, PreparedEffect::AsyncOpenCommit(completion));
+            self.prepare_topology_effect(&mut frame, PreparedEffect::ContentOpenCommit(completion));
         self.finish_execution_frame(frame, result)?;
         Ok(true)
     }
@@ -972,7 +978,8 @@ impl<F: Frontend> App<F> {
                     self.kernel.clear_history(content);
                     self.kernel.update_buffer_baseline(content, path, baseline);
                 }
-                PreparedEffect::AsyncOpenCommit(completion) => {
+                PreparedEffect::ContentOpenCommit(completion) => {
+                    let report_content = completion.install_without_target;
                     let targets = completion
                         .targets
                         .iter()
@@ -987,11 +994,14 @@ impl<F: Frontend> App<F> {
                             .register_content_profile(content, ContentKind::Buffer);
                     }
                     for target in targets {
-                        self.switch_buffer_at(target, content)
-                            .expect("validated async open target remains available");
+                        self.replace_space_content(target, content, true)
+                            .expect("validated async view target remains available");
+                    }
+                    if report_content {
+                        self.record_runtime_message(format!("opened content {}", content.0));
                     }
                 }
-                PreparedEffect::BufferList(buffers) => {
+                PreparedEffect::ContentList(buffers) => {
                     let listing = buffers
                         .into_iter()
                         .map(|buffer| {
@@ -1011,23 +1021,44 @@ impl<F: Frontend> App<F> {
                         .join(" | ");
                     self.record_runtime_message(listing);
                 }
-                PreparedEffect::BufferNew => {
+                PreparedEffect::ContentCreate => {
                     let content = self.new_buffer();
-                    self.switch_buffer(content)
-                        .expect("new buffer remains switchable until frame commit");
+                    self.record_runtime_message(format!("created content {}", content.0));
                 }
-                PreparedEffect::BufferOpen(path) => {
-                    let target = self.session.focused();
-                    let expected_view = self.session.view_for_space(target);
-                    self.kernel.queue_open(target, expected_view, path);
+                PreparedEffect::ContentOpen(path) => {
+                    self.kernel.queue_content_open(path);
                 }
-                PreparedEffect::BufferSwitch { content } => {
-                    self.switch_buffer(content)
-                        .expect("validated buffer remains switchable until frame commit");
-                }
-                PreparedEffect::BufferClose { content, force } => {
+                PreparedEffect::ViewSwitch { target, spec } => match spec {
+                    ViewSpec::Buffer {
+                        source: BufferViewSource::Content(content),
+                    } => {
+                        self.switch_view_at(target, content)
+                            .expect("validated view remains switchable until frame commit");
+                    }
+                    ViewSpec::Buffer {
+                        source: BufferViewSource::Create,
+                    } => {
+                        let content = self.new_buffer();
+                        self.switch_view_at(target, content)
+                            .expect("new content remains switchable until frame commit");
+                    }
+                    ViewSpec::Buffer {
+                        source: BufferViewSource::Open { path },
+                    } => {
+                        let target_space = self
+                            .session
+                            .body_space_for_view(target)
+                            .expect("validated view keeps its body Pane until frame commit");
+                        self.kernel.queue_view_open(
+                            target_space,
+                            Some(target),
+                            std::path::PathBuf::from(path),
+                        );
+                    }
+                },
+                PreparedEffect::ContentClose { content, force } => {
                     self.close_buffer(content, force)
-                        .expect("validated buffer remains closeable until frame commit");
+                        .expect("validated content remains closeable until frame commit");
                 }
                 PreparedEffect::Viewport { view, command } => {
                     self.frontend.apply_viewport_command(view, command);
@@ -1227,19 +1258,28 @@ impl<F: Frontend> App<F> {
             | DispatchCommand::ModeOperations { operations, .. } => operations,
             _ => return origin,
         };
-        let [OperationRequest::Buffer(operation)] = operations.as_slice() else {
-            return origin;
-        };
-        let target = match operation {
-            BufferOperation::Switch { content } => Some(*content),
-            BufferOperation::Close { target, .. }
-            | BufferOperation::Save { target, .. }
-            | BufferOperation::SaveAs { target, .. }
-            | BufferOperation::Reload { target, .. } => match target {
-                ContentTarget::Current => origin,
-                ContentTarget::Id(content) => Some(*content),
+        let target = match operations.as_slice() {
+            [OperationRequest::ContentLifecycle(operation)] => match operation {
+                ContentLifecycleOperation::Close { target, .. }
+                | ContentLifecycleOperation::Save { target, .. }
+                | ContentLifecycleOperation::SaveAs { target, .. }
+                | ContentLifecycleOperation::Reload { target, .. } => match target {
+                    ContentTarget::Current => origin,
+                    ContentTarget::Id(content) => Some(*content),
+                },
+                ContentLifecycleOperation::Create
+                | ContentLifecycleOperation::Open { .. }
+                | ContentLifecycleOperation::List => None,
             },
-            BufferOperation::New | BufferOperation::Open { .. } | BufferOperation::List => None,
+            [
+                OperationRequest::ViewLifecycle(ViewLifecycleOperation::Switch {
+                    spec:
+                        ViewSpec::Buffer {
+                            source: BufferViewSource::Content(content),
+                        },
+                }),
+            ] => Some(*content),
+            _ => return origin,
         };
         target
             .filter(|content| self.kernel.contents().contains(*content))
@@ -1441,71 +1481,101 @@ impl<F: Frontend> App<F> {
                     }
                     Ok(())
                 }
-                ResolvedOperation::Buffer(operation) => {
-                    if !frame.can_prepare_buffer_lifecycle() || !queue.is_empty() {
+                ResolvedOperation::ContentLifecycle(operation) => {
+                    let exclusive =
+                        !matches!(operation, ResolvedContentLifecycleOperation::Save { .. });
+                    if exclusive && (!frame.can_prepare_lifecycle() || !queue.is_empty()) {
                         return Err(invalid_operation(
-                            "a buffer lifecycle operation must be the only operation in its frame",
+                            "a content lifecycle operation must be the only operation in its frame",
                         ));
                     }
                     let target = match &operation {
-                        ResolvedBufferOperation::Switch { content }
-                        | ResolvedBufferOperation::Close { content, .. }
-                        | ResolvedBufferOperation::Save { content, .. }
-                        | ResolvedBufferOperation::SaveAs { content, .. }
-                        | ResolvedBufferOperation::Reload { content, .. } => Some(*content),
-                        ResolvedBufferOperation::New
-                        | ResolvedBufferOperation::Open { .. }
-                        | ResolvedBufferOperation::List => None,
+                        ResolvedContentLifecycleOperation::Close { content, .. }
+                        | ResolvedContentLifecycleOperation::Save { content, .. }
+                        | ResolvedContentLifecycleOperation::SaveAs { content, .. }
+                        | ResolvedContentLifecycleOperation::Reload { content, .. } => {
+                            Some(*content)
+                        }
+                        ResolvedContentLifecycleOperation::Create
+                        | ResolvedContentLifecycleOperation::Open { .. }
+                        | ResolvedContentLifecycleOperation::List => None,
                     };
                     if let Some(content) = target {
                         self.retarget_execution_frame(frame, content)?;
                     }
                     match operation {
-                        ResolvedBufferOperation::New => self
-                            .prepare_topology_effect(frame, PreparedEffect::BufferNew)
+                        ResolvedContentLifecycleOperation::Create => self
+                            .prepare_topology_effect(frame, PreparedEffect::ContentCreate)
                             .map(|_| ()),
-                        ResolvedBufferOperation::Open { path } => self
+                        ResolvedContentLifecycleOperation::Open { path } => self
                             .prepare_topology_effect(
                                 frame,
-                                PreparedEffect::BufferOpen(std::path::PathBuf::from(path)),
+                                PreparedEffect::ContentOpen(std::path::PathBuf::from(path)),
                             )
                             .map(|_| ()),
-                        ResolvedBufferOperation::List => {
+                        ResolvedContentLifecycleOperation::List => {
                             let buffers = self.buffers();
-                            self.prepare_effect(frame, PreparedEffect::BufferList(buffers));
+                            self.prepare_effect(frame, PreparedEffect::ContentList(buffers));
                             Ok(())
                         }
-                        ResolvedBufferOperation::Switch { content } => {
-                            self.validate_switch_buffer(content).map_err(|error| {
-                                recoverable_message(io::ErrorKind::Other, error.to_string())
-                            })?;
-                            self.prepare_topology_effect(
-                                frame,
-                                PreparedEffect::BufferSwitch { content },
-                            )
-                            .map(|_| ())
-                        }
-                        ResolvedBufferOperation::Close { content, force } => {
+                        ResolvedContentLifecycleOperation::Close { content, force } => {
                             self.validate_close_buffer(content, force)
                                 .map_err(|error| {
                                     recoverable_message(io::ErrorKind::Other, error.to_string())
                                 })?;
                             self.prepare_topology_effect(
                                 frame,
-                                PreparedEffect::BufferClose { content, force },
+                                PreparedEffect::ContentClose { content, force },
                             )
                             .map(|_| ())
                         }
-                        ResolvedBufferOperation::Save { content, force } => {
+                        ResolvedContentLifecycleOperation::Save { content, force } => {
                             self.execute_save_with_force(content, force, frame)
                         }
-                        ResolvedBufferOperation::SaveAs {
+                        ResolvedContentLifecycleOperation::SaveAs {
                             content,
                             path,
                             force,
                         } => self.execute_save_as(content, path, force, frame),
-                        ResolvedBufferOperation::Reload { content, force } => {
+                        ResolvedContentLifecycleOperation::Reload { content, force } => {
                             self.execute_reload(content, force, frame)
+                        }
+                    }
+                }
+                ResolvedOperation::ViewLifecycle(operation) => {
+                    if !frame.can_prepare_lifecycle() || !queue.is_empty() {
+                        return Err(invalid_operation(
+                            "a view lifecycle operation must be the only operation in its frame",
+                        ));
+                    }
+                    match operation {
+                        ResolvedViewLifecycleOperation::Focus { view } => {
+                            let target = self
+                                .session
+                                .body_space_for_view(view)
+                                .ok_or_else(|| invalid_operation("view has no body Pane"))?;
+                            if !self.session.is_focusable_space(target) {
+                                return Err(invalid_operation("view is not focusable"));
+                            }
+                            self.prepare_topology_effect(frame, PreparedEffect::Focus { target })
+                                .map(|_| ())
+                        }
+                        ResolvedViewLifecycleOperation::Switch { target, spec } => {
+                            if let ViewSpec::Buffer {
+                                source: BufferViewSource::Content(content),
+                            } = &spec
+                            {
+                                self.retarget_execution_frame(frame, *content)?;
+                                self.validate_buffer_view_content(*content)
+                                    .map_err(|error| {
+                                        recoverable_message(io::ErrorKind::Other, error.to_string())
+                                    })?;
+                            }
+                            self.prepare_topology_effect(
+                                frame,
+                                PreparedEffect::ViewSwitch { target, spec },
+                            )
+                            .map(|_| ())
                         }
                     }
                 }
@@ -1781,42 +1851,82 @@ impl<F: Frontend> App<F> {
                 })
             }
             OperationRequest::App(operation) => Ok(ResolvedOperation::App(operation)),
-            OperationRequest::Buffer(operation) => {
+            OperationRequest::ContentLifecycle(operation) => {
                 let operation = match operation {
-                    BufferOperation::New => ResolvedBufferOperation::New,
-                    BufferOperation::Open { path } => ResolvedBufferOperation::Open { path },
-                    BufferOperation::List => ResolvedBufferOperation::List,
-                    BufferOperation::Switch { content } => {
-                        let content =
-                            self.resolve_content_target(ContentTarget::Id(content), origin)?;
-                        ResolvedBufferOperation::Switch { content }
+                    ContentLifecycleOperation::Create => ResolvedContentLifecycleOperation::Create,
+                    ContentLifecycleOperation::Open { path } => {
+                        ResolvedContentLifecycleOperation::Open { path }
                     }
-                    BufferOperation::Close { target, force } => {
+                    ContentLifecycleOperation::List => ResolvedContentLifecycleOperation::List,
+                    ContentLifecycleOperation::Close { target, force } => {
                         let content = self.resolve_content_target(target, origin)?;
-                        ResolvedBufferOperation::Close { content, force }
+                        ResolvedContentLifecycleOperation::Close { content, force }
                     }
-                    BufferOperation::Save { target, force } => {
+                    ContentLifecycleOperation::Save { target, force } => {
                         let content = self.resolve_content_target(target, origin)?;
-                        ResolvedBufferOperation::Save { content, force }
+                        ResolvedContentLifecycleOperation::Save { content, force }
                     }
-                    BufferOperation::SaveAs {
+                    ContentLifecycleOperation::SaveAs {
                         target,
                         path,
                         force,
                     } => {
                         let content = self.resolve_content_target(target, origin)?;
-                        ResolvedBufferOperation::SaveAs {
+                        ResolvedContentLifecycleOperation::SaveAs {
                             content,
                             path,
                             force,
                         }
                     }
-                    BufferOperation::Reload { target, force } => {
+                    ContentLifecycleOperation::Reload { target, force } => {
                         let content = self.resolve_content_target(target, origin)?;
-                        ResolvedBufferOperation::Reload { content, force }
+                        ResolvedContentLifecycleOperation::Reload { content, force }
                     }
                 };
-                Ok(ResolvedOperation::Buffer(operation))
+                Ok(ResolvedOperation::ContentLifecycle(operation))
+            }
+            OperationRequest::ViewLifecycle(operation) => {
+                if origin.scope != OperationOriginScope::View {
+                    return Err(invalid_operation(
+                        "view lifecycle operation requires a view-scoped origin",
+                    ));
+                }
+                let operation = match operation {
+                    ViewLifecycleOperation::Focus { view } => {
+                        self.resolve_view_target(ViewTarget::Id(view), origin)?;
+                        ResolvedViewLifecycleOperation::Focus { view }
+                    }
+                    ViewLifecycleOperation::Switch { spec } => {
+                        let source = origin
+                            .view
+                            .ok_or_else(|| invalid_operation("view switch has no source view"))?;
+                        let target =
+                            self.session
+                                .switch_target_from_view(source)
+                                .ok_or_else(|| {
+                                    invalid_operation("view switch has no switchable target")
+                                })?;
+                        if self
+                            .session
+                            .view(target)
+                            .is_some_and(|view| !view.children().is_empty())
+                        {
+                            return Err(invalid_operation(
+                                "compound view replacement requires ViewWorkspace subtree lifecycle",
+                            ));
+                        }
+                        let spec = match spec {
+                            ViewSpec::Buffer {
+                                source: BufferViewSource::Content(content),
+                            } => ViewSpec::buffer(
+                                self.resolve_content_target(ContentTarget::Id(content), origin)?,
+                            ),
+                            spec => spec,
+                        };
+                        ResolvedViewLifecycleOperation::Switch { target, spec }
+                    }
+                };
+                Ok(ResolvedOperation::ViewLifecycle(operation))
             }
             OperationRequest::Face(operation) => {
                 let owner = origin

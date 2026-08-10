@@ -2,7 +2,7 @@
 
 **状态：** 当前实现
 
-**更新日期：** 2026-08-02
+**更新日期：** 2026-08-10
 
 ## 1. 定位
 
@@ -193,7 +193,7 @@ operation 上限来自 `vell-mode` 的共享常量，不能与 App frame 上限�
 editor.commands.register(formatDocument)
 editor.commands.register("math.increment", increment)
 editor.commands.shortcut("wq", async () => {
-  await save()
+  await content.save()
   quit()
 })
 ```
@@ -207,7 +207,7 @@ namespace 叶子、bare global fallback 和宿主 `CommandRegistry` 中的实现
 宿主为每个 native 命令安装 callable wrapper，使 native 与 TS 命令具有相同的
 函数调用体验。bare global fallback 只在该名称当前是 undefined、或仍是宿主
 自己安装的 fallback 时才写入，因此词法绑定和用户自定义 global 优先；
-`editor.commands.save()` 始终明确调用正式命令。
+`editor.commands.content.save()` 始终明确调用正式命令。
 
 `shortcut` 只接收一个原始可选参数 `string | undefined`。传入未注册回调时，
 宿主保留私有 callback identity：它不进入公开命令补全，但仍使用正常的命令

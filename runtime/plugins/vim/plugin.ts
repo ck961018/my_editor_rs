@@ -994,7 +994,7 @@ function closeBuffer(context: VimCommandContext, force: boolean): void {
   if (argument && id === undefined) {
     commandError(context, "E86: invalid buffer id");
   } else {
-    context.buffers.close(id, force);
+    context.content.close(id, force);
   }
 }
 
@@ -1118,13 +1118,16 @@ editor.commands.shortcut("q", () => quit());
 editor.commands.shortcut("quit", () => quit());
 editor.commands.shortcut("q!", () => forceQuit());
 editor.commands.shortcut("quit!", () => forceQuit());
-editor.commands.shortcut("w", (path) => path === undefined ? save() : invokeVim("write", path));
+editor.commands.shortcut(
+  "w",
+  (path) => path === undefined ? content.save() : invokeVim("write", path),
+);
 editor.commands.shortcut(
   "write",
-  (path) => path === undefined ? save() : invokeVim("write", path),
+  (path) => path === undefined ? content.save() : invokeVim("write", path),
 );
 editor.commands.shortcut("wq", async () => {
-  await save();
+  await content.save();
   quit();
 });
 registerVimShortcut(["w!", "write!"], "writeForce");
@@ -1166,24 +1169,24 @@ editor.modes.define({
       commands: {
         edit(context) {
           const path = stringArgument(context);
-          if (path) context.buffers.open(path);
+          if (path) context.view.switch({ type: "core.buffer", path });
           else commandError(context, "E471: path required");
         },
         editForce(context) {
           const path = stringArgument(context);
-          if (path) context.buffers.open(path);
-          else context.buffers.reload(undefined, true);
+          if (path) context.view.switch({ type: "core.buffer", path });
+          else context.content.reload(undefined, true);
         },
         new(context) {
-          context.buffers.create();
+          context.view.switch({ type: "core.buffer", create: true });
         },
         buffers(context) {
-          context.buffers.list();
+          context.content.list();
         },
         buffer(context) {
           const id = parseContentId(stringArgument(context));
           if (id === undefined) commandError(context, "E86: buffer id required");
-          else context.buffers.switch(id);
+          else context.view.switch({ type: "core.buffer", content: id });
         },
         bdelete(context) {
           closeBuffer(context, false);
@@ -1193,24 +1196,24 @@ editor.modes.define({
         },
         write(context) {
           const path = stringArgument(context);
-          if (path) context.buffers.saveAs(path);
-          else context.buffers.save();
+          if (path) context.content.saveAs(path);
+          else context.content.save();
         },
         writeForce(context) {
           const path = stringArgument(context);
-          if (path) context.buffers.saveAs(path, true);
-          else context.buffers.save(undefined, true);
+          if (path) context.content.saveAs(path, true);
+          else context.content.save(undefined, true);
         },
         saveAs(context) {
           const path = stringArgument(context);
-          if (path) context.buffers.saveAs(path);
+          if (path) context.content.saveAs(path);
           else commandError(context, "E471: path required");
         },
         reload(context) {
-          context.buffers.reload();
+          context.content.reload();
         },
         reloadForce(context) {
-          context.buffers.reload(undefined, true);
+          context.content.reload(undefined, true);
         },
         duplicate(context) {
           context.edit.duplicateLines();

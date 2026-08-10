@@ -5,7 +5,7 @@ use crate::buffer_lifecycle::BufferInfo;
 use crate::dispatcher::DispatcherInputSnapshot;
 use crate::kernel::{FileBaseline, OpenCompletion};
 use crate::mode::ModeDraftJournal;
-use crate::operation::OperationError;
+use crate::operation::{OperationError, ViewSpec};
 use crate::theme::{FaceRemapOwner, ResolvedFaceOperation};
 use crate::transaction::TransactionRecord;
 use vell_core::clipboard::ClipboardPayload;
@@ -92,14 +92,15 @@ pub(super) enum PreparedEffect {
         path: PathBuf,
         baseline: FileBaseline,
     },
-    AsyncOpenCommit(OpenCompletion),
-    BufferList(Vec<BufferInfo>),
-    BufferNew,
-    BufferOpen(PathBuf),
-    BufferSwitch {
-        content: ContentId,
+    ContentOpenCommit(OpenCompletion),
+    ContentList(Vec<BufferInfo>),
+    ContentCreate,
+    ContentOpen(PathBuf),
+    ViewSwitch {
+        target: ViewId,
+        spec: ViewSpec,
     },
-    BufferClose {
+    ContentClose {
         content: ContentId,
         force: bool,
     },
@@ -315,7 +316,7 @@ impl ExecutionFrame {
         self.budget.consume_operation()
     }
 
-    pub(super) fn can_prepare_buffer_lifecycle(&self) -> bool {
+    pub(super) fn can_prepare_lifecycle(&self) -> bool {
         self.checkpoints.content.is_none()
             && self.checkpoints.selections.is_none()
             && self.prepared_effects.is_empty()

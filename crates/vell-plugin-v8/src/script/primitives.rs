@@ -16,12 +16,13 @@ use vell_mode::editing::{
 };
 use vell_mode::mode_name::{ModeActionName, ModeName};
 use vell_mode::operation::{
-    AppOperation, BufferOperation, ClipboardDestination, ClipboardOperation, ClipboardSource,
-    ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget, ModeFlowPropagation,
-    ModeInvocation, ModeTarget, OperationRequest, SearchOperation, ViewOperation, ViewTarget,
+    AppOperation, BufferViewSource, ClipboardDestination, ClipboardOperation, ClipboardSource,
+    ContentLifecycleOperation, ContentTarget, FaceOperation, FaceRemapTarget, ModeFlowPropagation,
+    ModeInvocation, ModeTarget, OperationRequest, SearchOperation, ViewLifecycleOperation,
+    ViewOperation, ViewSpec, ViewTarget,
 };
 use vell_protocol::content_query::{FaceExpr, FaceName, FaceRemapToken};
-use vell_protocol::ids::ContentId;
+use vell_protocol::ids::{ContentId, ViewId};
 use vell_protocol::revision::Revision;
 use vell_protocol::space::SplitDirection;
 use vell_protocol::viewport::{
@@ -161,7 +162,6 @@ primitives! {
     SetFaceBase => ("faces", "setBase"),
     AddRelativeFace => ("faces", "addRelative"),
     RemoveRelativeFace => ("faces", "removeRelative"),
-    Save => ("app", "save"),
     Quit => ("app", "quit"),
     ClosePane => ("app", "closePane"),
     SplitHorizontal => ("app", "splitHorizontal"),
@@ -170,14 +170,15 @@ primitives! {
     FocusDown => ("app", "focusDown"),
     FocusUp => ("app", "focusUp"),
     FocusRight => ("app", "focusRight"),
-    BufferCreate => ("buffers", "create"),
-    BufferOpen => ("buffers", "open"),
-    BufferList => ("buffers", "list"),
-    BufferSwitch => ("buffers", "switch"),
-    BufferClose => ("buffers", "close"),
-    BufferSave => ("buffers", "save"),
-    BufferSaveAs => ("buffers", "saveAs"),
-    BufferReload => ("buffers", "reload"),
+    ContentCreate => ("content", "create"),
+    ContentOpen => ("content", "open"),
+    ContentList => ("content", "list"),
+    ContentClose => ("content", "close"),
+    ContentSave => ("content", "save"),
+    ContentSaveAs => ("content", "saveAs"),
+    ContentReload => ("content", "reload"),
+    ViewFocus => ("view", "focus"),
+    ViewSwitch => ("view", "switch"),
 }
 
 struct PrimitiveInvocation {
@@ -261,7 +262,8 @@ pub(super) fn install_primitives(
             ("commands", "commands"),
             ("faces", "faces"),
             ("app", "app"),
-            ("buffers", "buffers"),
+            ("content", "content"),
+            ("view", "view"),
         ],
     };
     for &(primitive_namespace, context_namespace) in namespaces {
@@ -779,10 +781,6 @@ fn primitive_effects(
         RemoveRelativeFace => vec![OperationRequest::Face(FaceOperation::RemoveRelative {
             token: face_remap_token(scope, arguments.get(0))?,
         })],
-        Save => nested(OperationRequest::Content {
-            target: ContentTarget::Current,
-            operation: ContentOperation::Save,
-        }),
         Quit => nested(OperationRequest::App(AppOperation::Command(
             AppCommand::Quit,
         ))),
@@ -807,31 +805,52 @@ fn primitive_effects(
         FocusRight => nested(OperationRequest::App(AppOperation::Command(
             AppCommand::Focus(SplitDirection::Right),
         ))),
-        BufferCreate => nested(OperationRequest::Buffer(BufferOperation::New)),
-        BufferOpen => nested(OperationRequest::Buffer(BufferOperation::Open {
-            path: non_empty_string(scope, arguments.get(0), "path")?,
-        })),
-        BufferList => nested(OperationRequest::Buffer(BufferOperation::List)),
-        BufferSwitch => nested(OperationRequest::Buffer(BufferOperation::Switch {
-            content: content_id(scope, arguments.get(0))?,
-        })),
-        BufferClose => nested(OperationRequest::Buffer(BufferOperation::Close {
-            target: optional_content_target(scope, arguments.get(0))?,
-            force: optional_bool_argument(scope, arguments.get(1), "force")?,
-        })),
-        BufferSave => nested(OperationRequest::Buffer(BufferOperation::Save {
-            target: optional_content_target(scope, arguments.get(0))?,
-            force: optional_bool_argument(scope, arguments.get(1), "force")?,
-        })),
-        BufferSaveAs => nested(OperationRequest::Buffer(BufferOperation::SaveAs {
-            target: ContentTarget::Current,
-            path: non_empty_string(scope, arguments.get(0), "path")?,
-            force: optional_bool_argument(scope, arguments.get(1), "force")?,
-        })),
-        BufferReload => nested(OperationRequest::Buffer(BufferOperation::Reload {
-            target: optional_content_target(scope, arguments.get(0))?,
-            force: optional_bool_argument(scope, arguments.get(1), "force")?,
-        })),
+        ContentCreate => nested(OperationRequest::ContentLifecycle(
+            ContentLifecycleOperation::Create,
+        )),
+        ContentOpen => nested(OperationRequest::ContentLifecycle(
+            ContentLifecycleOperation::Open {
+                path: non_empty_string(scope, arguments.get(0), "path")?,
+            },
+        )),
+        ContentList => nested(OperationRequest::ContentLifecycle(
+            ContentLifecycleOperation::List,
+        )),
+        ContentClose => nested(OperationRequest::ContentLifecycle(
+            ContentLifecycleOperation::Close {
+                target: optional_content_target(scope, arguments.get(0))?,
+                force: optional_bool_argument(scope, arguments.get(1), "force")?,
+            },
+        )),
+        ContentSave => nested(OperationRequest::ContentLifecycle(
+            ContentLifecycleOperation::Save {
+                target: optional_content_target(scope, arguments.get(0))?,
+                force: optional_bool_argument(scope, arguments.get(1), "force")?,
+            },
+        )),
+        ContentSaveAs => nested(OperationRequest::ContentLifecycle(
+            ContentLifecycleOperation::SaveAs {
+                target: ContentTarget::Current,
+                path: non_empty_string(scope, arguments.get(0), "path")?,
+                force: optional_bool_argument(scope, arguments.get(1), "force")?,
+            },
+        )),
+        ContentReload => nested(OperationRequest::ContentLifecycle(
+            ContentLifecycleOperation::Reload {
+                target: optional_content_target(scope, arguments.get(0))?,
+                force: optional_bool_argument(scope, arguments.get(1), "force")?,
+            },
+        )),
+        ViewFocus => nested(OperationRequest::ViewLifecycle(
+            ViewLifecycleOperation::Focus {
+                view: view_id(scope, arguments.get(0))?,
+            },
+        )),
+        ViewSwitch => nested(OperationRequest::ViewLifecycle(
+            ViewLifecycleOperation::Switch {
+                spec: view_spec(scope, arguments.get(0))?,
+            },
+        )),
     };
     Ok((effects, result))
 }
@@ -1048,6 +1067,65 @@ fn content_id(
     u64::try_from(value)
         .map(ContentId)
         .map_err(|_| ScriptError::new("contentId is too large"))
+}
+
+fn view_id(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Result<ViewId, ScriptError> {
+    let value = non_negative_integer(scope, value, "viewId")?;
+    u64::try_from(value)
+        .map(ViewId)
+        .map_err(|_| ScriptError::new("viewId is too large"))
+}
+
+fn view_spec(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<ViewSpec, ScriptError> {
+    let value = v8_to_json(scope, value, "view spec")?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| ScriptError::new("view spec must be an object"))?;
+    if object.get("type").and_then(serde_json::Value::as_str) != Some("core.buffer") {
+        return Err(ScriptError::new("view spec type must be 'core.buffer'"));
+    }
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "type" | "content" | "create" | "path"))
+    {
+        return Err(ScriptError::new(
+            "buffer view spec contains an unknown field",
+        ));
+    }
+    let sources = [
+        object.contains_key("content"),
+        object.contains_key("create"),
+        object.contains_key("path"),
+    ];
+    if sources.into_iter().filter(|present| *present).count() != 1 {
+        return Err(ScriptError::new(
+            "buffer view spec requires exactly one of content, create, or path",
+        ));
+    }
+    let source = if let Some(content) = object.get("content") {
+        let content = content
+            .as_u64()
+            .map(ContentId)
+            .ok_or_else(|| ScriptError::new("view spec content must be an integer"))?;
+        BufferViewSource::Content(content)
+    } else if let Some(create) = object.get("create") {
+        if create.as_bool() != Some(true) {
+            return Err(ScriptError::new("view spec create must be true"));
+        }
+        BufferViewSource::Create
+    } else {
+        let path = object
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| ScriptError::new("view spec path must be a non-empty string"))?;
+        BufferViewSource::Open { path }
+    };
+    Ok(ViewSpec::Buffer { source })
 }
 
 fn optional_content_target(
@@ -1464,7 +1542,7 @@ mod tests {
     fn interface_for(namespace: &str) -> &'static str {
         match namespace {
             "app" => "AppPrimitives",
-            "buffers" => "BufferPrimitives",
+            "content" => "ContentPrimitives",
             "clipboard" => "ClipboardPrimitives",
             "commands" => "CommandPrimitives",
             "cursor" => "CursorPrimitives",
@@ -1473,6 +1551,7 @@ mod tests {
             "mode" => "ModePrimitives",
             "search" => "SearchPrimitives",
             "text" => "TextPrimitives",
+            "view" => "ViewPrimitives",
             "viewport" => "ViewportPrimitives",
             other => panic!("primitive namespace '{other}' has no declared interface"),
         }

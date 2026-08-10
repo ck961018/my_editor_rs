@@ -12,9 +12,20 @@ const registeredExplicit = editor.commands.register(
 
 const localResult: string = registeredLocal(42);
 const explicitResult: number = registeredExplicit("vell");
-const contentId: number = newBuffer();
+const contentId: number = content.create();
+view.switch({ type: "core.buffer", content: contentId });
+view.focus(0);
+const saving: Promise<void> = content.save();
+
+// @ts-expect-error A ViewSpec has exactly one source.
+view.switch({ type: "core.buffer", content: contentId, create: true });
+
+// @ts-expect-error Buffer lifecycle commands were removed in favor of Content/View.
+newBuffer();
+// @ts-expect-error Buffer switching was removed in favor of view.switch.
 switchBuffer(contentId);
-const saving: Promise<void> = save();
+// @ts-expect-error The old unscoped save command is no longer public.
+save();
 
 void localResult;
 void explicitResult;
