@@ -1924,7 +1924,10 @@ async fn runtime_polls_worker_results_without_input() {
             RowRange { start: 0, end: 1 },
         )
         .unwrap();
-    assert!(app.frontend.renders >= 2);
+    // A fast worker may finish before the initial render, while a slower one
+    // is installed by the runtime tick and causes another render. Both
+    // schedules are valid; observing the decoration is the relevant result.
+    assert!(app.frontend.decorations_seen);
     assert!(decorations.iter().any(|decoration| {
         decoration.start.char_index == 0
             && decoration.end.char_index == "# Heading".len()
