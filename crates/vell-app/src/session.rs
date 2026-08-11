@@ -10,7 +10,7 @@ use crate::layout::{LayoutError, NewView, StatusBarHandle, StatusBarPlacement, c
 use crate::mode::{
     CompoundViewDefinition, CompoundViewDirection, CursorDomain, FaceRegistry, ModeAttachmentError,
     ModeContentContext, ModeContentStore, ModeDraftJournal, ModeError, ModeId, ModeRegistry,
-    ModeResult, ModeViewStore,
+    ModeResult, ModeViewContext, ModeViewStore,
 };
 use crate::mode_resolver::{AttachmentPlanError, ModeAttachmentPlan, ModeOverride, ModeResolver};
 use crate::presentation::PresentationLayerStore;
@@ -245,35 +245,38 @@ impl ClientSession {
         }
         let mut target = Vec::with_capacity(plan.entries.len());
         for entry in &plan.entries {
-            let (Some(binding), Some(content)) = (&entry.binding, entry.content) else {
-                return Err(AttachmentPlanError::UnsupportedBinding {
-                    mode: entry.mode.clone(),
-                    binding: entry.binding.clone(),
-                });
-            };
-            if binding.as_str() != DOCUMENT_BINDING || view_data.document_content() != Some(content)
-            {
-                return Err(AttachmentPlanError::UnsupportedBinding {
-                    mode: entry.mode.clone(),
-                    binding: entry.binding.clone(),
-                });
-            }
             let mode = registry
                 .resolve_mode(&entry.mode)
                 .ok_or_else(|| ModeAttachmentError::UnknownMode(entry.mode.clone()))?;
-            registry.ensure_adapter(
-                &entry.mode,
-                content,
-                contents
-                    .kind(content)
-                    .ok_or(ModeAttachmentError::UnknownContent(content))?,
-            )?;
+            match (&entry.binding, entry.content) {
+                (None, None) => registry.ensure_view_adapter(&entry.mode)?,
+                (Some(binding), Some(content))
+                    if binding.as_str() == DOCUMENT_BINDING
+                        && view_data.document_content() == Some(content) =>
+                {
+                    registry.ensure_adapter(
+                        &entry.mode,
+                        content,
+                        contents
+                            .kind(content)
+                            .ok_or(ModeAttachmentError::UnknownContent(content))?,
+                    )?;
+                }
+                _ => {
+                    return Err(AttachmentPlanError::UnsupportedBinding {
+                        mode: entry.mode.clone(),
+                        binding: entry.binding.clone(),
+                    });
+                }
+            }
             if target.contains(&mode) {
                 return Err(AttachmentPlanError::DuplicateMode(entry.mode.clone()));
             }
             target.push(mode);
         }
-        if !target.is_empty() || self.view_modes.is_active(plan.view) {
+        if plan.entries.iter().any(|entry| entry.content.is_some())
+            || self.view_modes.has_content_bound_mode(plan.view)
+        {
             require_mode_view_context(plan.view, view_data, contents)
                 .map_err(ModeAttachmentError::from)?;
         }
@@ -293,27 +296,28 @@ impl ClientSession {
         if current == target {
             return false;
         }
-        let context = require_mode_view_context(plan.view, &view_data, contents)
-            .expect("attachment plan View context was prevalidated");
         let mut additions = Vec::new();
         for (entry, mode) in plan.entries.iter().zip(&target) {
             if current.contains(mode) {
                 continue;
             }
-            let content = entry
-                .content
-                .expect("attachment plan content was prevalidated");
-            let content_context = ModeContentContext::new(content, contents);
-            let instance = registry.instantiate_registered_with_context(
-                *mode,
-                content,
-                contents
-                    .kind(content)
-                    .expect("attachment content was prevalidated"),
-                mode_contents,
-                &content_context,
-                &context,
-            );
+            let instance = if let Some(content) = entry.content {
+                let context = require_mode_view_context(plan.view, &view_data, contents)
+                    .expect("attachment plan View context was prevalidated");
+                let content_context = ModeContentContext::new(content, contents);
+                registry.instantiate_registered_with_context(
+                    *mode,
+                    content,
+                    contents
+                        .kind(content)
+                        .expect("attachment content was prevalidated"),
+                    mode_contents,
+                    &content_context,
+                    &context,
+                )
+            } else {
+                registry.instantiate_registered_for_view(*mode, plan.view)
+            };
             additions.push(instance);
         }
         self.dispatcher.invalidate_view(
@@ -328,12 +332,14 @@ impl ClientSession {
             .copied()
             .filter(|mode| !target.contains(mode))
             .collect::<Vec<ModeId>>();
-        let document = view_data
-            .document_content()
-            .expect("active Mode chain has a document binding");
         for mode in &removed {
-            self.view_modes.remove_mode(plan.view, *mode);
-            mode_contents.detach_view(document, *mode);
+            let instance = self
+                .view_modes
+                .remove_mode(plan.view, *mode)
+                .expect("removed Mode is attached to the View");
+            if let Some(content) = instance.bound_content_id() {
+                mode_contents.detach_view(content, *mode);
+            }
         }
         for instance in additions {
             instance.register_faces(self.faces.registry_mut());
@@ -790,8 +796,19 @@ impl ClientSession {
         drafts: &mut ModeDraftJournal,
     ) -> Result<ModeResult, ModeError> {
         let view_data = self.workspace.view(view).expect("target view exists");
-        let context = require_mode_view_context(view, view_data, contents)
-            .map_err(ModeError::InvalidViewContext)?;
+        let mode = registry
+            .resolve_mode(&command.mode)
+            .expect("resolved Mode command keeps its registration");
+        let instance = self
+            .view_modes
+            .instance(mode, view)
+            .expect("resolved Mode command targets an attached View");
+        let context = if !instance.is_view_only() {
+            require_mode_view_context(view, view_data, contents)
+                .map_err(ModeError::InvalidViewContext)?
+        } else {
+            ModeViewContext::for_view(view)
+        };
         self.view_modes.execute_with_context(
             view,
             registry,
@@ -812,8 +829,19 @@ impl ClientSession {
         drafts: &mut ModeDraftJournal,
     ) -> Result<ModeResult, ModeError> {
         let view_data = self.workspace.view(view).expect("target view exists");
-        let context = require_mode_view_context(view, view_data, contents)
-            .map_err(ModeError::InvalidViewContext)?;
+        let mode = registry
+            .resolve_mode(input.mode())
+            .expect("resolved Mode input keeps its registration");
+        let instance = self
+            .view_modes
+            .instance(mode, view)
+            .expect("resolved Mode input targets an attached View");
+        let context = if !instance.is_view_only() {
+            require_mode_view_context(view, view_data, contents)
+                .map_err(ModeError::InvalidViewContext)?
+        } else {
+            ModeViewContext::for_view(view)
+        };
         self.view_modes.execute_input_with_context(
             view,
             registry,
@@ -822,6 +850,21 @@ impl ClientSession {
             mode_contents,
             drafts,
         )
+    }
+
+    pub(super) fn mode_owner_from_view(
+        &self,
+        source: ViewId,
+        mode: ModeId,
+    ) -> Option<(ViewId, Option<ContentId>)> {
+        let mut candidate = Some(source);
+        while let Some(view) = candidate {
+            if let Some(instance) = self.view_modes.instance(mode, view) {
+                return Some((view, instance.bound_content_id()));
+            }
+            candidate = self.workspace.view(view)?.parent();
+        }
+        None
     }
 
     pub(super) fn view_for_space(&self, space: SpaceId) -> Option<ViewId> {
@@ -865,24 +908,11 @@ impl ClientSession {
         let previous_view = self
             .view_for_space(self.workspace.focused())
             .expect("focused space hosts a view");
-        let previous_data = self
-            .workspace
-            .view(previous_view)
-            .expect("focused view exists");
-        let presentation_changed = self.dispatcher.invalidate_view(
-            previous_view,
-            previous_data,
-            &mut self.view_modes,
-            content_modes,
-            contents,
-        );
-        if presentation_changed {
-            self.workspace
-                .view_mut(previous_view)
-                .expect("previous view exists")
-                .touch();
-        }
+        let focused_view = self
+            .view_for_space(target)
+            .expect("focusable space hosts a view");
         self.workspace.focus(target)?;
+        self.invalidate_unfocused_view_chain(previous_view, focused_view, content_modes, contents);
         self.sync_changed_input_source(content_modes, contents);
         Ok(())
     }
@@ -953,18 +983,32 @@ impl ClientSession {
         contents: &ContentStore,
         drafts: &ModeDraftJournal,
     ) {
-        let Some(view_id) = self.view_for_space(self.workspace.focused()) else {
+        let Some(focused_view) = self.view_for_space(self.workspace.focused()) else {
             return;
         };
-        let view = self.workspace.view(view_id).expect("focused view exists");
-        let Ok(context) = require_mode_view_context(view_id, view, contents) else {
-            return;
-        };
-        for index in 0..self.view_modes.mode_ids(view_id).len() {
-            let status = self
-                .view_modes
-                .status_at(view_id, index, &context, content_modes, drafts);
-            self.dispatcher.sync_mode(view_id, index, status, true, now);
+        let mut candidate = Some(focused_view);
+        while let Some(view_id) = candidate {
+            let view = self.workspace.view(view_id).expect("input View exists");
+            for index in 0..self.view_modes.mode_ids(view_id).len() {
+                let mode = self.view_modes.mode_ids(view_id)[index];
+                let instance = self
+                    .view_modes
+                    .instance(mode, view_id)
+                    .expect("Mode chain keeps its View instance");
+                let context = if instance.is_view_only() {
+                    ModeViewContext::for_view(view_id)
+                } else {
+                    let Ok(context) = require_mode_view_context(view_id, view, contents) else {
+                        continue;
+                    };
+                    context
+                };
+                let status =
+                    self.view_modes
+                        .status_at(view_id, index, &context, content_modes, drafts);
+                self.dispatcher.sync_mode(view_id, index, status, true, now);
+            }
+            candidate = view.parent();
         }
     }
 
@@ -1105,23 +1149,15 @@ impl ClientSession {
             return Err(LayoutError::ModeAttachment(error.to_string()));
         }
         if focus_new {
-            let view_data = self
-                .workspace
-                .view(previous_view)
-                .expect("previous view exists");
-            let presentation_changed = self.dispatcher.invalidate_view(
+            let focused_view = self
+                .view_for_space(self.workspace.focused())
+                .expect("focused space hosts a view");
+            self.invalidate_unfocused_view_chain(
                 previous_view,
-                view_data,
-                &mut self.view_modes,
+                focused_view,
                 content_modes,
                 contents,
             );
-            if presentation_changed {
-                self.workspace
-                    .view_mut(previous_view)
-                    .expect("previous view still exists")
-                    .touch();
-            }
         }
         if focus_new {
             self.sync_changed_input_source(content_modes, contents);
@@ -1246,6 +1282,9 @@ impl ClientSession {
                     .view_modes
                     .instance(*mode, view)
                     .expect("retained Mode is attached to the View");
+                if instance.bound_content_id() != Some(previous_content) {
+                    continue;
+                }
                 content_modes.attach_retained_view_with_context(
                     content,
                     instance,
@@ -1253,7 +1292,22 @@ impl ClientSession {
                 );
             }
             for mode in &current_modes {
-                content_modes.detach_view(previous_content, *mode);
+                if self
+                    .view_modes
+                    .instance(*mode, view)
+                    .is_some_and(|instance| instance.bound_content_id() == Some(previous_content))
+                {
+                    content_modes.detach_view(previous_content, *mode);
+                }
+            }
+            for mode in &retained_modes {
+                if self
+                    .view_modes
+                    .instance(*mode, view)
+                    .is_some_and(|instance| instance.bound_content_id() == Some(previous_content))
+                {
+                    self.view_modes.rebind_content(*mode, view, content);
+                }
             }
             for mode in &removed_modes {
                 self.view_modes.remove_mode(view, *mode);
@@ -1389,10 +1443,28 @@ impl ClientSession {
                 .view_modes
                 .instance(*mode, child)
                 .expect("retained Mode is attached to the rebound child");
+            if instance.bound_content_id() != Some(previous_content) {
+                continue;
+            }
             content_modes.attach_retained_view_with_context(content, instance, &content_context);
         }
         for mode in &current_modes {
-            content_modes.detach_view(previous_content, *mode);
+            if self
+                .view_modes
+                .instance(*mode, child)
+                .is_some_and(|instance| instance.bound_content_id() == Some(previous_content))
+            {
+                content_modes.detach_view(previous_content, *mode);
+            }
+        }
+        for mode in &retained_modes {
+            if self
+                .view_modes
+                .instance(*mode, child)
+                .is_some_and(|instance| instance.bound_content_id() == Some(previous_content))
+            {
+                self.view_modes.rebind_content(*mode, child, content);
+            }
         }
         for mode in &removed_modes {
             self.view_modes.remove_mode(child, *mode);
@@ -1650,6 +1722,52 @@ impl ClientSession {
         self.sync_focused_input(Instant::now(), content_modes, contents);
     }
 
+    fn invalidate_unfocused_view_chain(
+        &mut self,
+        previous_view: ViewId,
+        focused_view: ViewId,
+        content_modes: &mut ModeContentStore,
+        contents: &ContentStore,
+    ) {
+        let focused_chain = self.semantic_view_chain(focused_view);
+        for view in self.semantic_view_chain(previous_view) {
+            if focused_chain.contains(&view) {
+                continue;
+            }
+            let view_data = self
+                .workspace
+                .view(view)
+                .expect("previous focus chain View exists");
+            let presentation_changed = self.dispatcher.invalidate_view(
+                view,
+                view_data,
+                &mut self.view_modes,
+                content_modes,
+                contents,
+            );
+            if presentation_changed {
+                self.workspace
+                    .view_mut(view)
+                    .expect("previous focus chain View still exists")
+                    .touch();
+            }
+        }
+    }
+
+    fn semantic_view_chain(&self, view: ViewId) -> Vec<ViewId> {
+        let mut chain = Vec::new();
+        let mut candidate = Some(view);
+        while let Some(view) = candidate {
+            chain.push(view);
+            candidate = self
+                .workspace
+                .view(view)
+                .expect("semantic View chain is valid")
+                .parent();
+        }
+        chain
+    }
+
     fn cleanup_removed_views(
         &mut self,
         removed: Vec<RemovedView>,
@@ -1669,8 +1787,22 @@ impl ClientSession {
             );
             self.faces.remove_view_remaps(id);
             self.mode_resolver.forget_view(id);
-            for mode in self.view_modes.remove(id) {
-                if let Some(content) = view.document_content() {
+            let attachments = self
+                .view_modes
+                .mode_ids(id)
+                .iter()
+                .map(|mode| {
+                    (
+                        *mode,
+                        self.view_modes
+                            .instance(*mode, id)
+                            .and_then(|instance| instance.bound_content_id()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            self.view_modes.remove(id);
+            for (mode, content) in attachments {
+                if let Some(content) = content {
                     mode_contents.detach_view(content, mode);
                 }
                 removed_modes.insert(mode);

@@ -2,7 +2,7 @@
 
 **状态：** 当前实现
 
-**更新日期：** 2026-08-10
+**更新日期：** 2026-08-11
 
 ## 1. 定位
 
@@ -31,10 +31,11 @@ source
 ```
 
 `vell-app` 的普通依赖不含 V8。根二进制先调用
-`vell_plugin_v8::load_user_configuration()`，再把 Mode、后台运行时、
-ThemeName 和纯 protocol Face override DTO 注入 App。`prepare_commands()`
-在同一步安装 native 命令的 TypeScript 视图，并返回语言中立的
-`CommandEntry` 列表。V8 类型不跨出 `vell-plugin-v8` 的公共边界。
+`vell_plugin_v8::load_user_configuration()`，再把 Mode、View extension、
+owned `CompoundViewDefinition`、后台运行时、ThemeName 和纯 protocol Face
+override DTO 注入 App。`prepare_commands()` 在同一步安装 native 命令的
+TypeScript 视图，并返回语言中立的 `CommandEntry` 列表。V8 类型不跨出
+`vell-plugin-v8` 的公共边界。
 
 ## 2. 加载与所有权
 
@@ -43,10 +44,13 @@ ThemeName 和纯 protocol Face override DTO 注入 App。`prepare_commands()`
 
 1. 枚举内嵌 `plugin.json`；
 2. 按 manifest `order` 稳定加载入口；
-3. 在同一 `ScriptHost` draft 中收集 Mode 和视觉配置；
+3. 在同一 `ScriptHost` draft 中收集 Mode、View definition、View extension
+   和视觉配置；
 4. 加载可选用户 `config.ts`；
-5. 把每个 definition 包装为 `ScriptMode`；
-6. 将通用 Mode 与视觉 DTO 交给 App bootstrap。
+5. 把 Mode definition 包装为 `ScriptMode`，把 View definition 转成 owned
+   `CompoundViewDefinition`；
+6. 将通用 Mode、View definition、View extension 与视觉 DTO 交给 App
+   bootstrap。
 
 所有 `ScriptMode` 和一个独立 `ScriptBackground` 通过
 `Rc<RefCell<ScriptHost>>` 共享主 isolate、context、module map、callback
@@ -55,8 +59,14 @@ App 的 background owner 列表，因此没有 Mode 的插件也能持续泵送 
 App 不识别具体 ScriptHost 类型。
 
 内建插件失败表示安装损坏，会阻止启动。可选用户配置失败会输出 warning，
-原子回滚该模块新增的 definition、Theme 选择和 Face override，并继续使用
-内建配置。
+原子回滚该模块新增的 Mode、View definition、View extension、命令、Theme
+选择和 Face override，并继续使用内建配置。
+
+App bootstrap 先把 `CompoundViewDefinition` 注册到 Kernel 的唯一
+`ViewDefinitionRegistry`，再创建初始 session 并安装 extension。definition
+只携带 binding schema、两个子 View recipe 和布局方向，不携带 V8 callback。
+卸载时，活动 View、Mode attachment rule 或 extension 仍引用该 definition
+都会使操作失败；通过检查后才按 owner 一次移除。
 
 ## 3. 配置发现
 
@@ -116,6 +126,17 @@ Buffer adapter 获得静态 context。Buffer context 暴露
 app 在 render query 层按状态栏 Pane 组装。Buffer context 不暴露
 Pane 或 Space 标识。
 
+View API 有两个不同深度的入口：
+
+- `editor.views.extend(target, definition)` 为已有 View definition 增加
+  host-supported Pane。render callback 只接收 owned snapshot，只返回受限
+  presentation；缓存完成后 TUI 不再进入 V8。
+- `editor.views.define(definition)` 注册完整复合 View recipe。schema 在 V8
+  内解析后立刻转成 owned `CompoundViewDefinition`；App 只看到 binding、
+  子 View 映射和布局方向，不看到脚本 factory 或布局树。
+
+两种注册都只允许出现在模块加载 draft 中，并按模块 owner 原子发布或回滚。
+
 ## 5. ScriptMode 与状态
 
 脚本定义中的 callback 保存在 V8 callback registry。`ScriptMode` 只保存稳定
@@ -132,6 +153,11 @@ host，不保存可变 App、Content 或 View 引用。schema 把 `attach.view`�
 state:     每 (ModeId, ContentId) 一份
 viewState: 每 (ModeId, ViewId) 一份
 ```
+
+省略 `attach.binding` 的 View-only Mode 使用 `on.view`，只实例化一份 View
+`state`，不会运行 content `state` factory，也不会在 `ModeContentStore` 中
+创建占位项。它适合只依赖 View definition 的父级行为；Content-bound
+`on.buffer` adapter 仍使用完整的 `state + viewState` 对。
 
 状态必须是 JSON-compatible owned data：null、boolean、number、string、
 array 和普通 object。函数、Promise、V8 handle、循环引用、host object 与
@@ -294,8 +320,9 @@ shortcut 分派移除名称与参数之间的分隔空白：没有非空白参�
 
 ## 12. Presentation
 
-脚本可以定义 named Face、content decoration、view decoration 和 View policy。
-callback 返回的数据转换为 owned Rust presentation layer。
+Content-bound `on.buffer` 可以定义 named Face、content decoration、view
+decoration 和 View policy。callback 返回的数据转换为 owned Rust
+presentation layer。View-only `on.view` 的可见区域由 View extension 呈现。
 
 render path 不进入 V8：
 

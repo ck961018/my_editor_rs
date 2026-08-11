@@ -112,10 +112,11 @@ Mode 保持静态拓扑顺序；它不会启用原本被筛掉的 Mode。
 _Avoid_: Mode 列表缓存、启动 Mode 顺序
 
 **Native DiffView**：
-内建的 `core.diff` View。它是可切换的零 Pane 语义父 View，持有 `left`、
-`right` bindings；两个不可切换的子 BufferView 才拥有实际 Pane、selection
-和语言 Mode。通用生命周期从子 Pane 解析到父 View，但替换时复用一个子
-Pane 作为 Scene 锚点。
+内建的 `core.diff` View。它是可切换的零 recipe Pane 语义父 View，持有
+`left`、`right` bindings；View extension 可以给父 View 增加直属 Pane。
+两个不可切换的子 BufferView 拥有正文 Pane、selection 和语言 Mode。通用
+生命周期从子 Pane 解析到父 View，但替换时复用一个子 Pane 作为 Scene
+锚点。
 _Avoid_: 第三个协调 Pane、Pane state、左右 Content 的 Mode 并集
 
 ## Rules

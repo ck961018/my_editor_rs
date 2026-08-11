@@ -254,8 +254,9 @@ chain 还要根据 attachment rule、binding 对应 Content 的分类、adapter 
 enum。Buffer variant 仅提供强类型文本查询、细粒度资源事实、snapshot
 和 selections。不支持的能力不会出现在对应的强类型
 context 上。Context 不借出 `&mut Content`、`&mut View` 或宿主对象。
-TypeScript 通过 `on.buffer` 把同一边界映射为内容专属的用户 context，
-不建立另一套 Mode runtime。状态栏呈现不再经过 Mode adapter：插件通过
+TypeScript 通过 `on.buffer` 映射 Content-bound context，通过 `on.view`
+映射没有 Content identity 的 View context，不建立另一套 Mode runtime。
+状态栏呈现不再经过 Mode adapter：插件通过
 buffer mode 的 `viewState.viewPolicy.statusBar` 提供，由 app 在
 render query 层组装。
 

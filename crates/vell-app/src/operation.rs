@@ -60,7 +60,7 @@ pub enum ResolvedOperation {
     ModeInput {
         mode: ModeId,
         view: ViewId,
-        content: ContentId,
+        content: Option<ContentId>,
         input: ModeInputCommand,
     },
     Face(ResolvedFaceOperation),
@@ -119,7 +119,7 @@ pub enum ResolvedModeScope {
     },
     View {
         view: ViewId,
-        content: ContentId,
+        content: Option<ContentId>,
     },
 }
 
@@ -156,6 +156,15 @@ impl OperationOrigin {
             scope: OperationOriginScope::View,
             view: Some(view),
             content: Some(content),
+            mode: None,
+        }
+    }
+
+    pub fn view_only(view: ViewId) -> Self {
+        Self {
+            scope: OperationOriginScope::View,
+            view: Some(view),
+            content: None,
             mode: None,
         }
     }
@@ -212,12 +221,30 @@ pub fn adapt_dispatch_command(
                 },
             }],
         ),
+        DispatchCommand::ViewMode { command, view } => (
+            OperationOrigin::view_only(view),
+            vec![OperationRequest::Mode {
+                target: ModeTarget::CurrentView,
+                invocation: ModeInvocation {
+                    command,
+                    nested: false,
+                    flow: ModeFlowPropagation::Propagate,
+                },
+            }],
+        ),
         DispatchCommand::ModeInput {
             input,
             view,
             content,
         } => (
             OperationOrigin::view(view, content),
+            vec![OperationRequest::ModeInput {
+                target: ViewTarget::Current,
+                input,
+            }],
+        ),
+        DispatchCommand::ViewModeInput { input, view } => (
+            OperationOrigin::view_only(view),
             vec![OperationRequest::ModeInput {
                 target: ViewTarget::Current,
                 input,
@@ -248,6 +275,9 @@ pub fn adapt_dispatch_command(
             view,
             content,
         } => (OperationOrigin::view(view, content), operations),
+        DispatchCommand::ViewModeOperations { operations, view } => {
+            (OperationOrigin::view_only(view), operations)
+        }
         DispatchCommand::Noop => (OperationOrigin::app(), Vec::new()),
     };
     Ok(requests

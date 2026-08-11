@@ -16,7 +16,7 @@ use vell_mode::editing::{
 };
 use vell_mode::mode_name::{ModeActionName, ModeName};
 use vell_mode::operation::{
-    AppOperation, BufferViewSource, ClipboardDestination, ClipboardOperation, ClipboardSource,
+    AppOperation, ClipboardDestination, ClipboardOperation, ClipboardSource,
     ContentLifecycleOperation, ContentTarget, FaceOperation, FaceRemapTarget, ModeFlowPropagation,
     ModeInvocation, ModeTarget, OperationRequest, SearchOperation, ViewLifecycleOperation,
     ViewOperation, ViewSpec, ViewTarget,
@@ -25,7 +25,6 @@ use vell_protocol::content_query::{FaceExpr, FaceName, FaceRemapToken};
 use vell_protocol::ids::{ContentId, ViewId};
 use vell_protocol::revision::Revision;
 use vell_protocol::space::SplitDirection;
-use vell_protocol::view::{BindingKey, ViewDefinitionId};
 use vell_protocol::viewport::{
     ViewportAlignment, ViewportCommand, ViewportCursorBehavior, ViewportMoveAmount,
     ViewportMoveDirection,
@@ -267,10 +266,64 @@ pub(super) fn install_primitives(
             ("view", "view"),
         ],
     };
+    install_primitive_namespaces(scope, context, invocation_id, namespaces, |_| true)
+}
+
+pub(super) fn install_view_primitives(
+    scope: &mut v8::PinScope<'_, '_>,
+    context: v8::Local<v8::Object>,
+    invocation_id: u64,
+) -> v8::Global<v8::Object> {
+    install_primitive_namespaces(
+        scope,
+        context,
+        invocation_id,
+        &[
+            ("commands", "commands"),
+            ("faces", "faces"),
+            ("app", "app"),
+            ("content", "content"),
+            ("view", "view"),
+        ],
+        |primitive| {
+            matches!(
+                primitive,
+                Primitive::InvokeCommand
+                    | Primitive::SetFaceBase
+                    | Primitive::AddRelativeFace
+                    | Primitive::RemoveRelativeFace
+                    | Primitive::Quit
+                    | Primitive::ClosePane
+                    | Primitive::SplitHorizontal
+                    | Primitive::SplitVertical
+                    | Primitive::FocusLeft
+                    | Primitive::FocusDown
+                    | Primitive::FocusUp
+                    | Primitive::FocusRight
+                    | Primitive::ContentCreate
+                    | Primitive::ContentOpen
+                    | Primitive::ContentList
+                    | Primitive::ContentClose
+                    | Primitive::ContentSave
+                    | Primitive::ContentReload
+                    | Primitive::ViewFocus
+                    | Primitive::ViewSwitch
+            )
+        },
+    )
+}
+
+fn install_primitive_namespaces(
+    scope: &mut v8::PinScope<'_, '_>,
+    context: v8::Local<v8::Object>,
+    invocation_id: u64,
+    namespaces: &[(&str, &str)],
+    allowed: impl Fn(Primitive) -> bool,
+) -> v8::Global<v8::Object> {
     for &(primitive_namespace, context_namespace) in namespaces {
         let object = v8::Object::new(scope);
         for &(primitive, candidate, name) in PRIMITIVES {
-            if candidate == primitive_namespace {
+            if candidate == primitive_namespace && allowed(primitive) {
                 let encoded = encode(invocation_id, primitive as u8);
                 let data = v8::Number::new(scope, encoded as f64);
                 let function = v8::Function::builder(call_primitive)
@@ -1082,106 +1135,7 @@ fn view_spec(
     value: v8::Local<v8::Value>,
 ) -> Result<ViewSpec, ScriptError> {
     let value = v8_to_json(scope, value, "view spec")?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| ScriptError::new("view spec must be an object"))?;
-    match object.get("type").and_then(serde_json::Value::as_str) {
-        Some("core.buffer") => {
-            if object
-                .keys()
-                .any(|key| !matches!(key.as_str(), "type" | "content" | "create" | "path"))
-            {
-                return Err(ScriptError::new(
-                    "buffer view spec contains an unknown field",
-                ));
-            }
-            let sources = [
-                object.contains_key("content"),
-                object.contains_key("create"),
-                object.contains_key("path"),
-            ];
-            if sources.into_iter().filter(|present| *present).count() != 1 {
-                return Err(ScriptError::new(
-                    "buffer view spec requires exactly one of content, create, or path",
-                ));
-            }
-            let source = if let Some(content) = object.get("content") {
-                let content = content
-                    .as_u64()
-                    .map(ContentId)
-                    .ok_or_else(|| ScriptError::new("view spec content must be an integer"))?;
-                BufferViewSource::Content(content)
-            } else if let Some(create) = object.get("create") {
-                if create.as_bool() != Some(true) {
-                    return Err(ScriptError::new("view spec create must be true"));
-                }
-                BufferViewSource::Create
-            } else {
-                let path = object
-                    .get("path")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|path| !path.is_empty())
-                    .map(str::to_owned)
-                    .ok_or_else(|| ScriptError::new("view spec path must be a non-empty string"))?;
-                BufferViewSource::Open { path }
-            };
-            Ok(ViewSpec::Buffer { source })
-        }
-        Some("core.diff") => {
-            if object
-                .keys()
-                .any(|key| !matches!(key.as_str(), "type" | "left" | "right"))
-            {
-                return Err(ScriptError::new("diff view spec contains an unknown field"));
-            }
-            let content = |name: &str| {
-                object
-                    .get(name)
-                    .and_then(serde_json::Value::as_u64)
-                    .map(ContentId)
-                    .ok_or_else(|| {
-                        ScriptError::new(format!("diff view spec {name} must be an integer"))
-                    })
-            };
-            Ok(ViewSpec::diff(content("left")?, content("right")?))
-        }
-        Some("defined") => {
-            if object
-                .keys()
-                .any(|key| !matches!(key.as_str(), "type" | "definition" | "bindings"))
-            {
-                return Err(ScriptError::new(
-                    "defined view spec contains an unknown field",
-                ));
-            }
-            let definition = object
-                .get("definition")
-                .and_then(serde_json::Value::as_str)
-                .filter(|definition| !definition.is_empty())
-                .map(ViewDefinitionId::new)
-                .ok_or_else(|| {
-                    ScriptError::new("defined view spec definition must be a non-empty string")
-                })?;
-            let bindings = object
-                .get("bindings")
-                .and_then(serde_json::Value::as_object)
-                .ok_or_else(|| ScriptError::new("defined view spec bindings must be an object"))?
-                .iter()
-                .map(|(binding, content)| {
-                    let content = content.as_u64().map(ContentId).ok_or_else(|| {
-                        ScriptError::new(format!(
-                            "defined view spec binding '{binding}' must be an integer"
-                        ))
-                    })?;
-                    Ok((BindingKey::new(binding), content))
-                })
-                .collect::<Result<Vec<_>, ScriptError>>()?;
-            Ok(ViewSpec::defined(definition, bindings))
-        }
-        _ => Err(ScriptError::new(
-            "view spec type must be 'core.buffer', 'core.diff', or 'defined'",
-        )),
-    }
+    ViewSpec::from_json(&value).map_err(|error| ScriptError::new(error.to_string()))
 }
 
 fn optional_content_target(

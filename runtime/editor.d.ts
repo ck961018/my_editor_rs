@@ -386,6 +386,10 @@ interface CommandPrimitives {
 	executeLine(source: string): void;
 }
 
+interface ViewCommandPrimitives {
+	invoke(command: `${string}.${string}`, arguments?: ScriptData): void;
+}
+
 type EditorCommand = (...arguments: any[]) => unknown;
 
 interface EditorCommands {
@@ -414,6 +418,22 @@ interface FacePrimitives {
 	removeRelative(token: number): void;
 }
 
+type ViewFaceRemapScope = "session" | "view";
+
+interface ViewFacePrimitives {
+	setBase(
+		face: string,
+		expressions: readonly EditorFaceExpression[] | null,
+		scope?: ViewFaceRemapScope,
+	): void;
+	addRelative(
+		face: string,
+		expressions: readonly EditorFaceExpression[],
+		scope?: ViewFaceRemapScope,
+	): number;
+	removeRelative(token: number): void;
+}
+
 interface AppPrimitives {
 	quit(): void;
 	closePane(): void;
@@ -433,6 +453,15 @@ interface ContentPrimitives {
 	save(contentId?: number, force?: boolean): void;
 	saveAs(path: string, force?: boolean): void;
 	reload(contentId?: number, force?: boolean): void;
+}
+
+interface ViewContentPrimitives {
+	create(): void;
+	open(path: string): void;
+	list(): void;
+	close(contentId: number, force?: boolean): void;
+	save(contentId: number, force?: boolean): void;
+	reload(contentId: number, force?: boolean): void;
 }
 
 type BufferViewSpec =
@@ -533,31 +562,69 @@ interface BufferAdapterDefinition<ContentState, ViewState> {
 	): void;
 }
 
-type ModeAttachmentDefinition = {
-	readonly view: string;
-} & (
-	| {
-		readonly binding: string;
-		readonly languages?: readonly string[];
-	}
-	| {
-		readonly binding?: never;
-		readonly languages?: never;
-	}
-);
+interface ViewModeContext<ViewState, Arguments = ScriptData> {
+	readonly viewId: number;
+	readonly arguments: Arguments;
+	readonly commands: ViewCommandPrimitives;
+	readonly faces: ViewFacePrimitives;
+	readonly app: AppPrimitives;
+	readonly content: ViewContentPrimitives;
+	readonly view: ViewPrimitives;
+	state: ViewState;
+	pass(): Pass;
+}
 
-interface ModeDefinition<
-	BufferState = ScriptData,
-	BufferViewState = ScriptData,
-> {
+interface ViewAdapterDefinition<ViewState> {
+	state?(): ViewState;
+	commands?: Record<
+		string,
+		(context: ViewModeContext<ViewState>) => void | Pass
+	>;
+	keys?: Record<string, string>;
+	input?(context: ViewModeContext<ViewState, EditorKeyEvent>): void | Pass;
+}
+
+interface ModeDefinitionBase {
 	name: string;
 	before?: string;
-	attach?: ModeAttachmentDefinition;
 	faces?: Record<string, EditorModeFace>;
+}
+
+interface BufferModeDefinition<
+	BufferState = ScriptData,
+	BufferViewState = ScriptData,
+> extends ModeDefinitionBase {
+	attach?: {
+		readonly view: string;
+		readonly binding: string;
+		readonly languages?: readonly string[];
+	};
 	on: {
-		buffer?: BufferAdapterDefinition<BufferState, BufferViewState>;
+		buffer: BufferAdapterDefinition<BufferState, BufferViewState>;
+		view?: never;
 	};
 }
+
+interface ViewModeDefinition<ViewState = ScriptData>
+	extends ModeDefinitionBase {
+	attach: {
+		readonly view: string;
+		/** No binding means this Mode owns only per-View state. */
+		readonly binding?: never;
+		readonly languages?: never;
+	};
+	on: {
+		view: ViewAdapterDefinition<ViewState>;
+		buffer?: never;
+	};
+}
+
+type ModeDefinition<
+	BufferState = ScriptData,
+	BufferViewState = ScriptData,
+> =
+	| BufferModeDefinition<BufferState, BufferViewState>
+	| ViewModeDefinition<BufferViewState>;
 
 interface ContentChange {
 	readonly startCharacter: number;
@@ -650,8 +717,11 @@ declare const editor: {
 		): void;
 	};
 	readonly modes: {
+		define<ViewState = ScriptData>(
+			definition: ViewModeDefinition<ViewState>,
+		): void;
 		define<BufferState = ScriptData, BufferViewState = ScriptData>(
-			definition: ModeDefinition<BufferState, BufferViewState>,
+			definition: BufferModeDefinition<BufferState, BufferViewState>,
 		): void;
 	};
 	readonly views: {

@@ -620,6 +620,49 @@ impl ScriptHost {
         Ok(result)
     }
 
+    pub(super) fn execute_view_action(
+        &mut self,
+        callback: &v8::Global<v8::Function>,
+        context: &ModeViewContext<'_>,
+        arguments: &ModeValue,
+        view_state: &mut ScriptModeState,
+    ) -> Result<ModeResult, ScriptError> {
+        debug_assert!(context.bound_content_id().is_none());
+        let callback = callback.clone();
+        let v8_context = self.context.clone();
+        let primitives = self.primitives.clone();
+        let current_state = view_state.data.clone();
+        let (result, next_state) = self.invoke(ScriptInvocationKind::Action, |isolate| {
+            v8::scope_with_context!(scope, isolate, v8_context);
+            v8::tc_scope!(let scope, scope);
+
+            let argument = v8::Object::new(scope);
+            set_number(scope, argument, "viewId", context.view_id().0 as f64);
+            let arguments = json_to_v8(scope, &mode_value_to_json(arguments))?;
+            set_value(scope, argument, "arguments", arguments);
+            let state = json_to_v8(scope, &current_state)?;
+            set_value(scope, argument, "state", state);
+            let primitive_id = primitives.borrow_mut().begin(context)?;
+            let pass = primitives::install_view_primitives(scope, argument, primitive_id);
+            let callback = v8::Local::new(scope, callback);
+            let receiver = v8::undefined(scope).into();
+            let callback_result =
+                call_script_callback(scope, callback, receiver, &[argument.into()]);
+            let operations = primitives.borrow_mut().finish(primitive_id)?;
+            ensure_count("operations", operations.len(), MAX_SCRIPT_OPERATIONS)?;
+            let value = callback_result
+                .ok_or_else(|| current_exception(scope, "script View mode action", "execute"))?;
+            let result = parse_action_result(scope, value, &pass, operations)?;
+            let next_state = property(scope, argument, "state")
+                .ok_or_else(|| ScriptError::new("script removed context.state"))?;
+            let next_state = v8_to_json(scope, next_state, "state")?;
+            perform_microtask_checkpoint(scope);
+            Ok((result, next_state))
+        })?;
+        view_state.data = next_state;
+        Ok(result)
+    }
+
     pub(super) fn create_state(
         &mut self,
         callback: Option<&v8::Global<v8::Function>>,

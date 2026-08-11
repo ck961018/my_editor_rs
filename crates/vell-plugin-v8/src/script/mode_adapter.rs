@@ -58,6 +58,7 @@ struct ScriptAdapter {
 
 #[derive(Default)]
 struct ScriptAdapters {
+    view: Option<ScriptAdapter>,
     buffer: Option<ScriptAdapter>,
 }
 
@@ -98,7 +99,13 @@ impl ScriptMode {
         owns_worker_decorations: bool,
     ) -> Self {
         let mut actions = Vec::new();
-        for adapter in [definition.adapters.buffer.as_ref()].into_iter().flatten() {
+        for adapter in [
+            definition.adapters.view.as_ref(),
+            definition.adapters.buffer.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             for action in &adapter.actions {
                 if !actions.contains(&action.name) {
                     actions.push(action.name.clone());
@@ -106,6 +113,10 @@ impl ScriptMode {
             }
         }
         let adapters = ScriptAdapters {
+            view: definition
+                .adapters
+                .view
+                .map(|adapter| ScriptAdapter::new(&definition.name, adapter)),
             buffer: definition
                 .adapters
                 .buffer
@@ -128,6 +139,13 @@ impl ScriptMode {
             .get(kind)
             .expect("registered ScriptMode keeps its declared adapter")
     }
+
+    fn view_adapter(&self) -> &ScriptAdapter {
+        self.adapters
+            .view
+            .as_ref()
+            .expect("registered View-only ScriptMode keeps its View adapter")
+    }
 }
 
 impl Mode for ScriptMode {
@@ -140,9 +158,13 @@ impl Mode for ScriptMode {
     }
 
     fn adapters(&self) -> ModeAdapters {
-        match self.adapters.buffer.is_some() {
-            true => ModeAdapters::buffer(),
-            false => unreachable!("script parser requires at least one adapter"),
+        if self.adapters.view.is_some() {
+            ModeAdapters::view()
+        } else {
+            match self.adapters.buffer.is_some() {
+                true => ModeAdapters::buffer(),
+                false => unreachable!("script parser requires at least one adapter"),
+            }
         }
     }
 
@@ -187,19 +209,30 @@ impl Mode for ScriptMode {
         context: &ModeViewContext<'_>,
     ) -> Result<Box<dyn ModeState>, ModeError> {
         let adapter = self.adapter(context.content_kind());
-        let content_state = &script_state(content_state, &self.name)?.data;
+        let content_state = Some(&script_state(content_state, &self.name)?.data);
         let state = self
             .host
             .borrow_mut()
-            .create_state(adapter.create_view.as_ref(), Some(content_state))
+            .create_state(adapter.create_view.as_ref(), content_state)
             .map_err(|error| ModeError::CallbackFailed {
                 mode: self.name.clone(),
                 message: error.to_string(),
             })?;
-        view_policy_from_json(&state).map_err(|error| ModeError::CallbackFailed {
-            mode: self.name.clone(),
-            message: error.to_string(),
-        })?;
+        Ok(Box::new(ScriptModeState::new(state)))
+    }
+
+    fn create_view_only_state(
+        &self,
+        _context: &ModeViewContext<'_>,
+    ) -> Result<Box<dyn ModeState>, ModeError> {
+        let state = self
+            .host
+            .borrow_mut()
+            .create_state(self.view_adapter().create_view.as_ref(), None)
+            .map_err(|error| ModeError::CallbackFailed {
+                mode: self.name.clone(),
+                message: error.to_string(),
+            })?;
         Ok(Box::new(ScriptModeState::new(state)))
     }
 
@@ -220,6 +253,32 @@ impl Mode for ScriptMode {
         key: KeyEvent,
     ) -> Option<Command> {
         let adapter = self.adapter(context.content_kind());
+        if adapter.input.is_some() {
+            return Some(Command::ModeInput(
+                vell_mode::command::ModeInputCommand::new(self.name.clone(), key),
+            ));
+        }
+        let action = adapter.input_action.clone()?;
+        Some(Command::Mode(
+            ModeCommand::new(self.name.clone(), action).with_arguments(key_event_arguments(key)),
+        ))
+    }
+
+    fn view_only_input_keymap<'a>(
+        &'a self,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) -> &'a Keymap<Command> {
+        &self.view_adapter().keymap
+    }
+
+    fn view_only_input_typing(
+        &self,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+        key: KeyEvent,
+    ) -> Option<Command> {
+        let adapter = self.view_adapter();
         if adapter.input.is_some() {
             return Some(Command::ModeInput(
                 vell_mode::command::ModeInputCommand::new(self.name.clone(), key),
@@ -257,6 +316,30 @@ impl Mode for ScriptMode {
                 content_state,
                 view_state,
             )
+            .map_err(|error| ModeError::CallbackFailed {
+                mode: self.name.clone(),
+                message: format!("callback '<input>': {error}"),
+            })
+    }
+
+    fn execute_view_only_input(
+        &self,
+        view_state: &mut dyn ModeState,
+        context: &ModeViewContext<'_>,
+        key: KeyEvent,
+    ) -> Result<ModeResult, ModeError> {
+        let callback =
+            self.view_adapter()
+                .input
+                .as_ref()
+                .ok_or_else(|| ModeError::UnknownAction {
+                    mode: self.name.clone(),
+                    action: ModeActionName::new("<input>"),
+                })?;
+        let view_state = script_state_mut(view_state, &self.name)?;
+        self.host
+            .borrow_mut()
+            .execute_view_action(callback, context, &key_event_arguments(key), view_state)
             .map_err(|error| ModeError::CallbackFailed {
                 mode: self.name.clone(),
                 message: format!("callback '<input>': {error}"),
@@ -407,6 +490,32 @@ impl Mode for ScriptMode {
                 content_state,
                 view_state,
             )
+            .map_err(|error| ModeError::CallbackFailed {
+                mode: self.name.clone(),
+                message: format!("callback '{}': {error}", action.as_str()),
+            })
+    }
+
+    fn execute_view_only_with_arguments(
+        &self,
+        view_state: &mut dyn ModeState,
+        context: &ModeViewContext<'_>,
+        action: &ModeActionName,
+        arguments: &ModeValue,
+    ) -> Result<ModeResult, ModeError> {
+        let callback = self
+            .view_adapter()
+            .actions
+            .iter()
+            .find(|candidate| &candidate.name == action)
+            .ok_or_else(|| ModeError::UnknownAction {
+                mode: self.name.clone(),
+                action: action.clone(),
+            })?;
+        let view_state = script_state_mut(view_state, &self.name)?;
+        self.host
+            .borrow_mut()
+            .execute_view_action(&callback.callback, context, arguments, view_state)
             .map_err(|error| ModeError::CallbackFailed {
                 mode: self.name.clone(),
                 message: format!("callback '{}': {error}", action.as_str()),

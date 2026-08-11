@@ -101,17 +101,38 @@ editor.modes.define<{
 	name: "typed-state",
 	attach: { view: "test.diff" },
 	on: {
-		buffer: {
+		view: {
 			state: () => ({
 				count: 0,
 				nested: { language: "rust" },
 				items: [],
 			}),
+			commands: {
+				increment(ctx) {
+					ctx.state.count++;
+					ctx.view.focus(ctx.viewId);
+					ctx.content.create();
+					ctx.commands.invoke("typed-state.increment");
+					ctx.faces.setBase("ui.text", null, "view");
+					// @ts-expect-error View-only Modes have no Content identity.
+					void ctx.contentId;
+					// @ts-expect-error View-only Modes cannot edit text.
+					ctx.edit.insert("x");
+					// @ts-expect-error Command lines require a document View.
+					ctx.commands.executeLine("write");
+					// @ts-expect-error View-only save needs an explicit ContentId.
+					ctx.content.save();
+					// @ts-expect-error View-only Modes cannot use current-content saveAs.
+					ctx.content.saveAs("other.rs");
+					// @ts-expect-error A View-only Mode has no content Face scope.
+					ctx.faces.setBase("ui.text", null, "content");
+				},
+			},
 		},
 	},
 });
 
-editor.modes.define({
+editor.modes.define<null, null>({
 	name: "invalid-return",
 	on: {
 		buffer: {
@@ -129,7 +150,7 @@ editor.modes.define({
 	name: "invalid-view-only-language",
 	// @ts-expect-error Language matching needs a Content binding to classify.
 	attach: { view: "test.diff", languages: ["rust"] },
-	on: { buffer: {} },
+	on: { view: {} },
 });
 
 editor.theme.use("catppuccin-mocha");

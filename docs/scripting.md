@@ -2,10 +2,47 @@
 
 **状态：** 当前插件作者指南
 
-**更新日期：** 2026-08-10
+**更新日期：** 2026-08-11
 
 宿主架构与信任边界见
 [`TypeScript 脚本架构`](design/typescript-scripting-architecture.md)。
+
+## 新手先回答四个问题
+
+第一次写插件时，先不要从 API 名称出发。依次回答下面四个问题，就能确定
+需要扩展哪一层。
+
+1. 你的插件要保存什么数据？
+   文件文本等可打开、保存、关闭的数据是 **Content**。插件通常使用已有的
+   Buffer Content，而不是定义新的 ContentKind。
+2. 用户面对的完整交互单元是什么？
+   一个文件编辑器、一个左右对比器，都是 **View**。View 可以绑定零个、
+   一个或多个 Content，并拥有自己的 selection、Mode 组合和生命周期。
+3. 屏幕上要增加什么显示区域？
+   正文、状态栏、minimap 都是 **Pane**。Pane 只是 View 的显示入口；它不
+   拥有 Content、Mode 或独立生命周期。
+4. 你要增加的是行为、附加显示，还是新的交互单元？
+   这一步决定使用哪一种扩展方式。
+
+最常见的三个答案如下：
+
+- “给 Rust 文件增加快捷键和高亮”使用 **Mode**。声明目标
+  `core.buffer`、`document` binding 和 `rust` language；不自行遍历文件。
+- “给所有文件编辑器右侧增加 minimap”使用 **View extension**。它给已有
+  `core.buffer` 增加 Pane，不接管原 View 的关闭和切换。
+- “定义一个左右各显示一份文档、整体切换和关闭的对比器”使用
+  **View definition**。父 View 定义 `left/right` binding，两个子
+  BufferView 各自使用一个 binding。
+
+Worker 不是第四种 View 扩展。需要并行计算时使用标准 `Worker`，再把
+结果写回 revision-safe sink；Worker 不拥有 Mode 或 View。
+
+可以把判断过程记成一句话：改行为选 Mode，给现有 View 加区域选
+View extension，创造完整交互单元选 View definition，耗时计算选 Worker。
+
+下面是这些扩展方式的具体写法。Mode 示例见内建
+[Vim 插件](../runtime/plugins/vim/plugin.ts)，Worker 示例见内建
+[Tree-sitter 插件](../runtime/plugins/tree-sitter/plugin.ts)。
 
 编辑器在创建初始 Content 和 View 之前，按照 manifest 中的 `order`
 加载 `runtime/plugins/*/plugin.json` 指定的内建插件。Rust 只注册由此得到的
@@ -40,14 +77,17 @@ let loaded = vell_plugin_v8::load_typescript_modes(
 )?;
 let modes = loaded.modes;
 let backgrounds = loaded.backgrounds;
+let view_definitions = loaded.view_definitions;
+let view_extensions = loaded.view_extensions;
+let commands = loaded.commands;
 ```
 
-结果只暴露通用 `Mode`、`ModeBackground`、`ViewExtension` 和 `CommandEntry`；
-V8 类型不会跨越 crate 边界。
-根二进制通过 `load_user_configuration()` 原子取得 Mode、View extension、后台
-运行时、Theme 和 Face override，再用 `prepare_commands()` 安装原生命令视图
-并取回命令，最后构建 App。内建配置的测试或 headless 入口可使用
-`load_default_configuration()`。
+结果只暴露通用 `Mode`、`ModeBackground`、`ViewExtension`、
+`CompoundViewDefinition` 和 `CommandEntry`；V8 类型不会跨越 crate
+边界。根二进制通过 `load_user_configuration()` 原子取得 Mode、View
+extension、View definition、后台运行时、Theme 和 Face override，再用
+`prepare_commands()` 安装原生命令视图并取回命令，最后构建 App。内建配置
+的测试或 headless 入口可使用 `load_default_configuration()`。
 
 ## 扩展已有 View
 
@@ -126,8 +166,8 @@ editor.views.define({
 `left` 和 `right` 是父 View 的 Content 角色；`before` 和 `after` 只是稳定的
 子 View 名称，二者不能混用。每个子 `core.buffer` 把自己的 `document` 映射到
 一个父 binding，因此分别拥有 Pane、selection 和语言 Mode。父
-`example.diff` 是可切换的零 Pane View，整体切换和关闭从任一子 Pane 提升到
-父 View。
+`example.diff` 是可切换的零 recipe Pane View；View extension 仍可给它
+增加直属 Pane。整体切换和关闭从任一子 Pane 提升到父 View。
 
 创建实例时使用统一的 `view.switch`：
 
@@ -153,6 +193,13 @@ contract。需要给已有 View 增加派生 Pane 时继续使用 `editor.views.
 
 完整示例见
 [view-definition-diff.ts](../runtime/examples/view-definition-diff.ts)。
+
+`editor.views.define` 与 extension 一样只在插件模块加载期间可用。模块失败
+时，该模块新增的 Mode、View definition、View extension、命令、Theme 和
+Face override 一起回滚。成功后，根二进制把 owned
+`CompoundViewDefinition` 交给 Kernel registry，再创建初始 session；因此
+App 和 V8 之间不共享 callback 或可变 View factory。卸载 definition 前，
+宿主会拒绝仍被活动 View、Mode 或 extension 使用的 owner。
 
 ## 选择 Theme 与覆盖 Face
 
@@ -396,11 +443,37 @@ diff.setRightContent(nextContent);
 
 `attach` 省略时，为兼容现有插件，等价于匹配
 `core.buffer` 的 `document` binding 且不限制语言。新插件应显式声明
-`attach`，让读者只看 definition 就能理解 Mode 的适用范围。当前运行时只
-安装指向 BufferView `document` binding 的 Mode。省略 `attach.binding`
-可以声明纯 View 行为，但要等 Native View contract 验证后才会实际安装；
-复合 View 的其他 binding 也在该阶段开放。`languages` 依赖 Content 分类，
-因此只能和 `binding` 一起声明。
+`attach`，让读者只看 definition 就能理解 Mode 的适用范围。省略
+`attach.binding` 声明 View-only Mode：宿主只创建 `(ModeId, ViewId)` state，
+不会为父 View 借用某个子 Content，也不会创建 Mode content state。直接附加
+到复合 View 的其他 binding 仍暂缓；优先让独立编辑区域成为子 BufferView。
+`languages` 依赖 Content 分类，因此只能和 `binding` 一起声明。
+
+View-only Mode 使用 `on.view`，而不是 `on.buffer`：
+
+```ts
+editor.modes.define<{ activeSide: "left" | "right" }>({
+  name: "diff-navigation",
+  attach: { view: "core.diff" },
+  on: {
+    view: {
+      state: () => ({ activeSide: "left" }),
+      commands: {
+        selectRight(context) {
+          context.state.activeSide = "right";
+        },
+      },
+      keys: { "]": "selectRight" },
+    },
+  },
+});
+```
+
+它只有一份 View state。context 提供 `viewId`、`commands`、`faces`、`app`、
+`content` 和 `view`；不提供 `contentId`、`text`、`cursor`、`edit`、
+`search`、`history` 或 `viewport`。从复合 View 的子 View 发起限定 Mode 命令
+时，宿主会向上查找最近的同名 attachment owner，因此 Diff 的整体行为仍由
+Diff 父 View 的 state 处理。
 
 ## 定义 Mode
 
@@ -547,8 +620,9 @@ decoration snapshot 都携带 Content revision 和 UTF-16 range。渲染只读�
 文本变化时，缓存的 Content decoration 会先随该 change 映射，直到新的异步
 snapshot 到达。这样既能避免高亮短暂消失，也能保持 revision 安全。
 
-`viewState.viewPolicy` 可以设置 cursor style、cursor domain、selection
-shape 和具名 selection face。
+Buffer adapter 的 `viewState.viewPolicy` 可以设置 cursor style、cursor
+domain、selection shape 和具名 selection face。View-only adapter 不声明
+这类依赖 Content 的呈现策略；它的可见区域由 View extension 提供。
 
 ## 后台 Worker
 

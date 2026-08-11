@@ -1,8 +1,10 @@
 use crate::action::TransactionIntent;
 use crate::command::AppCommand;
+#[cfg(test)]
+use crate::operation::BufferViewSource;
 use crate::operation::{
-    AppOperation, BufferViewSource, ContentLifecycleOperation, ContentTarget, ModeFlowPropagation,
-    ModeInvocation, ModeTarget, OperationRequest, ViewLifecycleOperation, ViewSpec,
+    AppOperation, ContentLifecycleOperation, ContentTarget, ModeFlowPropagation, ModeInvocation,
+    ModeTarget, OperationRequest, ViewLifecycleOperation, ViewSpec,
 };
 use vell_mode::command::{ModeCommand, ModeValue};
 use vell_mode::command_registry::{
@@ -344,121 +346,7 @@ fn one_view_spec(arguments: Vec<CommandValue>) -> Result<ViewSpec, CommandError>
             "expected one view spec".to_owned(),
         ));
     };
-    let object = value
-        .as_object()
-        .ok_or_else(|| CommandError::InvalidArguments("view spec must be an object".to_owned()))?;
-    if object.get("type").and_then(CommandValue::as_str) == Some("core.diff") {
-        if object
-            .keys()
-            .any(|key| !matches!(key.as_str(), "type" | "left" | "right"))
-        {
-            return Err(CommandError::InvalidArguments(
-                "diff view spec contains an unknown field".to_owned(),
-            ));
-        }
-        let content = |name: &str| {
-            object
-                .get(name)
-                .and_then(CommandValue::as_u64)
-                .map(ContentId)
-                .ok_or_else(|| {
-                    CommandError::InvalidArguments(format!(
-                        "diff view spec {name} must be a non-negative content id"
-                    ))
-                })
-        };
-        return Ok(ViewSpec::diff(content("left")?, content("right")?));
-    }
-    if object.get("type").and_then(CommandValue::as_str) == Some("defined") {
-        if object
-            .keys()
-            .any(|key| !matches!(key.as_str(), "type" | "definition" | "bindings"))
-        {
-            return Err(CommandError::InvalidArguments(
-                "defined view spec contains an unknown field".to_owned(),
-            ));
-        }
-        let definition = object
-            .get("definition")
-            .and_then(CommandValue::as_str)
-            .filter(|definition| !definition.is_empty())
-            .map(vell_protocol::view::ViewDefinitionId::new)
-            .ok_or_else(|| {
-                CommandError::InvalidArguments(
-                    "defined view spec definition must be a non-empty string".to_owned(),
-                )
-            })?;
-        let bindings = object
-            .get("bindings")
-            .and_then(CommandValue::as_object)
-            .ok_or_else(|| {
-                CommandError::InvalidArguments(
-                    "defined view spec bindings must be an object".to_owned(),
-                )
-            })?
-            .iter()
-            .map(|(binding, content)| {
-                let content = content.as_u64().map(ContentId).ok_or_else(|| {
-                    CommandError::InvalidArguments(format!(
-                        "defined view spec binding '{binding}' must be a non-negative content id"
-                    ))
-                })?;
-                Ok((BindingKey::new(binding), content))
-            })
-            .collect::<Result<Vec<_>, CommandError>>()?;
-        return Ok(ViewSpec::defined(definition, bindings));
-    }
-    if object.get("type").and_then(CommandValue::as_str) != Some("core.buffer") {
-        return Err(CommandError::InvalidArguments(
-            "view spec type must be 'core.buffer', 'core.diff', or 'defined'".to_owned(),
-        ));
-    }
-    if object
-        .keys()
-        .any(|key| !matches!(key.as_str(), "type" | "content" | "create" | "path"))
-    {
-        return Err(CommandError::InvalidArguments(
-            "buffer view spec contains an unknown field".to_owned(),
-        ));
-    }
-    let sources = [
-        object.contains_key("content"),
-        object.contains_key("create"),
-        object.contains_key("path"),
-    ];
-    if sources.into_iter().filter(|present| *present).count() != 1 {
-        return Err(CommandError::InvalidArguments(
-            "buffer view spec requires exactly one of content, create, or path".to_owned(),
-        ));
-    }
-    let source = if let Some(content) = object.get("content") {
-        let content = content.as_u64().map(ContentId).ok_or_else(|| {
-            CommandError::InvalidArguments(
-                "view spec content must be a non-negative integer".to_owned(),
-            )
-        })?;
-        BufferViewSource::Content(content)
-    } else if let Some(create) = object.get("create") {
-        if create.as_bool() != Some(true) {
-            return Err(CommandError::InvalidArguments(
-                "view spec create must be true".to_owned(),
-            ));
-        }
-        BufferViewSource::Create
-    } else {
-        let path = object
-            .get("path")
-            .and_then(CommandValue::as_str)
-            .filter(|path| !path.is_empty())
-            .map(str::to_owned)
-            .ok_or_else(|| {
-                CommandError::InvalidArguments(
-                    "view spec path must be a non-empty string".to_owned(),
-                )
-            })?;
-        BufferViewSource::Open { path }
-    };
-    Ok(ViewSpec::Buffer { source })
+    ViewSpec::from_json(value).map_err(|error| CommandError::InvalidArguments(error.to_string()))
 }
 
 fn command_value_to_mode(value: &CommandValue) -> Result<ModeValue, CommandError> {

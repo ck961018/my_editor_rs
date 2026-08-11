@@ -35,18 +35,26 @@ pub(super) fn resolve_command(
         }
         Command::Mode(command) => {
             let view = source.view_or(focused_view);
-            Some(DispatchCommand::Mode {
-                command,
-                view,
-                content: views.get(&view)?.document_content()?,
+            let content = views.get(&view)?.document_content();
+            Some(match content {
+                Some(content) => DispatchCommand::Mode {
+                    command,
+                    view,
+                    content,
+                },
+                None => DispatchCommand::ViewMode { command, view },
             })
         }
         Command::ModeInput(input) => {
             let view = source.view_or(focused_view);
-            Some(DispatchCommand::ModeInput {
-                input,
-                view,
-                content: views.get(&view)?.document_content()?,
+            let content = views.get(&view)?.document_content();
+            Some(match content {
+                Some(content) => DispatchCommand::ModeInput {
+                    input,
+                    view,
+                    content,
+                },
+                None => DispatchCommand::ViewModeInput { input, view },
             })
         }
         Command::Registered(invocation) => {
@@ -83,4 +91,47 @@ pub(super) fn default_global_keymap() -> Keymap<Command> {
         Command::Content(crate::command::ContentCommand::Save),
     );
     keymap
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command::{ModeCommand, ModeInputCommand};
+    use crate::mode_name::{ModeActionName, ModeName};
+    use vell_protocol::view::{ViewDefinition, ViewDefinitionId};
+
+    #[test]
+    fn view_only_mode_commands_do_not_require_a_document_binding() {
+        let view_id = ViewId(7);
+        let definition = ViewDefinition::new(ViewDefinitionId::new("test.container"), []).unwrap();
+        let view = View::with_definition(&definition, [], None).unwrap();
+        let views = HashMap::from([(view_id, view)]);
+        let source = CommandSource::Mode {
+            view: view_id,
+            index: 0,
+        };
+        let name = ModeName::new("container");
+
+        assert!(matches!(
+            resolve_command(
+                Command::Mode(ModeCommand::new(
+                    name.clone(),
+                    ModeActionName::new("next")
+                )),
+                source,
+                view_id,
+                &views,
+            ),
+            Some(DispatchCommand::ViewMode { view, .. }) if view == view_id
+        ));
+        assert!(matches!(
+            resolve_command(
+                Command::ModeInput(ModeInputCommand::new(name, KeyEvent::char('x'))),
+                source,
+                view_id,
+                &views,
+            ),
+            Some(DispatchCommand::ViewModeInput { view, .. }) if view == view_id
+        ));
+    }
 }

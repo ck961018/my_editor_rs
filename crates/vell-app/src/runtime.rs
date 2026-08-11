@@ -1266,7 +1266,8 @@ impl<F: Frontend> App<F> {
         let origin = command.content();
         let operations = match command {
             DispatchCommand::ModeContentOperations { operations, .. }
-            | DispatchCommand::ModeOperations { operations, .. } => operations,
+            | DispatchCommand::ModeOperations { operations, .. }
+            | DispatchCommand::ViewModeOperations { operations, .. } => operations,
             _ => return origin,
         };
         let target = match operations.as_slice() {
@@ -1890,7 +1891,10 @@ impl<F: Frontend> App<F> {
                                 input_flow = flow;
                             }
                             frame.record_view_touch(view, revision_before);
-                            let mut effect_origin = OperationOrigin::view(view, content);
+                            let mut effect_origin = content.map_or_else(
+                                || OperationOrigin::view_only(view),
+                                |content| OperationOrigin::view(view, content),
+                            );
                             effect_origin.mode = Some(mode);
                             prepend_mode_operations(
                                 &mut queue,
@@ -1930,7 +1934,10 @@ impl<F: Frontend> App<F> {
                     let (flow, operations) = result.into_parts();
                     input_flow = flow;
                     frame.record_view_touch(view, revision_before);
-                    let mut effect_origin = OperationOrigin::view(view, content);
+                    let mut effect_origin = content.map_or_else(
+                        || OperationOrigin::view_only(view),
+                        |content| OperationOrigin::view(view, content),
+                    );
                     effect_origin.mode = Some(mode);
                     prepend_mode_operations(
                         &mut queue,
@@ -2114,9 +2121,22 @@ impl<F: Frontend> App<F> {
                     FaceRemapTarget::CurrentContent => self
                         .resolve_content_target(ContentTarget::Current, origin)
                         .map(vell_protocol::content_query::FaceRemapScope::Content),
-                    FaceRemapTarget::CurrentView => self
-                        .resolve_view_target(ViewTarget::Current, origin)
-                        .map(|(view, _)| vell_protocol::content_query::FaceRemapScope::View(view)),
+                    FaceRemapTarget::CurrentView => {
+                        let view = origin.view.ok_or_else(|| {
+                            invalid_operation("face operation has no current View")
+                        })?;
+                        let view_data = self.session.view(view).ok_or_else(|| {
+                            invalid_operation("face operation targets missing View")
+                        })?;
+                        if origin.content.is_some()
+                            && view_data.document_content() != origin.content
+                        {
+                            return Err(invalid_operation(
+                                "face operation View/Content target mismatch",
+                            ));
+                        }
+                        Ok(vell_protocol::content_query::FaceRemapScope::View(view))
+                    }
                 };
                 let operation = match operation {
                     FaceOperation::SetBase {
@@ -2224,48 +2244,112 @@ impl<F: Frontend> App<F> {
                         "nested mode invocation needs a source view",
                     ));
                 }
-                let origin_content = origin
-                    .content
-                    .ok_or_else(|| invalid_operation("mode invocation has no content target"))?;
-                let content_kind =
-                    self.kernel.contents().kind(origin_content).ok_or_else(|| {
-                        invalid_operation("mode invocation targets missing content")
-                    })?;
-                let command_scope = self
-                    .kernel
-                    .modes()
-                    .command_scope(
-                        &invocation.command.mode,
-                        &invocation.command.action,
-                        content_kind,
-                    )
-                    .map_err(|error| {
-                        recoverable_execution_error(io::ErrorKind::InvalidData, error)
-                    })?;
                 let mode = self
                     .kernel
                     .modes()
                     .resolve_mode(&invocation.command.mode)
-                    .expect("validated mode exists");
-                let scope = match command_scope {
-                    crate::mode::ModeActionScope::Content => {
-                        let content =
-                            self.resolve_content_target(ContentTarget::Current, origin)?;
-                        let source_view = origin.view;
-                        if target == ModeTarget::CurrentView && source_view.is_none() {
-                            return Err(invalid_operation("mode invocation needs a source view"));
+                    .ok_or_else(|| {
+                        recoverable_execution_error(
+                            io::ErrorKind::InvalidData,
+                            crate::mode::ModeError::UnknownMode {
+                                mode: invocation.command.mode.clone(),
+                            },
+                        )
+                    })?;
+                let scope =
+                    match target {
+                        ModeTarget::CurrentView => {
+                            let source = origin.view.ok_or_else(|| {
+                                invalid_operation("mode invocation needs a source view")
+                            })?;
+                            if let Some(content) = origin.content {
+                                if !self.kernel.contents().contains(content) {
+                                    return Err(invalid_operation(
+                                        "mode invocation targets missing content",
+                                    ));
+                                }
+                                let source_content = self
+                                    .session
+                                    .view(source)
+                                    .ok_or_else(|| {
+                                        invalid_operation("mode invocation targets missing View")
+                                    })?
+                                    .document_content();
+                                if source_content != Some(content) {
+                                    return Err(invalid_operation(
+                                        "mode invocation View/Content target mismatch",
+                                    ));
+                                }
+                            }
+                            let (view, content) =
+                                self.session.mode_owner_from_view(source, mode).ok_or_else(
+                                    || invalid_operation("mode is not attached to the source View"),
+                                )?;
+                            let command_scope = if let Some(content) = content {
+                                let content_kind =
+                                    self.kernel.contents().kind(content).ok_or_else(|| {
+                                        invalid_operation("mode invocation targets missing content")
+                                    })?;
+                                self.kernel.modes().command_scope(
+                                    &invocation.command.mode,
+                                    &invocation.command.action,
+                                    content_kind,
+                                )
+                            } else {
+                                self.kernel.modes().view_command_scope(
+                                    &invocation.command.mode,
+                                    &invocation.command.action,
+                                )
+                            }
+                            .map_err(|error| {
+                                recoverable_execution_error(io::ErrorKind::InvalidData, error)
+                            })?;
+                            match (command_scope, content) {
+                                (crate::mode::ModeActionScope::Content, Some(content)) => {
+                                    ResolvedModeScope::Content {
+                                        content,
+                                        source_view: Some(view),
+                                    }
+                                }
+                                (crate::mode::ModeActionScope::Content, None) => {
+                                    return Err(invalid_operation(
+                                        "View-only Mode cannot execute a content-scoped action",
+                                    ));
+                                }
+                                (crate::mode::ModeActionScope::View, content) => {
+                                    ResolvedModeScope::View { view, content }
+                                }
+                            }
                         }
-                        ResolvedModeScope::Content {
-                            content,
-                            source_view,
+                        ModeTarget::CurrentContent => {
+                            let content =
+                                self.resolve_content_target(ContentTarget::Current, origin)?;
+                            let content_kind =
+                                self.kernel.contents().kind(content).ok_or_else(|| {
+                                    invalid_operation("mode invocation targets missing content")
+                                })?;
+                            let command_scope = self
+                                .kernel
+                                .modes()
+                                .command_scope(
+                                    &invocation.command.mode,
+                                    &invocation.command.action,
+                                    content_kind,
+                                )
+                                .map_err(|error| {
+                                    recoverable_execution_error(io::ErrorKind::InvalidData, error)
+                                })?;
+                            if command_scope != crate::mode::ModeActionScope::Content {
+                                return Err(invalid_operation(
+                                    "content origin cannot execute a view-scoped action",
+                                ));
+                            }
+                            ResolvedModeScope::Content {
+                                content,
+                                source_view: origin.view,
+                            }
                         }
-                    }
-                    crate::mode::ModeActionScope::View => {
-                        let (view, content) =
-                            self.resolve_view_target(ViewTarget::Current, origin)?;
-                        ResolvedModeScope::View { view, content }
-                    }
-                };
+                    };
                 Ok(ResolvedOperation::Mode {
                     mode,
                     scope,
@@ -2278,22 +2362,27 @@ impl<F: Frontend> App<F> {
                         "mode input requires a view-scoped origin",
                     ));
                 }
-                let (view, content) = self.resolve_view_target(target, origin)?;
-                let content_kind = self
-                    .kernel
-                    .contents()
-                    .kind(content)
-                    .ok_or_else(|| invalid_operation("mode input targets missing content"))?;
                 let mode = self
                     .kernel
                     .modes()
                     .resolve_mode(input.mode())
                     .ok_or_else(|| invalid_operation("mode input targets unknown mode"))?;
-                if self.kernel.modes().adapter(mode, content_kind).is_none() {
-                    return Err(invalid_operation(
-                        "mode input targets an unsupported content kind",
-                    ));
-                }
+                let source = match target {
+                    ViewTarget::Current => origin.view.expect("View origin keeps its View"),
+                    ViewTarget::Switchable => {
+                        let source = origin.view.expect("View origin keeps its View");
+                        self.session
+                            .switch_target_from_view(source)
+                            .ok_or_else(|| {
+                                invalid_operation("mode input has no switchable target")
+                            })?
+                    }
+                    ViewTarget::Id(view) => view,
+                };
+                let (view, content) = self
+                    .session
+                    .mode_owner_from_view(source, mode)
+                    .ok_or_else(|| invalid_operation("mode input targets an inactive mode"))?;
                 Ok(ResolvedOperation::ModeInput {
                     mode,
                     view,

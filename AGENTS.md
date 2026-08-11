@@ -95,9 +95,10 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
 - `ViewWorkspace` 是 View 语义树、直属 Pane 映射、Scene、SceneBuilder、
   结构 ID、焦点和状态栏结构的唯一所有者。创建、替换和关闭先在完整结构
   草稿上校验，再一次发布；调用方只消费 View 生命周期事件。
-- Native DiffView 是持有 `left/right` bindings 的零 Pane 语义父 View；左右
-  子 BufferView 不可切换并各自拥有 Pane、selection 和语言 Mode。通用切换
-  与关闭从子 Pane 解析到 DiffView，替换锚点仍是一个实际子 Pane。
+- Native DiffView 是持有 `left/right` bindings 的零 recipe Pane 语义父
+  View；View extension 可以给它增加直属 Pane。左右子 BufferView 不可切换
+  并各自拥有 Pane、selection 和语言 Mode。通用切换与关闭从子 Pane 解析到
+  DiffView，替换锚点仍是一个实际子 Pane。
 - DiffView replacement 必须在进入 prepared effects 前校验完整 workspace 和
   attachment candidate；发布时先接续新 attachment，再清理旧 View，避免共享
   Mode content state 引用短暂归零。
@@ -168,9 +169,10 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
 - `runtime/editor.d.ts` 与 Rust schema 必须同步；改变任一侧时补充契约测试。
 - 内建插件通过 `plugin.json` 的 `order` 排序，不能在 Rust bootstrap 中按名
   选择 Vim 或 Tree-sitter。
-- adapter 使用 `on.buffer`；状态栏分段经
-  `viewState.viewPolicy.statusBar` 提供。只暴露该 ContentKind 合法
-  的 context 能力。
+- Content-bound adapter 使用 `on.buffer`，View-only adapter 使用 `on.view`。
+  只有 Content-bound view state 可以经 `viewPolicy.statusBar` 提供状态栏
+  分段；View-only 可见区域使用 View extension。只暴露对应 adapter 合法的
+  context 能力。
 - 脚本 state 必须是 JSON-compatible owned data。V8 handle、函数、Promise、
   循环引用和宿主引用不得进入 Mode state。
 - 后台任务使用全局标准 `new Worker`；Worker 不属于 Mode。结果通过主

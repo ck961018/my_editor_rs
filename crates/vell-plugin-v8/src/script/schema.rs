@@ -615,9 +615,13 @@ fn parse_mode_definition(
     let attachment = parse_attachment(scope, object)?;
     let face_definitions = parse_face_definitions(scope, object)?;
     let adapters = match property(scope, object, "on") {
-        Some(value) if !value.is_null_or_undefined() => parse_adapters(scope, object, value)?,
+        Some(value) if !value.is_null_or_undefined() => {
+            parse_adapters(scope, object, value, &attachment)?
+        }
         _ => {
-            return Err(ScriptError::new("mode definition must provide on.buffer"));
+            return Err(ScriptError::new(
+                "mode definition must provide on.buffer or on.view",
+            ));
         }
     };
     Ok(ScriptModeDefinition {
@@ -696,6 +700,7 @@ fn parse_adapters(
     scope: &mut v8::PinScope,
     definition: v8::Local<v8::Object>,
     value: v8::Local<v8::Value>,
+    attachment: &ModeAttachmentRule,
 ) -> Result<ScriptAdapterDefinitions, ScriptError> {
     for unsupported in ["content", "view", "actions", "keys", "input", "worker"] {
         if property(scope, definition, unsupported)
@@ -724,13 +729,64 @@ fn parse_adapters(
             .map_err(|_| ScriptError::new(format!("mode adapter '{name}' must be an object")))?;
         match name.as_str() {
             "buffer" => adapters.buffer = Some(parse_adapter(scope, adapter, ContentKind::Buffer)?),
+            "view" => adapters.view = Some(parse_view_adapter(scope, adapter)?),
             _ => return Err(ScriptError::new(format!("unknown mode adapter '{name}'"))),
         }
     }
-    if adapters.buffer.is_none() {
-        return Err(ScriptError::new("mode definition must provide on.buffer"));
+    match (
+        attachment.binding().is_some(),
+        adapters.buffer.is_some(),
+        adapters.view.is_some(),
+    ) {
+        (true, true, false) | (false, false, true) => {}
+        (true, _, _) => {
+            return Err(ScriptError::new(
+                "content-bound mode must provide only on.buffer",
+            ));
+        }
+        (false, _, _) => {
+            return Err(ScriptError::new("View-only mode must provide only on.view"));
+        }
     }
     Ok(adapters)
+}
+
+fn parse_view_adapter(
+    scope: &mut v8::PinScope,
+    object: v8::Local<v8::Object>,
+) -> Result<ScriptAdapterDefinition, ScriptError> {
+    for field in [
+        "viewState",
+        "changed",
+        "worker",
+        "job",
+        "applyJob",
+        "analysis",
+    ] {
+        if property(scope, object, field).is_some_and(|value| !value.is_null_or_undefined()) {
+            return Err(ScriptError::new(format!(
+                "mode view.{field} is not supported"
+            )));
+        }
+    }
+    let actions = parse_actions(scope, object, "commands", false)?;
+    if actions
+        .iter()
+        .any(|action| action.name.as_str() == INPUT_ACTION)
+    {
+        return Err(ScriptError::new(format!(
+            "mode command '{INPUT_ACTION}' is reserved for raw input"
+        )));
+    }
+    Ok(ScriptAdapterDefinition {
+        bindings: parse_bindings(scope, object, &actions)?,
+        input_action: None,
+        input: optional_function(scope, object, "input")?,
+        actions,
+        create_content: None,
+        content_changed: None,
+        create_view: optional_function(scope, object, "state")?,
+    })
 }
 
 fn parse_adapter(

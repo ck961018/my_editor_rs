@@ -424,6 +424,20 @@ impl ModeDraftJournal {
         )
     }
 
+    fn view_mut<'a>(
+        &'a mut self,
+        mode: ModeId,
+        view: ViewId,
+        persistent: &ModeViewInstance,
+    ) -> &'a mut ModeViewDraft {
+        self.views
+            .entry((mode, view))
+            .or_insert_with(|| ModeViewDraft {
+                state: persistent.state.clone_box(),
+                fault: persistent.fault.clone(),
+            })
+    }
+
     fn content_and_view_mut<'a>(
         &'a mut self,
         mode: ModeId,
@@ -857,7 +871,13 @@ impl BufferModeContentContext<'_> {
 
 #[allow(dead_code, reason = "reserved for generic Mode extensions")]
 pub enum ModeViewContext<'a> {
+    View(ViewOnlyModeViewContext),
     Buffer(BufferModeViewContext<'a>),
+}
+
+#[allow(dead_code, reason = "native View-only Mode adapter capability surface")]
+pub struct ViewOnlyModeViewContext {
+    view_id: ViewId,
 }
 
 #[allow(dead_code, reason = "native Mode adapter capability surface")]
@@ -870,6 +890,10 @@ pub struct BufferModeViewContext<'a> {
 
 #[allow(dead_code, reason = "reserved for generic Mode extensions")]
 impl<'a> ModeViewContext<'a> {
+    pub fn for_view(view_id: ViewId) -> Self {
+        Self::View(ViewOnlyModeViewContext { view_id })
+    }
+
     pub fn new(
         view_id: ViewId,
         content_id: ContentId,
@@ -896,30 +920,40 @@ impl<'a> ModeViewContext<'a> {
 
     pub fn view_id(&self) -> ViewId {
         match self {
+            Self::View(context) => context.view_id,
             Self::Buffer(context) => context.view_id,
         }
     }
 
-    pub fn content_id(&self) -> ContentId {
+    pub fn bound_content_id(&self) -> Option<ContentId> {
         match self {
-            Self::Buffer(context) => context.content_id,
+            Self::View(_) => None,
+            Self::Buffer(context) => Some(context.content_id),
         }
+    }
+
+    pub fn content_id(&self) -> ContentId {
+        self.bound_content_id()
+            .expect("View-only Mode context has no bound Content")
     }
 
     pub fn content_kind(&self) -> ContentKind {
         match self {
+            Self::View(_) => panic!("View-only Mode context has no ContentKind"),
             Self::Buffer(_) => ContentKind::Buffer,
         }
     }
 
     pub fn content_revision(&self) -> Option<Revision> {
         match self {
+            Self::View(_) => None,
             Self::Buffer(context) => context.contents.revision(context.content_id),
         }
     }
 
     pub fn buffer(&self) -> Option<&BufferModeViewContext<'a>> {
         match self {
+            Self::View(_) => None,
             Self::Buffer(context) => Some(context),
         }
     }
@@ -1120,12 +1154,14 @@ pub enum ModeActionScope {
 
 #[derive(Clone, Copy)]
 pub enum ModeAdapter<'a> {
+    View(&'a dyn Mode),
     Buffer(&'a dyn Mode),
 }
 
 impl<'a> ModeAdapter<'a> {
     fn behavior(self) -> &'a dyn Mode {
         match self {
+            Self::View(mode) => mode,
             Self::Buffer(mode) => mode,
         }
     }
@@ -1133,12 +1169,23 @@ impl<'a> ModeAdapter<'a> {
 
 #[derive(Clone, Copy, Default)]
 pub struct ModeAdapters {
+    view: bool,
     buffer: bool,
 }
 
 impl ModeAdapters {
+    pub fn view() -> Self {
+        Self {
+            view: true,
+            buffer: false,
+        }
+    }
+
     pub fn buffer() -> Self {
-        Self { buffer: true }
+        Self {
+            view: false,
+            buffer: true,
+        }
     }
 
     pub fn contains(self, kind: ContentKind) -> bool {
@@ -1147,8 +1194,12 @@ impl ModeAdapters {
         }
     }
 
+    pub fn contains_view(self) -> bool {
+        self.view
+    }
+
     fn is_empty(self) -> bool {
-        !self.buffer
+        !self.view && !self.buffer
     }
 }
 
@@ -1187,6 +1238,12 @@ pub trait Mode {
     fn create_view_state(
         &self,
         _content_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) -> Result<Box<dyn ModeState>, ModeError> {
+        Ok(Box::new(()))
+    }
+    fn create_view_only_state(
+        &self,
         _context: &ModeViewContext<'_>,
     ) -> Result<Box<dyn ModeState>, ModeError> {
         Ok(Box::new(()))
@@ -1273,9 +1330,24 @@ pub trait Mode {
     ) -> &'a Keymap<Command> {
         &EMPTY_KEYMAP
     }
+    fn view_only_input_keymap<'a>(
+        &'a self,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) -> &'a Keymap<Command> {
+        &EMPTY_KEYMAP
+    }
     fn input_typing(
         &self,
         _content_state: &dyn ModeState,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+        _key: KeyEvent,
+    ) -> Option<Command> {
+        None
+    }
+    fn view_only_input_typing(
+        &self,
         _view_state: &dyn ModeState,
         _context: &ModeViewContext<'_>,
         _key: KeyEvent,
@@ -1294,9 +1366,27 @@ pub trait Mode {
             action: ModeActionName::new("<input>"),
         })
     }
+    fn execute_view_only_input(
+        &self,
+        _view_state: &mut dyn ModeState,
+        _context: &ModeViewContext<'_>,
+        _key: KeyEvent,
+    ) -> Result<ModeResult, ModeError> {
+        Err(ModeError::UnknownAction {
+            mode: self.name().clone(),
+            action: ModeActionName::new("<input>"),
+        })
+    }
     fn mode_input_status(
         &self,
         _content_state: &dyn ModeState,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) -> InputStatus {
+        InputStatus::Ready
+    }
+    fn view_only_input_status(
+        &self,
         _view_state: &dyn ModeState,
         _context: &ModeViewContext<'_>,
     ) -> InputStatus {
@@ -1311,9 +1401,24 @@ pub trait Mode {
     ) -> InputDecision<Command> {
         InputDecision::Pass
     }
+    fn view_only_input_capture(
+        &self,
+        _view_state: &mut dyn ModeState,
+        _context: &ModeViewContext<'_>,
+        _key: KeyEvent,
+    ) -> InputDecision<Command> {
+        InputDecision::Pass
+    }
     fn input_timeout(
         &self,
         _content_state: &mut dyn ModeState,
+        _view_state: &mut dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) -> ModeResult {
+        ModeResult::none()
+    }
+    fn view_only_input_timeout(
+        &self,
         _view_state: &mut dyn ModeState,
         _context: &ModeViewContext<'_>,
     ) -> ModeResult {
@@ -1326,9 +1431,27 @@ pub trait Mode {
         _context: &ModeViewContext<'_>,
     ) {
     }
+    fn view_only_input_cancel(
+        &self,
+        _view_state: &mut dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) {
+    }
     fn execute_view_with_arguments(
         &self,
         _content_state: &mut dyn ModeState,
+        _view_state: &mut dyn ModeState,
+        _context: &ModeViewContext<'_>,
+        action: &ModeActionName,
+        _arguments: &ModeValue,
+    ) -> Result<ModeResult, ModeError> {
+        Err(ModeError::UnknownAction {
+            mode: self.name().clone(),
+            action: action.clone(),
+        })
+    }
+    fn execute_view_only_with_arguments(
+        &self,
         _view_state: &mut dyn ModeState,
         _context: &ModeViewContext<'_>,
         action: &ModeActionName,
@@ -1358,11 +1481,7 @@ impl fmt::Display for ModeRegistrationError {
                 write!(formatter, "mode '{}' is already registered", mode.as_str())
             }
             Self::MissingAdapter(mode) => {
-                write!(
-                    formatter,
-                    "mode '{}' defines no content adapter",
-                    mode.as_str()
-                )
+                write!(formatter, "mode '{}' defines no adapter", mode.as_str())
             }
             Self::DuplicateAction { mode, action } => write!(
                 formatter,
@@ -1386,6 +1505,9 @@ pub enum ModeAttachmentError {
         content: ContentId,
         kind: ContentKind,
     },
+    UnsupportedView {
+        mode: ModeName,
+    },
 }
 
 impl fmt::Display for ModeAttachmentError {
@@ -1405,6 +1527,11 @@ impl fmt::Display for ModeAttachmentError {
                 "mode '{}' has no {kind:?} adapter for content {}",
                 mode.as_str(),
                 content.0
+            ),
+            Self::UnsupportedView { mode } => write!(
+                formatter,
+                "mode '{}' has no View-only adapter",
+                mode.as_str()
             ),
         }
     }
@@ -1462,12 +1589,20 @@ struct ModeRegistration {
 }
 
 struct RegisteredModeAdapters {
+    view: Option<Rc<dyn Mode>>,
     buffer: Option<Rc<dyn Mode>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModeAdapterKind {
+    View,
+    Content(ContentKind),
 }
 
 pub struct ModeViewInstance {
     registered: Rc<ModeRegistration>,
-    adapter_kind: ContentKind,
+    adapter_kind: ModeAdapterKind,
+    content: Option<ContentId>,
     state: Box<dyn ModeState>,
     fault: Option<ModeFault>,
     revision: Revision,
@@ -1539,6 +1674,7 @@ impl ModeRegistry {
         self.next_id = self.next_id.checked_add(1).expect("mode id overflow");
         let definition: Rc<dyn Mode> = Rc::from(definition);
         let adapters = RegisteredModeAdapters {
+            view: declared_adapters.view.then(|| definition.clone()),
             buffer: has_buffer.then(|| definition.clone()),
         };
         let registered = Rc::new(ModeRegistration {
@@ -1636,6 +1772,22 @@ impl ModeRegistry {
         Ok(adapter.behavior().action_scope(action))
     }
 
+    pub fn view_command_scope(
+        &self,
+        mode: &ModeName,
+        action: &ModeActionName,
+    ) -> Result<ModeActionScope, ModeError> {
+        let (mode_id, _) = self.resolve_command_checked(mode, action)?;
+        let registered = &self.definitions[&mode_id];
+        let adapter = registered
+            .view_adapter()
+            .ok_or_else(|| ModeError::InactiveMode {
+                requested: mode.clone(),
+                active: None,
+            })?;
+        Ok(adapter.behavior().action_scope(action))
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn instantiate(&self, name: &ModeName) -> Option<ModeViewInstance> {
         let id = self.resolve_mode(name)?;
@@ -1644,7 +1796,8 @@ impl ModeRegistry {
         Some(ModeViewInstance {
             state: Box::new(()),
             registered,
-            adapter_kind: ContentKind::Buffer,
+            adapter_kind: ModeAdapterKind::Content(ContentKind::Buffer),
+            content: None,
             fault: None,
             revision: Revision::default(),
         })
@@ -1700,12 +1853,45 @@ impl ModeRegistry {
         let mut mode = ModeViewInstance {
             state: Box::new(()),
             registered,
-            adapter_kind: kind,
+            adapter_kind: ModeAdapterKind::Content(kind),
+            content: Some(content),
             fault: None,
             revision: Revision::default(),
         };
         mode_contents.attach_view_with_context(content, &mut mode, content_context, view_context);
         mode
+    }
+
+    pub fn instantiate_registered_for_view(&self, id: ModeId, view: ViewId) -> ModeViewInstance {
+        let registered = self
+            .definitions
+            .get(&id)
+            .expect("registered ModeId exists")
+            .clone();
+        assert!(
+            registered.view_adapter().is_some(),
+            "registered ModeId supports the prevalidated View-only adapter"
+        );
+        let mut mode = ModeViewInstance {
+            state: Box::new(()),
+            registered,
+            adapter_kind: ModeAdapterKind::View,
+            content: None,
+            fault: None,
+            revision: Revision::default(),
+        };
+        mode.initialize_view_only(&ModeViewContext::for_view(view));
+        mode
+    }
+
+    pub fn ensure_view_adapter(&self, name: &ModeName) -> Result<(), ModeAttachmentError> {
+        let id = self
+            .resolve_mode(name)
+            .ok_or_else(|| ModeAttachmentError::UnknownMode(name.clone()))?;
+        if self.definitions[&id].view_adapter().is_none() {
+            return Err(ModeAttachmentError::UnsupportedView { mode: name.clone() });
+        }
+        Ok(())
     }
 }
 
@@ -1724,6 +1910,10 @@ impl ModeRegistration {
         match kind {
             ContentKind::Buffer => self.adapters.buffer.as_deref().map(ModeAdapter::Buffer),
         }
+    }
+
+    fn view_adapter(&self) -> Option<ModeAdapter<'_>> {
+        self.adapters.view.as_deref().map(ModeAdapter::View)
     }
 }
 
@@ -1941,7 +2131,9 @@ impl ModeContentStore {
             ModeContentInstance {
                 content,
                 registered: mode.registered.clone(),
-                adapter_kind: mode.adapter_kind,
+                adapter_kind: mode
+                    .content_kind()
+                    .expect("test content attachment uses a content adapter"),
                 state,
                 attachments: 1,
                 fault: None,
@@ -1998,7 +2190,9 @@ impl ModeContentStore {
                 ModeContentInstance {
                     content,
                     registered: mode.registered.clone(),
-                    adapter_kind: mode.adapter_kind,
+                    adapter_kind: mode
+                        .content_kind()
+                        .expect("retained content attachment uses a content adapter"),
                     state,
                     attachments: 1,
                     background_job_dirty: fault.is_none(),
@@ -2119,10 +2313,35 @@ impl ModeContentStore {
 
 impl ModeViewInstance {
     fn adapter(&self) -> &dyn Mode {
-        self.registered
-            .adapter(self.adapter_kind)
-            .expect("attached view mode keeps its registered adapter")
-            .behavior()
+        match self.adapter_kind {
+            ModeAdapterKind::View => self.registered.view_adapter(),
+            ModeAdapterKind::Content(kind) => self.registered.adapter(kind),
+        }
+        .expect("attached view mode keeps its registered adapter")
+        .behavior()
+    }
+
+    pub fn bound_content_id(&self) -> Option<ContentId> {
+        self.content
+    }
+
+    pub fn is_view_only(&self) -> bool {
+        matches!(self.adapter_kind, ModeAdapterKind::View)
+    }
+
+    fn content_kind(&self) -> Option<ContentKind> {
+        match self.adapter_kind {
+            ModeAdapterKind::View => None,
+            ModeAdapterKind::Content(kind) => Some(kind),
+        }
+    }
+
+    pub fn rebind_content(&mut self, content: ContentId) {
+        assert!(
+            self.content.is_some(),
+            "only a content-bound Mode can migrate its binding"
+        );
+        self.content = Some(content);
     }
 
     fn initialize(
@@ -2135,6 +2354,21 @@ impl ModeViewInstance {
             return;
         }
         let state = self.adapter().create_view_state(content_state, context);
+        match state {
+            Ok(state) => self.state = state,
+            Err(error) => {
+                self.fault = Some(ModeFault::from_error(
+                    self.name(),
+                    ModeFaultPhase::ViewState,
+                    "<view-state>",
+                    &error,
+                ));
+            }
+        }
+    }
+
+    fn initialize_view_only(&mut self, context: &ModeViewContext<'_>) {
+        let state = self.adapter().create_view_only_state(context);
         match state {
             Ok(state) => self.state = state,
             Err(error) => {
@@ -2185,6 +2419,29 @@ impl ModeViewInstance {
         )
     }
 
+    pub fn execute_view_only_with_context(
+        &self,
+        view_state: &mut dyn ModeState,
+        faulted: bool,
+        action: ModeActionId,
+        arguments: &ModeValue,
+        context: &ModeViewContext<'_>,
+    ) -> Result<ModeResult, ModeError> {
+        if faulted {
+            return Err(ModeError::InactiveMode {
+                requested: self.name().clone(),
+                active: None,
+            });
+        }
+        let action = self
+            .registered
+            .action_names
+            .get(usize::try_from(action.0).expect("mode action index overflow"))
+            .expect("mode action id belongs to registered mode");
+        self.adapter()
+            .execute_view_only_with_arguments(view_state, context, action, arguments)
+    }
+
     fn execute_input_with_context(
         &self,
         content_state: &mut dyn ModeState,
@@ -2202,6 +2459,23 @@ impl ModeViewInstance {
         self.adapter()
             .execute_input(content_state, view_state, context, key)
     }
+
+    fn execute_view_only_input_with_context(
+        &self,
+        view_state: &mut dyn ModeState,
+        faulted: bool,
+        context: &ModeViewContext<'_>,
+        key: KeyEvent,
+    ) -> Result<ModeResult, ModeError> {
+        if faulted {
+            return Err(ModeError::InactiveMode {
+                requested: self.name().clone(),
+                active: None,
+            });
+        }
+        self.adapter()
+            .execute_view_only_input(view_state, context, key)
+    }
 }
 
 impl ModeViewInstance {
@@ -2217,6 +2491,18 @@ impl ModeViewInstance {
         }
         self.adapter()
             .input_cancel(content_state, view_state, context);
+    }
+
+    fn input_cancel_view_only(
+        &self,
+        view_state: &mut dyn ModeState,
+        faulted: bool,
+        context: &ModeViewContext<'_>,
+    ) {
+        if faulted {
+            return;
+        }
+        self.adapter().view_only_input_cancel(view_state, context);
     }
 }
 
@@ -2266,12 +2552,27 @@ impl ModeViewStore {
             .is_some_and(|chain| !chain.is_empty())
     }
 
+    pub fn has_content_bound_mode(&self, view: ViewId) -> bool {
+        self.mode_ids(view).iter().any(|mode| {
+            self.instances
+                .get(&(*mode, view))
+                .is_some_and(|instance| !instance.is_view_only())
+        })
+    }
+
     pub fn revision(&self, mode: ModeId, view: ViewId) -> Option<Revision> {
         Some(self.instances.get(&(mode, view))?.revision)
     }
 
     pub fn instance(&self, mode: ModeId, view: ViewId) -> Option<&ModeViewInstance> {
         self.instances.get(&(mode, view))
+    }
+
+    pub fn rebind_content(&mut self, mode: ModeId, view: ViewId, content: ContentId) {
+        self.instances
+            .get_mut(&(mode, view))
+            .expect("rebound Mode is attached to the View")
+            .rebind_content(content);
     }
 
     pub fn insert(&mut self, view: ViewId, mode: ModeViewInstance) {
@@ -2448,11 +2749,21 @@ impl ModeViewStore {
         drafts: &'a ModeDraftJournal,
     ) -> Option<&'a Keymap<Command>> {
         let mode = *self.mode_ids(view).get(index)?;
-        let content_state = mode_contents.instance(mode, context.content_id())?;
         let instance = self.instances.get(&(mode, view))?;
-        let (content_state, content_faulted) =
-            drafts.content(mode, context.content_id(), content_state);
         let (view_state, view_faulted) = drafts.view(mode, view, instance);
+        if instance.is_view_only() {
+            let view_context = ModeViewContext::for_view(view);
+            return (!view_faulted).then(|| {
+                instance
+                    .adapter()
+                    .view_only_input_keymap(view_state, &view_context)
+            });
+        }
+        let content = instance
+            .bound_content_id()
+            .unwrap_or_else(|| context.content_id());
+        let content_state = mode_contents.instance(mode, content)?;
+        let (content_state, content_faulted) = drafts.content(mode, content, content_state);
         (!content_faulted && !view_faulted).then(|| {
             instance
                 .adapter()
@@ -2470,11 +2781,23 @@ impl ModeViewStore {
         key: KeyEvent,
     ) -> Option<Command> {
         let mode = *self.mode_ids(view).get(index)?;
-        let content_state = mode_contents.instance(mode, context.content_id())?;
         let instance = self.instances.get(&(mode, view))?;
-        let (content_state, content_faulted) =
-            drafts.content(mode, context.content_id(), content_state);
         let (view_state, view_faulted) = drafts.view(mode, view, instance);
+        if instance.is_view_only() {
+            let view_context = ModeViewContext::for_view(view);
+            return (!view_faulted)
+                .then(|| {
+                    instance
+                        .adapter()
+                        .view_only_input_typing(view_state, &view_context, key)
+                })
+                .flatten();
+        }
+        let content = instance
+            .bound_content_id()
+            .unwrap_or_else(|| context.content_id());
+        let content_state = mode_contents.instance(mode, content)?;
+        let (content_state, content_faulted) = drafts.content(mode, content, content_state);
         if content_faulted || view_faulted {
             return None;
         }
@@ -2494,15 +2817,27 @@ impl ModeViewStore {
         let Some(mode) = self.mode_ids(view).get(index).copied() else {
             return InputStatus::Ready;
         };
-        let Some(content_state) = mode_contents.instance(mode, context.content_id()) else {
-            return InputStatus::Ready;
-        };
         let Some(instance) = self.instances.get(&(mode, view)) else {
             return InputStatus::Ready;
         };
-        let (content_state, content_faulted) =
-            drafts.content(mode, context.content_id(), content_state);
         let (view_state, view_faulted) = drafts.view(mode, view, instance);
+        if instance.is_view_only() {
+            let view_context = ModeViewContext::for_view(view);
+            return if view_faulted {
+                InputStatus::Ready
+            } else {
+                instance
+                    .adapter()
+                    .view_only_input_status(view_state, &view_context)
+            };
+        }
+        let content = instance
+            .bound_content_id()
+            .unwrap_or_else(|| context.content_id());
+        let Some(content_state) = mode_contents.instance(mode, content) else {
+            return InputStatus::Ready;
+        };
+        let (content_state, content_faulted) = drafts.content(mode, content, content_state);
         if content_faulted || view_faulted {
             return InputStatus::Ready;
         }
@@ -2523,14 +2858,29 @@ impl ModeViewStore {
         let Some(mode) = self.mode_ids(view).get(index).copied() else {
             return InputDecision::Pass;
         };
-        let Some(content_state) = mode_contents.instance(mode, context.content_id()) else {
-            return InputDecision::Pass;
-        };
         let Some(instance) = self.instances.get(&(mode, view)) else {
             return InputDecision::Pass;
         };
+        if instance.is_view_only() {
+            let view_draft = drafts.view_mut(mode, view, instance);
+            if view_draft.fault.is_some() {
+                return InputDecision::Pass;
+            }
+            let view_context = ModeViewContext::for_view(view);
+            return instance.adapter().view_only_input_capture(
+                view_draft.state.as_mut(),
+                &view_context,
+                key,
+            );
+        }
+        let content = instance
+            .bound_content_id()
+            .unwrap_or_else(|| context.content_id());
+        let Some(content_state) = mode_contents.instance(mode, content) else {
+            return InputDecision::Pass;
+        };
         let (content_draft, view_draft) =
-            drafts.content_and_view_mut(mode, context.content_id(), view, content_state, instance);
+            drafts.content_and_view_mut(mode, content, view, content_state, instance);
         if content_draft.fault.is_some() || view_draft.fault.is_some() {
             return InputDecision::Pass;
         }
@@ -2551,10 +2901,26 @@ impl ModeViewStore {
         drafts: &mut ModeDraftJournal,
     ) -> Option<Vec<OperationRequest>> {
         let mode = self.mode_ids(view).get(index).copied()?;
-        let content_state = mode_contents.instance(mode, context.content_id())?;
         let instance = self.instances.get(&(mode, view))?;
+        if instance.is_view_only() {
+            let view_draft = drafts.view_mut(mode, view, instance);
+            if view_draft.fault.is_some() {
+                return None;
+            }
+            let view_context = ModeViewContext::for_view(view);
+            return Some(
+                instance
+                    .adapter()
+                    .view_only_input_timeout(view_draft.state.as_mut(), &view_context)
+                    .into_operations(),
+            );
+        }
+        let content = instance
+            .bound_content_id()
+            .unwrap_or_else(|| context.content_id());
+        let content_state = mode_contents.instance(mode, content)?;
         let (content_draft, view_draft) =
-            drafts.content_and_view_mut(mode, context.content_id(), view, content_state, instance);
+            drafts.content_and_view_mut(mode, content, view, content_state, instance);
         if content_draft.fault.is_some() || view_draft.fault.is_some() {
             return None;
         }
@@ -2584,11 +2950,27 @@ impl ModeViewStore {
             .enumerate()
             .skip(start_mode)
             .find_map(|(index, mode)| {
-                let content_instance = mode_contents.instance(*mode, context.content_id())?;
                 let view_instance = self.instances.get(&(*mode, view))?;
-                let (content_state, content_faulted) =
-                    drafts.content(*mode, context.content_id(), content_instance);
                 let (view_state, view_faulted) = drafts.view(*mode, view, view_instance);
+                if view_instance.is_view_only() {
+                    let view_context = ModeViewContext::for_view(view);
+                    return (!view_faulted)
+                        .then(|| {
+                            view_instance.adapter().view_only_input_typing(
+                                view_state,
+                                &view_context,
+                                key,
+                            )
+                        })
+                        .flatten()
+                        .map(|command| (index, command));
+                }
+                let content = view_instance
+                    .bound_content_id()
+                    .unwrap_or_else(|| context.content_id());
+                let content_instance = mode_contents.instance(*mode, content)?;
+                let (content_state, content_faulted) =
+                    drafts.content(*mode, content, content_instance);
                 if content_faulted || view_faulted {
                     return None;
                 }
@@ -2609,19 +2991,27 @@ impl ModeViewStore {
         let modes = self.mode_ids(view).to_vec();
         let mut drafts = ModeDraftJournal::default();
         for mode in modes {
-            let Some(content_state) = mode_contents.instance(mode, context.content_id()) else {
-                continue;
-            };
             let Some(instance) = self.instances.get(&(mode, view)) else {
                 continue;
             };
-            let (content_draft, view_draft) = drafts.content_and_view_mut(
-                mode,
-                context.content_id(),
-                view,
-                content_state,
-                instance,
-            );
+            if instance.is_view_only() {
+                let view_draft = drafts.view_mut(mode, view, instance);
+                let view_context = ModeViewContext::for_view(view);
+                instance.input_cancel_view_only(
+                    view_draft.state.as_mut(),
+                    view_draft.fault.is_some(),
+                    &view_context,
+                );
+                continue;
+            }
+            let content = instance
+                .bound_content_id()
+                .unwrap_or_else(|| context.content_id());
+            let Some(content_state) = mode_contents.instance(mode, content) else {
+                continue;
+            };
+            let (content_draft, view_draft) =
+                drafts.content_and_view_mut(mode, content, view, content_state, instance);
             instance.input_cancel_with_content(
                 content_draft.state.as_mut(),
                 view_draft.state.as_mut(),
@@ -2642,15 +3032,20 @@ impl ModeViewStore {
     ) -> ModeViewPolicy {
         let mut policy = ModeViewPolicy::default();
         for mode in self.mode_ids(view) {
-            let Some(content_instance) = mode_contents.instance(*mode, context.content_id()) else {
-                continue;
-            };
             let Some(view_instance) = self.instances.get(&(*mode, view)) else {
                 continue;
             };
-            let (content_state, content_faulted) =
-                drafts.content(*mode, context.content_id(), content_instance);
             let (view_state, view_faulted) = drafts.view(*mode, view, view_instance);
+            if view_instance.is_view_only() {
+                continue;
+            }
+            let content = view_instance
+                .bound_content_id()
+                .unwrap_or_else(|| context.content_id());
+            let Some(content_instance) = mode_contents.instance(*mode, content) else {
+                continue;
+            };
+            let (content_state, content_faulted) = drafts.content(*mode, content, content_instance);
             if content_faulted || view_faulted {
                 continue;
             }
@@ -2679,6 +3074,28 @@ impl ModeViewStore {
                 active: self.first(view).map(|instance| instance.name().clone()),
             });
         };
+        if instance.is_view_only() {
+            debug_assert!(context.bound_content_id().is_none());
+            let view_draft = drafts.view_mut(mode, view, instance);
+            let result = instance.execute_view_only_with_context(
+                view_draft.state.as_mut(),
+                view_draft.fault.is_some(),
+                action,
+                &command.arguments,
+                context,
+            );
+            if let Err(error) = &result
+                && error.faults_instance()
+            {
+                view_draft.fault = Some(ModeFault::from_error(
+                    instance.name(),
+                    ModeFaultPhase::Action,
+                    command.action.as_str(),
+                    error,
+                ));
+            }
+            return result;
+        }
         let content_state = mode_contents
             .instance(mode, context.content_id())
             .expect("attached mode has content state");
@@ -2727,6 +3144,27 @@ impl ModeViewStore {
                 active: self.first(view).map(|instance| instance.name().clone()),
             });
         };
+        if instance.is_view_only() {
+            debug_assert!(context.bound_content_id().is_none());
+            let view_draft = drafts.view_mut(mode, view, instance);
+            let result = instance.execute_view_only_input_with_context(
+                view_draft.state.as_mut(),
+                view_draft.fault.is_some(),
+                context,
+                input.key(),
+            );
+            if let Err(error) = &result
+                && error.faults_instance()
+            {
+                view_draft.fault = Some(ModeFault::from_error(
+                    instance.name(),
+                    ModeFaultPhase::Input,
+                    "<input>",
+                    error,
+                ));
+            }
+            return result;
+        }
         let content_state = mode_contents
             .instance(mode, context.content_id())
             .expect("attached mode has content state");
@@ -2929,7 +3367,7 @@ mod tests {
     }
 
     #[test]
-    fn registration_rejects_a_mode_without_content_adapters() {
+    fn registration_rejects_a_mode_without_adapters() {
         let name = ModeName::new("no-adapter");
         let mut registry = ModeRegistry::new();
 

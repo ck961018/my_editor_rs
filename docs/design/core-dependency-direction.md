@@ -92,5 +92,6 @@ ContentStore       -> Content
 - `cargo metadata --no-deps` 的内部依赖仍符合上图；
 - `cargo tree -p vell-app -e normal` 不出现 V8、Taffy 或 crossterm；
 - `vell-tui` 不反向依赖 app；
-- `vell-plugin-v8` 的公共 API 只暴露通用 Mode、`CommandEntry` 与结构化诊断；
+- `vell-plugin-v8` 的公共 API 只暴露通用 Mode、`CommandEntry`、
+  `ViewExtension`、`CompoundViewDefinition` 与结构化诊断；
 - workspace 测试、Clippy 和 Rustdoc 通过。

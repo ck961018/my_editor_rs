@@ -339,6 +339,8 @@ presentation。
 
 ### M0：术语和迁移清单
 
+实现状态：已完成。
+
 目标：让代码、文档和测试使用同一套领域语言。
 
 工作：
@@ -356,7 +358,13 @@ presentation。
 - [命令目标 ADR](../adr/0004-commands-target-content-or-view.md)；
 - [View 命令迁移清单](view-command-migration-inventory.md)。
 
+实现结果：`CONTEXT.md`、两份 ADR 与迁移清单统一了 Content、View、Pane、
+Mode attachment、binding 和 switchable owner 的术语。清单区分公共
+`buffer.*` 命令与 core 内部 Buffer 文本实现，并为 M1 提供逐项迁移依据。
+
 ### M1：命令语义归位
+
+实现状态：已完成。
 
 目标：命令系统不再把 Buffer 当作切换对象。
 
@@ -373,6 +381,11 @@ presentation。
 Content、input、history 和准备中的副作用。复合 View 子树的实际替换由 M2
 统一收口；M1 明确拒绝带子 View 的切换目标，避免在 `ViewWorkspace` 形成前
 维护两套分步清理协议或留下孤儿 Space。
+
+实现结果：公开注册表、TypeScript 声明、内建插件和示例只使用
+`content.*`、`view.focus` 与 `view.switch`。所有入口共用同一
+`CommandRegistry` 和 ExecutionFrame；switch target 从来源 View 提升到
+最近的 switchable owner。注册表测试拒绝任何 `buffer.*` 公共命令。
 
 ### M2：深化 ViewWorkspace
 
@@ -446,9 +459,11 @@ Content/View override 生成有序计划。安装器按计划增量保留、添�
 的 content state 由引用计数共享。计划携带 binding revision，过期计划在
 改动 state 前失败。TypeScript `attach` 已开放，省略时兼容为
 `core.buffer/document` 的任意语言；Tree-sitter 插件已改为声明其语言集合。
-计划模型已经能表示不依赖 Content 的 View-only Mode。当前 Mode context
-仍只安装 BufferView 的 `document` binding；View-only Mode 和直接附加到
-复合 View 的非 document binding 留待 Native DiffView 验证实际需求。
+View-only Mode 使用独立 View adapter，只创建 `(ModeId, ViewId)` state，
+通过无 Content context 执行 View 命令和输入，并参与同一 execution frame
+rollback；不会创建或借用 Mode content state。当前 Content-bound Mode
+context 仍只安装 BufferView 的 `document` binding；直接附加到复合 View 的
+非 document binding 继续等待至少两个真实用例证明它比子 View 更清楚。
 
 View 顺序覆盖按部分优先列表解释：列出的活动 Mode 按用户顺序置前，未列出
 的 Mode 保持静态拓扑顺序。顺序覆盖不隐式启用 Mode，未知项和重复项会产生
@@ -470,17 +485,20 @@ View 顺序覆盖按部分优先列表解释：列出的活动 Mode 按用户顺
 验收：本文 3.2 节的全部行为由集成测试覆盖，且不需要 Pane 自有状态。
 
 实现结果：内建 `core.diff` definition 持有 `left/right` bindings，实例是
-可切换的零 Pane 父 View；左右子 BufferView 不可切换并各自拥有 body Pane、
-selection 与解析后的语言 Mode。`view.switch` 和关闭从任一子 Pane 解析到
-父 DiffView，再复用当前子 Pane 替换完整语义子树。`diff.setRightContent`
-在一个 workspace draft 中同步重绑父 `right` 与右子 `document`，保持 Scene、
-父子 ViewId 和右子 Mode view state，并迁移 Mode content state 引用。
+可切换的零 recipe Pane 父 View；左右子 BufferView 不可切换并各自拥有 body
+Pane、selection 与解析后的语言 Mode。`view.switch` 和关闭从任一子 Pane
+解析到父 DiffView，再复用当前子 Pane 替换完整语义子树。
+`diff.setRightContent` 在一个 workspace draft 中同步重绑父 `right` 与右子
+`document`，保持 Scene、父子 ViewId 和右子 Mode view state，并迁移 Mode
+content state 引用。
 
 这一步确认生命周期 owner 与 Scene 替换锚点必须分离，也确认复合 View 不应
 通过第三个协调 Pane 表达身份。输入、双 Pane 渲染、attachment、失败不发布、
 整体切换和关闭清理均由集成测试覆盖。Diff 替换在进入 prepared effects 前
 校验完整 workspace 与 attachment candidate；发布时先安装新 attachment，
-再清理旧 View。关闭任一侧 Content 会先提升并去重 DiffView 生命周期 owner。
+再清理旧 View。Diff 父 View 可以安装无 Content 依赖的 View-only Mode；
+左右 rebind 不会重建其 view state，整体替换会清理 attachment。关闭任一侧
+Content 会先提升并去重 DiffView 生命周期 owner。
 
 ### M6：开放 TypeScript View extension
 

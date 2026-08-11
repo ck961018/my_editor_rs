@@ -38,7 +38,7 @@ use crate::operation::{
     ViewBindingOperation, ViewEditPlan, ViewLifecycleOperation, ViewOperation, ViewPrecondition,
     ViewSpec, ViewTarget,
 };
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use vell_core::action::ContentAction;
 use vell_core::buffer::Buffer;
 use vell_core::clipboard::{ClipboardKind, PastePlacement};
@@ -143,6 +143,15 @@ struct ClassifiedAttachmentMode {
 
 struct ViewOnlyDiffMode {
     name: ModeName,
+    actions: Vec<ModeActionName>,
+    keymap: Keymap<Command>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ViewOnlyDiffState {
+    created_for: ViewId,
+    executions: usize,
+    capturing: bool,
 }
 
 struct NativeMinimapExtension {
@@ -906,15 +915,148 @@ impl Mode for ViewOnlyDiffMode {
     }
 
     fn actions(&self) -> &[ModeActionName] {
-        &[]
+        &self.actions
     }
 
     fn adapters(&self) -> ModeAdapters {
-        ModeAdapters::buffer()
+        ModeAdapters::view()
     }
 
     fn attachment(&self) -> ModeAttachmentRule {
         ModeAttachmentRule::for_view(ViewDefinitionId::new(DIFF_VIEW_DEFINITION))
+    }
+
+    fn create_view_only_state(
+        &self,
+        context: &ModeViewContext<'_>,
+    ) -> Result<Box<dyn ModeState>, ModeError> {
+        assert!(context.buffer().is_none());
+        Ok(Box::new(ViewOnlyDiffState {
+            created_for: context.view_id(),
+            executions: 0,
+            capturing: false,
+        }))
+    }
+
+    fn view_only_input_keymap<'a>(
+        &'a self,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) -> &'a Keymap<Command> {
+        &self.keymap
+    }
+
+    fn view_only_input_status(
+        &self,
+        view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) -> vell_core::input::InputStatus {
+        let state = view_state
+            .as_any()
+            .downcast_ref::<ViewOnlyDiffState>()
+            .expect("View-only Diff Mode owns its state");
+        if state.capturing {
+            vell_core::input::InputStatus::Awaiting(vell_core::input::TimeoutPolicy::After(
+                std::time::Duration::ZERO,
+            ))
+        } else {
+            vell_core::input::InputStatus::Ready
+        }
+    }
+
+    fn view_only_input_capture(
+        &self,
+        view_state: &mut dyn ModeState,
+        _context: &ModeViewContext<'_>,
+        key: KeyEvent,
+    ) -> vell_core::input::InputDecision<Command> {
+        let state = view_state
+            .as_any_mut()
+            .downcast_mut::<ViewOnlyDiffState>()
+            .expect("View-only Diff Mode owns its state");
+        if state.capturing && key == KeyEvent::plain(KeyCode::Function(12)) {
+            state.capturing = false;
+            state.executions += 1;
+            vell_core::input::InputDecision::Consumed
+        } else {
+            vell_core::input::InputDecision::Pass
+        }
+    }
+
+    fn view_only_input_cancel(
+        &self,
+        view_state: &mut dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) {
+        view_state
+            .as_any_mut()
+            .downcast_mut::<ViewOnlyDiffState>()
+            .expect("View-only Diff Mode owns its state")
+            .capturing = false;
+    }
+
+    fn execute_view_only_with_arguments(
+        &self,
+        view_state: &mut dyn ModeState,
+        _context: &ModeViewContext<'_>,
+        action: &ModeActionName,
+        arguments: &ModeValue,
+    ) -> Result<ModeResult, ModeError> {
+        let state = view_state
+            .as_any_mut()
+            .downcast_mut::<ViewOnlyDiffState>()
+            .expect("View-only Diff Mode owns its state");
+        if action == &self.actions[1] {
+            state.executions += 1;
+            state.capturing = true;
+            return Ok(ModeResult::operations(vec![OperationRequest::Face(
+                FaceOperation::SetBase {
+                    target: FaceRemapTarget::CurrentView,
+                    face: FaceName::new("ui.editor"),
+                    expressions: None,
+                },
+            )]));
+        }
+        if action != &self.actions[0] {
+            return Err(ModeError::UnknownAction {
+                mode: self.name.clone(),
+                action: action.clone(),
+            });
+        }
+        let ModeValue::Map(arguments) = arguments else {
+            return Err(ModeError::CallbackFailed {
+                mode: self.name.clone(),
+                message: "expected View-only test arguments".to_owned(),
+            });
+        };
+        let Some(ModeValue::Integer(content)) = arguments.get("content") else {
+            return Err(ModeError::CallbackFailed {
+                mode: self.name.clone(),
+                message: "expected replacement ContentId".to_owned(),
+            });
+        };
+        let content = u64::try_from(*content).map_err(|_| ModeError::CallbackFailed {
+            mode: self.name.clone(),
+            message: "replacement ContentId is out of range".to_owned(),
+        })?;
+        state.executions += 1;
+        let mut operations = vec![OperationRequest::ViewBinding {
+            target: ViewTarget::Current,
+            operation: ViewBindingOperation::Rebind {
+                binding: BindingKey::new(RIGHT_BINDING),
+                content: ContentTarget::Id(ContentId(content)),
+            },
+        }];
+        if arguments.get("fail") == Some(&ModeValue::Bool(true)) {
+            operations.push(OperationRequest::ViewBinding {
+                target: ViewTarget::Current,
+                operation: ViewBindingOperation::Rebind {
+                    binding: BindingKey::new("missing"),
+                    content: ContentTarget::Id(ContentId(content)),
+                },
+            });
+        }
+        Ok(ModeResult::operations(operations))
     }
 }
 
@@ -4174,42 +4316,231 @@ fn switching_buffer_to_diff_preserves_shared_mode_content_state() {
     );
 }
 
-#[test]
-fn unsupported_diff_attachment_fails_before_frame_publication() {
+#[tokio::test]
+async fn diff_parent_installs_view_only_mode_without_content_state() {
     let mut app = make_app(vec![], None);
-    app.kernel
+    let original_space = app.session.focused();
+    let survivor_content = app.new_buffer();
+    let survivor_space = app
+        .split_space(
+            original_space,
+            survivor_content,
+            true,
+            SplitDirection::Right,
+            false,
+        )
+        .unwrap()
+        .new_space;
+    let survivor = view_id(&app, survivor_space);
+    let name = ModeName::new("diff-view-only");
+    let actions = vec![
+        ModeActionName::new("set-right"),
+        ModeActionName::new("activate"),
+    ];
+    let mut keymap = Keymap::new();
+    keymap.bind(
+        KeyEvent::char(']'),
+        Command::Mode(ModeCommand::new(name.clone(), actions[1].clone())),
+    );
+    let mode = app
+        .kernel
         .modes_mut()
         .register(ViewOnlyDiffMode {
-            name: ModeName::new("unsupported-diff-view-only"),
+            name,
+            actions,
+            keymap,
         })
         .unwrap();
     let right_content = app.new_buffer();
-    let source_space = app.session.focused();
-    let source = view_id(&app, source_space);
-    let scene_revision = app.session.scene_revision();
-    let next_view_id = app.session.next_view_id_for_test();
 
-    let error = app
-        .execute_command(DispatchCommand::ModeOperations {
-            operations: vec![OperationRequest::ViewLifecycle(
-                ViewLifecycleOperation::Switch {
-                    spec: ViewSpec::diff(editor_cid(), right_content),
-                },
-            )],
-            view: source,
-            content: editor_cid(),
+    let (parent, left, right) = switch_focused_to_diff(&mut app, editor_cid(), right_content);
+
+    assert_eq!(app.session.view_modes().mode_ids(parent), &[mode]);
+    assert_eq!(
+        app.session
+            .view_modes()
+            .state_for_test::<ViewOnlyDiffState>(mode, parent),
+        Some(&ViewOnlyDiffState {
+            created_for: parent,
+            executions: 0,
+            capturing: false,
         })
-        .unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("cannot attach without a content binding yet")
     );
-    assert_eq!(app.session.scene_revision(), scene_revision);
-    assert_eq!(app.session.next_view_id_for_test(), next_view_id);
-    assert_eq!(view_id(&app, source_space), source);
-    assert_eq!(app.session.views().len(), 1);
+    assert!(
+        app.kernel
+            .content_modes()
+            .state_for_test::<()>(mode, editor_cid())
+            .is_none()
+    );
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::char(']')))
+        .await
+        .unwrap();
+    assert_eq!(
+        app.session
+            .view_modes()
+            .state_for_test::<ViewOnlyDiffState>(mode, parent),
+        Some(&ViewOnlyDiffState {
+            created_for: parent,
+            executions: 1,
+            capturing: true,
+        })
+    );
+    assert!(
+        app.session
+            .next_input_deadline(app.kernel.content_modes(), app.kernel.contents())
+            .is_some()
+    );
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::ViewLifecycle(
+            ViewLifecycleOperation::Focus { view: survivor },
+        )],
+        view: left,
+        content: editor_cid(),
+    })
+    .unwrap();
+    assert_eq!(
+        app.session
+            .view_modes()
+            .state_for_test::<ViewOnlyDiffState>(mode, parent),
+        Some(&ViewOnlyDiffState {
+            created_for: parent,
+            executions: 1,
+            capturing: false,
+        })
+    );
+    assert!(
+        app.session
+            .next_input_deadline(app.kernel.content_modes(), app.kernel.contents())
+            .is_none()
+    );
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::ViewLifecycle(
+            ViewLifecycleOperation::Focus { view: right },
+        )],
+        view: survivor,
+        content: survivor_content,
+    })
+    .unwrap();
+    app.handle_event(FrontendEvent::Key(KeyEvent::char(']')))
+        .await
+        .unwrap();
+    app.handle_event(FrontendEvent::Key(KeyEvent::plain(KeyCode::Function(12))))
+        .await
+        .unwrap();
+    assert_eq!(
+        app.session
+            .view_modes()
+            .state_for_test::<ViewOnlyDiffState>(mode, parent),
+        Some(&ViewOnlyDiffState {
+            created_for: parent,
+            executions: 3,
+            capturing: false,
+        })
+    );
+    assert!(
+        app.kernel
+            .content_modes()
+            .state_for_test::<()>(mode, right_content)
+            .is_none()
+    );
+
+    let replacement = app.new_buffer();
+    let arguments = ModeValue::Map(BTreeMap::from([(
+        "content".to_owned(),
+        ModeValue::Integer(i64::try_from(replacement.0).unwrap()),
+    )]));
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::Mode {
+            target: ModeTarget::CurrentView,
+            invocation: ModeInvocation {
+                command: ModeCommand {
+                    mode: ModeName::new("diff-view-only"),
+                    action: ModeActionName::new("set-right"),
+                    arguments,
+                },
+                nested: false,
+                flow: ModeFlowPropagation::Propagate,
+            },
+        }],
+        view: right,
+        content: right_content,
+    })
+    .unwrap();
+
+    assert_eq!(
+        app.session.view(parent).unwrap().binding(RIGHT_BINDING),
+        Some(replacement)
+    );
+    assert_eq!(
+        app.session.view(right).unwrap().document_content(),
+        Some(replacement)
+    );
+    assert_eq!(app.session.view_modes().mode_ids(parent), &[mode]);
+    assert_eq!(
+        app.session
+            .view_modes()
+            .state_for_test::<ViewOnlyDiffState>(mode, parent),
+        Some(&ViewOnlyDiffState {
+            created_for: parent,
+            executions: 4,
+            capturing: false,
+        })
+    );
+    assert!(
+        app.kernel
+            .content_modes()
+            .state_for_test::<()>(mode, replacement)
+            .is_none()
+    );
+
+    let rejected = app.new_buffer();
+    let arguments = ModeValue::Map(BTreeMap::from([
+        (
+            "content".to_owned(),
+            ModeValue::Integer(i64::try_from(rejected.0).unwrap()),
+        ),
+        ("fail".to_owned(), ModeValue::Bool(true)),
+    ]));
+    let result = app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::Mode {
+            target: ModeTarget::CurrentView,
+            invocation: ModeInvocation {
+                command: ModeCommand {
+                    mode: ModeName::new("diff-view-only"),
+                    action: ModeActionName::new("set-right"),
+                    arguments,
+                },
+                nested: false,
+                flow: ModeFlowPropagation::Propagate,
+            },
+        }],
+        view: right,
+        content: replacement,
+    });
+    assert!(result.is_err());
+    assert_eq!(
+        app.session.view(parent).unwrap().binding(RIGHT_BINDING),
+        Some(replacement)
+    );
+    assert_eq!(
+        app.session.view(right).unwrap().document_content(),
+        Some(replacement)
+    );
+    assert_eq!(
+        app.session
+            .view_modes()
+            .state_for_test::<ViewOnlyDiffState>(mode, parent),
+        Some(&ViewOnlyDiffState {
+            created_for: parent,
+            executions: 4,
+            capturing: false,
+        })
+    );
+
+    app.switch_view_at(parent, editor_cid()).unwrap();
+
+    assert!(!app.session.view_modes().contains_mode(mode));
 }
 
 #[test]

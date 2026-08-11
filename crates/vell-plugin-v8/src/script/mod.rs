@@ -302,6 +302,7 @@ struct ScriptAdapterDefinition {
 
 #[derive(Clone, Default)]
 struct ScriptAdapterDefinitions {
+    view: Option<ScriptAdapterDefinition>,
     buffer: Option<ScriptAdapterDefinition>,
 }
 
@@ -1951,7 +1952,24 @@ editor.modes.define({
 editor.modes.define({
   name: "diff-navigation",
   attach: { view: "example.diff" },
-  on: { buffer: {} },
+  on: {
+    view: {
+      state: () => ({
+        active: true,
+        count: 0,
+        viewPolicy: "ordinary View state",
+      }),
+      commands: {
+        increment(ctx) {
+          if ("contentId" in ctx || "edit" in ctx ||
+              "executeLine" in ctx.commands || "saveAs" in ctx.content) {
+            throw new Error("View adapter leaked Content capabilities");
+          }
+          ctx.state.count += 1;
+        },
+      },
+    },
+  },
 });
 "#,
         )
@@ -1961,6 +1979,25 @@ editor.modes.define({
 
         assert_eq!(mode.attachment().view().as_str(), "example.diff");
         assert!(mode.attachment().binding().is_none());
+        assert!(mode.adapters().contains_view());
+        assert!(!mode.adapters().contains(ContentKind::Buffer));
+        let context = ModeViewContext::for_view(ViewId(9));
+        let mut state = mode.create_view_only_state(&context).unwrap();
+        mode.execute_view_only_with_arguments(
+            state.as_mut(),
+            &context,
+            &ModeActionName::new("increment"),
+            &ModeValue::Null,
+        )
+        .unwrap();
+        assert_eq!(
+            script_state(state.as_ref(), mode.name()).unwrap().data,
+            serde_json::json!({
+                "active": true,
+                "count": 1,
+                "viewPolicy": "ordinary View state",
+            })
+        );
     }
 
     #[test]
@@ -2537,6 +2574,21 @@ editor.modes.define({
                 "bound-internal-input",
                 r#"on: { buffer: { input() {}, keys: { "x": "$input" } } }"#,
                 "unknown command '$input' in key bindings",
+            ),
+            (
+                "view-with-buffer-adapter",
+                r#"attach: { view: "example.diff" }, on: { buffer: {} }"#,
+                "View-only mode must provide only on.view",
+            ),
+            (
+                "bound-with-view-adapter",
+                r#"attach: { view: "core.buffer", binding: "document" }, on: { view: {} }"#,
+                "content-bound mode must provide only on.buffer",
+            ),
+            (
+                "view-changed-callback",
+                r#"attach: { view: "example.diff" }, on: { view: { changed() {} } }"#,
+                "mode view.changed is not supported",
             ),
         ] {
             let mut host = ScriptHost::new();

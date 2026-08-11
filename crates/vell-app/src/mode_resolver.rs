@@ -136,7 +136,7 @@ impl fmt::Display for AttachmentPlanError {
                 ),
                 None => write!(
                     formatter,
-                    "mode '{}' cannot attach without a content binding yet",
+                    "mode '{}' has an inconsistent View-only attachment",
                     mode.as_str()
                 ),
             },

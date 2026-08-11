@@ -23,8 +23,8 @@ View 保存与一个 Content 绑定的会话状态；app 解析目标并原子�
 - View definition、可选 binding 和 language 匹配；
 - named Face 默认值。
 
-`ModeAdapters` 当前只包含 Buffer slot（状态栏是 editor view 的直属
-Pane，不是 adapter slot）。native Mode 可以直接
+`ModeAdapters` 当前包含无 Content 的 View slot 和 Buffer slot（状态栏是
+editor view 的直属 Pane，不是 adapter slot）。native Mode 可以直接
 实现 `Mode`，也可以通过 `TypedMode` 与 `ErasedMode` 在静态状态类型和
 运行时类型擦除之间建立单一 adapter。TypeScript Mode 使用相同的 erased
 contract。
@@ -56,6 +56,7 @@ Space 只标识 Scene 布局节点，也不拥有 View 或 Mode 状态。
 
 - Buffer content context 可以查询文档状态、稳定文本快照和范围；
 - Buffer view context 还包含目标 View 的 selections；
+- View-only context 只有 View identity，不伪造 Content identity；
 - 不合法的 cursor、edit 或 Buffer 文本能力不会出现在对应 adapter 上。
 
 状态栏呈现不进 adapter：buffer mode 通过 `viewPolicy.statusBar`
@@ -83,6 +84,11 @@ view scope 还可以：
 - 产生绑定 View 的 `ViewAction` 或 selection-relative `EditCommand`；
 - 请求 viewport；
 - 调用 view-scoped Mode command。
+
+View-only action 也是 view scope，但只能使用不依赖当前 Content 的能力。它可以
+修改自己的 View state，并产生 app、Content lifecycle、View lifecycle 或显式
+ContentId 的 typed operation；需要文本、selection 或 history 的操作仍会被
+目标解析器拒绝。
 
 所有目标在 app 中结合 operation origin 解析。Mode 不能直接修改其他 Mode
 state，也不能保存另一个 Mode 的实例引用；跨 Mode 调用使用限定命令名并进入
@@ -121,7 +127,8 @@ Mode 的 `before` 约束执行稳定拓扑排序：
 安装器校验计划的 binding revision，再按 diff 保留、添加、删除和重排
 attachment。保留项继续使用原 view state；content state 按
 `(ModeId, ContentId)` 引用计数共享。新增项准备失败或计划过期时不留下部分
-attachment。当前只安装指向 BufferView `document` binding 的 Mode。
+attachment。无 binding 的 View-only Mode 使用 View adapter；带 binding 的
+Mode 当前只安装到 BufferView 的 `document`。
 
 ## 8. Presentation 与后台任务
 
@@ -131,6 +138,9 @@ Mode 可以贡献：
 - view decoration layer；
 - cursor、selection shape 与 face policy；
 - named Face 默认值。
+
+这些 text/selection policy 需要 Content-bound context。View-only Mode 的可见
+区域由 View extension 呈现，不声明无法发布的 `viewPolicy`。
 
 这些数据先发布到 Rust 的 presentation cache。render path 只读取缓存，不调用
 Mode、V8 或 worker。
