@@ -25,7 +25,10 @@ use crate::kernel::FileBaseline;
 use crate::mode::{
     LanguageId, Mode, ModeActionScope, ModeAdapters, ModeAttachmentError, ModeAttachmentRule,
     ModeContentContext, ModeError, ModeFaultPhase, ModeResult, ModeState, ModeViewContext,
-    ModeViewInstance, ModeViewPolicy, NamedStatusBarPresentation, NamedStatusBarSegment,
+    ModeViewInstance, ModeViewPolicy, NamedLineSegment, NamedLinesPresentation,
+    NamedStatusBarPresentation, NamedStatusBarSegment, ViewExtension, ViewExtensionContext,
+    ViewExtensionContractError, ViewExtensionDefinition, ViewExtensionId, ViewExtensionOwner,
+    ViewExtensionPaneDefinition, ViewExtensionPaneSide, ViewExtensionPresentation,
 };
 use crate::mode_name::{ModeActionName, ModeName};
 use crate::operation::{
@@ -140,6 +143,73 @@ struct ClassifiedAttachmentMode {
 
 struct ViewOnlyDiffMode {
     name: ModeName,
+}
+
+struct NativeMinimapExtension {
+    definition: ViewExtensionDefinition,
+    calls: Rc<Cell<usize>>,
+    unloads: Rc<Cell<usize>>,
+    fail: bool,
+}
+
+impl NativeMinimapExtension {
+    fn new(
+        id: &str,
+        owner: &str,
+        calls: Rc<Cell<usize>>,
+        unloads: Rc<Cell<usize>>,
+        fail: bool,
+    ) -> Self {
+        Self {
+            definition: ViewExtensionDefinition::new(
+                ViewExtensionId::new(id),
+                ViewExtensionOwner::new(owner),
+                ViewDefinitionId::new("core.buffer"),
+                vec![ViewExtensionPaneDefinition::new(
+                    "minimap",
+                    ViewExtensionPaneSide::Right,
+                    8,
+                )],
+            )
+            .unwrap(),
+            calls,
+            unloads,
+            fail,
+        }
+    }
+}
+
+impl ViewExtension for NativeMinimapExtension {
+    fn definition(&self) -> &ViewExtensionDefinition {
+        &self.definition
+    }
+
+    fn present(
+        &mut self,
+        pane: &str,
+        context: &ViewExtensionContext,
+    ) -> Result<ViewExtensionPresentation, ViewExtensionContractError> {
+        assert_eq!(pane, "minimap");
+        self.calls.set(self.calls.get() + 1);
+        if self.fail {
+            return Err(ViewExtensionContractError::new("native minimap failed"));
+        }
+        let line_count = context
+            .document
+            .as_ref()
+            .map_or(0, |document| document.text.lines().count());
+        Ok(ViewExtensionPresentation::Lines(NamedLinesPresentation {
+            base_face: Some(FaceName::new("ui.editor")),
+            rows: vec![vec![NamedLineSegment {
+                text: format!("view={} lines={line_count}", context.view_id.0),
+                face: None,
+            }]],
+        }))
+    }
+
+    fn unload(&mut self) {
+        self.unloads.set(self.unloads.get() + 1);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1499,7 +1569,7 @@ fn make_app(events: Vec<FrontendEvent>, path: Option<&str>) -> App<ScriptedFront
     let commands = configuration
         .prepare_commands(&crate::native_command_ids())
         .unwrap();
-    let mut app = App::with_modes_visuals_and_backgrounds(
+    let mut app = App::with_modes_visuals_backgrounds_and_extensions(
         path,
         40,
         5,
@@ -1508,12 +1578,261 @@ fn make_app(events: Vec<FrontendEvent>, path: Option<&str>) -> App<ScriptedFront
         configuration.backgrounds,
         configuration.theme,
         configuration.face_overrides,
+        configuration.view_extensions,
     )
     .unwrap();
     for command in commands {
         app.register_command(command);
     }
     app
+}
+
+fn make_extension_app(
+    extensions: Vec<Box<dyn ViewExtension>>,
+) -> io::Result<App<ScriptedFrontend>> {
+    App::with_modes_visuals_backgrounds_and_extensions(
+        None,
+        40,
+        5,
+        ScriptedFrontend::new(Vec::new()),
+        Vec::new(),
+        Vec::new(),
+        None,
+        Vec::new(),
+        extensions,
+    )
+}
+
+#[test]
+fn view_extension_panes_follow_buffer_views_and_unload_without_owning_them() {
+    let calls = Rc::new(Cell::new(0));
+    let unloads = Rc::new(Cell::new(0));
+    let owner = ViewExtensionOwner::new("example");
+    let mut app = make_extension_app(vec![Box::new(NativeMinimapExtension::new(
+        "example.minimap",
+        owner.as_str(),
+        calls.clone(),
+        unloads.clone(),
+        false,
+    ))])
+    .unwrap();
+    let pane_key = "plugin.example.minimap.minimap";
+    let initial = app.session.view(ViewId(0)).unwrap();
+    let pane = initial.panes().space_for_key(pane_key).unwrap();
+    let document_before = initial.document().unwrap().1.clone();
+    let revision_before = initial.revision();
+    assert!(matches!(
+        app.session.scene().node(pane).space.kind,
+        SpaceKind::Content {
+            view: ViewId(0),
+            focusable: false,
+        }
+    ));
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+    let data = query.view(ViewId(0), pane).unwrap();
+    let ViewPresentation::Lines(lines) = data.presentation else {
+        panic!("extension Pane must use lines presentation");
+    };
+    assert_eq!(data.content, Some(editor_cid()));
+    assert_eq!(lines.rows[0][0].text, "view=0 lines=0");
+
+    app.set_status_bar_placement(StatusBarPlacement::PerPane)
+        .unwrap();
+    assert!(app.session.status_bar_for_view(ViewId(0)).is_some());
+
+    let body = app.session.body_space_for_view(ViewId(0)).unwrap();
+    let split = app
+        .split_space(body, editor_cid(), true, SplitDirection::Right, false)
+        .unwrap();
+    let new_view = view_id(&app, split.new_space);
+    assert!(
+        app.session
+            .view(new_view)
+            .unwrap()
+            .panes()
+            .space_for_key(pane_key)
+            .is_some()
+    );
+    assert!(app.session.status_bar_for_view(new_view).is_some());
+
+    assert_eq!(app.unload_view_extensions(&owner).unwrap(), 1);
+    assert_eq!(unloads.get(), 1);
+    assert!(calls.get() >= 2);
+    for view in [ViewId(0), new_view] {
+        let data = app.session.view(view).unwrap();
+        assert!(data.panes().space_for_key(pane_key).is_none());
+        assert!(data.panes().space_for_key(super::STATUS_PANE).is_some());
+        assert_eq!(data.document_content(), Some(editor_cid()));
+    }
+    let initial = app.session.view(ViewId(0)).unwrap();
+    assert_eq!(initial.revision(), revision_before);
+    assert_eq!(initial.document().unwrap().1, &document_before);
+}
+
+#[test]
+fn view_extension_fault_is_cached_and_does_not_break_sibling_panes() {
+    let failed_calls = Rc::new(Cell::new(0));
+    let healthy_calls = Rc::new(Cell::new(0));
+    let mut app = make_extension_app(vec![
+        Box::new(NativeMinimapExtension::new(
+            "example.failed",
+            "failed",
+            failed_calls.clone(),
+            Rc::new(Cell::new(0)),
+            true,
+        )),
+        Box::new(NativeMinimapExtension::new(
+            "example.healthy",
+            "healthy",
+            healthy_calls.clone(),
+            Rc::new(Cell::new(0)),
+            false,
+        )),
+    ])
+    .unwrap();
+    app.session
+        .refresh_presentation(app.kernel.contents(), app.kernel.content_modes());
+    assert_eq!(failed_calls.get(), 1, "faulted callbacks stay suspended");
+    assert_eq!(healthy_calls.get(), 1, "unchanged output remains cached");
+
+    let failed = app.session.views()[&ViewId(0)]
+        .panes()
+        .space_for_key("plugin.example.failed.minimap")
+        .unwrap();
+    let healthy = app.session.views()[&ViewId(0)]
+        .panes()
+        .space_for_key("plugin.example.healthy.minimap")
+        .unwrap();
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+    let ViewPresentation::Lines(failed) = query.view(ViewId(0), failed).unwrap().presentation
+    else {
+        panic!("fault presentation must remain renderable");
+    };
+    assert!(failed.rows[0][0].text.contains("native minimap failed"));
+    let ViewPresentation::Lines(healthy) = query.view(ViewId(0), healthy).unwrap().presentation
+    else {
+        panic!("healthy sibling must remain renderable");
+    };
+    assert_eq!(healthy.rows[0][0].text, "view=0 lines=0");
+}
+
+#[test]
+fn unknown_view_extension_target_is_rejected_before_scene_publication() {
+    struct UnknownTargetExtension(ViewExtensionDefinition);
+    impl ViewExtension for UnknownTargetExtension {
+        fn definition(&self) -> &ViewExtensionDefinition {
+            &self.0
+        }
+
+        fn present(
+            &mut self,
+            _pane: &str,
+            _context: &ViewExtensionContext,
+        ) -> Result<ViewExtensionPresentation, ViewExtensionContractError> {
+            unreachable!()
+        }
+    }
+    let extension = UnknownTargetExtension(
+        ViewExtensionDefinition::new(
+            ViewExtensionId::new("example.unknown"),
+            ViewExtensionOwner::new("example"),
+            ViewDefinitionId::new("missing.view"),
+            vec![ViewExtensionPaneDefinition::new(
+                "pane",
+                ViewExtensionPaneSide::Right,
+                4,
+            )],
+        )
+        .unwrap(),
+    );
+
+    let error = match make_extension_app(vec![Box::new(extension)]) {
+        Ok(_) => panic!("unknown extension target must fail registration"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("unknown View definition"));
+}
+
+#[test]
+fn minimap_example_runs_through_v8_app_query_and_owner_unload() {
+    let source = include_str!("../../../runtime/examples/view-extension-minimap.ts");
+    let loaded =
+        vell_plugin_v8::load_typescript_modes("file:///examples/minimap.ts", source).unwrap();
+    let owner = loaded.view_extensions[0].definition().owner().clone();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), "😀\nsecond").unwrap();
+    let path = file.path().to_string_lossy();
+    let mut app = App::with_modes_visuals_backgrounds_and_extensions(
+        Some(&path),
+        40,
+        5,
+        ScriptedFrontend::new(Vec::new()),
+        loaded.modes,
+        loaded.backgrounds,
+        None,
+        Vec::new(),
+        loaded.view_extensions,
+    )
+    .unwrap();
+    assert!(
+        app.session
+            .view_mut(ViewId(0))
+            .unwrap()
+            .set_selections(Selections::from_parts(
+                vec![
+                    Selection::collapsed(TextOffset { char_index: 0 }),
+                    Selection::collapsed(TextOffset { char_index: 2 }),
+                ],
+                1,
+            ))
+    );
+    app.session
+        .refresh_presentation(app.kernel.contents(), app.kernel.content_modes());
+    let pane_key = "plugin.example.minimap.minimap";
+    let pane = app.session.views()[&ViewId(0)]
+        .panes()
+        .space_for_key(pane_key)
+        .unwrap();
+    let (_, named) = app
+        .session
+        .presentation()
+        .extension_pane(ViewId(0), pane_key)
+        .unwrap();
+    assert_eq!(named.rows[0][0].face, None);
+    assert_eq!(
+        named.rows[1][0].face.as_ref().map(FaceName::as_str),
+        Some("ui.selection")
+    );
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+
+    let ViewPresentation::Lines(lines) = query.view(ViewId(0), pane).unwrap().presentation else {
+        panic!("minimap example must render cached lines");
+    };
+    assert_eq!(lines.rows.len(), 2);
+
+    assert_eq!(app.unload_view_extensions(&owner).unwrap(), 1);
+    assert!(
+        app.session.views()[&ViewId(0)]
+            .panes()
+            .space_for_key(pane_key)
+            .is_none()
+    );
 }
 
 async fn send_key(app: &mut App<ScriptedFrontend>, key: KeyEvent) {
@@ -2181,7 +2500,9 @@ fn replace_view_mode_for_test(
 fn text_presentation(view: &ViewData) -> &TextPresentation {
     match &view.presentation {
         ViewPresentation::Text(text) => text,
-        ViewPresentation::StatusBar(_) => panic!("expected text presentation"),
+        ViewPresentation::StatusBar(_) | ViewPresentation::Lines(_) => {
+            panic!("expected text presentation")
+        }
     }
 }
 
@@ -4142,7 +4463,9 @@ editor.modes.define({
         .presentation
     {
         ViewPresentation::StatusBar(presentation) => presentation,
-        ViewPresentation::Text(_) => panic!("expected status-bar presentation"),
+        ViewPresentation::Text(_) | ViewPresentation::Lines(_) => {
+            panic!("expected status-bar presentation")
+        }
     };
     assert_eq!(
         status_region_texts(&presentation),
@@ -7454,7 +7777,9 @@ async fn ctrl_s_saves_file_and_marks_saved() {
         .presentation
     {
         ViewPresentation::StatusBar(presentation) => presentation,
-        ViewPresentation::Text(_) => panic!("expected status-bar presentation"),
+        ViewPresentation::Text(_) | ViewPresentation::Lines(_) => {
+            panic!("expected status-bar presentation")
+        }
     };
     assert_eq!(presentation.center[0].text, "Saved");
 }

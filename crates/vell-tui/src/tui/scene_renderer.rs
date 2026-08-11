@@ -7,8 +7,8 @@ use std::io;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::protocol::content_query::{
-    ContentData, ContentQuery, ContentQueryKind, DEFAULT_TAB_WIDTH, FacePatch, PaintFace,
-    RenderQuery, RenderQueryError, RowRange, SelectionShape, StatusBarPresentation,
+    ContentData, ContentQuery, ContentQueryKind, DEFAULT_TAB_WIDTH, FacePatch, LinesPresentation,
+    PaintFace, RenderQuery, RenderQueryError, RowRange, SelectionShape, StatusBarPresentation,
     StatusBarSegment, TextPresentation, ViewData, ViewPresentation,
 };
 use crate::protocol::ids::{SpaceId, ViewId};
@@ -88,20 +88,23 @@ impl SceneRenderer {
             .expect("focused space has render data");
         let focused_text = match &focused_view.presentation {
             ViewPresentation::Text(text) => Some(text),
-            ViewPresentation::StatusBar(_) => None,
+            ViewPresentation::StatusBar(_) | ViewPresentation::Lines(_) => None,
         };
         let focused_head = focused_text
             .map(|text| {
-                text_point(
-                    query,
-                    focused_view.content,
-                    text.selections.primary().head(),
-                )
+                let content = focused_view.content.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "text presentation has no content",
+                    )
+                })?;
+                text_point(query, content, text.selections.primary().head())
             })
             .transpose()?;
         let focused_display_col = match focused_head {
             Some(head) => {
-                let line = text_row(query, focused_view.content, head.row)?;
+                let content = focused_view.content.expect("focused text has content");
+                let line = text_row(query, content, head.row)?;
                 Some(display_width_before_col(
                     &line,
                     head.col,
@@ -412,10 +415,42 @@ fn paint_item(
 ) -> io::Result<()> {
     match &view.presentation {
         ViewPresentation::Text(text) => {
-            paint_text_item(item, query, view.content, text, viewports, canvas)
+            let content = view.content.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "text presentation has no content",
+                )
+            })?;
+            paint_text_item(item, query, content, text, viewports, canvas)
         }
         ViewPresentation::StatusBar(presentation) => paint_status_bar(item, presentation, canvas),
+        ViewPresentation::Lines(presentation) => paint_lines(item, presentation, canvas),
     }
+}
+
+fn paint_lines(
+    item: &RenderItem,
+    presentation: &LinesPresentation,
+    canvas: &mut dyn Canvas,
+) -> io::Result<()> {
+    let height = item.rect.height as usize;
+    let width = item.rect.width as usize;
+    let row = item.rect.y as usize;
+    let col = item.rect.x as usize;
+    for offset in 0..height {
+        clear_item_row(canvas, row + offset, col, width, &presentation.base_face)?;
+        if let Some(segments) = presentation.rows.get(offset) {
+            paint_status_segments(
+                canvas,
+                row + offset,
+                col,
+                width,
+                segments,
+                &presentation.base_face,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn paint_text_item(
@@ -894,7 +929,7 @@ mod tests {
         selection_shape: SelectionShape,
     ) -> ViewData {
         ViewData {
-            content,
+            content: Some(content),
             presentation: ViewPresentation::Text(TextPresentation {
                 base_face: PaintFace::default(),
                 selections,
@@ -908,7 +943,7 @@ mod tests {
 
     fn status_view(content: ContentId) -> ViewData {
         ViewData {
-            content,
+            content: Some(content),
             presentation: ViewPresentation::StatusBar(StatusBarPresentation {
                 base_face: PaintFace::default(),
                 left: vec![StatusBarSegment {
@@ -2155,6 +2190,42 @@ mod tests {
         let output = String::from_utf8(out.into_inner()).unwrap();
         assert!(output.contains("f.t"), "output: {output}");
         assert!(!output.contains("f.txt"), "output: {output}");
+    }
+
+    #[test]
+    fn lines_presentation_is_clipped_and_fills_every_pane_row() {
+        let item = RenderItem {
+            space_id: SpaceId(1),
+            view_id: ViewId(1),
+            rect: crate::protocol::geometry::Rect {
+                x: 2,
+                y: 1,
+                width: 3,
+                height: 2,
+            },
+            clip: None,
+            layer: crate::protocol::space::Layer::Base,
+            z_index: 0,
+            order: 0,
+        };
+        let presentation = LinesPresentation {
+            base_face: PaintFace::default(),
+            rows: vec![vec![StatusBarSegment {
+                text: "abcdef".to_owned(),
+                face: FacePatch::default(),
+            }]],
+        };
+        let mut out = Output::new(Vec::new());
+
+        paint_lines(&item, &presentation, &mut out).unwrap();
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert!(output.contains("abc"), "output: {output:?}");
+        assert!(!output.contains("abcd"), "output: {output:?}");
+        assert!(
+            output.matches("   ").count() >= 2,
+            "both rows must be cleared: {output:?}"
+        );
     }
 
     #[test]

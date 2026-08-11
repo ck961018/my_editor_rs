@@ -17,6 +17,8 @@ use crate::scene_model::{CloseResult, SplitResult};
 use crate::theme::{FaceEnvironment, SessionFaces};
 use crate::view::View;
 use crate::view_context::require_mode_view_context;
+use crate::view_definition::ViewDefinitionRegistry;
+use crate::view_extension::{ViewExtensionRegistrationError, ViewExtensionStore};
 use crate::view_workspace::{DiffViewResult, RemovedView, ViewWorkspace, WorkspaceMutation};
 use vell_core::content::ContentChange;
 use vell_core::content_store::ContentStore;
@@ -35,6 +37,7 @@ pub(super) struct ClientSession {
     view_modes: ModeViewStore,
     faces: SessionFaces,
     presentation: PresentationLayerStore,
+    view_extensions: ViewExtensionStore,
     dispatcher: Dispatcher,
 }
 
@@ -104,6 +107,7 @@ impl ClientSession {
             view_modes,
             faces: SessionFaces::new(faces, face_environment),
             presentation: PresentationLayerStore::default(),
+            view_extensions: ViewExtensionStore::empty(),
             dispatcher: Dispatcher::new(default_global_keymap()),
         };
         session.reconcile_view_modes(
@@ -578,8 +582,50 @@ impl ClientSession {
                 }
             }
         }
+        self.view_extensions
+            .refresh(self.workspace.views(), contents, &mut self.presentation);
         self.presentation
             .finish_refresh(&active_content, &active_views);
+    }
+
+    pub(super) fn install_view_extensions(
+        &mut self,
+        extensions: Vec<Box<dyn crate::mode::ViewExtension>>,
+        definitions: &ViewDefinitionRegistry,
+        contents: &ContentStore,
+        mode_contents: &ModeContentStore,
+    ) -> Result<(), ViewExtensionRegistrationError> {
+        let store = ViewExtensionStore::new(extensions, definitions)?;
+        let mut workspace = self.workspace.clone();
+        store.reconcile_workspace(&mut workspace)?;
+        self.workspace = workspace;
+        self.view_extensions = store;
+        self.refresh_presentation(contents, mode_contents);
+        Ok(())
+    }
+
+    fn reconcile_view_extensions(&self, workspace: &mut ViewWorkspace) -> Result<(), LayoutError> {
+        if self.view_extensions.is_empty() {
+            return Ok(());
+        }
+        self.view_extensions
+            .reconcile_workspace(workspace)
+            .map_err(|error| LayoutError::InvalidWorkspace(error.to_string()))
+    }
+
+    pub(super) fn unload_view_extensions(
+        &mut self,
+        owner: &crate::mode::ViewExtensionOwner,
+        contents: &ContentStore,
+        mode_contents: &ModeContentStore,
+    ) -> Result<usize, LayoutError> {
+        let keys = self.view_extensions.pane_keys_for_owner(owner);
+        let mut workspace = self.workspace.clone();
+        workspace.remove_extension_panes(&keys)?;
+        let removed = self.view_extensions.remove_owner(owner);
+        self.workspace = workspace;
+        self.refresh_presentation(contents, mode_contents);
+        Ok(removed)
     }
 
     pub(super) fn snapshot_input(&self) -> DispatcherInputSnapshot {
@@ -1037,11 +1083,11 @@ impl ClientSession {
             .mode_resolver
             .resolve(planned_view, &view, registry, classifier, contents)
             .map_err(|error| LayoutError::ModeAttachment(error.to_string()))?;
-        let workspace_before = self.workspace.clone();
-        let (view, result) = self
-            .workspace
-            .split(target, view, focusable, direction, focus_new)?;
+        let mut workspace = self.workspace.clone();
+        let (view, result) = workspace.split(target, view, focusable, direction, focus_new)?;
         assert_eq!(view, planned_view, "workspace allocated the planned ViewId");
+        self.reconcile_view_extensions(&mut workspace)?;
+        let workspace_before = std::mem::replace(&mut self.workspace, workspace);
         if let Err(error) = self.apply_attachment_plan(plan, registry, content_modes, contents) {
             self.workspace = workspace_before;
             return Err(LayoutError::ModeAttachment(error.to_string()));
@@ -1418,8 +1464,12 @@ impl ClientSession {
             }
             None => (None, None),
         };
-        let workspace_before = self.workspace.clone();
-        let mutation = self.workspace.close_content_views(content, replacement)?;
+        let mut workspace = self.workspace.clone();
+        let mutation = workspace.close_content_views(content, replacement)?;
+        if mutation.output.is_some() {
+            self.reconcile_view_extensions(&mut workspace)?;
+        }
+        let workspace_before = std::mem::replace(&mut self.workspace, workspace);
         if let (Some(view), Some(plan)) = (mutation.output, plan) {
             assert_eq!(view, planned_view, "workspace allocated the planned ViewId");
             if let Err(error) = self.apply_attachment_plan(plan, registry, content_modes, contents)
@@ -1462,12 +1512,14 @@ impl ClientSession {
             .mode_resolver
             .resolve(planned_view, &view, registry, classifier, contents)
             .map_err(|error| LayoutError::ModeAttachment(error.to_string()))?;
-        let workspace_before = self.workspace.clone();
-        let mutation = self.workspace.replace(target, view, focusable)?;
+        let mut workspace = self.workspace.clone();
+        let mutation = workspace.replace(target, view, focusable)?;
         assert_eq!(
             mutation.output, planned_view,
             "workspace allocated the planned ViewId"
         );
+        self.reconcile_view_extensions(&mut workspace)?;
+        let workspace_before = std::mem::replace(&mut self.workspace, workspace);
         if let Err(error) = self.apply_attachment_plan(plan, registry, content_modes, contents) {
             self.workspace = workspace_before;
             return Err(LayoutError::ModeAttachment(error.to_string()));
@@ -1501,6 +1553,7 @@ impl ClientSession {
             .expect("focused space hosts a view");
         let mut candidate = self.workspace.clone();
         let mutation = candidate.replace_with_diff(target, parent, left.view, right.view)?;
+        self.reconcile_view_extensions(&mut candidate)?;
         let created = [
             mutation.output.parent,
             mutation.output.left,

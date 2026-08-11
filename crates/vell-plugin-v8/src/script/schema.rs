@@ -10,6 +10,12 @@ pub(super) fn install_editor_api(scope: &mut v8::PinScope<'_, '_>) {
         .get_function(scope)
         .unwrap();
     modes.set(scope, define_name.into(), define.into());
+    let views = v8::Object::new(scope);
+    let extend_name = v8::String::new(scope, "extend").unwrap();
+    let extend = v8::FunctionTemplate::new(scope, define_view_extension)
+        .get_function(scope)
+        .unwrap();
+    views.set(scope, extend_name.into(), extend.into());
     let theme = v8::Object::new(scope);
     let use_name = v8::String::new(scope, "use").unwrap();
     let use_theme = v8::FunctionTemplate::new(scope, select_theme)
@@ -23,6 +29,7 @@ pub(super) fn install_editor_api(scope: &mut v8::PinScope<'_, '_>) {
         .unwrap();
     faces.set(scope, override_name.into(), override_face.into());
     set_object(scope, editor, "modes", modes);
+    set_object(scope, editor, "views", views);
     set_object(scope, editor, "theme", theme);
     set_object(scope, editor, "faces", faces);
     let write_decorations_name = v8::String::new(scope, "writeDecorations").unwrap();
@@ -42,11 +49,185 @@ pub(super) fn install_editor_api(scope: &mut v8::PinScope<'_, '_>) {
     commands.borrow().install_api(scope);
 }
 
+fn define_view_extension(
+    scope: &mut v8::PinScope,
+    arguments: v8::FunctionCallbackArguments,
+    mut return_value: v8::ReturnValue,
+) {
+    let Some(registration) = scope
+        .get_slot::<Rc<ScriptViewExtensionRegistration>>()
+        .cloned()
+    else {
+        throw_script_error(scope, "View extension registration is unavailable");
+        return;
+    };
+    if registration.owner().is_none() {
+        throw_script_error(
+            scope,
+            "editor.views.extend is only available during module loading",
+        );
+        return;
+    }
+    match parse_view_extension_definition(scope, arguments.get(0), arguments.get(1)) {
+        Ok(definition) => {
+            let Some(definitions) = scope
+                .get_slot::<Rc<RefCell<Vec<ScriptViewExtensionDefinition>>>>()
+                .cloned()
+            else {
+                throw_script_error(scope, "View extension registry is unavailable");
+                return;
+            };
+            if definitions
+                .borrow()
+                .iter()
+                .any(|existing| existing.definition.id() == definition.definition.id())
+            {
+                throw_script_error(
+                    scope,
+                    &format!("duplicate View extension '{}'", definition.definition.id()),
+                );
+                return;
+            }
+            definitions.borrow_mut().push(definition);
+            return_value.set_undefined();
+        }
+        Err(error) => throw_script_error(scope, &error.to_string()),
+    }
+}
+
+fn parse_view_extension_definition(
+    scope: &mut v8::PinScope,
+    target: v8::Local<v8::Value>,
+    value: v8::Local<v8::Value>,
+) -> Result<ScriptViewExtensionDefinition, ScriptError> {
+    if !target.is_string() {
+        return Err(ScriptError::new(
+            "editor.views.extend expects a target View definition",
+        ));
+    }
+    let target = target.to_rust_string_lossy(scope);
+    if target.is_empty() {
+        return Err(ScriptError::new("View extension target must not be empty"));
+    }
+    let object = v8::Local::<v8::Object>::try_from(value)
+        .map_err(|_| ScriptError::new("editor.views.extend expects a definition object"))?;
+    ensure_v8_fields(scope, object, &["id", "panes"], "View extension definition")?;
+    let id = required_view_extension_string(scope, object, "id")?;
+    let panes = property(scope, object, "panes")
+        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+        .ok_or_else(|| ScriptError::new("View extension panes must be an object"))?;
+    let pane_names = panes
+        .get_own_property_names(scope, Default::default())
+        .ok_or_else(|| ScriptError::new("failed to enumerate View extension panes"))?;
+    let mut pane_definitions = Vec::with_capacity(pane_names.length() as usize);
+    let mut callbacks = HashMap::new();
+    for index in 0..pane_names.length() {
+        let key = pane_names
+            .get_index(scope, index)
+            .ok_or_else(|| ScriptError::new("failed to read View extension Pane name"))?;
+        let key_name = key.to_rust_string_lossy(scope);
+        let pane = panes
+            .get(scope, key)
+            .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+            .ok_or_else(|| {
+                ScriptError::new(format!(
+                    "View extension Pane '{key_name}' must be an object"
+                ))
+            })?;
+        ensure_v8_fields(
+            scope,
+            pane,
+            &["side", "size", "render"],
+            "View extension Pane",
+        )?;
+        let side = match required_view_extension_string(scope, pane, "side")?.as_str() {
+            "left" => ViewExtensionPaneSide::Left,
+            "right" => ViewExtensionPaneSide::Right,
+            "above" => ViewExtensionPaneSide::Above,
+            "below" => ViewExtensionPaneSide::Below,
+            side => {
+                return Err(ScriptError::new(format!(
+                    "unknown View extension Pane side '{side}'"
+                )));
+            }
+        };
+        let size = property(scope, pane, "size")
+            .and_then(|value| value.integer_value(scope))
+            .and_then(|value| u16::try_from(value).ok())
+            .ok_or_else(|| {
+                ScriptError::new("View extension Pane size must be a positive integer")
+            })?;
+        let callback = property(scope, pane, "render")
+            .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
+            .ok_or_else(|| ScriptError::new("View extension Pane render must be a function"))?;
+        pane_definitions.push(ViewExtensionPaneDefinition::new(
+            key_name.clone(),
+            side,
+            size,
+        ));
+        callbacks.insert(key_name, v8::Global::new(scope, callback));
+    }
+    let owner = scope
+        .get_slot::<Rc<ScriptViewExtensionRegistration>>()
+        .and_then(|registration| registration.owner())
+        .ok_or_else(|| {
+            ScriptError::new("editor.views.extend is only available during module loading")
+        })?;
+    let definition = ViewExtensionDefinition::new(
+        ViewExtensionId::new(id),
+        owner,
+        ViewDefinitionId::new(target),
+        pane_definitions,
+    )
+    .map_err(|error| ScriptError::new(error.to_string()))?;
+    Ok(ScriptViewExtensionDefinition {
+        definition,
+        callbacks,
+    })
+}
+
+fn required_view_extension_string(
+    scope: &mut v8::PinScope,
+    object: v8::Local<v8::Object>,
+    field: &str,
+) -> Result<String, ScriptError> {
+    property(scope, object, field)
+        .filter(|value| value.is_string())
+        .map(|value| value.to_rust_string_lossy(scope))
+        .ok_or_else(|| ScriptError::new(format!("View extension {field} must be a string")))
+}
+
+fn ensure_v8_fields(
+    scope: &mut v8::PinScope,
+    object: v8::Local<v8::Object>,
+    allowed: &[&str],
+    label: &str,
+) -> Result<(), ScriptError> {
+    let keys = object
+        .get_own_property_names(scope, Default::default())
+        .ok_or_else(|| ScriptError::new(format!("failed to enumerate {label}")))?;
+    for index in 0..keys.length() {
+        let field = keys
+            .get_index(scope, index)
+            .ok_or_else(|| ScriptError::new(format!("failed to read {label} field")))?
+            .to_rust_string_lossy(scope);
+        if !allowed.contains(&field.as_str()) {
+            return Err(ScriptError::new(format!(
+                "{label} contains unknown field '{field}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn write_decorations(
     scope: &mut v8::PinScope,
     arguments: v8::FunctionCallbackArguments,
     mut return_value: v8::ReturnValue,
 ) {
+    if reject_view_extension_host_mutation(scope, "editor.writeDecorations") {
+        return;
+    }
     const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
     let Some(content_id) = arguments.get(0).number_value(scope) else {
         throw_script_error(scope, "editor.writeDecorations expects a content id");
@@ -114,6 +295,9 @@ fn select_theme(
     arguments: v8::FunctionCallbackArguments,
     mut return_value: v8::ReturnValue,
 ) {
+    if reject_view_extension_host_mutation(scope, "editor.theme.use") {
+        return;
+    }
     let value = arguments.get(0);
     if !value.is_string() {
         throw_script_error(scope, "editor.theme.use expects a theme name");
@@ -140,6 +324,9 @@ fn define_face_override(
     arguments: v8::FunctionCallbackArguments,
     mut return_value: v8::ReturnValue,
 ) {
+    if reject_view_extension_host_mutation(scope, "editor.faces.override") {
+        return;
+    }
     let name = arguments.get(0);
     if !name.is_string() {
         throw_script_error(scope, "editor.faces.override expects a face name");
@@ -200,6 +387,9 @@ fn define_mode(
     arguments: v8::FunctionCallbackArguments,
     mut return_value: v8::ReturnValue,
 ) {
+    if reject_view_extension_host_mutation(scope, "editor.modes.define") {
+        return;
+    }
     let result = parse_mode_definition(scope, arguments.get(0));
     match result {
         Ok(definition) => {

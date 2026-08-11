@@ -783,6 +783,9 @@ fn url_constructor(
     arguments: v8::FunctionCallbackArguments,
     mut return_value: v8::ReturnValue,
 ) {
+    if super::reject_view_extension_host_mutation(scope, "URL construction") {
+        return;
+    }
     let relative = arguments.get(0);
     let base = arguments.get(1);
     let base_url = v8::Local::<v8::String>::try_from(base)
@@ -933,6 +936,9 @@ fn abort_controller_constructor(
     _arguments: v8::FunctionCallbackArguments,
     mut return_value: v8::ReturnValue,
 ) {
+    if super::reject_view_extension_host_mutation(scope, "AbortController construction") {
+        return;
+    }
     let controller = v8::Object::new(scope);
     let token = CancellationToken::new();
     // Store the token in the object's internal field via a
@@ -992,6 +998,9 @@ fn abort_signal_abort(
     arguments: v8::FunctionCallbackArguments,
     mut return_value: v8::ReturnValue,
 ) {
+    if super::reject_view_extension_host_mutation(scope, "AbortController.abort") {
+        return;
+    }
     let this = arguments.this();
     let id_name = v8::String::new(scope, "_signalId").unwrap();
     let Some(id_val) = this.get(scope, id_name.into()) else {
@@ -1052,6 +1061,9 @@ fn worker_constructor(
     arguments: v8::FunctionCallbackArguments,
     mut return_value: v8::ReturnValue,
 ) {
+    if super::reject_view_extension_host_mutation(scope, "Worker construction") {
+        return;
+    }
     let url = arguments.get(0);
     let Ok(url_obj) = v8::Local::<v8::Object>::try_from(url) else {
         throw_type_error(scope, "Worker constructor expects a URL object");
@@ -1302,6 +1314,9 @@ fn worker_js_post_message(
     arguments: v8::FunctionCallbackArguments,
     mut return_value: v8::ReturnValue,
 ) {
+    if super::reject_view_extension_host_mutation(scope, "Worker.postMessage") {
+        return;
+    }
     let data = arguments.get(0);
     let json = v8_to_json(scope, data, "Worker.postMessage");
     match json {
@@ -1341,6 +1356,9 @@ fn worker_js_terminate(
     arguments: v8::FunctionCallbackArguments,
     mut return_value: v8::ReturnValue,
 ) {
+    if super::reject_view_extension_host_mutation(scope, "Worker.terminate") {
+        return;
+    }
     let Some(registry) = get_registry(scope) else {
         throw_script_error(scope, "worker registry is unavailable");
         return;
@@ -1364,6 +1382,9 @@ fn worker_js_add_event_listener(
     arguments: v8::FunctionCallbackArguments,
     mut return_value: v8::ReturnValue,
 ) {
+    if super::reject_view_extension_host_mutation(scope, "Worker.addEventListener") {
+        return;
+    }
     let event_type = arguments.get(0);
     let callback = arguments.get(1);
     let this = arguments.this();
@@ -1400,6 +1421,9 @@ fn worker_js_remove_event_listener(
     arguments: v8::FunctionCallbackArguments,
     mut return_value: v8::ReturnValue,
 ) {
+    if super::reject_view_extension_host_mutation(scope, "Worker.removeEventListener") {
+        return;
+    }
     let event_type = arguments.get(0);
     let callback = arguments.get(1);
     let this = arguments.this();

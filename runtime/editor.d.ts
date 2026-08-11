@@ -559,6 +559,58 @@ interface ContentChange {
 	readonly text: string;
 }
 
+interface ViewExtensionSelection {
+	readonly anchor: Readonly<EditorPosition>;
+	readonly head: Readonly<EditorPosition>;
+}
+
+interface ViewExtensionDocument {
+	readonly contentId: number;
+	readonly revision: number;
+	readonly text: string;
+	readonly resourceName: string | null;
+	readonly selections: readonly ViewExtensionSelection[];
+	readonly primarySelection: ViewExtensionSelection;
+}
+
+interface ViewExtensionContext {
+	readonly viewId: number;
+	readonly definition: string;
+	readonly revision: number;
+	readonly bindings: readonly {
+		readonly name: string;
+		readonly contentId: number;
+	}[];
+	readonly document: ViewExtensionDocument | null;
+}
+
+interface LinesSegment {
+	readonly text: string;
+	readonly face?: string;
+}
+
+interface LinesPresentation {
+	readonly type: "lines";
+	readonly baseFace?: string;
+	readonly rows: readonly (string | readonly LinesSegment[])[];
+}
+
+interface ViewExtensionDefinition {
+	readonly id: string;
+	readonly panes: Readonly<
+		Record<
+			string,
+			{
+				readonly side: "left" | "right" | "above" | "below";
+				readonly size: number;
+				readonly render: (
+					context: DeepReadonly<ViewExtensionContext>,
+				) => LinesPresentation;
+			}
+		>
+	>;
+}
+
 declare const editor: {
 	readonly commands: EditorCommands;
 	readonly theme: {
@@ -575,6 +627,9 @@ declare const editor: {
 		define<BufferState = ScriptData, BufferViewState = ScriptData>(
 			definition: ModeDefinition<BufferState, BufferViewState>,
 		): void;
+	};
+	readonly views: {
+		extend(target: string, definition: ViewExtensionDefinition): void;
 	};
 	readonly resources: {
 		readText(path: string): string;

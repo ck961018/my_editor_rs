@@ -16,6 +16,7 @@
     "../plugins/vim/plugin.ts",
     "../examples/worker-platform.ts",
     "../examples/worker-platform-worker.ts",
+    "../examples/view-extension-minimap.ts",
     "command-system.ts",
     "../type-tests/mode.ts"
   ]

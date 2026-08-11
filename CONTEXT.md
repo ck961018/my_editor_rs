@@ -55,6 +55,11 @@ _Avoid_: 切换 View、替换 View
 状态、行为或生命周期。
 _Avoid_: 子 View、组件、Content
 
+**View extension**：
+附着到既有 View definition 的可卸载贡献。它可以增加由宿主
+管理的 Pane 和对应派生呈现，但不拥有 View 身份、数据或生命周期。
+_Avoid_: 子 View、Pane 类型、插件布局树
+
 **Switchable View**：
 允许被通用 View switch 替换的 View。焦点 Pane 所属
 View 的最近 switchable 祖先是默认切换目标。
@@ -120,13 +125,14 @@ _Avoid_: 第三个协调 Pane、Pane state、左右 Content 的 Mode 并集
   存活的 binding 引用；引用者必须先 rebind 或关闭。
 - Mode attachment 位于 View；多个 attachment 可以按
   Content 共享 Mode state。
-- DiffView 的父 binding 与对应子 BufferView `document` binding 必须在一个
-  workspace draft 中同步改变。
-- DiffView replacement 在 prepared effects 前校验完整 workspace 与
-  attachment candidate；发布时先接续新 attachment，再清理旧 View。
+- DiffView 的父 binding 与对应子 BufferView `document` binding 必须原子改变。
+- DiffView replacement 必须在发布前验证完整结构和 Mode attachment；失败时
+  原 View 保持不变。
 - 关闭 Content 时，document View 先提升到最近的 switchable 生命周期 owner
   并去重；同一 DiffView 的两侧引用同一 Content 也只删除一次。
 - ContentClassifier 只负责分类；ModeResolver 结合 View、binding、分类、
   override 和 Mode 规则产生 attachment plan。
 - 用户可见编号只对 listed content 派生；插件 API
   使用不透明 ContentId。
+- View extension 只贡献 Pane 与派生呈现；卸载时必须移除贡献，且不得改变宿主
+  View 的 identity、binding、状态或生命周期。

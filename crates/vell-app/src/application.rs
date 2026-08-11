@@ -8,7 +8,7 @@ use crate::bootstrap::{bootstrap_editor, bootstrap_editor_with_theme};
 use crate::buffer_lifecycle::normalize_path;
 use crate::diagnostics::RuntimeDiagnostic;
 use crate::kernel::{FileBaseline, Kernel};
-use crate::mode::{Mode, ModeBackground};
+use crate::mode::{Mode, ModeBackground, ViewExtension, ViewExtensionOwner};
 use crate::mode_name::ModeName;
 use crate::mode_resolver::AttachmentPlanError;
 use crate::session::ClientSession;
@@ -59,6 +59,7 @@ impl<F: Frontend> App<F> {
             Vec::new(),
             None,
             Vec::new(),
+            Vec::new(),
         )
     }
 
@@ -77,6 +78,7 @@ impl<F: Frontend> App<F> {
             modes,
             Vec::new(),
             None,
+            Vec::new(),
             Vec::new(),
         )
     }
@@ -99,6 +101,7 @@ impl<F: Frontend> App<F> {
             Vec::new(),
             Some(&theme),
             Vec::new(),
+            Vec::new(),
         )
     }
 
@@ -120,6 +123,7 @@ impl<F: Frontend> App<F> {
             Vec::new(),
             theme.as_ref(),
             face_overrides,
+            Vec::new(),
         )
     }
 
@@ -144,6 +148,33 @@ impl<F: Frontend> App<F> {
             backgrounds,
             theme.as_ref(),
             face_overrides,
+            Vec::new(),
+        )
+    }
+
+    // ponytail: composition-root inputs stay explicit; add a builder only if this grows.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_modes_visuals_backgrounds_and_extensions(
+        path: Option<&str>,
+        width: usize,
+        height: usize,
+        frontend: F,
+        modes: Vec<Box<dyn Mode>>,
+        backgrounds: Vec<Box<dyn ModeBackground>>,
+        theme: Option<ThemeName>,
+        face_overrides: Vec<FaceOverride>,
+        view_extensions: Vec<Box<dyn ViewExtension>>,
+    ) -> io::Result<Self> {
+        Self::build(
+            path,
+            width,
+            height,
+            frontend,
+            modes,
+            backgrounds,
+            theme.as_ref(),
+            face_overrides,
+            view_extensions,
         )
     }
 
@@ -158,6 +189,7 @@ impl<F: Frontend> App<F> {
         backgrounds: Vec<Box<dyn ModeBackground>>,
         theme: Option<&ThemeName>,
         face_overrides: Vec<FaceOverride>,
+        view_extensions: Vec<Box<dyn ViewExtension>>,
     ) -> io::Result<Self> {
         let display_profile = frontend.display_profile();
         let opened_path = path
@@ -199,6 +231,15 @@ impl<F: Frontend> App<F> {
             .session
             .faces_mut()
             .set_display_profile(display_profile);
+        bootstrap
+            .session
+            .install_view_extensions(
+                view_extensions,
+                bootstrap.kernel.view_definitions(),
+                bootstrap.kernel.contents(),
+                bootstrap.kernel.content_modes(),
+            )
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let mut app = Self {
             kernel: bootstrap.kernel,
             session: bootstrap.session,
@@ -216,6 +257,12 @@ impl<F: Frontend> App<F> {
                 .expect("bootstrap contains only one editor buffer");
         }
         Ok(app)
+    }
+
+    pub fn unload_view_extensions(&mut self, owner: &ViewExtensionOwner) -> io::Result<usize> {
+        self.session
+            .unload_view_extensions(owner, self.kernel.contents(), self.kernel.content_modes())
+            .map_err(io::Error::other)
     }
 
     #[cfg_attr(

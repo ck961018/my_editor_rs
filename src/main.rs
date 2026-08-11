@@ -33,7 +33,7 @@ async fn main() -> io::Result<()> {
         .prepare_commands(&native_command_ids())
         .map_err(io::Error::other)?;
     let theme = theme.map(ThemeName::new).or(configuration.theme);
-    let mut app = App::with_modes_visuals_and_backgrounds(
+    let mut app = App::with_modes_visuals_backgrounds_and_extensions(
         path.as_deref(),
         width as usize,
         height as usize,
@@ -42,6 +42,7 @@ async fn main() -> io::Result<()> {
         configuration.backgrounds,
         theme,
         configuration.face_overrides,
+        configuration.view_extensions,
     )?;
     for command in commands {
         app.register_command(command);

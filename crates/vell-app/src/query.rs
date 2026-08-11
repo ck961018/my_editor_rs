@@ -7,9 +7,10 @@ use vell_core::content_store::ContentStore;
 use vell_core::content_view_state::ContentViewState;
 use vell_protocol::content_query::{
     BufferBackingState, ContentData, ContentQuery, ContentQueryKind, CursorStyle,
-    DEFAULT_TAB_WIDTH, DirtyState, FaceName, FacePatch, MAX_TAB_WIDTH, RenderQuery,
-    RenderQueryError, RowRange, SaveState, SelectionShape, StatusBarPresentation, StatusBarSegment,
-    TextDecoration, TextPresentation, ViewData, ViewPresentation,
+    DEFAULT_TAB_WIDTH, DirtyState, FaceName, FacePatch, LinesPresentation, MAX_TAB_WIDTH,
+    PaintFace, RenderQuery, RenderQueryError, RowRange, SaveState, SelectionShape,
+    StatusBarPresentation, StatusBarSegment, TextDecoration, TextPresentation, ViewData,
+    ViewPresentation,
 };
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 
@@ -44,17 +45,17 @@ impl RenderQuery for AppQuery<'_> {
             .views
             .get(&id)
             .ok_or(RenderQueryError::MissingView(id))?;
-        let content = view
-            .document_content()
-            .ok_or(RenderQueryError::MissingDocumentBinding(id))?;
-        let _content_kind = self
-            .contents
-            .kind(content)
-            .ok_or(RenderQueryError::MissingContent(content))?;
         // view 根据来源 Pane 决定该 Space 的显示内容。
         match view.panes().key_for_space(space) {
-            Some(BODY_PANE) => self.body_pane_view(id, content, view),
-            Some(STATUS_PANE) => self.status_pane_view(id, content, view),
+            Some(BODY_PANE) => {
+                let content = self.document_content(id, view)?;
+                self.body_pane_view(id, content, view)
+            }
+            Some(STATUS_PANE) => {
+                let content = self.document_content(id, view)?;
+                self.status_pane_view(id, content, view)
+            }
+            Some(pane) => self.extension_pane_view(id, pane),
             _ => Err(RenderQueryError::UnmappedSpace { view: id, space }),
         }
     }
@@ -107,6 +108,16 @@ impl RenderQuery for AppQuery<'_> {
 }
 
 impl AppQuery<'_> {
+    fn document_content(&self, id: ViewId, view: &View) -> Result<ContentId, RenderQueryError> {
+        let content = view
+            .document_content()
+            .ok_or(RenderQueryError::MissingDocumentBinding(id))?;
+        self.contents
+            .kind(content)
+            .ok_or(RenderQueryError::MissingContent(content))?;
+        Ok(content)
+    }
+
     fn body_pane_view(
         &self,
         id: ViewId,
@@ -148,7 +159,7 @@ impl AppQuery<'_> {
             })
         };
         Ok(ViewData {
-            content,
+            content: Some(content),
             presentation,
         })
     }
@@ -184,10 +195,73 @@ impl AppQuery<'_> {
             }];
         }
         Ok(ViewData {
-            content,
+            content: Some(content),
             presentation: ViewPresentation::StatusBar(presentation),
         })
     }
+
+    fn extension_pane_view(&self, id: ViewId, pane: &str) -> Result<ViewData, RenderQueryError> {
+        let Some((content, named)) = self.presentation.extension_pane(id, pane) else {
+            return Err(RenderQueryError::UnmappedSpace {
+                view: id,
+                space: self.views[&id]
+                    .panes()
+                    .space_for_key(pane)
+                    .expect("query Pane belongs to the View"),
+            });
+        };
+        let base_name = named
+            .base_face
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| FaceName::new("ui.editor"));
+        let base_face = resolve_extension_root(self.faces, &base_name, content, id);
+        let rows = named
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|segment| StatusBarSegment {
+                        text: segment.text.clone(),
+                        face: segment
+                            .face
+                            .as_ref()
+                            .map_or_else(FacePatch::default, |face| {
+                                resolve_extension_face(self.faces, face, content, id)
+                            }),
+                    })
+                    .collect()
+            })
+            .collect();
+        Ok(ViewData {
+            content,
+            presentation: ViewPresentation::Lines(LinesPresentation { base_face, rows }),
+        })
+    }
+}
+
+fn resolve_extension_root(
+    faces: &SessionFaces,
+    face: &FaceName,
+    content: Option<ContentId>,
+    view: ViewId,
+) -> PaintFace {
+    content.map_or_else(
+        || faces.resolve(face).resolve(&PaintFace::default()),
+        |content| faces.resolve_root_for(face, content, view),
+    )
+}
+
+fn resolve_extension_face(
+    faces: &SessionFaces,
+    face: &FaceName,
+    content: Option<ContentId>,
+    view: ViewId,
+) -> FacePatch {
+    content.map_or_else(
+        || faces.resolve(face),
+        |content| faces.resolve_for(face, content, view),
+    )
 }
 
 fn resolve_status_segments(

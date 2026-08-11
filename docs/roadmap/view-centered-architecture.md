@@ -484,6 +484,8 @@ selection 与解析后的语言 Mode。`view.switch` 和关闭从任一子 Pane 
 
 ### M6：开放 TypeScript View extension
 
+实现状态：已完成。
+
 目标：先允许插件在已有 View 上安全增加 Pane。
 
 工作：
@@ -495,6 +497,18 @@ selection 与解析后的语言 Mode。`view.switch` 和关闭从任一子 Pane 
 
 验收：卸载插件会完整移除新增 Pane 和回调，不改变宿主 View 的数据与
 生命周期。
+
+实现结果：`editor.views.extend(target, definition)` 允许插件按稳定的 View
+definition 声明一个或多个 Pane。插件只选择相对方位、固定尺寸并返回宿主支持的
+`lines` presentation；`ViewWorkspace` 统一分配 Space、维护 PaneKey、校验完整
+Scene 并发布。回调只接收 owned View snapshot，在 presentation refresh 期间受
+V8 预算约束，渲染查询只读取缓存，不执行插件代码。
+
+扩展以插件 root 为 owner。卸载 owner 会原子移除其 Pane，调用 adapter unload
+并释放 V8 callback，同时保留目标 View 的 ViewId、bindings、document state 和
+revision。schema 错误或未知 target 在 Scene 发布前失败；回调异常或超预算只会
+暂停对应 Pane callback 并显示有界错误行，不影响其他 Pane。native 测试 adapter
+与 `runtime/examples/view-extension-minimap.ts` 共同验证该 contract。
 
 ### M7：开放 TypeScript View definition
 

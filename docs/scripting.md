@@ -42,12 +42,58 @@ let modes = loaded.modes;
 let backgrounds = loaded.backgrounds;
 ```
 
-结果只暴露通用 `Mode`、`ModeBackground` 和 `CommandEntry`；
+结果只暴露通用 `Mode`、`ModeBackground`、`ViewExtension` 和 `CommandEntry`；
 V8 类型不会跨越 crate 边界。
-根二进制通过 `load_user_configuration()` 原子取得 Mode、后台运行时、Theme
-和 Face override，再用 `prepare_commands()` 安装原生命令视图并取回命令，
-最后构建 App。内建配置的测试或 headless 入口可使用
+根二进制通过 `load_user_configuration()` 原子取得 Mode、View extension、后台
+运行时、Theme 和 Face override，再用 `prepare_commands()` 安装原生命令视图
+并取回命令，最后构建 App。内建配置的测试或 headless 入口可使用
 `load_default_configuration()`。
+
+## 扩展已有 View
+
+View extension 适合 minimap、gutter、outline 摘要等派生显示。插件作者只需回答
+三个问题：扩展哪一种 View、增加哪个 Pane、该 Pane 显示什么。插件不创建
+ViewId、SpaceId 或布局树，也不能通过 extension 改变宿主 View 的 Content 和
+生命周期。
+
+```ts
+editor.views.extend("core.buffer", {
+  id: "example.minimap",
+  panes: {
+    minimap: {
+      side: "right",
+      size: 8,
+      render(context) {
+        const rows = context.document?.text
+          .split("\n")
+          .map((line) => "▏".repeat(Math.ceil(line.length / 10))) ?? [];
+        return { type: "lines", rows };
+      },
+    },
+  },
+});
+```
+
+`core.buffer` 是目标 View definition；`minimap` 只是该 extension 内的局部 Pane
+名称。宿主把两者组合成稳定 PaneKey，并负责位置、焦点规则、原子发布与清理。
+`render` 收到只读 owned snapshot，可以读取 View bindings 和可选的 `document`
+快照，只能返回 `lines` presentation。回调在宿主预算内运行；TUI 渲染只读取
+已验证的缓存，不进入 V8。
+
+`document.selections` 使用与 `EditorPosition` 相同的零基 UTF-16
+`{ line, character }`，因此插件不需要换算 Rust 字符下标；例如当前行可直接读取
+`context.document?.primarySelection.head.line`。不要假设 `selections[0]` 是主选区；
+`primarySelection` 才是当前 cursor。宿主先检查 revision 缓存和快照大小，再复制
+文档文本并调用回调。
+
+`editor.views.extend` 只在插件模块加载期间可用，不能从 `render`、Mode callback
+或交互求值中动态注册。这样 Pane、callback 与 unload owner 始终作为同一份启动
+配置原子发布。
+
+同一插件模块注册的 extension 共享 unload owner。卸载会移除该 owner 的 Pane
+和 callback，但保留原 View 的 ViewId、bindings、selection 与 revision。完整的
+minimap 示例见
+[view-extension-minimap.ts](../runtime/examples/view-extension-minimap.ts)。
 
 ## 选择 Theme 与覆盖 Face
 

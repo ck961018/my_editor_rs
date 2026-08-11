@@ -494,6 +494,14 @@ pub struct StatusBarPresentation {
     pub right: Vec<StatusBarSegment>,
 }
 
+/// 完全由宿主缓存持有的多行 presentation。每行由有序文本分段组成；
+/// 前端只负责裁剪和绘制，不在 render query 中执行扩展回调。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LinesPresentation {
+    pub base_face: PaintFace,
+    pub rows: Vec<Vec<StatusBarSegment>>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorStyle {
     Default,
@@ -525,11 +533,12 @@ pub struct TextPresentation {
 pub enum ViewPresentation {
     Text(TextPresentation),
     StatusBar(StatusBarPresentation),
+    Lines(LinesPresentation),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewData {
-    pub content: ContentId,
+    pub content: Option<ContentId>,
     pub presentation: ViewPresentation,
 }
 

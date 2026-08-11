@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{ModeId, ModeViewPolicy};
+use crate::{ModeId, ModeViewPolicy, NamedLinesPresentation};
 use vell_core::text_snapshot::TextSnapshot;
 use vell_protocol::content_query::{NamedTextDecoration, RowRange};
 use vell_protocol::ids::{ContentId, ViewId};
@@ -52,6 +52,7 @@ pub struct PresentationLayerStore {
     view_layers: HashMap<(ModeId, ViewId), ViewPresentationLayer>,
     view_contents: HashMap<ViewId, ContentId>,
     view_order: HashMap<ViewId, Vec<ModeId>>,
+    extension_panes: HashMap<(ViewId, String), (Option<ContentId>, NamedLinesPresentation)>,
     status_message: Option<String>,
 }
 
@@ -71,6 +72,28 @@ impl PresentationLayerStore {
     pub fn begin_refresh(&mut self) {
         self.view_contents.clear();
         self.view_order.clear();
+        self.extension_panes.clear();
+    }
+
+    pub fn set_extension_pane(
+        &mut self,
+        view: ViewId,
+        pane: String,
+        content: Option<ContentId>,
+        presentation: NamedLinesPresentation,
+    ) {
+        self.extension_panes
+            .insert((view, pane), (content, presentation));
+    }
+
+    pub fn extension_pane(
+        &self,
+        view: ViewId,
+        pane: &str,
+    ) -> Option<(Option<ContentId>, &NamedLinesPresentation)> {
+        self.extension_panes
+            .get(&(view, pane.to_owned()))
+            .map(|(content, presentation)| (*content, presentation))
     }
 
     pub fn set_view(&mut self, view: ViewId, content: ContentId, order: Vec<ModeId>) {

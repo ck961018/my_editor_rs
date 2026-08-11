@@ -32,6 +32,7 @@ mod transaction;
 mod view;
 mod view_context;
 mod view_definition;
+mod view_extension;
 mod view_workspace;
 
 pub(crate) use vell_mode as mode;

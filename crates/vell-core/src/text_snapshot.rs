@@ -24,6 +24,10 @@ impl TextSnapshot {
         self.rope.len_chars()
     }
 
+    pub fn len_bytes(&self) -> usize {
+        self.rope.len_bytes()
+    }
+
     pub fn len_lines(&self) -> usize {
         self.rope.len_lines()
     }

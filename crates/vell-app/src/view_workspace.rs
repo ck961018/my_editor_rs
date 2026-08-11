@@ -147,6 +147,105 @@ impl ViewWorkspace {
         bars
     }
 
+    pub(super) fn install_extension_pane(
+        &mut self,
+        view: ViewId,
+        key: &str,
+        side: crate::mode::ViewExtensionPaneSide,
+        size: u16,
+    ) -> Result<SpaceId, LayoutError> {
+        if matches!(key, BODY_PANE | STATUS_PANE) {
+            return Err(LayoutError::InvalidWorkspace(format!(
+                "view extension pane key '{key}' is reserved"
+            )));
+        }
+        let target = self
+            .views
+            .get(&view)
+            .ok_or(LayoutError::MissingView(view))?;
+        if let Some(space) = target.panes().space_for_key(key) {
+            return Ok(space);
+        }
+        let anchor = self.replacement_space_for_view(view).ok_or_else(|| {
+            LayoutError::InvalidWorkspace(format!(
+                "View {} has no Pane anchor for extension '{key}'",
+                view.0
+            ))
+        })?;
+        let direction = match side {
+            crate::mode::ViewExtensionPaneSide::Left => SplitDirection::Left,
+            crate::mode::ViewExtensionPaneSide::Right => SplitDirection::Right,
+            crate::mode::ViewExtensionPaneSide::Above => SplitDirection::Up,
+            crate::mode::ViewExtensionPaneSide::Below => SplitDirection::Down,
+        };
+        let mut draft = self.clone();
+        let result = draft
+            .scene_builder
+            .split(&mut draft.scene, anchor, view, false, direction)?;
+        draft.scene_builder.set_sizing(
+            &mut draft.scene,
+            result.new_space,
+            Sizing::Fixed(i32::from(size)),
+        )?;
+        draft
+            .views
+            .get_mut(&view)
+            .expect("extension target View was prevalidated")
+            .assign_pane(result.new_space, key);
+        draft.scene_revision.next();
+        draft.validate()?;
+        *self = draft;
+        Ok(result.new_space)
+    }
+
+    pub(super) fn remove_extension_panes(
+        &mut self,
+        keys: &HashSet<String>,
+    ) -> Result<usize, LayoutError> {
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let mut targets = self
+            .views
+            .iter()
+            .flat_map(|(view, data)| {
+                data.panes().spaces().filter_map(|space| {
+                    let key = data.panes().key_for_space(space)?;
+                    keys.contains(key).then_some((*view, space, key.to_owned()))
+                })
+            })
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            return Ok(0);
+        }
+        targets.sort_by_key(|(_, space, _)| std::cmp::Reverse(space.0));
+        let mut draft = self.clone();
+        for (view, space, key) in &targets {
+            if matches!(key.as_str(), BODY_PANE | STATUS_PANE) {
+                return Err(LayoutError::InvalidWorkspace(format!(
+                    "cannot remove reserved Pane '{key}' as a view extension"
+                )));
+            }
+            draft.scene_builder.close(&mut draft.scene, *space)?;
+            let removed = draft
+                .views
+                .get_mut(view)
+                .ok_or(LayoutError::MissingView(*view))?
+                .release_pane_space(*space);
+            if removed.as_deref() != Some(key) {
+                return Err(LayoutError::InvalidWorkspace(
+                    "extension Pane ownership changed during removal".to_owned(),
+                ));
+            }
+        }
+        draft.reconcile_layout(Some(draft.focused))?;
+        draft.sync_global_status_target()?;
+        draft.scene_revision.next();
+        draft.validate()?;
+        *self = draft;
+        Ok(targets.len())
+    }
+
     pub(super) fn set_status_bar_placement(
         &mut self,
         placement: StatusBarPlacement,
@@ -177,7 +276,12 @@ impl ViewWorkspace {
                     .ok_or(LayoutError::MissingView(global_target))?
                     .release_pane_space(global_space);
                 self.global_status_space = None;
-                let editors = scene_views(&self.scene);
+                let editors = scene_views(&self.scene)
+                    .into_iter()
+                    .filter(|(space, view)| {
+                        self.views[view].panes().key_for_space(*space) == Some(BODY_PANE)
+                    })
+                    .collect::<Vec<_>>();
                 self.status_by_editor.clear();
                 for (editor_space, editor_view) in editors {
                     let pane = self.scene_builder.wrap_with_status(

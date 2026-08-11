@@ -8,7 +8,9 @@ pub mod operation;
 pub mod presentation;
 mod runtime;
 mod typed;
+mod view_extension;
 
 pub use attachment::*;
 pub use runtime::*;
 pub use typed::*;
+pub use view_extension::*;

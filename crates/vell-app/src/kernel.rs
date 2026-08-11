@@ -235,10 +235,6 @@ impl Kernel {
         &self.modes
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "M4 ModeResolver will read View definitions")
-    )]
     pub(super) fn view_definitions(&self) -> &ViewDefinitionRegistry {
         &self.view_definitions
     }

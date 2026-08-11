@@ -1,6 +1,6 @@
 //! TypeScript runtime owned by the application layer.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::fs;
@@ -16,7 +16,10 @@ use vell_mode::mode_name::{ModeActionName, ModeName};
 use vell_mode::operation::MAX_MODE_CALLBACK_OPERATIONS;
 use vell_mode::{
     LanguageId, Mode, ModeAttachmentRule, ModeBackground, ModeContentContext, ModeError,
-    ModeResult, ModeState, ModeViewContext,
+    ModeResult, ModeState, ModeViewContext, NamedLineSegment, NamedLinesPresentation,
+    ViewExtension, ViewExtensionContext, ViewExtensionDefinition, ViewExtensionId,
+    ViewExtensionOwner, ViewExtensionPaneDefinition, ViewExtensionPaneSide,
+    ViewExtensionPresentation,
 };
 use vell_protocol::content_query::{
     Color, Face, FaceDefinition, FaceName, FaceOverride, FacePatch, FaceValue, NamedTextDecoration,
@@ -37,6 +40,7 @@ mod module;
 mod primitives;
 mod schema;
 mod type_environment;
+mod view_extension_adapter;
 mod worker;
 mod worker_channel;
 mod worker_quota;
@@ -65,6 +69,7 @@ use primitives::PrimitiveRuntime;
 use schema::install_editor_api;
 pub use type_environment::TYPESCRIPT_COMPILER_VERSION;
 use type_environment::TypeEnvironment;
+use view_extension_adapter::ScriptViewExtension;
 
 static V8_INIT: Once = Once::new();
 const INPUT_ACTION: &str = "$input";
@@ -120,6 +125,143 @@ fn ensure_count(label: &str, actual: usize, limit: usize) -> Result<(), ScriptEr
     Ok(())
 }
 
+fn view_extension_context_json(context: &ViewExtensionContext) -> serde_json::Value {
+    let document = context.document.as_ref().map(|document| {
+        serde_json::json!({
+            "contentId": document.content_id.0,
+            "revision": document.revision.0,
+            "text": document.text,
+            "resourceName": document.resource_name,
+            "selections": document.selections.iter().map(|selection| serde_json::json!({
+                "anchor": {
+                    "line": selection.anchor.line,
+                    "character": selection.anchor.character,
+                },
+                "head": {
+                    "line": selection.head.line,
+                    "character": selection.head.character,
+                },
+            })).collect::<Vec<_>>(),
+            "primarySelection": {
+                "anchor": {
+                    "line": document.primary_selection.anchor.line,
+                    "character": document.primary_selection.anchor.character,
+                },
+                "head": {
+                    "line": document.primary_selection.head.line,
+                    "character": document.primary_selection.head.character,
+                },
+            },
+        })
+    });
+    serde_json::json!({
+        "viewId": context.view_id.0,
+        "definition": context.definition.as_str(),
+        "revision": context.revision.0,
+        "bindings": context.bindings.iter().map(|(binding, content)| serde_json::json!({
+            "name": binding.as_str(),
+            "contentId": content.0,
+        })).collect::<Vec<_>>(),
+        "document": document,
+    })
+}
+
+fn parse_view_extension_presentation(
+    value: serde_json::Value,
+) -> Result<ViewExtensionPresentation, ScriptError> {
+    let object = value.as_object().ok_or_else(|| {
+        ScriptError::new("View extension render must return a presentation object")
+    })?;
+    ensure_json_fields(object, &["type", "baseFace", "rows"], "lines presentation")?;
+    if object.get("type").and_then(serde_json::Value::as_str) != Some("lines") {
+        return Err(ScriptError::new(
+            "View extension presentation type must be 'lines'",
+        ));
+    }
+    let base_face = optional_json_face(object.get("baseFace"), "baseFace")?;
+    let rows = object
+        .get("rows")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| ScriptError::new("lines presentation rows must be an array"))?
+        .iter()
+        .map(parse_view_extension_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    let presentation = ViewExtensionPresentation::Lines(NamedLinesPresentation { base_face, rows });
+    presentation
+        .validate()
+        .map_err(|error| ScriptError::new(error.to_string()))?;
+    Ok(presentation)
+}
+
+fn parse_view_extension_row(
+    value: &serde_json::Value,
+) -> Result<Vec<NamedLineSegment>, ScriptError> {
+    if let Some(text) = value.as_str() {
+        return Ok(vec![NamedLineSegment {
+            text: text.to_owned(),
+            face: None,
+        }]);
+    }
+    let segments = value.as_array().ok_or_else(|| {
+        ScriptError::new("lines presentation rows must contain strings or arrays")
+    })?;
+    segments
+        .iter()
+        .map(|segment| {
+            let object = segment
+                .as_object()
+                .ok_or_else(|| ScriptError::new("lines presentation segments must be objects"))?;
+            ensure_json_fields(object, &["text", "face"], "lines segment")?;
+            let text = object
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ScriptError::new("lines segment text must be a string"))?;
+            let face = optional_json_face(object.get("face"), "segment face")?;
+            Ok(NamedLineSegment {
+                text: text.to_owned(),
+                face,
+            })
+        })
+        .collect()
+}
+
+fn optional_json_face(
+    value: Option<&serde_json::Value>,
+    label: &str,
+) -> Result<Option<FaceName>, ScriptError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let value = value
+        .as_str()
+        .ok_or_else(|| ScriptError::new(format!("{label} must be a string")))?;
+    if value.is_empty() || value.len() > 256 {
+        return Err(ScriptError::new(format!(
+            "{label} must contain between 1 and 256 bytes"
+        )));
+    }
+    Ok(Some(FaceName::new(value)))
+}
+
+fn ensure_json_fields(
+    object: &serde_json::Map<String, serde_json::Value>,
+    allowed: &[&str],
+    label: &str,
+) -> Result<(), ScriptError> {
+    if let Some(field) = object
+        .keys()
+        .find(|field| !allowed.contains(&field.as_str()))
+    {
+        return Err(ScriptError::new(format!(
+            "{label} contains unknown field '{field}'"
+        )));
+    }
+    Ok(())
+}
+
 fn ensure_file_size(path: &Path, label: &str, limit: usize) -> Result<(), ScriptError> {
     let bytes = fs::metadata(path)
         .map_err(|error| {
@@ -169,6 +311,83 @@ struct ScriptModeDefinition {
     before: Option<ModeName>,
     attachment: ModeAttachmentRule,
     adapters: ScriptAdapterDefinitions,
+}
+
+#[derive(Clone)]
+struct ScriptViewExtensionDefinition {
+    definition: ViewExtensionDefinition,
+    callbacks: HashMap<String, v8::Global<v8::Function>>,
+}
+
+#[derive(Default)]
+struct ScriptViewExtensionRegistration {
+    open: Cell<bool>,
+    owner: RefCell<Option<ViewExtensionOwner>>,
+}
+
+#[derive(Default)]
+struct ScriptViewExtensionRenderScope {
+    active: Cell<bool>,
+}
+
+impl ScriptViewExtensionRenderScope {
+    fn enter(&self) {
+        self.active.set(true);
+    }
+
+    fn leave(&self) {
+        self.active.set(false);
+    }
+}
+
+fn reject_view_extension_host_mutation(scope: &mut v8::PinScope, api: &str) -> bool {
+    if scope
+        .get_slot::<Rc<ScriptViewExtensionRenderScope>>()
+        .is_some_and(|render| render.active.get())
+    {
+        throw_script_error(
+            scope,
+            &format!("{api} is not available during View extension rendering"),
+        );
+        true
+    } else {
+        false
+    }
+}
+
+impl ScriptViewExtensionRegistration {
+    fn begin(&self, owner: ViewExtensionOwner) {
+        self.owner.replace(Some(owner));
+        self.open.set(true);
+    }
+
+    fn finish(&self) {
+        self.open.set(false);
+        self.owner.replace(None);
+    }
+
+    fn is_open(&self) -> bool {
+        self.open.get()
+    }
+
+    fn owner(&self) -> Option<ViewExtensionOwner> {
+        self.open
+            .get()
+            .then(|| self.owner.borrow().clone())
+            .flatten()
+    }
+}
+
+fn source_view_extension_owner(namespace: &str, identity: &str) -> ViewExtensionOwner {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(namespace.len() + 1 + identity.len() * 2);
+    encoded.push_str(namespace);
+    encoded.push('.');
+    for byte in identity.as_bytes() {
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    ViewExtensionOwner::new(encoded)
 }
 
 #[derive(Clone)]
@@ -464,6 +683,7 @@ fn loaded_editor_configuration(
     Ok(LoadedEditorConfiguration {
         modes,
         backgrounds: vec![Box::new(ScriptBackground::new(host.clone()))],
+        view_extensions: ScriptHost::script_view_extensions(&host),
         theme: configuration.theme,
         face_overrides: configuration.face_overrides,
         host,
@@ -487,6 +707,7 @@ pub fn load_typescript_modes(
     Ok(LoadedScriptModes {
         modes,
         backgrounds,
+        view_extensions: ScriptHost::script_view_extensions(&host),
         commands,
         host,
     })
@@ -666,6 +887,245 @@ mod tests {
     use vell_core::content_store::ContentStore;
     use vell_mode::{InputFlow, ModeRegistry};
     use vell_protocol::ids::{ContentId, ViewId};
+    use vell_protocol::revision::Revision;
+    use vell_protocol::view::{BindingKey, ViewDefinitionId};
+
+    fn extension_context() -> ViewExtensionContext {
+        ViewExtensionContext {
+            view_id: ViewId(7),
+            definition: ViewDefinitionId::new("core.buffer"),
+            revision: Revision(3),
+            bindings: vec![(BindingKey::new("document"), ContentId(2))],
+            document: Some(vell_mode::ViewExtensionDocument {
+                content_id: ContentId(2),
+                revision: Revision(5),
+                text: "alpha\nbeta".to_owned(),
+                resource_name: Some("sample.rs".to_owned()),
+                selections: vec![vell_mode::ViewExtensionSelection {
+                    anchor: vell_mode::ViewExtensionPosition {
+                        line: 1,
+                        character: 1,
+                    },
+                    head: vell_mode::ViewExtensionPosition {
+                        line: 1,
+                        character: 1,
+                    },
+                }],
+                primary_selection: vell_mode::ViewExtensionSelection {
+                    anchor: vell_mode::ViewExtensionPosition {
+                        line: 1,
+                        character: 1,
+                    },
+                    head: vell_mode::ViewExtensionPosition {
+                        line: 1,
+                        character: 1,
+                    },
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn view_extension_schema_callback_and_unload_share_one_contract() {
+        let mut host = ScriptHost::new();
+        host.execute_typescript(
+            "file:///minimap.ts",
+            r#"
+editor.views.extend("core.buffer", {
+  id: "example.minimap",
+  panes: {
+    minimap: {
+      side: "right",
+      size: 8,
+      render(context) {
+        return {
+          type: "lines",
+          baseFace: "ui.editor",
+          rows: [
+            context.document?.resourceName ?? "none",
+            [{
+              text: `${context.document?.primarySelection.head.line}:` +
+                String(context.document?.primarySelection.head.character),
+              face: "ui.selection",
+            }],
+          ],
+        };
+      },
+    },
+  },
+});
+"#,
+        )
+        .unwrap();
+        let host = Rc::new(RefCell::new(host));
+        let mut extensions = ScriptHost::script_view_extensions(&host);
+
+        assert_eq!(extensions.len(), 1);
+        assert_eq!(extensions[0].definition().id().as_str(), "example.minimap");
+        let presentation = extensions[0]
+            .present("minimap", &extension_context())
+            .unwrap();
+        let ViewExtensionPresentation::Lines(lines) = presentation;
+        assert_eq!(lines.rows[0][0].text, "sample.rs");
+        assert_eq!(lines.rows[1][0].text, "1:1");
+
+        extensions[0].unload();
+        assert!(host.borrow().view_extension_definitions.borrow().is_empty());
+    }
+
+    #[test]
+    fn view_extension_registration_is_strict_atomic_and_budgeted() {
+        let mut host =
+            ScriptHost::with_timeouts(Duration::from_millis(50), Duration::from_millis(100));
+        let error = host
+            .execute_typescript(
+                "file:///invalid-extension.ts",
+                r#"
+editor.views.extend("core.buffer", {
+  id: "example.partial",
+  panes: { map: { side: "right", size: 4, render: () => ({ type: "lines", rows: [] }) } },
+});
+editor.views.extend("core.buffer", {
+  id: "example.invalid",
+  unknown: true,
+  panes: { map: { side: "right", size: 4, render: () => ({ type: "lines", rows: [] }) } },
+});
+"#,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown field 'unknown'"));
+        assert!(host.view_extension_definitions.borrow().is_empty());
+
+        host.execute_typescript(
+            "file:///slow-extension.ts",
+            r#"
+editor.views.extend("core.buffer", {
+  id: "example.slow",
+  panes: {
+    map: {
+      side: "right",
+      size: 4,
+      render() { while (true) {} },
+    },
+  },
+});
+"#,
+        )
+        .unwrap();
+        let host = Rc::new(RefCell::new(host));
+        let mut extensions = ScriptHost::script_view_extensions(&host);
+        let error = extensions[0]
+            .present("map", &extension_context())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("timeout"),
+            "unexpected callback error: {error}"
+        );
+    }
+
+    #[test]
+    fn view_extension_callback_cannot_register_another_extension() {
+        let mut host = ScriptHost::new();
+        host.execute_typescript(
+            "file:///dynamic-extension.ts",
+            r#"
+editor.views.extend("core.buffer", {
+  id: "example.dynamic",
+  panes: {
+    map: {
+      side: "right",
+      size: 4,
+      render() {
+        const errors = [];
+        const attempt = (callback) => {
+          try { callback(); } catch (error) { errors.push(String(error)); }
+        };
+        attempt(() => editor.views.extend("core.buffer", {
+          id: "example.leaked",
+          panes: { leaked: {
+            side: "left",
+            size: 2,
+            render: () => ({ type: "lines", rows: [] }),
+          } },
+        }));
+        attempt(() => editor.theme.use("catppuccin-mocha"));
+        attempt(() => editor.faces.override("ui.editor", { bold: true }));
+        attempt(() => editor.modes.define({
+          name: "example.leaked-mode",
+          on: { buffer: {} },
+        }));
+        attempt(() => editor.commands.register("example.leaked", () => {}));
+        attempt(() => editor.writeDecorations(2, 5, []));
+        attempt(() => new Worker({}));
+        return { type: "lines", rows: errors };
+      },
+    },
+  },
+});
+"#,
+        )
+        .unwrap();
+        let host = Rc::new(RefCell::new(host));
+        let mut extensions = ScriptHost::script_view_extensions(&host);
+
+        let presentation = extensions[0].present("map", &extension_context()).unwrap();
+
+        let ViewExtensionPresentation::Lines(lines) = presentation;
+        assert_eq!(lines.rows.len(), 7);
+        assert!(lines.rows.iter().all(|row| {
+            row[0]
+                .text
+                .contains("not available during View extension rendering")
+                || row[0].text.contains("only available during module loading")
+        }));
+        let definitions = host.borrow().view_extension_definitions.borrow().clone();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].definition.id().as_str(), "example.dynamic");
+        assert!(host.borrow().definitions.borrow().is_empty());
+        assert_eq!(host.borrow().commands.borrow().change_count(), 0);
+        let configuration = host.borrow().configuration.borrow().clone();
+        assert!(configuration.theme.is_none());
+        assert!(configuration.face_overrides.is_empty());
+    }
+
+    #[test]
+    fn filesystem_view_extension_owners_are_unique_and_unload_independently() {
+        let directory = tempfile::tempdir().unwrap();
+        let first_root = directory.path().join("first");
+        let second_root = directory.path().join("second");
+        fs::create_dir_all(&first_root).unwrap();
+        fs::create_dir_all(&second_root).unwrap();
+        let source = |id: &str| {
+            format!(
+                r#"editor.views.extend("core.buffer", {{
+  id: "{id}",
+  panes: {{ map: {{
+    side: "right",
+    size: 4,
+    render: () => ({{ type: "lines", rows: [] }}),
+  }} }},
+}});"#
+            )
+        };
+        let first = first_root.join("plugin.ts");
+        let second = second_root.join("plugin.ts");
+        fs::write(&first, source("example.first")).unwrap();
+        fs::write(&second, source("example.second")).unwrap();
+        let mut host = ScriptHost::new();
+        host.execute_module(&first).unwrap();
+        host.execute_module(&second).unwrap();
+        let host = Rc::new(RefCell::new(host));
+        let mut extensions = ScriptHost::script_view_extensions(&host);
+        let first_owner = extensions[0].definition().owner().clone();
+        let second_owner = extensions[1].definition().owner().clone();
+        assert_ne!(first_owner, second_owner);
+
+        extensions[0].unload();
+
+        let definitions = host.borrow().view_extension_definitions.borrow().clone();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].definition.id().as_str(), "example.second");
+    }
 
     #[test]
     fn tab_input_uses_the_public_key_codes() {

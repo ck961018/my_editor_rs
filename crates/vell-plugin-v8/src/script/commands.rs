@@ -12,7 +12,8 @@ use vell_mode::command_registry::{
 
 use super::{
     ScriptError, ScriptHost, ScriptInvocationKind, call_script_callback, current_exception,
-    json_to_v8, perform_microtask_checkpoint, throw_script_error, v8_to_json,
+    json_to_v8, perform_microtask_checkpoint, reject_view_extension_host_mutation,
+    throw_script_error, v8_to_json,
 };
 
 const RESERVED_ROOTS: &[&str] = &["$commandLine", "$script", "register", "shortcut"];
@@ -501,6 +502,9 @@ fn register_command(
     arguments: v8::FunctionCallbackArguments,
     mut return_value: v8::ReturnValue,
 ) {
+    if reject_view_extension_host_mutation(scope, "editor.commands.register") {
+        return;
+    }
     let parsed = (|| {
         let (id, callback) = match arguments.length() {
             1 => {
@@ -574,6 +578,9 @@ fn register_shortcut(
     arguments: v8::FunctionCallbackArguments,
     mut return_value: v8::ReturnValue,
 ) {
+    if reject_view_extension_host_mutation(scope, "editor.commands.shortcut") {
+        return;
+    }
     let result = (|| {
         if arguments.length() != 2 || !arguments.get(0).is_string() {
             return Err(ScriptError::new(
@@ -602,6 +609,9 @@ fn invoke_native_command(
     arguments: v8::FunctionCallbackArguments,
     mut return_value: v8::ReturnValue,
 ) {
+    if reject_view_extension_host_mutation(scope, "native command invocation") {
+        return;
+    }
     let result = (|| {
         let id = arguments.data().to_rust_string_lossy(scope);
         let id = CommandId::new(id)

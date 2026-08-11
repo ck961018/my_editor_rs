@@ -10,6 +10,9 @@ pub struct ScriptHost {
     pub(super) context: v8::Global<v8::Context>,
     pub(super) modules: Rc<RefCell<ModuleMap>>,
     pub(super) definitions: Rc<RefCell<Vec<ScriptModeDefinition>>>,
+    pub(super) view_extension_definitions: Rc<RefCell<Vec<ScriptViewExtensionDefinition>>>,
+    view_extension_registration: Rc<ScriptViewExtensionRegistration>,
+    view_extension_render: Rc<ScriptViewExtensionRenderScope>,
     pub(super) configuration: Rc<RefCell<ScriptConfigurationDraft>>,
     pub(super) commands: Rc<RefCell<ScriptCommands>>,
     pub(super) command_host: Rc<ActiveCommandHost>,
@@ -47,6 +50,9 @@ impl ScriptHost {
         isolate.set_host_import_module_dynamically_callback(host_import_module_dynamically);
         let modules = Rc::new(RefCell::new(ModuleMap::default()));
         let definitions = Rc::new(RefCell::new(Vec::new()));
+        let view_extension_definitions = Rc::new(RefCell::new(Vec::new()));
+        let view_extension_registration = Rc::new(ScriptViewExtensionRegistration::default());
+        let view_extension_render = Rc::new(ScriptViewExtensionRenderScope::default());
         let configuration = Rc::new(RefCell::new(ScriptConfigurationDraft::default()));
         let commands = Rc::new(RefCell::new(ScriptCommands::default()));
         let command_host = Rc::new(ActiveCommandHost::default());
@@ -54,6 +60,9 @@ impl ScriptHost {
         let primitives = PrimitiveRuntime::new();
         isolate.set_slot(modules.clone());
         isolate.set_slot(definitions.clone());
+        isolate.set_slot(view_extension_definitions.clone());
+        isolate.set_slot(view_extension_registration.clone());
+        isolate.set_slot(view_extension_render.clone());
         isolate.set_slot(configuration.clone());
         isolate.set_slot(commands.clone());
         isolate.set_slot(command_host.clone());
@@ -89,6 +98,9 @@ impl ScriptHost {
             context,
             modules,
             definitions,
+            view_extension_definitions,
+            view_extension_registration,
+            view_extension_render,
             configuration,
             commands,
             command_host,
@@ -251,10 +263,22 @@ impl ScriptHost {
     pub fn execute_typescript(&mut self, specifier: &str, source: &str) -> Result<(), ScriptError> {
         let command_count = self.commands.borrow().change_count();
         let definition_count = self.definitions.borrow().len();
+        let view_extension_count = self.view_extension_definitions.borrow().len();
         let configuration = self.configuration.borrow().clone();
+        let owns_registration = !self.view_extension_registration.is_open();
+        if owns_registration {
+            self.view_extension_registration
+                .begin(source_view_extension_owner("source", specifier));
+        }
         let result = self.evaluate_typescript(specifier, source).map(|_| ());
+        if owns_registration {
+            self.view_extension_registration.finish();
+        }
         if result.is_err() {
             self.definitions.borrow_mut().truncate(definition_count);
+            self.view_extension_definitions
+                .borrow_mut()
+                .truncate(view_extension_count);
             self.configuration.replace(configuration);
         }
         self.publish_command_types_since(command_count);
@@ -266,8 +290,11 @@ impl ScriptHost {
             .rsplit_once('/')
             .map(|(root, _)| format!("{root}/"))
             .unwrap_or_default();
-        self.plugin_root.replace(Some(root));
+        self.plugin_root.replace(Some(root.clone()));
+        self.view_extension_registration
+            .begin(source_view_extension_owner("embedded", &root));
         let result = self.execute_typescript(&format!("file:///runtime/plugins/{path}"), source);
+        self.view_extension_registration.finish();
         self.plugin_root.replace(None);
         result
     }
@@ -275,6 +302,7 @@ impl ScriptHost {
     pub(super) fn execute_embedded_module(&mut self, path: &str) -> Result<(), ScriptError> {
         let command_count = self.commands.borrow().change_count();
         let definition_count = self.definitions.borrow().len();
+        let view_extension_count = self.view_extension_definitions.borrow().len();
         let configuration = self.configuration.borrow().clone();
         let root = path
             .rsplit_once('/')
@@ -283,7 +311,9 @@ impl ScriptHost {
         self.modules
             .borrow_mut()
             .reset(PathBuf::from(root.trim_end_matches('/')));
-        self.plugin_root.replace(Some(root));
+        self.plugin_root.replace(Some(root.clone()));
+        self.view_extension_registration
+            .begin(source_view_extension_owner("embedded", &root));
 
         let context = self.context.clone();
         let modules = self.modules.clone();
@@ -310,10 +340,14 @@ impl ScriptHost {
             Ok(())
         });
 
+        self.view_extension_registration.finish();
         self.plugin_root.replace(None);
         self.sync_module_type_sources();
         if result.is_err() {
             self.definitions.borrow_mut().truncate(definition_count);
+            self.view_extension_definitions
+                .borrow_mut()
+                .truncate(view_extension_count);
             self.configuration.replace(configuration);
         }
         self.publish_command_types_since(command_count);
@@ -331,7 +365,13 @@ impl ScriptHost {
         self.modules.borrow_mut().reset(root.clone());
         let command_count = self.commands.borrow().change_count();
         let definition_count = self.definitions.borrow().len();
+        let view_extension_count = self.view_extension_definitions.borrow().len();
         let configuration = self.configuration.borrow().clone();
+        self.view_extension_registration
+            .begin(source_view_extension_owner(
+                "filesystem",
+                &root.to_string_lossy(),
+            ));
 
         let modules = self.modules.clone();
         let context = self.context.clone();
@@ -377,10 +417,14 @@ impl ScriptHost {
             }
             Ok(())
         });
+        self.view_extension_registration.finish();
         self.sync_module_type_sources();
         self.publish_command_types_since(command_count);
         if result.is_err() {
             self.definitions.borrow_mut().truncate(definition_count);
+            self.view_extension_definitions
+                .borrow_mut()
+                .truncate(view_extension_count);
             self.configuration.replace(configuration);
             self.modules.borrow_mut().reset(root);
         }
@@ -399,6 +443,55 @@ impl ScriptHost {
                 ScriptMode::new(host.clone(), definition, decoration_owner == Some(index))
             })
             .collect()
+    }
+
+    pub(super) fn script_view_extensions(host: &Rc<RefCell<Self>>) -> Vec<Box<dyn ViewExtension>> {
+        let definitions = host.borrow().view_extension_definitions.borrow().clone();
+        definitions
+            .into_iter()
+            .map(|definition| {
+                Box::new(ScriptViewExtension::new(host.clone(), definition))
+                    as Box<dyn ViewExtension>
+            })
+            .collect()
+    }
+
+    pub(super) fn remove_view_extension(&mut self, id: &vell_mode::ViewExtensionId) {
+        self.view_extension_definitions
+            .borrow_mut()
+            .retain(|definition| definition.definition.id() != id);
+    }
+
+    pub(super) fn present_view_extension(
+        &mut self,
+        callback: &v8::Global<v8::Function>,
+        context: &ViewExtensionContext,
+    ) -> Result<ViewExtensionPresentation, ScriptError> {
+        if let Some(document) = &context.document {
+            ensure_size(
+                "View extension document text",
+                document.text.len(),
+                MAX_SCRIPT_INPUT_BYTES,
+            )?;
+        }
+        let callback = callback.clone();
+        let context_value = view_extension_context_json(context);
+        let v8_context = self.context.clone();
+        self.view_extension_render.enter();
+        let result = self.invoke(ScriptInvocationKind::Action, |isolate| {
+            v8::scope_with_context!(scope, isolate, v8_context);
+            v8::tc_scope!(let scope, scope);
+            let argument = json_to_v8(scope, &context_value)?;
+            let callback = v8::Local::new(scope, callback);
+            let receiver = v8::undefined(scope).into();
+            let value = call_script_callback(scope, callback, receiver, &[argument])
+                .ok_or_else(|| current_exception(scope, "View extension render", "execute"))?;
+            let value = v8_to_json(scope, value, "View extension presentation")?;
+            perform_microtask_checkpoint(scope);
+            parse_view_extension_presentation(value)
+        });
+        self.view_extension_render.leave();
+        result
     }
 
     #[cfg(feature = "test-support")]
