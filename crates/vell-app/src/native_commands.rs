@@ -510,6 +510,13 @@ mod tests {
                 "legacy command {legacy} leaked"
             );
         }
+        for entry in registry.iter() {
+            assert!(
+                !entry.id().as_str().starts_with("buffer."),
+                "legacy command namespace leaked through {}",
+                entry.id()
+            );
+        }
     }
 
     #[test]

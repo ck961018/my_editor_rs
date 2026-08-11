@@ -224,6 +224,12 @@ Rust 原生命令与 TypeScript 命令有完全相同的调用体验。当前原
 `invokeMode("mode.command", arguments?)` 是命令进入 Mode command 的唯一
 入口。
 
+按键绑定、`:` 命令行和 `editor.commands` API 最终都调用同一个
+`CommandRegistry` entry。入口只提供当前 View/Content 来源，不自行解释目标；
+例如从 DiffView 任一子 Pane 调用 `diff.setRightContent(id)`，都会由同一命令
+把目标解析为父 DiffView。命令中的同步 operation 共用一个 ExecutionFrame，
+所以任一步失败时，不论入口是哪一种，都执行相同 rollback 并保留同一根因诊断。
+
 ## 快捷命令与 `:`
 
 快捷命令是文本入口，最终指向正式命令：

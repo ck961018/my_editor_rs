@@ -2052,9 +2052,15 @@ async fn send_text(app: &mut App<ScriptedFrontend>, text: &str) {
 }
 
 async fn send_vim_command(app: &mut App<ScriptedFrontend>, command: &str) {
+    send_vim_command_result(app, command).await.unwrap();
+}
+
+async fn send_vim_command_result(app: &mut App<ScriptedFrontend>, command: &str) -> io::Result<()> {
     send_key(app, KeyEvent::char(':')).await;
     send_text(app, command).await;
-    send_key(app, KeyEvent::plain(KeyCode::Enter)).await;
+    app.handle_event(FrontendEvent::Key(KeyEvent::plain(KeyCode::Enter)))
+        .await
+        .map(|_| ())
 }
 
 fn vim_command_events(command: &str) -> Vec<FrontendEvent> {
@@ -10925,6 +10931,82 @@ async fn vim_command_line_calls_formal_commands_and_registered_shortcuts() {
         app.session.view(view).unwrap().require_document(),
         editor_cid()
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn direct_and_vim_command_line_share_diff_target_resolution() {
+    let mut direct = make_app(vec![], None);
+    let direct_previous = direct.new_buffer();
+    let direct_replacement = direct.new_buffer();
+    let (direct_parent, _, direct_right) =
+        switch_focused_to_diff(&mut direct, editor_cid(), direct_previous);
+    direct
+        .execute_command(DispatchCommand::Registered {
+            invocation: CommandInvocation::new(
+                CommandId::new("diff.setRightContent").unwrap(),
+                vec![CommandValue::from(direct_replacement.0)],
+            ),
+            view: direct_right,
+            content: direct_previous,
+        })
+        .unwrap();
+
+    let mut command_line = make_app(vec![], None);
+    let line_previous = command_line.new_buffer();
+    let line_replacement = command_line.new_buffer();
+    let (line_parent, _, line_right) =
+        switch_focused_to_diff(&mut command_line, editor_cid(), line_previous);
+    send_vim_command(
+        &mut command_line,
+        &format!("diff.setRightContent({})", line_replacement.0),
+    )
+    .await;
+
+    for (app, parent, right, replacement) in [
+        (&direct, direct_parent, direct_right, direct_replacement),
+        (&command_line, line_parent, line_right, line_replacement),
+    ] {
+        assert_eq!(
+            app.session.view(parent).unwrap().binding(RIGHT_BINDING),
+            Some(replacement)
+        );
+        assert_eq!(
+            app.session.view(right).unwrap().document_content(),
+            Some(replacement)
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn direct_and_vim_command_line_share_registry_rollback_and_diagnostics() {
+    let mut app = make_app(vec![], None);
+    send_vim_command(
+        &mut app,
+        "ts editor.commands.register('test.createThenFail', () => {\
+         content.create(); throw new Error('shared command failure'); })",
+    )
+    .await;
+    assert!(app.runtime_diagnostics().is_empty());
+    let view = view_id(&app, app.session.focused());
+
+    let error = app
+        .execute_command(DispatchCommand::Registered {
+            invocation: CommandInvocation::new(
+                CommandId::new("test.createThenFail").unwrap(),
+                Vec::new(),
+            ),
+            view,
+            content: editor_cid(),
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("shared command failure"));
+    assert_eq!(app.buffers().len(), 1);
+
+    let line_error = send_vim_command_result(&mut app, "test.createThenFail()")
+        .await
+        .unwrap_err();
+    assert!(line_error.to_string().contains("shared command failure"));
+    assert_eq!(app.buffers().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

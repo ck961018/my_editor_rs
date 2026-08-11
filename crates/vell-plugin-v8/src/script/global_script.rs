@@ -503,7 +503,7 @@ throw new Error("after registration");
                 resource_path: Some(PathBuf::from("workspace/example.ts")),
                 source: r#"
 editor.commands.register(
-  "buffer.typed",
+  "math.typed",
   (value: number): number => value + 1,
 );
 "#
@@ -520,8 +520,8 @@ editor.commands.register(
             .diagnostics(
                 "file:///other-buffer.ts",
                 r#"
-editor.commands.buffer.typed("bad");
-buffer.typed("bad");
+editor.commands.math.typed("bad");
+math.typed("bad");
 "#,
             )
             .unwrap();

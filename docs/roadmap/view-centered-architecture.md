@@ -545,6 +545,8 @@ TypeScript DiffView 示例和 Rust 集成测试覆盖。
 
 ### M8：上层命令体验
 
+实现状态：已完成。
+
 目标：让命令行、Vim Ex 或其他入口复用稳定的领域命令。
 
 工作：
@@ -556,6 +558,20 @@ TypeScript DiffView 示例和 Rust 集成测试覆盖。
 
 验收：不同命令入口调用同一 registry 后具有相同目标解析、rollback 和
 诊断语义。
+
+实现结果：现有 `CommandRegistry`、`ScopedCommandHost` 和
+`ExecuteCommandLine` 已形成所需深模块，不需要再增加一层 command executor。
+按键、Vim `:`、显式 API 和 global TypeScript 都进入同一 registry，并在
+app 创建的 ExecutionFrame 中解析 View/Content target。对照测试使用
+`diff.setRightContent` 验证直接调用与 Vim 命令行从子 Pane 解析到同一父
+DiffView；失败命令在两条入口中都回收 provisional Content，并保留相同根因
+诊断。
+
+持久 global evaluator、增量 TypeScript 类型环境和返回 Promise 的 continuation
+已经作为命令系统能力存在。它们继续独立于 View contract：同步段先提交，返回的
+Promise 完成后以固定原 View/Content 启动新 frame；未返回的 detached Promise
+不隐式获得 continuation。原生命令、生成声明和测试 guard 均不再暴露
+`buffer.*` 命令。
 
 ## 10. 关键不变量
 
@@ -605,14 +621,12 @@ pnpm typecheck
 
 ## 12. 暂缓决策
 
-以下问题应由真实实现反馈决定，不在当前计划中提前固定：
+以下问题仍应由真实实现反馈决定：
 
-- View definition 的最终 Rust 类型擦除方式；
-- TypeScript View schema 的具体字段名称；
 - 一个 Mode 是否需要直接附加到复合 View 的某个 binding；
 - 自定义 View 的全部布局表达能力；
 - 插件卸载时复杂子 View 的用户恢复策略；
-- 持久 TypeScript evaluator 与 Promise continuation 的实现方式。
+- 未作为命令结果返回的 detached Promise 是否需要全局追踪。
 
 默认优先通过子 View 表达独立编辑区域。只有当至少两个真实用例证明
 “attachment 指向某个 binding”比子 View 更清楚时，才扩大 Mode contract。
