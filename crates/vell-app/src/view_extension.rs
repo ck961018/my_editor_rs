@@ -137,6 +137,15 @@ impl ViewExtensionStore {
         self.extensions.is_empty()
     }
 
+    pub(super) fn targets_any(
+        &self,
+        definitions: &HashSet<vell_protocol::view::ViewDefinitionId>,
+    ) -> bool {
+        self.extensions
+            .iter()
+            .any(|extension| definitions.contains(extension.definition().target()))
+    }
+
     pub(super) fn pane_keys_for_owner(&self, owner: &ViewExtensionOwner) -> HashSet<String> {
         self.extensions
             .iter()

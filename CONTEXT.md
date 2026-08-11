@@ -60,6 +60,12 @@ _Avoid_: 子 View、组件、Content
 管理的 Pane 和对应派生呈现，但不拥有 View 身份、数据或生命周期。
 _Avoid_: 子 View、Pane 类型、插件布局树
 
+**Compound View definition**：
+声明一个由宿主管理的复合 View recipe。它给出父 View 的 binding schema、
+两个子 View 的 binding 映射和分割方向；不包含 ViewId、SpaceId、Scene 或
+可变宿主对象。实例化后父子 View 都遵守普通 View 生命周期。
+_Avoid_: 插件布局树、View factory callback、Pane owner
+
 **Switchable View**：
 允许被通用 View switch 替换的 View。焦点 Pane 所属
 View 的最近 switchable 祖先是默认切换目标。

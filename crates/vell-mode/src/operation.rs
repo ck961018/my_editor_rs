@@ -214,8 +214,17 @@ pub enum BufferViewSource {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ViewSpec {
-    Buffer { source: BufferViewSource },
-    Diff { left: ContentId, right: ContentId },
+    Buffer {
+        source: BufferViewSource,
+    },
+    Diff {
+        left: ContentId,
+        right: ContentId,
+    },
+    Defined {
+        definition: vell_protocol::view::ViewDefinitionId,
+        bindings: BTreeMap<BindingKey, ContentId>,
+    },
 }
 
 impl ViewSpec {
@@ -227,6 +236,16 @@ impl ViewSpec {
 
     pub fn diff(left: ContentId, right: ContentId) -> Self {
         Self::Diff { left, right }
+    }
+
+    pub fn defined(
+        definition: vell_protocol::view::ViewDefinitionId,
+        bindings: impl IntoIterator<Item = (BindingKey, ContentId)>,
+    ) -> Self {
+        Self::Defined {
+            definition,
+            bindings: bindings.into_iter().collect(),
+        }
     }
 }
 
@@ -296,3 +315,4 @@ pub enum ViewPrecondition {
     #[allow(dead_code, reason = "revision preconditions are reserved for plugins")]
     Revision(Revision),
 }
+use std::collections::BTreeMap;

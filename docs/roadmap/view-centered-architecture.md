@@ -512,18 +512,36 @@ revision。schema 错误或未知 target 在 Scene 发布前失败；回调异�
 
 ### M7：开放 TypeScript View definition
 
+实现状态：已完成。
+
 目标：允许插件定义完整 View，而不泄漏宿主内部结构。
 
 工作：
 
 - 在至少两个真实 View 适配器后稳定共享 contract；
-- 支持声明 bindings、子 View、Pane、state 和事件；
-- 限制 state 为 JSON-compatible owned data；
+- 支持声明 bindings、文档子 View 与宿主管理的分割；
+- 保持第一版为 owned 静态 recipe，不开放 state、事件或 factory callback；
 - 增加模块路径、预算、rollback、诊断和 unload 测试；
 - 更新插件作者指南和最小模板。
 
 验收：TypeScript DiffView 与 Native DiffView 遵守相同生命周期、
 operation 和 presentation contract。
+
+实现结果：`editor.views.define` 注册具名复合 View recipe，声明父 bindings、
+两个 `core.buffer` 子 View 的 binding 映射，以及横向或纵向分割。脚本通过
+`view.switch({ type: "defined", definition, bindings })` 请求实例；Kernel
+registry 校验跨 definition schema，ClientSession 在完整 workspace candidate
+上预校验父子 Mode attachment，ViewWorkspace 统一分配 ID、组合语义树并原子
+发布。Native `core.diff` 已迁移到同一 compound replacement 路径。父 binding
+到子 binding 的映射也驱动原子 rebind；`diff.setRightContent` 因此可用于具有
+同一 `right` 角色的脚本 DiffView，并保留父子 ViewId 和 Mode state。
+
+实现反馈表明，DiffView 的结构验收不需要插件 state 或生命周期 callback。
+过早开放这些能力会迫使插件作者理解 draft、typed event、rollback 和卸载期间
+的悬空状态，因此本阶段明确不提供。当前 recipe 只支持两个文档叶 View；任意
+布局、owned View state 和事件在出现第二个真实需求后再设计。模块加载原子性、
+路径 owner、无效 bindings rollback、活动实例卸载保护、整体切换与清理均由
+TypeScript DiffView 示例和 Rust 集成测试覆盖。
 
 ### M8：上层命令体验
 

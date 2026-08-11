@@ -287,7 +287,7 @@ impl PreparedEffect {
             | Self::ContentCreate
             | Self::ContentOpen(_)
             | Self::ViewSwitch { .. }
-            | Self::DiffViewSwitch(_)
+            | Self::CompoundViewSwitch(_)
             | Self::ViewRebind { .. }
             | Self::ContentClose { .. } => EffectBehavior::Lifecycle,
             Self::Quit => EffectBehavior::Quit,
@@ -1052,8 +1052,8 @@ impl<F: Frontend> App<F> {
                         );
                     }
                 },
-                PreparedEffect::DiffViewSwitch(prepared) => {
-                    self.publish_diff_replacement(prepared);
+                PreparedEffect::CompoundViewSwitch(prepared) => {
+                    self.publish_compound_replacement(prepared);
                 }
                 PreparedEffect::ViewRebind {
                     view,
@@ -1604,14 +1604,67 @@ impl<F: Frontend> App<F> {
                                     self.session.replacement_space_for_view(target).ok_or_else(
                                         || invalid_operation("view has no replacement Pane"),
                                     )?;
+                                let bindings = std::collections::BTreeMap::from([
+                                    (
+                                        vell_protocol::view::BindingKey::new(
+                                            vell_protocol::view::LEFT_BINDING,
+                                        ),
+                                        left,
+                                    ),
+                                    (
+                                        vell_protocol::view::BindingKey::new(
+                                            vell_protocol::view::RIGHT_BINDING,
+                                        ),
+                                        right,
+                                    ),
+                                ]);
                                 let prepared = self
-                                    .prepare_diff_replacement(target_space, left, right)
+                                    .prepare_compound_replacement(
+                                        target_space,
+                                        &vell_protocol::view::ViewDefinitionId::new(
+                                            vell_protocol::view::DIFF_VIEW_DEFINITION,
+                                        ),
+                                        &bindings,
+                                    )
                                     .map_err(|error| {
                                         recoverable_message(io::ErrorKind::Other, error.to_string())
                                     })?;
                                 self.prepare_topology_effect(
                                     frame,
-                                    PreparedEffect::DiffViewSwitch(prepared),
+                                    PreparedEffect::CompoundViewSwitch(prepared),
+                                )
+                                .map(|_| ())
+                            }
+                            ViewSpec::Defined {
+                                definition,
+                                bindings,
+                            } => {
+                                for content in bindings.values() {
+                                    self.validate_buffer_view_content(*content).map_err(
+                                        |error| {
+                                            recoverable_message(
+                                                io::ErrorKind::Other,
+                                                error.to_string(),
+                                            )
+                                        },
+                                    )?;
+                                }
+                                let target_space =
+                                    self.session.replacement_space_for_view(target).ok_or_else(
+                                        || invalid_operation("view has no replacement Pane"),
+                                    )?;
+                                let prepared = self
+                                    .prepare_compound_replacement(
+                                        target_space,
+                                        &definition,
+                                        &bindings,
+                                    )
+                                    .map_err(|error| {
+                                        recoverable_message(io::ErrorKind::Other, error.to_string())
+                                    })?;
+                                self.prepare_topology_effect(
+                                    frame,
+                                    PreparedEffect::CompoundViewSwitch(prepared),
                                 )
                                 .map(|_| ())
                             }
@@ -1974,6 +2027,24 @@ impl<F: Frontend> App<F> {
                             ViewSpec::Diff { left, right } => ViewSpec::diff(
                                 self.resolve_content_target(ContentTarget::Id(left), origin)?,
                                 self.resolve_content_target(ContentTarget::Id(right), origin)?,
+                            ),
+                            ViewSpec::Defined {
+                                definition,
+                                bindings,
+                            } => ViewSpec::defined(
+                                definition,
+                                bindings
+                                    .into_iter()
+                                    .map(|(binding, content)| {
+                                        Ok((
+                                            binding,
+                                            self.resolve_content_target(
+                                                ContentTarget::Id(content),
+                                                origin,
+                                            )?,
+                                        ))
+                                    })
+                                    .collect::<io::Result<Vec<_>>>()?,
                             ),
                             spec => spec,
                         };

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use vell_mode::command_registry::{CommandEntry, CommandId, CommandInvocation};
-use vell_mode::{Mode, ModeBackground, ViewExtension};
+use vell_mode::{CompoundViewDefinition, Mode, ModeBackground, ViewExtension};
 use vell_protocol::content_query::{FaceOverride, ThemeName};
 use vell_protocol::ids::ContentId;
 
@@ -59,6 +59,7 @@ impl GlobalScriptRequest {
 pub struct LoadedScriptModes {
     pub modes: Vec<Box<dyn Mode>>,
     pub backgrounds: Vec<Box<dyn ModeBackground>>,
+    pub view_definitions: Vec<CompoundViewDefinition>,
     pub view_extensions: Vec<Box<dyn ViewExtension>>,
     pub commands: Vec<CommandEntry>,
     pub(crate) host: Rc<RefCell<ScriptHost>>,
@@ -73,6 +74,7 @@ impl LoadedScriptModes {
 pub struct LoadedEditorConfiguration {
     pub modes: Vec<Box<dyn Mode>>,
     pub backgrounds: Vec<Box<dyn ModeBackground>>,
+    pub view_definitions: Vec<CompoundViewDefinition>,
     pub view_extensions: Vec<Box<dyn ViewExtension>>,
     pub theme: Option<ThemeName>,
     pub face_overrides: Vec<FaceOverride>,

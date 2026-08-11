@@ -25,6 +25,7 @@ use vell_protocol::content_query::{FaceExpr, FaceName, FaceRemapToken};
 use vell_protocol::ids::{ContentId, ViewId};
 use vell_protocol::revision::Revision;
 use vell_protocol::space::SplitDirection;
+use vell_protocol::view::{BindingKey, ViewDefinitionId};
 use vell_protocol::viewport::{
     ViewportAlignment, ViewportCommand, ViewportCursorBehavior, ViewportMoveAmount,
     ViewportMoveDirection,
@@ -1144,8 +1145,41 @@ fn view_spec(
             };
             Ok(ViewSpec::diff(content("left")?, content("right")?))
         }
+        Some("defined") => {
+            if object
+                .keys()
+                .any(|key| !matches!(key.as_str(), "type" | "definition" | "bindings"))
+            {
+                return Err(ScriptError::new(
+                    "defined view spec contains an unknown field",
+                ));
+            }
+            let definition = object
+                .get("definition")
+                .and_then(serde_json::Value::as_str)
+                .filter(|definition| !definition.is_empty())
+                .map(ViewDefinitionId::new)
+                .ok_or_else(|| {
+                    ScriptError::new("defined view spec definition must be a non-empty string")
+                })?;
+            let bindings = object
+                .get("bindings")
+                .and_then(serde_json::Value::as_object)
+                .ok_or_else(|| ScriptError::new("defined view spec bindings must be an object"))?
+                .iter()
+                .map(|(binding, content)| {
+                    let content = content.as_u64().map(ContentId).ok_or_else(|| {
+                        ScriptError::new(format!(
+                            "defined view spec binding '{binding}' must be an integer"
+                        ))
+                    })?;
+                    Ok((BindingKey::new(binding), content))
+                })
+                .collect::<Result<Vec<_>, ScriptError>>()?;
+            Ok(ViewSpec::defined(definition, bindings))
+        }
         _ => Err(ScriptError::new(
-            "view spec type must be 'core.buffer' or 'core.diff'",
+            "view spec type must be 'core.buffer', 'core.diff', or 'defined'",
         )),
     }
 }

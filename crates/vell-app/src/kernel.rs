@@ -239,12 +239,38 @@ impl Kernel {
         &self.view_definitions
     }
 
-    pub(super) fn buffer_view_definition(&self) -> &vell_protocol::view::ViewDefinition {
-        self.view_definitions.buffer()
+    pub(super) fn register_view_definitions(
+        &mut self,
+        definitions: impl IntoIterator<Item = vell_mode::CompoundViewDefinition>,
+    ) -> Result<(), crate::view_definition::ViewDefinitionRegistrationError> {
+        self.view_definitions.register_compounds(definitions)
     }
 
-    pub(super) fn diff_view_definition(&self) -> &vell_protocol::view::ViewDefinition {
-        self.view_definitions.diff()
+    pub(super) fn view_definition_ids_for_owner(
+        &self,
+        owner: &vell_mode::ViewDefinitionOwner,
+    ) -> std::collections::HashSet<vell_protocol::view::ViewDefinitionId> {
+        self.view_definitions.ids_for_owner(owner)
+    }
+
+    pub(super) fn remove_view_definitions(
+        &mut self,
+        owner: &vell_mode::ViewDefinitionOwner,
+    ) -> usize {
+        self.view_definitions.remove_owner(owner)
+    }
+
+    pub(super) fn modes_use_view_definitions(
+        &self,
+        definitions: &std::collections::HashSet<vell_protocol::view::ViewDefinitionId>,
+    ) -> bool {
+        self.modes
+            .resolution_definitions()
+            .any(|mode| definitions.contains(mode.attachment().view()))
+    }
+
+    pub(super) fn buffer_view_definition(&self) -> &vell_protocol::view::ViewDefinition {
+        self.view_definitions.buffer()
     }
 
     #[cfg(test)]

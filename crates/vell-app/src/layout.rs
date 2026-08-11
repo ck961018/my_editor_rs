@@ -1,17 +1,18 @@
+use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::application::App;
 use crate::scene_model::{CloseResult, SceneError, SplitResult};
-use crate::session::PreparedDiffReplacement;
+use crate::session::PreparedCompoundReplacement;
 use crate::view::View;
+use crate::view_definition::ViewDefinitionRegistry;
 use vell_core::content_store::ContentStore;
 use vell_frontend::Frontend;
+use vell_mode::{CompoundViewDefinition, ViewChildDefinition};
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 use vell_protocol::space::{Sizing, SplitDirection};
 use vell_protocol::view::ViewDefinition;
-use vell_protocol::view::{
-    BindingKey, DIFF_VIEW_DEFINITION, DOCUMENT_BINDING, LEFT_BINDING, RIGHT_BINDING,
-};
+use vell_protocol::view::{BindingKey, DOCUMENT_BINDING};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StatusBarPlacement {
@@ -166,47 +167,68 @@ impl<F: Frontend> App<F> {
         Ok(mutation.output)
     }
 
-    pub(super) fn prepare_diff_replacement(
+    pub(super) fn prepare_compound_replacement(
         &mut self,
         target: SpaceId,
-        left: ContentId,
-        right: ContentId,
-    ) -> Result<PreparedDiffReplacement, LayoutError> {
-        let left_view = create_view(
-            left,
-            self.kernel.contents(),
-            self.kernel.buffer_view_definition(),
-        )
-        .ok_or(LayoutError::MissingContent(left))?;
-        let right_view = create_view(
-            right,
-            self.kernel.contents(),
-            self.kernel.buffer_view_definition(),
-        )
-        .ok_or(LayoutError::MissingContent(right))?;
+        definition: &vell_protocol::view::ViewDefinitionId,
+        bindings: &BTreeMap<BindingKey, ContentId>,
+    ) -> Result<PreparedCompoundReplacement, LayoutError> {
+        let compound = self
+            .kernel
+            .view_definitions()
+            .compound(definition)
+            .cloned()
+            .ok_or_else(|| {
+                LayoutError::InvalidWorkspace(format!(
+                    "View definition '{definition}' is not a registered compound View"
+                ))
+            })?;
         let parent = View::with_definition(
-            self.kernel.diff_view_definition(),
-            [
-                (BindingKey::new(LEFT_BINDING), left),
-                (BindingKey::new(RIGHT_BINDING), right),
-            ],
+            compound.definition(),
+            bindings
+                .iter()
+                .map(|(binding, content)| (binding.clone(), *content)),
             None,
         )
-        .expect("built-in DiffView definition and bindings are valid");
+        .map_err(|error| {
+            LayoutError::InvalidWorkspace(format!(
+                "View definition '{definition}' received invalid bindings: {error:?}"
+            ))
+        })?;
+        let first = create_compound_child(
+            &compound,
+            &compound.children()[0],
+            bindings,
+            self.kernel.view_definitions(),
+            self.kernel.contents(),
+        )?;
+        let second = create_compound_child(
+            &compound,
+            &compound.children()[1],
+            bindings,
+            self.kernel.view_definitions(),
+            self.kernel.contents(),
+        )?;
         let (contents, modes, classifier, _) = self.kernel.attachment_runtime_parts();
-        self.session.prepare_diff_replacement(
-            target, parent, left_view, right_view, modes, classifier, contents,
+        self.session.prepare_compound_replacement(
+            target,
+            &compound,
+            parent,
+            [first, second],
+            modes,
+            classifier,
+            contents,
         )
     }
 
-    pub(super) fn publish_diff_replacement(
+    pub(super) fn publish_compound_replacement(
         &mut self,
-        prepared: PreparedDiffReplacement,
-    ) -> crate::view_workspace::DiffViewResult {
+        prepared: PreparedCompoundReplacement,
+    ) -> crate::view_workspace::CompoundViewResult {
         let (contents, modes, _, content_modes) = self.kernel.attachment_runtime_parts();
         let mutation =
             self.session
-                .publish_diff_replacement(prepared, modes, content_modes, contents);
+                .publish_compound_replacement(prepared, modes, content_modes, contents);
         for removed in &mutation.removed {
             self.cancel_pending_commands_for_view(removed.view);
             if let Some(content) = removed.document
@@ -244,16 +266,19 @@ impl<F: Frontend> App<F> {
         binding: &BindingKey,
         content: ContentId,
     ) -> Result<ContentId, LayoutError> {
-        if self
-            .session
-            .view(view)
-            .is_some_and(|view| view.definition().as_str() == DIFF_VIEW_DEFINITION)
-            && binding.as_str() == RIGHT_BINDING
-        {
+        let compound = self.session.view(view).and_then(|current| {
+            self.kernel
+                .view_definitions()
+                .compound(current.definition())
+                .cloned()
+        });
+        if let Some(compound) = compound {
             let (contents, modes, classifier, content_modes) =
                 self.kernel.attachment_runtime_parts();
-            let (previous, right) = self.session.rebind_diff_right(
+            let (previous, child) = self.session.rebind_compound_binding(
                 view,
+                &compound,
+                binding,
                 content,
                 modes,
                 classifier,
@@ -261,15 +286,31 @@ impl<F: Frontend> App<F> {
                 contents,
             )?;
             if previous != content {
-                if self.kernel.active_transaction_owner(previous) == Some(Some(right)) {
+                if self.kernel.active_transaction_owner(previous) == Some(Some(child)) {
                     self.kernel.commit_transaction(previous);
                 }
-                self.cancel_pending_commands_for_view(right);
+                self.cancel_pending_commands_for_view(child);
                 self.kernel.schedule_mode_jobs();
             }
             self.session
                 .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
             return Ok(previous);
+        }
+        let compound_root = self.session.view(view).and_then(|current| {
+            current.parent().filter(|parent| {
+                self.session.view(*parent).is_some_and(|parent| {
+                    self.kernel
+                        .view_definitions()
+                        .compound(parent.definition())
+                        .is_some()
+                })
+            })
+        });
+        if let Some(root) = compound_root {
+            return Err(LayoutError::InvalidWorkspace(format!(
+                "compound View {} child bindings must be changed through the parent View",
+                root.0
+            )));
         }
         let (contents, modes, classifier, content_modes) = self.kernel.attachment_runtime_parts();
         let previous = self.session.rebind_view_content(
@@ -307,6 +348,36 @@ impl<F: Frontend> App<F> {
     ) -> Result<(), LayoutError> {
         self.session.set_space_sizing(target, sizing)
     }
+}
+
+fn create_compound_child(
+    compound: &CompoundViewDefinition,
+    child: &ViewChildDefinition,
+    bindings: &BTreeMap<BindingKey, ContentId>,
+    definitions: &ViewDefinitionRegistry,
+    contents: &ContentStore,
+) -> Result<NewView, LayoutError> {
+    let definition = definitions.get(child.definition()).ok_or_else(|| {
+        LayoutError::InvalidWorkspace(format!(
+            "compound View '{}' child '{}' targets an unknown definition",
+            compound.definition().id(),
+            child.key()
+        ))
+    })?;
+    let document = child
+        .bindings()
+        .iter()
+        .find(|binding| binding.child().as_str() == DOCUMENT_BINDING)
+        .and_then(|binding| bindings.get(binding.parent()))
+        .copied()
+        .ok_or_else(|| {
+            LayoutError::InvalidWorkspace(format!(
+                "compound View '{}' child '{}' has no document binding",
+                compound.definition().id(),
+                child.key()
+            ))
+        })?;
+    create_view(document, contents, definition).ok_or(LayoutError::MissingContent(document))
 }
 
 #[derive(Debug, PartialEq, Eq)]

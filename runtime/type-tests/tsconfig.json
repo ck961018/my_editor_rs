@@ -17,6 +17,7 @@
     "../examples/worker-platform.ts",
     "../examples/worker-platform-worker.ts",
     "../examples/view-extension-minimap.ts",
+    "../examples/view-definition-diff.ts",
     "command-system.ts",
     "../type-tests/mode.ts"
   ]

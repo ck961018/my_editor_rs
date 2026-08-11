@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::layout::{LayoutError, StatusBarHandle, StatusBarPlacement};
+use crate::mode::CompoundViewDefinition;
 use crate::scene_model::{CloseResult, SceneBuilder, SceneError, SplitResult, build_editor_scene};
 use crate::view::{BODY_PANE, ContentBindingError, STATUS_PANE, View};
 use vell_core::content_view_state::ContentViewState;
@@ -43,10 +44,9 @@ pub(super) struct WorkspaceMutation<T> {
     pub removed: Vec<RemovedView>,
 }
 
-pub(super) struct DiffViewResult {
+pub(super) struct CompoundViewResult {
     pub parent: ViewId,
-    pub left: ViewId,
-    pub right: ViewId,
+    pub children: [ViewId; 2],
 }
 
 impl ViewWorkspace {
@@ -416,60 +416,130 @@ impl ViewWorkspace {
         Ok(previous)
     }
 
-    pub(super) fn rebind_diff_right(
+    pub(super) fn rebind_compound_binding(
         &mut self,
         parent: ViewId,
+        definition: &CompoundViewDefinition,
+        binding: &BindingKey,
         content: ContentId,
         state: ContentViewState,
     ) -> Result<(ContentId, ViewId), LayoutError> {
-        let parent_view = self
+        let children = self.validate_compound_view(parent, definition)?;
+        let (child_index, child_binding) = definition
+            .child_binding_for_parent(binding)
+            .ok_or_else(|| LayoutError::MissingBinding {
+                view: parent,
+                binding: binding.clone(),
+            })?;
+        let child = children[child_index];
+        let previous = self
             .views
             .get(&parent)
-            .ok_or(LayoutError::MissingView(parent))?;
-        if parent_view.definition().as_str() != DIFF_VIEW_DEFINITION {
-            return Err(LayoutError::InvalidWorkspace(format!(
-                "View {} is not a DiffView",
-                parent.0
-            )));
-        }
-        let [_, right] = parent_view.children() else {
-            return Err(LayoutError::InvalidWorkspace(format!(
-                "DiffView {} does not own exactly two children",
-                parent.0
-            )));
-        };
-        let right = *right;
-        let previous =
-            parent_view
-                .binding(RIGHT_BINDING)
-                .ok_or_else(|| LayoutError::MissingBinding {
-                    view: parent,
-                    binding: BindingKey::new(RIGHT_BINDING),
-                })?;
+            .expect("compound View parent was prevalidated")
+            .binding(binding.as_str())
+            .ok_or_else(|| LayoutError::MissingBinding {
+                view: parent,
+                binding: binding.clone(),
+            })?;
         if previous == content {
-            return Ok((previous, right));
+            return Ok((previous, child));
         }
 
         let mut draft = self.clone();
         draft
             .views
             .get_mut(&parent)
-            .expect("DiffView parent was prevalidated")
-            .rebind(&BindingKey::new(RIGHT_BINDING), content, None)
+            .expect("compound View parent was prevalidated")
+            .rebind(binding, content, None)
             .map_err(|error| LayoutError::InvalidWorkspace(format!("{error:?}")))?;
         draft
             .views
-            .get_mut(&right)
-            .expect("DiffView right child was prevalidated")
-            .rebind(
-                &BindingKey::new(vell_protocol::view::DOCUMENT_BINDING),
-                content,
-                Some(state),
-            )
+            .get_mut(&child)
+            .expect("compound View child was prevalidated")
+            .rebind(child_binding, content, Some(state))
             .map_err(|error| LayoutError::InvalidWorkspace(format!("{error:?}")))?;
         draft.validate()?;
+        draft.validate_compound_view(parent, definition)?;
         *self = draft;
-        Ok((previous, right))
+        Ok((previous, child))
+    }
+
+    pub(super) fn validate_compound_view(
+        &self,
+        parent: ViewId,
+        definition: &CompoundViewDefinition,
+    ) -> Result<[ViewId; 2], LayoutError> {
+        let parent_view = self
+            .views
+            .get(&parent)
+            .ok_or(LayoutError::MissingView(parent))?;
+        let [first, second] = parent_view.children() else {
+            return Err(LayoutError::InvalidWorkspace(format!(
+                "compound View {} does not own exactly two children",
+                parent.0
+            )));
+        };
+        let children = [*first, *second];
+        let invalid = |message: String| {
+            LayoutError::InvalidWorkspace(format!(
+                "compound View '{}' {message}",
+                definition.definition().id()
+            ))
+        };
+        if parent_view.definition() != definition.definition().id() || !parent_view.switchable() {
+            return Err(invalid("has an invalid semantic root".to_owned()));
+        }
+        for (index, child_definition) in definition.children().iter().enumerate() {
+            let child = self
+                .views
+                .get(&children[index])
+                .ok_or(LayoutError::MissingView(children[index]))?;
+            if child.definition() != child_definition.definition()
+                || child.switchable()
+                || child.parent() != Some(parent)
+            {
+                return Err(invalid(format!(
+                    "child '{}' has an invalid View identity",
+                    child_definition.key()
+                )));
+            }
+            for binding in child_definition.bindings() {
+                if child.binding(binding.child().as_str())
+                    != parent_view.binding(binding.parent().as_str())
+                {
+                    return Err(invalid(format!(
+                        "child '{}' binding '{}' is inconsistent with parent binding '{}'",
+                        child_definition.key(),
+                        binding.child(),
+                        binding.parent()
+                    )));
+                }
+            }
+        }
+        Ok(children)
+    }
+
+    pub(super) fn validate_new_compound_view(
+        &self,
+        parent: ViewId,
+        definition: &CompoundViewDefinition,
+    ) -> Result<[ViewId; 2], LayoutError> {
+        let children = self.validate_compound_view(parent, definition)?;
+        if self
+            .views
+            .get(&parent)
+            .expect("compound View parent was prevalidated")
+            .panes()
+            .spaces()
+            .next()
+            .is_some()
+        {
+            return Err(LayoutError::InvalidWorkspace(format!(
+                "new compound View '{}' must not own a recipe Pane",
+                definition.definition().id()
+            )));
+        }
+        Ok(children)
     }
 
     /// 返回关闭 Content 后仍会存活的第一个 binding 引用。
@@ -660,36 +730,36 @@ impl ViewWorkspace {
         Ok((id, result))
     }
 
-    pub(super) fn replace_with_diff(
+    pub(super) fn replace_with_compound(
         &mut self,
         target: SpaceId,
         parent: View,
-        left: View,
-        right: View,
-    ) -> Result<WorkspaceMutation<DiffViewResult>, LayoutError> {
+        children: [View; 2],
+        direction: SplitDirection,
+    ) -> Result<WorkspaceMutation<CompoundViewResult>, LayoutError> {
         let mut draft = self.clone();
         let base_revision = draft.scene_revision;
-        let replacement = draft.replace(target, left, true)?;
-        let left = replacement.output;
-        let left_space = draft
-            .body_space_for_view(left)
-            .expect("new left BufferView owns its body Pane");
-        let (right, _) = draft.split(left_space, right, true, SplitDirection::Right, false)?;
+        let [first, second] = children;
+        let replacement = draft.replace(target, first, true)?;
+        let first = replacement.output;
+        let first_space = draft
+            .body_space_for_view(first)
+            .expect("new compound child owns its body Pane");
+        let (second, _) = draft.split(first_space, second, true, direction, false)?;
         let parent_id = draft.alloc_view_id();
         assert!(
             draft.views.insert(parent_id, parent).is_none(),
             "view id must be unique"
         );
-        draft.compose(parent_id, &[(left, false), (right, false)])?;
+        draft.compose(parent_id, &[(first, false), (second, false)])?;
         draft.scene_revision = base_revision;
         draft.scene_revision.next();
         draft.validate()?;
         *self = draft;
         Ok(WorkspaceMutation {
-            output: DiffViewResult {
+            output: CompoundViewResult {
                 parent: parent_id,
-                left,
-                right,
+                children: [first, second],
             },
             removed: replacement.removed,
         })
@@ -1279,8 +1349,13 @@ impl ViewWorkspace {
     fn validate_diff_view(&self, id: ViewId, view: &View) -> Result<(), LayoutError> {
         let invalid =
             |message: &str| LayoutError::InvalidWorkspace(format!("DiffView {} {message}", id.0));
-        if !view.switchable() || view.panes().spaces().next().is_some() {
-            return Err(invalid("must be a switchable zero-Pane parent"));
+        if !view.switchable()
+            || view.panes().space_for_key(BODY_PANE).is_some()
+            || view.panes().space_for_key(STATUS_PANE).is_some()
+        {
+            return Err(invalid(
+                "must be a switchable parent without body or status Pane",
+            ));
         }
         let [left, right] = view.children() else {
             return Err(invalid("must own exactly left and right child Views"));

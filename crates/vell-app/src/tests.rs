@@ -160,11 +160,22 @@ impl NativeMinimapExtension {
         unloads: Rc<Cell<usize>>,
         fail: bool,
     ) -> Self {
+        Self::for_target(id, owner, "core.buffer", calls, unloads, fail)
+    }
+
+    fn for_target(
+        id: &str,
+        owner: &str,
+        target: &str,
+        calls: Rc<Cell<usize>>,
+        unloads: Rc<Cell<usize>>,
+        fail: bool,
+    ) -> Self {
         Self {
             definition: ViewExtensionDefinition::new(
                 ViewExtensionId::new(id),
                 ViewExtensionOwner::new(owner),
-                ViewDefinitionId::new("core.buffer"),
+                ViewDefinitionId::new(target),
                 vec![ViewExtensionPaneDefinition::new(
                     "minimap",
                     ViewExtensionPaneSide::Right,
@@ -1578,6 +1589,7 @@ fn make_app(events: Vec<FrontendEvent>, path: Option<&str>) -> App<ScriptedFront
         configuration.backgrounds,
         configuration.theme,
         configuration.face_overrides,
+        configuration.view_definitions,
         configuration.view_extensions,
     )
     .unwrap();
@@ -1598,6 +1610,7 @@ fn make_extension_app(
         Vec::new(),
         Vec::new(),
         None,
+        Vec::new(),
         Vec::new(),
         extensions,
     )
@@ -1782,6 +1795,7 @@ fn minimap_example_runs_through_v8_app_query_and_owner_unload() {
         loaded.backgrounds,
         None,
         Vec::new(),
+        loaded.view_definitions,
         loaded.view_extensions,
     )
     .unwrap();
@@ -1833,6 +1847,198 @@ fn minimap_example_runs_through_v8_app_query_and_owner_unload() {
             .space_for_key(pane_key)
             .is_none()
     );
+}
+
+#[test]
+fn typescript_diff_definition_uses_the_native_compound_view_lifecycle() {
+    let source = format!(
+        "{}\n{}",
+        include_str!("../../../runtime/examples/view-definition-diff.ts"),
+        r#"
+editor.views.extend("example.diff", {
+  id: "example.diff-info",
+  panes: {
+    info: {
+      side: "above",
+      size: 1,
+      render: () => ({ type: "lines", rows: ["diff"] }),
+    },
+  },
+});
+"#
+    );
+    let loaded =
+        vell_plugin_v8::load_typescript_modes("file:///examples/defined-diff.ts", &source).unwrap();
+    assert_eq!(loaded.view_definitions.len(), 1);
+    let definition = loaded.view_definitions[0].definition().id().clone();
+    let owner = loaded.view_definitions[0].owner().clone();
+    let extension_owner = loaded.view_extensions[0].definition().owner().clone();
+    let mut app = App::with_modes_visuals_backgrounds_and_extensions(
+        None,
+        40,
+        5,
+        ScriptedFrontend::new(Vec::new()),
+        loaded.modes,
+        loaded.backgrounds,
+        None,
+        Vec::new(),
+        loaded.view_definitions,
+        loaded.view_extensions,
+    )
+    .unwrap();
+    let right_content = ContentId(9);
+    app.kernel
+        .contents_mut()
+        .insert(right_content, Content::Buffer(Buffer::new()))
+        .unwrap();
+    let source_view = view_id(&app, app.session.focused());
+    let switch = |bindings| {
+        OperationRequest::ViewLifecycle(ViewLifecycleOperation::Switch {
+            spec: ViewSpec::defined(definition.clone(), bindings),
+        })
+    };
+
+    let error = app
+        .execute_command(DispatchCommand::ModeOperations {
+            operations: vec![switch(vec![(BindingKey::new("left"), editor_cid())])],
+            view: source_view,
+            content: editor_cid(),
+        })
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("invalid bindings"),
+        "unexpected switch error: {error}"
+    );
+    assert_eq!(
+        app.session.views().len(),
+        1,
+        "failed candidate is not published"
+    );
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![switch(vec![
+            (BindingKey::new("left"), editor_cid()),
+            (BindingKey::new("right"), right_content),
+        ])],
+        view: source_view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    let parent = app.switch_target().unwrap();
+    let parent_view = app.session.view(parent).unwrap();
+    assert_eq!(parent_view.definition(), &definition);
+    assert_eq!(parent_view.panes().spaces().count(), 1);
+    let [left, right] = parent_view.children() else {
+        panic!("defined DiffView must own two children");
+    };
+    let (left, right) = (*left, *right);
+    assert_eq!(
+        app.session.view(left).unwrap().document_content(),
+        Some(editor_cid())
+    );
+    assert_eq!(
+        app.session.view(right).unwrap().document_content(),
+        Some(right_content)
+    );
+    assert!(!app.session.view(left).unwrap().switchable());
+    assert!(!app.session.view(right).unwrap().switchable());
+    assert!(
+        app.session
+            .view(parent)
+            .unwrap()
+            .panes()
+            .space_for_key("plugin.example.diff-info.info")
+            .is_some()
+    );
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::ViewBinding {
+            target: ViewTarget::Switchable,
+            operation: ViewBindingOperation::Rebind {
+                binding: BindingKey::new("right"),
+                content: ContentTarget::Id(editor_cid()),
+            },
+        }],
+        view: right,
+        content: right_content,
+    })
+    .unwrap();
+    let rebound_parent = app.session.view(parent).unwrap();
+    assert_eq!(rebound_parent.children(), &[left, right]);
+    assert_eq!(rebound_parent.binding("right"), Some(editor_cid()));
+    assert_eq!(
+        app.session.view(right).unwrap().document_content(),
+        Some(editor_cid())
+    );
+    let error = app
+        .rebind_view_content(right, &BindingKey::new(DOCUMENT_BINDING), right_content)
+        .unwrap_err();
+    assert!(error.to_string().contains("through the parent View"));
+    assert_eq!(
+        app.session.view(right).unwrap().document_content(),
+        Some(editor_cid())
+    );
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::ViewBinding {
+            target: ViewTarget::Switchable,
+            operation: ViewBindingOperation::Rebind {
+                binding: BindingKey::new("right"),
+                content: ContentTarget::Id(right_content),
+            },
+        }],
+        view: right,
+        content: editor_cid(),
+    })
+    .unwrap();
+    assert_eq!(app.session.view(parent).unwrap().children(), &[left, right]);
+    assert_eq!(
+        app.session.view(right).unwrap().document_content(),
+        Some(right_content)
+    );
+    assert_eq!(
+        app.unload_view_definitions(&owner).unwrap_err().kind(),
+        io::ErrorKind::ResourceBusy
+    );
+
+    let focused = view_id(&app, app.session.focused());
+    let focused_content = app.session.view(focused).unwrap().require_document();
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::ViewLifecycle(
+            ViewLifecycleOperation::Switch {
+                spec: ViewSpec::buffer(editor_cid()),
+            },
+        )],
+        view: focused,
+        content: focused_content,
+    })
+    .unwrap();
+    assert!(
+        app.session
+            .views()
+            .values()
+            .all(|view| view.definition() != &definition)
+    );
+    assert_eq!(app.unload_view_extensions(&extension_owner).unwrap(), 1);
+    assert_eq!(app.unload_view_definitions(&owner).unwrap(), 1);
+    let focused = view_id(&app, app.session.focused());
+    let error = app
+        .execute_command(DispatchCommand::ModeOperations {
+            operations: vec![OperationRequest::ViewLifecycle(
+                ViewLifecycleOperation::Switch {
+                    spec: ViewSpec::defined(
+                        definition,
+                        [
+                            (BindingKey::new("left"), editor_cid()),
+                            (BindingKey::new("right"), right_content),
+                        ],
+                    ),
+                },
+            )],
+            view: focused,
+            content: editor_cid(),
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("not a registered compound View"));
 }
 
 async fn send_key(app: &mut App<ScriptedFrontend>, key: KeyEvent) {
@@ -4003,6 +4209,22 @@ fn unsupported_diff_attachment_fails_before_frame_publication() {
 #[test]
 fn diff_set_right_content_rebinds_parent_and_child_atomically() {
     let mut app = make_app(vec![], None);
+    let extension_calls = Rc::new(Cell::new(0));
+    app.session
+        .install_view_extensions(
+            vec![Box::new(NativeMinimapExtension::for_target(
+                "example.diff-minimap",
+                "example.diff-owner",
+                DIFF_VIEW_DEFINITION,
+                extension_calls.clone(),
+                Rc::new(Cell::new(0)),
+                false,
+            ))],
+            app.kernel.view_definitions(),
+            app.kernel.contents(),
+            app.kernel.content_modes(),
+        )
+        .unwrap();
     let mode_name = ModeName::new("diff-rebind-view-state-probe");
     let create_view_calls = Rc::new(Cell::new(0));
     let mode = app
@@ -4021,6 +4243,15 @@ fn diff_set_right_content_rebinds_parent_and_child_atomically() {
     let parent_revision = app.session.view(parent).unwrap().revision();
     let right_revision = app.session.view(right).unwrap().revision();
     assert_eq!(create_view_calls.get(), 2);
+    assert!(
+        app.session
+            .view(parent)
+            .unwrap()
+            .panes()
+            .space_for_key("plugin.example.diff-minimap.minimap")
+            .is_some()
+    );
+    assert_eq!(extension_calls.get(), 1);
 
     app.execute_command(DispatchCommand::Registered {
         invocation: CommandInvocation::new(
@@ -4032,6 +4263,7 @@ fn diff_set_right_content_rebinds_parent_and_child_atomically() {
     })
     .unwrap();
 
+    assert_eq!(extension_calls.get(), 2);
     assert_eq!(app.session.scene_revision(), scene_revision);
     assert_eq!(app.session.view(parent).unwrap().children(), [left, right]);
     assert_eq!(

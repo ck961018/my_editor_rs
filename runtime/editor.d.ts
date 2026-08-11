@@ -461,7 +461,13 @@ type DiffViewSpec = {
 	readonly right: number;
 };
 
-type ViewSpec = BufferViewSpec | DiffViewSpec;
+type DefinedViewSpec = {
+	readonly type: "defined";
+	readonly definition: string;
+	readonly bindings: Readonly<Record<string, number>>;
+};
+
+type ViewSpec = BufferViewSpec | DiffViewSpec | DefinedViewSpec;
 
 interface ViewPrimitives {
 	focus(viewId: number): void;
@@ -611,6 +617,26 @@ interface ViewExtensionDefinition {
 	>;
 }
 
+interface CompoundViewChildDefinition {
+	readonly key: string;
+	readonly view: "core.buffer";
+	readonly bindings: {
+		readonly document: string;
+	};
+}
+
+interface CompoundViewDefinition {
+	readonly name: string;
+	readonly bindings: readonly string[];
+	readonly layout: {
+		readonly direction: "horizontal" | "vertical";
+		readonly children: readonly [
+			CompoundViewChildDefinition,
+			CompoundViewChildDefinition,
+		];
+	};
+}
+
 declare const editor: {
 	readonly commands: EditorCommands;
 	readonly theme: {
@@ -629,6 +655,7 @@ declare const editor: {
 		): void;
 	};
 	readonly views: {
+		define(definition: CompoundViewDefinition): void;
 		extend(target: string, definition: ViewExtensionDefinition): void;
 	};
 	readonly resources: {

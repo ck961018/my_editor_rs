@@ -369,9 +369,48 @@ fn one_view_spec(arguments: Vec<CommandValue>) -> Result<ViewSpec, CommandError>
         };
         return Ok(ViewSpec::diff(content("left")?, content("right")?));
     }
+    if object.get("type").and_then(CommandValue::as_str) == Some("defined") {
+        if object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "type" | "definition" | "bindings"))
+        {
+            return Err(CommandError::InvalidArguments(
+                "defined view spec contains an unknown field".to_owned(),
+            ));
+        }
+        let definition = object
+            .get("definition")
+            .and_then(CommandValue::as_str)
+            .filter(|definition| !definition.is_empty())
+            .map(vell_protocol::view::ViewDefinitionId::new)
+            .ok_or_else(|| {
+                CommandError::InvalidArguments(
+                    "defined view spec definition must be a non-empty string".to_owned(),
+                )
+            })?;
+        let bindings = object
+            .get("bindings")
+            .and_then(CommandValue::as_object)
+            .ok_or_else(|| {
+                CommandError::InvalidArguments(
+                    "defined view spec bindings must be an object".to_owned(),
+                )
+            })?
+            .iter()
+            .map(|(binding, content)| {
+                let content = content.as_u64().map(ContentId).ok_or_else(|| {
+                    CommandError::InvalidArguments(format!(
+                        "defined view spec binding '{binding}' must be a non-negative content id"
+                    ))
+                })?;
+                Ok((BindingKey::new(binding), content))
+            })
+            .collect::<Result<Vec<_>, CommandError>>()?;
+        return Ok(ViewSpec::defined(definition, bindings));
+    }
     if object.get("type").and_then(CommandValue::as_str) != Some("core.buffer") {
         return Err(CommandError::InvalidArguments(
-            "view spec type must be 'core.buffer' or 'core.diff'".to_owned(),
+            "view spec type must be 'core.buffer', 'core.diff', or 'defined'".to_owned(),
         ));
     }
     if object
@@ -474,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn view_switch_accepts_closed_buffer_and_diff_specs() {
+    fn view_switch_accepts_buffer_diff_and_defined_specs() {
         assert_eq!(
             one_view_spec(vec![serde_json::json!({
                 "type": "core.buffer",
@@ -499,6 +538,20 @@ mod tests {
                 "create": true,
             })])
             .is_err()
+        );
+        assert_eq!(
+            one_view_spec(vec![serde_json::json!({
+                "type": "defined",
+                "definition": "example.diff",
+                "bindings": { "left": 7, "right": 8 },
+            })]),
+            Ok(ViewSpec::defined(
+                vell_protocol::view::ViewDefinitionId::new("example.diff"),
+                [
+                    (BindingKey::new("left"), ContentId(7)),
+                    (BindingKey::new("right"), ContentId(8)),
+                ]
+            ))
         );
         assert_eq!(
             one_view_spec(vec![serde_json::json!({

@@ -10,6 +10,8 @@ pub struct ScriptHost {
     pub(super) context: v8::Global<v8::Context>,
     pub(super) modules: Rc<RefCell<ModuleMap>>,
     pub(super) definitions: Rc<RefCell<Vec<ScriptModeDefinition>>>,
+    pub(super) view_definitions: Rc<RefCell<Vec<CompoundViewDefinition>>>,
+    view_definition_registration: Rc<ScriptViewDefinitionRegistration>,
     pub(super) view_extension_definitions: Rc<RefCell<Vec<ScriptViewExtensionDefinition>>>,
     view_extension_registration: Rc<ScriptViewExtensionRegistration>,
     view_extension_render: Rc<ScriptViewExtensionRenderScope>,
@@ -50,6 +52,8 @@ impl ScriptHost {
         isolate.set_host_import_module_dynamically_callback(host_import_module_dynamically);
         let modules = Rc::new(RefCell::new(ModuleMap::default()));
         let definitions = Rc::new(RefCell::new(Vec::new()));
+        let view_definitions = Rc::new(RefCell::new(Vec::new()));
+        let view_definition_registration = Rc::new(ScriptViewDefinitionRegistration::default());
         let view_extension_definitions = Rc::new(RefCell::new(Vec::new()));
         let view_extension_registration = Rc::new(ScriptViewExtensionRegistration::default());
         let view_extension_render = Rc::new(ScriptViewExtensionRenderScope::default());
@@ -60,6 +64,8 @@ impl ScriptHost {
         let primitives = PrimitiveRuntime::new();
         isolate.set_slot(modules.clone());
         isolate.set_slot(definitions.clone());
+        isolate.set_slot(view_definitions.clone());
+        isolate.set_slot(view_definition_registration.clone());
         isolate.set_slot(view_extension_definitions.clone());
         isolate.set_slot(view_extension_registration.clone());
         isolate.set_slot(view_extension_render.clone());
@@ -98,6 +104,8 @@ impl ScriptHost {
             context,
             modules,
             definitions,
+            view_definitions,
+            view_definition_registration,
             view_extension_definitions,
             view_extension_registration,
             view_extension_render,
@@ -263,19 +271,27 @@ impl ScriptHost {
     pub fn execute_typescript(&mut self, specifier: &str, source: &str) -> Result<(), ScriptError> {
         let command_count = self.commands.borrow().change_count();
         let definition_count = self.definitions.borrow().len();
+        let view_definition_count = self.view_definitions.borrow().len();
         let view_extension_count = self.view_extension_definitions.borrow().len();
         let configuration = self.configuration.borrow().clone();
-        let owns_registration = !self.view_extension_registration.is_open();
+        let owns_registration = !self.view_extension_registration.is_open()
+            && !self.view_definition_registration.is_open();
         if owns_registration {
             self.view_extension_registration
                 .begin(source_view_extension_owner("source", specifier));
+            self.view_definition_registration
+                .begin(source_view_definition_owner("source", specifier));
         }
         let result = self.evaluate_typescript(specifier, source).map(|_| ());
         if owns_registration {
             self.view_extension_registration.finish();
+            self.view_definition_registration.finish();
         }
         if result.is_err() {
             self.definitions.borrow_mut().truncate(definition_count);
+            self.view_definitions
+                .borrow_mut()
+                .truncate(view_definition_count);
             self.view_extension_definitions
                 .borrow_mut()
                 .truncate(view_extension_count);
@@ -293,8 +309,11 @@ impl ScriptHost {
         self.plugin_root.replace(Some(root.clone()));
         self.view_extension_registration
             .begin(source_view_extension_owner("embedded", &root));
+        self.view_definition_registration
+            .begin(source_view_definition_owner("embedded", &root));
         let result = self.execute_typescript(&format!("file:///runtime/plugins/{path}"), source);
         self.view_extension_registration.finish();
+        self.view_definition_registration.finish();
         self.plugin_root.replace(None);
         result
     }
@@ -302,6 +321,7 @@ impl ScriptHost {
     pub(super) fn execute_embedded_module(&mut self, path: &str) -> Result<(), ScriptError> {
         let command_count = self.commands.borrow().change_count();
         let definition_count = self.definitions.borrow().len();
+        let view_definition_count = self.view_definitions.borrow().len();
         let view_extension_count = self.view_extension_definitions.borrow().len();
         let configuration = self.configuration.borrow().clone();
         let root = path
@@ -314,6 +334,8 @@ impl ScriptHost {
         self.plugin_root.replace(Some(root.clone()));
         self.view_extension_registration
             .begin(source_view_extension_owner("embedded", &root));
+        self.view_definition_registration
+            .begin(source_view_definition_owner("embedded", &root));
 
         let context = self.context.clone();
         let modules = self.modules.clone();
@@ -341,10 +363,14 @@ impl ScriptHost {
         });
 
         self.view_extension_registration.finish();
+        self.view_definition_registration.finish();
         self.plugin_root.replace(None);
         self.sync_module_type_sources();
         if result.is_err() {
             self.definitions.borrow_mut().truncate(definition_count);
+            self.view_definitions
+                .borrow_mut()
+                .truncate(view_definition_count);
             self.view_extension_definitions
                 .borrow_mut()
                 .truncate(view_extension_count);
@@ -365,13 +391,13 @@ impl ScriptHost {
         self.modules.borrow_mut().reset(root.clone());
         let command_count = self.commands.borrow().change_count();
         let definition_count = self.definitions.borrow().len();
+        let view_definition_count = self.view_definitions.borrow().len();
         let view_extension_count = self.view_extension_definitions.borrow().len();
         let configuration = self.configuration.borrow().clone();
         self.view_extension_registration
-            .begin(source_view_extension_owner(
-                "filesystem",
-                &root.to_string_lossy(),
-            ));
+            .begin(filesystem_view_extension_owner(&root));
+        self.view_definition_registration
+            .begin(filesystem_view_definition_owner(&root));
 
         let modules = self.modules.clone();
         let context = self.context.clone();
@@ -418,10 +444,14 @@ impl ScriptHost {
             Ok(())
         });
         self.view_extension_registration.finish();
+        self.view_definition_registration.finish();
         self.sync_module_type_sources();
         self.publish_command_types_since(command_count);
         if result.is_err() {
             self.definitions.borrow_mut().truncate(definition_count);
+            self.view_definitions
+                .borrow_mut()
+                .truncate(view_definition_count);
             self.view_extension_definitions
                 .borrow_mut()
                 .truncate(view_extension_count);
@@ -454,6 +484,10 @@ impl ScriptHost {
                     as Box<dyn ViewExtension>
             })
             .collect()
+    }
+
+    pub(super) fn script_view_definitions(host: &Rc<RefCell<Self>>) -> Vec<CompoundViewDefinition> {
+        host.borrow().view_definitions.borrow().clone()
     }
 
     pub(super) fn remove_view_extension(&mut self, id: &vell_mode::ViewExtensionId) {

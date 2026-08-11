@@ -11,6 +11,11 @@ pub(super) fn install_editor_api(scope: &mut v8::PinScope<'_, '_>) {
         .unwrap();
     modes.set(scope, define_name.into(), define.into());
     let views = v8::Object::new(scope);
+    let define_view_name = v8::String::new(scope, "define").unwrap();
+    let define_view = v8::FunctionTemplate::new(scope, define_compound_view)
+        .get_function(scope)
+        .unwrap();
+    views.set(scope, define_view_name.into(), define_view.into());
     let extend_name = v8::String::new(scope, "extend").unwrap();
     let extend = v8::FunctionTemplate::new(scope, define_view_extension)
         .get_function(scope)
@@ -47,6 +52,187 @@ pub(super) fn install_editor_api(scope: &mut v8::PinScope<'_, '_>) {
         .cloned()
         .expect("command registry slot");
     commands.borrow().install_api(scope);
+}
+
+fn define_compound_view(
+    scope: &mut v8::PinScope,
+    arguments: v8::FunctionCallbackArguments,
+    mut return_value: v8::ReturnValue,
+) {
+    let Some(registration) = scope
+        .get_slot::<Rc<ScriptViewDefinitionRegistration>>()
+        .cloned()
+    else {
+        throw_script_error(scope, "View definition registration is unavailable");
+        return;
+    };
+    if registration.owner().is_none() {
+        throw_script_error(
+            scope,
+            "editor.views.define is only available during module loading",
+        );
+        return;
+    }
+    match parse_compound_view_definition(scope, arguments.get(0)) {
+        Ok(definition) => {
+            let Some(definitions) = scope
+                .get_slot::<Rc<RefCell<Vec<CompoundViewDefinition>>>>()
+                .cloned()
+            else {
+                throw_script_error(scope, "View definition registry is unavailable");
+                return;
+            };
+            if definitions
+                .borrow()
+                .iter()
+                .any(|existing| existing.definition().id() == definition.definition().id())
+            {
+                throw_script_error(
+                    scope,
+                    &format!(
+                        "duplicate View definition '{}'",
+                        definition.definition().id()
+                    ),
+                );
+                return;
+            }
+            definitions.borrow_mut().push(definition);
+            return_value.set_undefined();
+        }
+        Err(error) => throw_script_error(scope, &error.to_string()),
+    }
+}
+
+fn parse_compound_view_definition(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<CompoundViewDefinition, ScriptError> {
+    let object = v8::Local::<v8::Object>::try_from(value)
+        .map_err(|_| ScriptError::new("editor.views.define expects a definition object"))?;
+    ensure_v8_fields(
+        scope,
+        object,
+        &["name", "bindings", "layout"],
+        "View definition",
+    )?;
+    let name = required_view_definition_string(scope, object, "name")?;
+    let bindings = property(scope, object, "bindings")
+        .and_then(|value| v8::Local::<v8::Array>::try_from(value).ok())
+        .ok_or_else(|| ScriptError::new("View definition bindings must be an array"))?;
+    let binding_count = bindings.length() as usize;
+    ensure_count(
+        "View definition bindings",
+        binding_count,
+        MAX_COMPOUND_VIEW_BINDINGS,
+    )?;
+    let mut parent_bindings = Vec::with_capacity(binding_count);
+    for index in 0..bindings.length() {
+        let binding = bindings
+            .get_index(scope, index)
+            .filter(|value| value.is_string())
+            .map(|value| value.to_rust_string_lossy(scope))
+            .ok_or_else(|| ScriptError::new("View definition binding must be a string"))?;
+        parent_bindings.push(BindingKey::new(binding));
+    }
+    let layout = property(scope, object, "layout")
+        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+        .ok_or_else(|| ScriptError::new("View definition layout must be an object"))?;
+    ensure_v8_fields(
+        scope,
+        layout,
+        &["direction", "children"],
+        "View definition layout",
+    )?;
+    let direction = match required_view_definition_string(scope, layout, "direction")?.as_str() {
+        "horizontal" => CompoundViewDirection::Horizontal,
+        "vertical" => CompoundViewDirection::Vertical,
+        value => {
+            return Err(ScriptError::new(format!(
+                "unknown View definition layout direction '{value}'"
+            )));
+        }
+    };
+    let children = property(scope, layout, "children")
+        .and_then(|value| v8::Local::<v8::Array>::try_from(value).ok())
+        .filter(|children| children.length() == 2)
+        .ok_or_else(|| {
+            ScriptError::new("View definition layout must contain exactly two children")
+        })?;
+    let first = parse_compound_view_child(scope, children, 0)?;
+    let second = parse_compound_view_child(scope, children, 1)?;
+    let owner = scope
+        .get_slot::<Rc<ScriptViewDefinitionRegistration>>()
+        .and_then(|registration| registration.owner())
+        .ok_or_else(|| {
+            ScriptError::new("editor.views.define is only available during module loading")
+        })?;
+    CompoundViewDefinition::new(
+        ViewDefinitionId::new(name),
+        owner,
+        parent_bindings,
+        direction,
+        [first, second],
+    )
+    .map_err(|error| ScriptError::new(error.to_string()))
+}
+
+fn parse_compound_view_child(
+    scope: &mut v8::PinScope,
+    children: v8::Local<v8::Array>,
+    index: u32,
+) -> Result<ViewChildDefinition, ScriptError> {
+    let child = children
+        .get_index(scope, index)
+        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+        .ok_or_else(|| ScriptError::new("View definition child must be an object"))?;
+    ensure_v8_fields(
+        scope,
+        child,
+        &["key", "view", "bindings"],
+        "View definition child",
+    )?;
+    let key = required_view_definition_string(scope, child, "key")?;
+    let definition = required_view_definition_string(scope, child, "view")?;
+    let bindings = property(scope, child, "bindings")
+        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+        .ok_or_else(|| ScriptError::new("View definition child bindings must be an object"))?;
+    let names = bindings
+        .get_own_property_names(scope, Default::default())
+        .ok_or_else(|| ScriptError::new("failed to enumerate View definition child bindings"))?;
+    let binding_count = names.length() as usize;
+    ensure_count(
+        "View definition child bindings",
+        binding_count,
+        MAX_COMPOUND_VIEW_CHILD_BINDINGS,
+    )?;
+    let mut mappings = Vec::with_capacity(binding_count);
+    for index in 0..names.length() {
+        let child_binding = names
+            .get_index(scope, index)
+            .ok_or_else(|| ScriptError::new("failed to read View definition child binding"))?;
+        let child_binding_name = child_binding.to_rust_string_lossy(scope);
+        let parent_binding = bindings
+            .get(scope, child_binding)
+            .filter(|value| value.is_string())
+            .map(|value| value.to_rust_string_lossy(scope))
+            .ok_or_else(|| {
+                ScriptError::new("View definition child binding target must be a string")
+            })?;
+        mappings.push(ViewChildBinding::new(child_binding_name, parent_binding));
+    }
+    ViewChildDefinition::new(key, ViewDefinitionId::new(definition), mappings)
+        .map_err(|error| ScriptError::new(error.to_string()))
+}
+
+fn required_view_definition_string(
+    scope: &mut v8::PinScope,
+    object: v8::Local<v8::Object>,
+    field: &str,
+) -> Result<String, ScriptError> {
+    property(scope, object, field)
+        .filter(|value| value.is_string())
+        .map(|value| value.to_rust_string_lossy(scope))
+        .ok_or_else(|| ScriptError::new(format!("View definition {field} must be a string")))
 }
 
 fn define_view_extension(

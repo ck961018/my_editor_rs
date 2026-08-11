@@ -195,14 +195,25 @@ Native `core.diff` 验证了复合 View 的语义根可以没有直属 Pane。�
 Pane。生命周期 owner 与 Scene 替换锚点因此是两个概念：前者是 DiffView，
 后者优先选择当前焦点子 Pane，否则选择第一个子 body Pane。整体切换和关闭
 删除完整语义子树，但复用该叶 Pane 安装替代 View，不增加协调 Pane。
+
+脚本复合 View 与 Native `core.diff` 共用同一个声明式 recipe 和替换路径。
+recipe 只保存父 binding schema、两个文档子 View 的 binding 映射与分割方向；
+Kernel registry 负责跨 definition 校验，ClientSession 在完整 workspace
+candidate 上预校验全部 Mode attachment，`ViewWorkspace` 仍独占 ID、Scene、
+Pane 与原子发布。脚本不接收布局树或可变 View factory。
+recipe 创建校验要求父 View 初始不产生 Pane；运行时父子一致性校验允许
+View extension 为父 View 增加直属 Pane，因此 extension 不会改变 binding
+operation 或生命周期语义。
 Diff 替换在进入 `ExecutionFrame` 的 prepared effects 前生成完整 workspace
 candidate 并预校验全部 attachment。发布时先接续新 attachment，再清理旧
 View，避免共享 Mode content state 和 Face remap 因引用短暂归零而重建。
 
-`diff.setRightContent` 在一个 `ViewWorkspace` draft 中同时改变父 `right`
-binding 和右子 BufferView 的 `document` binding。Scene 与父子 ViewId
-保持不变；右子的 ContentViewState 按新 Content 重建，已有 Mode view state
-保留，Mode content state 引用从旧 Content 迁移到新 Content。
+复合 View 的具名 binding operation 通过 recipe 找到对应子 binding，并在一个
+`ViewWorkspace` draft 中同时改变父 binding 和子 BufferView 的 `document`
+binding。Scene 与父子 ViewId 保持不变；子 View 的 ContentViewState 按新
+Content 重建，已有 Mode view state 保留，Mode content state 引用从旧
+Content 迁移到新 Content。`diff.setRightContent` 只是该通用路径的内建命令
+入口，因此 Native `core.diff` 和声明同一 `right` 角色的脚本 View 语义一致。
 
 状态栏不是 Content（ADR 0001），也不是独立 View：状态栏 Space 直接
 引用其服务的 editor view，并在该 view 的 `ViewPaneMap` 中登记为

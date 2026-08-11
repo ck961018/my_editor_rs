@@ -42,6 +42,7 @@ async fn main() -> io::Result<()> {
         configuration.backgrounds,
         theme,
         configuration.face_overrides,
+        configuration.view_definitions,
         configuration.view_extensions,
     )?;
     for command in commands {

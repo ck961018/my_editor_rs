@@ -95,6 +95,65 @@ editor.views.extend("core.buffer", {
 minimap 示例见
 [view-extension-minimap.ts](../runtime/examples/view-extension-minimap.ts)。
 
+## 定义完整复合 View
+
+当插件需要自己的 View 身份、多个 Content binding 和整体生命周期时，使用
+`editor.views.define`。插件作者仍只需回答三个问题：父 View 有哪些数据角色、
+每个子 View 使用哪个角色、两个子 View 怎样排列。
+
+```ts
+editor.views.define({
+  name: "example.diff",
+  bindings: ["left", "right"],
+  layout: {
+    direction: "horizontal",
+    children: [
+      {
+        key: "before",
+        view: "core.buffer",
+        bindings: { document: "left" },
+      },
+      {
+        key: "after",
+        view: "core.buffer",
+        bindings: { document: "right" },
+      },
+    ],
+  },
+});
+```
+
+`left` 和 `right` 是父 View 的 Content 角色；`before` 和 `after` 只是稳定的
+子 View 名称，二者不能混用。每个子 `core.buffer` 把自己的 `document` 映射到
+一个父 binding，因此分别拥有 Pane、selection 和语言 Mode。父
+`example.diff` 是可切换的零 Pane View，整体切换和关闭从任一子 Pane 提升到
+父 View。
+
+创建实例时使用统一的 `view.switch`：
+
+```ts
+context.view.switch({
+  type: "defined",
+  definition: "example.diff",
+  bindings: { left: 1, right: 2 },
+});
+```
+
+宿主会先校验 definition、完整 bindings、全部 Content 和子 View Mode
+attachment，再一次发布完整 workspace。失败不会留下半个 View。当前结构契约
+有意只支持两个文档子 View 和横向或纵向分割，不接受 callback、插件 state 或
+任意布局树；这些能力必须先形成独立的 owned state、typed event 和 rollback
+contract。需要给已有 View 增加派生 Pane 时继续使用 `editor.views.extend`。
+
+改变复合 View 的 Content 时，命令应重绑父 View 的具名 binding，不能直接
+重绑子 BufferView。宿主按 recipe 同时更新父 binding 和对应子 View 的
+`document` binding，并保留整棵 View 子树的 ViewId。因为
+`diff.setRightContent` 发出的只是通用 `right` binding operation，具有
+`right` binding 的 `example.diff` 也能复用该命令。
+
+完整示例见
+[view-definition-diff.ts](../runtime/examples/view-definition-diff.ts)。
+
 ## 选择 Theme 与覆盖 Face
 
 用户配置可以选择内建 Theme，并按属性覆盖 named Face：

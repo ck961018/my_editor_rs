@@ -8,7 +8,9 @@ use crate::bootstrap::{bootstrap_editor, bootstrap_editor_with_theme};
 use crate::buffer_lifecycle::normalize_path;
 use crate::diagnostics::RuntimeDiagnostic;
 use crate::kernel::{FileBaseline, Kernel};
-use crate::mode::{Mode, ModeBackground, ViewExtension, ViewExtensionOwner};
+use crate::mode::{
+    CompoundViewDefinition, Mode, ModeBackground, ViewExtension, ViewExtensionOwner,
+};
 use crate::mode_name::ModeName;
 use crate::mode_resolver::AttachmentPlanError;
 use crate::session::ClientSession;
@@ -60,6 +62,7 @@ impl<F: Frontend> App<F> {
             None,
             Vec::new(),
             Vec::new(),
+            Vec::new(),
         )
     }
 
@@ -78,6 +81,7 @@ impl<F: Frontend> App<F> {
             modes,
             Vec::new(),
             None,
+            Vec::new(),
             Vec::new(),
             Vec::new(),
         )
@@ -102,6 +106,7 @@ impl<F: Frontend> App<F> {
             Some(&theme),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
         )
     }
 
@@ -123,6 +128,7 @@ impl<F: Frontend> App<F> {
             Vec::new(),
             theme.as_ref(),
             face_overrides,
+            Vec::new(),
             Vec::new(),
         )
     }
@@ -149,6 +155,7 @@ impl<F: Frontend> App<F> {
             theme.as_ref(),
             face_overrides,
             Vec::new(),
+            Vec::new(),
         )
     }
 
@@ -163,6 +170,7 @@ impl<F: Frontend> App<F> {
         backgrounds: Vec<Box<dyn ModeBackground>>,
         theme: Option<ThemeName>,
         face_overrides: Vec<FaceOverride>,
+        view_definitions: Vec<CompoundViewDefinition>,
         view_extensions: Vec<Box<dyn ViewExtension>>,
     ) -> io::Result<Self> {
         Self::build(
@@ -174,6 +182,7 @@ impl<F: Frontend> App<F> {
             backgrounds,
             theme.as_ref(),
             face_overrides,
+            view_definitions,
             view_extensions,
         )
     }
@@ -189,6 +198,7 @@ impl<F: Frontend> App<F> {
         backgrounds: Vec<Box<dyn ModeBackground>>,
         theme: Option<&ThemeName>,
         face_overrides: Vec<FaceOverride>,
+        view_definitions: Vec<CompoundViewDefinition>,
         view_extensions: Vec<Box<dyn ViewExtension>>,
     ) -> io::Result<Self> {
         let display_profile = frontend.display_profile();
@@ -228,6 +238,10 @@ impl<F: Frontend> App<F> {
             bootstrap.kernel.register_mode_background(background);
         }
         bootstrap
+            .kernel
+            .register_view_definitions(view_definitions)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        bootstrap
             .session
             .faces_mut()
             .set_display_profile(display_profile);
@@ -263,6 +277,25 @@ impl<F: Frontend> App<F> {
         self.session
             .unload_view_extensions(owner, self.kernel.contents(), self.kernel.content_modes())
             .map_err(io::Error::other)
+    }
+
+    pub fn unload_view_definitions(
+        &mut self,
+        owner: &crate::mode::ViewDefinitionOwner,
+    ) -> io::Result<usize> {
+        let definitions = self.kernel.view_definition_ids_for_owner(owner);
+        if definitions.is_empty() {
+            return Ok(0);
+        }
+        if self.session.uses_view_definitions(&definitions)
+            || self.kernel.modes_use_view_definitions(&definitions)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::ResourceBusy,
+                "View definitions cannot unload while a View or extension still uses them",
+            ));
+        }
+        Ok(self.kernel.remove_view_definitions(owner))
     }
 
     #[cfg_attr(

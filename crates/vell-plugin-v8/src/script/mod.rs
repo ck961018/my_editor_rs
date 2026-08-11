@@ -15,11 +15,12 @@ use vell_mode::command::ModeValue;
 use vell_mode::mode_name::{ModeActionName, ModeName};
 use vell_mode::operation::MAX_MODE_CALLBACK_OPERATIONS;
 use vell_mode::{
-    LanguageId, Mode, ModeAttachmentRule, ModeBackground, ModeContentContext, ModeError,
-    ModeResult, ModeState, ModeViewContext, NamedLineSegment, NamedLinesPresentation,
-    ViewExtension, ViewExtensionContext, ViewExtensionDefinition, ViewExtensionId,
-    ViewExtensionOwner, ViewExtensionPaneDefinition, ViewExtensionPaneSide,
-    ViewExtensionPresentation,
+    CompoundViewDefinition, CompoundViewDirection, LanguageId, MAX_COMPOUND_VIEW_BINDINGS,
+    MAX_COMPOUND_VIEW_CHILD_BINDINGS, Mode, ModeAttachmentRule, ModeBackground, ModeContentContext,
+    ModeError, ModeResult, ModeState, ModeViewContext, NamedLineSegment, NamedLinesPresentation,
+    ViewChildBinding, ViewChildDefinition, ViewDefinitionOwner, ViewExtension,
+    ViewExtensionContext, ViewExtensionDefinition, ViewExtensionId, ViewExtensionOwner,
+    ViewExtensionPaneDefinition, ViewExtensionPaneSide, ViewExtensionPresentation,
 };
 use vell_protocol::content_query::{
     Color, Face, FaceDefinition, FaceName, FaceOverride, FacePatch, FaceValue, NamedTextDecoration,
@@ -326,6 +327,12 @@ struct ScriptViewExtensionRegistration {
 }
 
 #[derive(Default)]
+struct ScriptViewDefinitionRegistration {
+    open: Cell<bool>,
+    owner: RefCell<Option<ViewDefinitionOwner>>,
+}
+
+#[derive(Default)]
 struct ScriptViewExtensionRenderScope {
     active: Cell<bool>,
 }
@@ -378,7 +385,46 @@ impl ScriptViewExtensionRegistration {
     }
 }
 
+impl ScriptViewDefinitionRegistration {
+    fn begin(&self, owner: ViewDefinitionOwner) {
+        self.owner.replace(Some(owner));
+        self.open.set(true);
+    }
+
+    fn finish(&self) {
+        self.open.set(false);
+        self.owner.replace(None);
+    }
+
+    fn is_open(&self) -> bool {
+        self.open.get()
+    }
+
+    fn owner(&self) -> Option<ViewDefinitionOwner> {
+        self.open
+            .get()
+            .then(|| self.owner.borrow().clone())
+            .flatten()
+    }
+}
+
 fn source_view_extension_owner(namespace: &str, identity: &str) -> ViewExtensionOwner {
+    ViewExtensionOwner::new(source_owner_key(namespace, identity))
+}
+
+fn source_view_definition_owner(namespace: &str, identity: &str) -> ViewDefinitionOwner {
+    ViewDefinitionOwner::new(source_owner_key(namespace, identity))
+}
+
+fn filesystem_view_extension_owner(path: &Path) -> ViewExtensionOwner {
+    ViewExtensionOwner::new(filesystem_owner_key("filesystem", path))
+}
+
+fn filesystem_view_definition_owner(path: &Path) -> ViewDefinitionOwner {
+    ViewDefinitionOwner::new(filesystem_owner_key("filesystem", path))
+}
+
+fn source_owner_key(namespace: &str, identity: &str) -> String {
     use std::fmt::Write as _;
 
     let mut encoded = String::with_capacity(namespace.len() + 1 + identity.len() * 2);
@@ -387,7 +433,31 @@ fn source_view_extension_owner(namespace: &str, identity: &str) -> ViewExtension
     for byte in identity.as_bytes() {
         write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
     }
-    ViewExtensionOwner::new(encoded)
+    encoded
+}
+
+fn filesystem_owner_key(namespace: &str, path: &Path) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::from(namespace);
+    encoded.push('.');
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        for byte in path.as_os_str().as_bytes() {
+            write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+
+        for unit in path.as_os_str().encode_wide() {
+            write!(&mut encoded, "{unit:04x}").expect("writing to String cannot fail");
+        }
+    }
+    encoded
 }
 
 #[derive(Clone)]
@@ -683,6 +753,7 @@ fn loaded_editor_configuration(
     Ok(LoadedEditorConfiguration {
         modes,
         backgrounds: vec![Box::new(ScriptBackground::new(host.clone()))],
+        view_definitions: ScriptHost::script_view_definitions(&host),
         view_extensions: ScriptHost::script_view_extensions(&host),
         theme: configuration.theme,
         face_overrides: configuration.face_overrides,
@@ -707,6 +778,7 @@ pub fn load_typescript_modes(
     Ok(LoadedScriptModes {
         modes,
         backgrounds,
+        view_definitions: ScriptHost::script_view_definitions(&host),
         view_extensions: ScriptHost::script_view_extensions(&host),
         commands,
         host,
@@ -974,6 +1046,102 @@ editor.views.extend("core.buffer", {
     }
 
     #[test]
+    fn compound_view_definition_schema_is_strict_atomic_and_module_scoped() {
+        let mut host = ScriptHost::new();
+        host.execute_typescript(
+            "file:///diff-view.ts",
+            r#"
+editor.views.define({
+  name: "example.diff",
+  bindings: ["left", "right"],
+  layout: {
+    direction: "horizontal",
+    children: [
+      { key: "before", view: "core.buffer", bindings: { document: "left" } },
+      { key: "after", view: "core.buffer", bindings: { document: "right" } },
+    ],
+  },
+});
+"#,
+        )
+        .unwrap();
+        let definitions = host.view_definitions.borrow();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].definition().id().as_str(), "example.diff");
+        assert_eq!(definitions[0].children()[0].key(), "before");
+        drop(definitions);
+
+        let error = host
+            .execute_typescript(
+                "file:///invalid-view.ts",
+                r#"
+editor.views.define({
+  name: "example.partial",
+  bindings: ["left", "right"],
+  layout: {
+    direction: "horizontal",
+    children: [
+      { key: "left", view: "core.buffer", bindings: { document: "left" } },
+      { key: "right", view: "core.buffer", bindings: { document: "right" } },
+    ],
+  },
+});
+editor.views.define({
+  name: "example.invalid",
+  bindings: ["left"],
+  unknown: true,
+  layout: { direction: "vertical", children: [] },
+});
+"#,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown field 'unknown'"));
+        assert_eq!(host.view_definitions.borrow().len(), 1);
+
+        let error = host
+            .execute_typescript(
+                "file:///oversized-view.ts",
+                r#"
+const bindings = [];
+bindings.length = 1_000_000_000;
+editor.views.define({
+  name: "example.oversized",
+  bindings,
+  layout: {
+    direction: "horizontal",
+    children: [
+      { key: "left", view: "core.buffer", bindings: { document: "left" } },
+      { key: "right", view: "core.buffer", bindings: { document: "right" } },
+    ],
+  },
+});
+"#,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("script limit exceeded for View definition bindings")
+        );
+        assert_eq!(host.view_definitions.borrow().len(), 1);
+
+        let error = host
+            .evaluate_script(
+                r#"editor.views.define({
+  name: "example.dynamic",
+  bindings: ["left"],
+  layout: { direction: "horizontal", children: [] },
+})"#,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("only available during module loading")
+        );
+    }
+
+    #[test]
     fn view_extension_registration_is_strict_atomic_and_budgeted() {
         let mut host =
             ScriptHost::with_timeouts(Duration::from_millis(50), Duration::from_millis(100));
@@ -1040,6 +1208,11 @@ editor.views.extend("core.buffer", {
         const attempt = (callback) => {
           try { callback(); } catch (error) { errors.push(String(error)); }
         };
+        attempt(() => editor.views.define({
+          name: "example.leaked-view",
+          bindings: ["document"],
+          layout: { direction: "horizontal", children: [] },
+        }));
         attempt(() => editor.views.extend("core.buffer", {
           id: "example.leaked",
           panes: { leaked: {
@@ -1071,7 +1244,7 @@ editor.views.extend("core.buffer", {
         let presentation = extensions[0].present("map", &extension_context()).unwrap();
 
         let ViewExtensionPresentation::Lines(lines) = presentation;
-        assert_eq!(lines.rows.len(), 7);
+        assert_eq!(lines.rows.len(), 8);
         assert!(lines.rows.iter().all(|row| {
             row[0]
                 .text
@@ -1081,6 +1254,7 @@ editor.views.extend("core.buffer", {
         let definitions = host.borrow().view_extension_definitions.borrow().clone();
         assert_eq!(definitions.len(), 1);
         assert_eq!(definitions[0].definition.id().as_str(), "example.dynamic");
+        assert!(host.borrow().view_definitions.borrow().is_empty());
         assert!(host.borrow().definitions.borrow().is_empty());
         assert_eq!(host.borrow().commands.borrow().change_count(), 0);
         let configuration = host.borrow().configuration.borrow().clone();
@@ -1125,6 +1299,38 @@ editor.views.extend("core.buffer", {
         let definitions = host.borrow().view_extension_definitions.borrow().clone();
         assert_eq!(definitions.len(), 1);
         assert_eq!(definitions[0].definition.id().as_str(), "example.second");
+    }
+
+    #[test]
+    fn filesystem_view_definition_owners_are_collision_free() {
+        let directory = tempfile::tempdir().unwrap();
+        let first_root = directory.path().join("a-b");
+        let second_root = directory.path().join("a_b");
+        fs::create_dir_all(&first_root).unwrap();
+        fs::create_dir_all(&second_root).unwrap();
+        let source = |name: &str| {
+            format!(
+                r#"editor.views.define({{
+  name: "{name}",
+  bindings: ["left", "right"],
+  layout: {{ direction: "horizontal", children: [
+    {{ key: "left", view: "core.buffer", bindings: {{ document: "left" }} }},
+    {{ key: "right", view: "core.buffer", bindings: {{ document: "right" }} }},
+  ] }},
+}});"#
+            )
+        };
+        let first = first_root.join("plugin.ts");
+        let second = second_root.join("plugin.ts");
+        fs::write(&first, source("example.first-view")).unwrap();
+        fs::write(&second, source("example.second-view")).unwrap();
+        let mut host = ScriptHost::new();
+        host.execute_module(&first).unwrap();
+        host.execute_module(&second).unwrap();
+        let definitions = host.view_definitions.borrow();
+
+        assert_eq!(definitions.len(), 2);
+        assert_ne!(definitions[0].owner(), definitions[1].owner());
     }
 
     #[test]
@@ -1834,6 +2040,13 @@ editor.modes.define({
         switchDiff(ctx) {
           ctx.view.switch({ type: "core.diff", left: 1, right: 2 });
         },
+        switchDefined(ctx) {
+          ctx.view.switch({
+            type: "defined",
+            definition: "example.diff",
+            bindings: { left: 1, right: 2 },
+          });
+        },
         invalidDiff(ctx) {
           ctx.view.switch({ type: "core.diff", left: 1, right: 2, extra: true });
         },
@@ -2004,6 +2217,19 @@ editor.modes.define({
                     spec: vell_mode::operation::ViewSpec::Diff { left, right },
                 }
             )] if *left == ContentId(1) && *right == ContentId(2)
+        ));
+        assert!(matches!(
+            execute("switchDefined").as_slice(),
+            [vell_mode::operation::OperationRequest::ViewLifecycle(
+                vell_mode::operation::ViewLifecycleOperation::Switch {
+                    spec: vell_mode::operation::ViewSpec::Defined {
+                        definition,
+                        bindings,
+                    },
+                }
+            )] if definition.as_str() == "example.diff"
+                && bindings.get("left") == Some(&ContentId(1))
+                && bindings.get("right") == Some(&ContentId(2))
         ));
         let error = mode
             .execute_view_with_arguments(
