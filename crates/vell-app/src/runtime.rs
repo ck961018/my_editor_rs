@@ -287,6 +287,7 @@ impl PreparedEffect {
             | Self::ContentCreate
             | Self::ContentOpen(_)
             | Self::ViewSwitch { .. }
+            | Self::DiffViewSwitch(_)
             | Self::ViewRebind { .. }
             | Self::ContentClose { .. } => EffectBehavior::Lifecycle,
             Self::Quit => EffectBehavior::Quit,
@@ -1028,34 +1029,32 @@ impl<F: Frontend> App<F> {
                 PreparedEffect::ContentOpen(path) => {
                     self.kernel.queue_content_open(path);
                 }
-                PreparedEffect::ViewSwitch { target, spec } => match spec {
-                    ViewSpec::Buffer {
-                        source: BufferViewSource::Content(content),
-                    } => {
+                PreparedEffect::ViewSwitch { target, source } => match source {
+                    BufferViewSource::Content(content) => {
                         self.switch_view_at(target, content)
                             .expect("validated view remains switchable until frame commit");
                     }
-                    ViewSpec::Buffer {
-                        source: BufferViewSource::Create,
-                    } => {
+                    BufferViewSource::Create => {
                         let content = self.new_buffer();
                         self.switch_view_at(target, content)
                             .expect("new content remains switchable until frame commit");
                     }
-                    ViewSpec::Buffer {
-                        source: BufferViewSource::Open { path },
-                    } => {
+                    BufferViewSource::Open { path } => {
                         let target_space = self
                             .session
-                            .body_space_for_view(target)
-                            .expect("validated view keeps its body Pane until frame commit");
+                            .replacement_space_for_view(target)
+                            .expect("validated view keeps a replacement Pane until frame commit");
+                        let expected_view = self.session.view_for_space(target_space);
                         self.kernel.queue_view_open(
                             target_space,
-                            Some(target),
+                            expected_view,
                             std::path::PathBuf::from(path),
                         );
                     }
                 },
+                PreparedEffect::DiffViewSwitch(prepared) => {
+                    self.publish_diff_replacement(prepared);
+                }
                 PreparedEffect::ViewRebind {
                     view,
                     binding,
@@ -1567,31 +1566,56 @@ impl<F: Frontend> App<F> {
                         ResolvedViewLifecycleOperation::Focus { view } => {
                             let target = self
                                 .session
-                                .body_space_for_view(view)
-                                .ok_or_else(|| invalid_operation("view has no body Pane"))?;
+                                .replacement_space_for_view(view)
+                                .ok_or_else(|| invalid_operation("view has no focusable Pane"))?;
                             if !self.session.is_focusable_space(target) {
                                 return Err(invalid_operation("view is not focusable"));
                             }
                             self.prepare_topology_effect(frame, PreparedEffect::Focus { target })
                                 .map(|_| ())
                         }
-                        ResolvedViewLifecycleOperation::Switch { target, spec } => {
-                            if let ViewSpec::Buffer {
-                                source: BufferViewSource::Content(content),
-                            } = &spec
-                            {
-                                self.retarget_execution_frame(frame, *content)?;
-                                self.validate_buffer_view_content(*content)
+                        ResolvedViewLifecycleOperation::Switch { target, spec } => match spec {
+                            ViewSpec::Buffer { source } => {
+                                if let BufferViewSource::Content(content) = &source {
+                                    self.retarget_execution_frame(frame, *content)?;
+                                    self.validate_buffer_view_content(*content).map_err(
+                                        |error| {
+                                            recoverable_message(
+                                                io::ErrorKind::Other,
+                                                error.to_string(),
+                                            )
+                                        },
+                                    )?;
+                                }
+                                self.prepare_topology_effect(
+                                    frame,
+                                    PreparedEffect::ViewSwitch { target, source },
+                                )
+                                .map(|_| ())
+                            }
+                            ViewSpec::Diff { left, right } => {
+                                self.validate_buffer_view_content(left).map_err(|error| {
+                                    recoverable_message(io::ErrorKind::Other, error.to_string())
+                                })?;
+                                self.validate_buffer_view_content(right).map_err(|error| {
+                                    recoverable_message(io::ErrorKind::Other, error.to_string())
+                                })?;
+                                let target_space =
+                                    self.session.replacement_space_for_view(target).ok_or_else(
+                                        || invalid_operation("view has no replacement Pane"),
+                                    )?;
+                                let prepared = self
+                                    .prepare_diff_replacement(target_space, left, right)
                                     .map_err(|error| {
                                         recoverable_message(io::ErrorKind::Other, error.to_string())
                                     })?;
+                                self.prepare_topology_effect(
+                                    frame,
+                                    PreparedEffect::DiffViewSwitch(prepared),
+                                )
+                                .map(|_| ())
                             }
-                            self.prepare_topology_effect(
-                                frame,
-                                PreparedEffect::ViewSwitch { target, spec },
-                            )
-                            .map(|_| ())
-                        }
+                        },
                     }
                 }
                 ResolvedOperation::ViewBinding {
@@ -1947,6 +1971,10 @@ impl<F: Frontend> App<F> {
                             } => ViewSpec::buffer(
                                 self.resolve_content_target(ContentTarget::Id(content), origin)?,
                             ),
+                            ViewSpec::Diff { left, right } => ViewSpec::diff(
+                                self.resolve_content_target(ContentTarget::Id(left), origin)?,
+                                self.resolve_content_target(ContentTarget::Id(right), origin)?,
+                            ),
                             spec => spec,
                         };
                         ResolvedViewLifecycleOperation::Switch { target, spec }
@@ -1964,6 +1992,16 @@ impl<F: Frontend> App<F> {
                     ViewTarget::Current => origin
                         .view
                         .ok_or_else(|| invalid_operation("operation has no current view"))?,
+                    ViewTarget::Switchable => {
+                        let source = origin
+                            .view
+                            .ok_or_else(|| invalid_operation("operation has no current view"))?;
+                        self.session
+                            .switch_target_from_view(source)
+                            .ok_or_else(|| {
+                                invalid_operation("operation has no switchable target")
+                            })?
+                    }
                     ViewTarget::Id(view) => view,
                 };
                 let view_data = self
@@ -2221,6 +2259,14 @@ impl<F: Frontend> App<F> {
             ViewTarget::Current => origin
                 .view
                 .ok_or_else(|| invalid_operation("operation has no current view"))?,
+            ViewTarget::Switchable => {
+                let source = origin
+                    .view
+                    .ok_or_else(|| invalid_operation("operation has no current view"))?;
+                self.session
+                    .switch_target_from_view(source)
+                    .ok_or_else(|| invalid_operation("operation has no switchable target"))?
+            }
             ViewTarget::Id(view) => view,
         };
         let content = self

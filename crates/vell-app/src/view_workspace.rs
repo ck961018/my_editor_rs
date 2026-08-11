@@ -14,7 +14,9 @@ use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 use vell_protocol::revision::Revision;
 use vell_protocol::scene::Scene;
 use vell_protocol::space::{Sizing, SpaceKind, SplitDirection};
-use vell_protocol::view::BindingKey;
+use vell_protocol::view::{
+    BUFFER_VIEW_DEFINITION, BindingKey, DIFF_VIEW_DEFINITION, LEFT_BINDING, RIGHT_BINDING,
+};
 
 #[derive(Clone)]
 pub(super) struct ViewWorkspace {
@@ -39,6 +41,12 @@ pub(super) struct RemovedView {
 pub(super) struct WorkspaceMutation<T> {
     pub output: T,
     pub removed: Vec<RemovedView>,
+}
+
+pub(super) struct DiffViewResult {
+    pub parent: ViewId,
+    pub left: ViewId,
+    pub right: ViewId,
 }
 
 impl ViewWorkspace {
@@ -254,6 +262,24 @@ impl ViewWorkspace {
         self.views.get(&view)?.panes().space_for_key(BODY_PANE)
     }
 
+    pub(super) fn replacement_space_for_view(&self, view: ViewId) -> Option<SpaceId> {
+        if let Some(space) = self.body_space_for_view(view) {
+            return Some(space);
+        }
+        let subtree = self.semantic_subtree(view).ok()?;
+        if subtree.contains(&self.view_for_space(self.focused)?)
+            && self.views[&self.view_for_space(self.focused)?]
+                .panes()
+                .key_for_space(self.focused)
+                == Some(BODY_PANE)
+        {
+            return Some(self.focused);
+        }
+        subtree
+            .into_iter()
+            .find_map(|child| self.body_space_for_view(child))
+    }
+
     /// 原子改变一个具名 binding。Scene 和 ViewId 均保持不变。
     pub(super) fn rebind(
         &mut self,
@@ -286,6 +312,62 @@ impl ViewWorkspace {
         Ok(previous)
     }
 
+    pub(super) fn rebind_diff_right(
+        &mut self,
+        parent: ViewId,
+        content: ContentId,
+        state: ContentViewState,
+    ) -> Result<(ContentId, ViewId), LayoutError> {
+        let parent_view = self
+            .views
+            .get(&parent)
+            .ok_or(LayoutError::MissingView(parent))?;
+        if parent_view.definition().as_str() != DIFF_VIEW_DEFINITION {
+            return Err(LayoutError::InvalidWorkspace(format!(
+                "View {} is not a DiffView",
+                parent.0
+            )));
+        }
+        let [_, right] = parent_view.children() else {
+            return Err(LayoutError::InvalidWorkspace(format!(
+                "DiffView {} does not own exactly two children",
+                parent.0
+            )));
+        };
+        let right = *right;
+        let previous =
+            parent_view
+                .binding(RIGHT_BINDING)
+                .ok_or_else(|| LayoutError::MissingBinding {
+                    view: parent,
+                    binding: BindingKey::new(RIGHT_BINDING),
+                })?;
+        if previous == content {
+            return Ok((previous, right));
+        }
+
+        let mut draft = self.clone();
+        draft
+            .views
+            .get_mut(&parent)
+            .expect("DiffView parent was prevalidated")
+            .rebind(&BindingKey::new(RIGHT_BINDING), content, None)
+            .map_err(|error| LayoutError::InvalidWorkspace(format!("{error:?}")))?;
+        draft
+            .views
+            .get_mut(&right)
+            .expect("DiffView right child was prevalidated")
+            .rebind(
+                &BindingKey::new(vell_protocol::view::DOCUMENT_BINDING),
+                content,
+                Some(state),
+            )
+            .map_err(|error| LayoutError::InvalidWorkspace(format!("{error:?}")))?;
+        draft.validate()?;
+        *self = draft;
+        Ok((previous, right))
+    }
+
     /// 返回关闭 Content 后仍会存活的第一个 binding 引用。
     pub(super) fn blocking_content_reference(
         &self,
@@ -309,10 +391,6 @@ impl ViewWorkspace {
 
     /// 建立一棵已存在 View 的语义子树。布局 Pane 可以先创建，但 parent、
     /// children 与子 View 的 switchable 属性必须在同一次发布中生效。
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "M5 Native DiffView will consume subtree creation")
-    )]
     pub(super) fn compose(
         &mut self,
         parent: ViewId,
@@ -478,6 +556,41 @@ impl ViewWorkspace {
         Ok((id, result))
     }
 
+    pub(super) fn replace_with_diff(
+        &mut self,
+        target: SpaceId,
+        parent: View,
+        left: View,
+        right: View,
+    ) -> Result<WorkspaceMutation<DiffViewResult>, LayoutError> {
+        let mut draft = self.clone();
+        let base_revision = draft.scene_revision;
+        let replacement = draft.replace(target, left, true)?;
+        let left = replacement.output;
+        let left_space = draft
+            .body_space_for_view(left)
+            .expect("new left BufferView owns its body Pane");
+        let (right, _) = draft.split(left_space, right, true, SplitDirection::Right, false)?;
+        let parent_id = draft.alloc_view_id();
+        assert!(
+            draft.views.insert(parent_id, parent).is_none(),
+            "view id must be unique"
+        );
+        draft.compose(parent_id, &[(left, false), (right, false)])?;
+        draft.scene_revision = base_revision;
+        draft.scene_revision.next();
+        draft.validate()?;
+        *self = draft;
+        Ok(WorkspaceMutation {
+            output: DiffViewResult {
+                parent: parent_id,
+                left,
+                right,
+            },
+            removed: replacement.removed,
+        })
+    }
+
     pub(super) fn close(
         &mut self,
         target: SpaceId,
@@ -599,7 +712,7 @@ impl ViewWorkspace {
         let mut replacement_id = None;
         if let (Some(root), Some(replacement)) = (replacement_root, replacement) {
             let target = draft
-                .body_space_for_view(root)
+                .replacement_space_for_view(root)
                 .ok_or(LayoutError::MissingView(root))?;
             let mutation = draft.replace(target, replacement, true)?;
             replacement_id = Some(mutation.output);
@@ -610,7 +723,7 @@ impl ViewWorkspace {
                 continue;
             }
             let target = draft
-                .body_space_for_view(root)
+                .replacement_space_for_view(root)
                 .ok_or(LayoutError::MissingView(root))?;
             let mutation = draft.close(target)?;
             removed.extend(mutation.removed);
@@ -646,8 +759,11 @@ impl ViewWorkspace {
         let focused_replaced = draft
             .view_for_space(previous_focus)
             .is_some_and(|view| subtree_set.contains(&view));
+        let target_view = draft
+            .view_for_space(target)
+            .ok_or(SceneError::ExpectedContentLeaf(target))?;
         let per_pane_status = (draft.status_placement == StatusBarPlacement::PerPane)
-            .then(|| draft.status_by_editor.get(&root).copied())
+            .then(|| draft.status_by_editor.get(&target_view).copied())
             .flatten();
         let global_status = draft.global_status_space.filter(|space| {
             draft
@@ -737,8 +853,15 @@ impl ViewWorkspace {
 
     fn validate_subtree_target(&self, target: SpaceId) -> Result<ViewId, LayoutError> {
         self.reject_non_body_space(target)?;
-        self.view_for_space(target)
-            .ok_or_else(|| SceneError::ExpectedContentLeaf(target).into())
+        let source = self
+            .view_for_space(target)
+            .ok_or(SceneError::ExpectedContentLeaf(target))?;
+        self.switch_target_from_view(source).ok_or_else(|| {
+            LayoutError::InvalidWorkspace(format!(
+                "View {} has no switchable lifecycle owner",
+                source.0
+            ))
+        })
     }
 
     fn reject_non_body_space(&self, target: SpaceId) -> Result<(), LayoutError> {
@@ -776,7 +899,15 @@ impl ViewWorkspace {
             .views
             .iter()
             .filter_map(|(view, data)| (data.document_content() == Some(content)).then_some(*view))
-            .collect::<HashSet<_>>();
+            .map(|view| {
+                self.switch_target_from_view(view).ok_or_else(|| {
+                    LayoutError::InvalidWorkspace(format!(
+                        "View {} has no switchable lifecycle owner",
+                        view.0
+                    ))
+                })
+            })
+            .collect::<Result<HashSet<_>, _>>()?;
         let mut roots = Vec::new();
         for target in &targets {
             let mut current = self
@@ -966,6 +1097,9 @@ impl ViewWorkspace {
                     )));
                 }
             }
+            if view.definition().as_str() == DIFF_VIEW_DEFINITION {
+                self.validate_diff_view(*id, view)?;
+            }
         }
         let mut reachable = HashSet::new();
         for root in self
@@ -1033,6 +1167,30 @@ impl ViewWorkspace {
                     "View {} has an invalid per-pane status mapping",
                     view.0
                 )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_diff_view(&self, id: ViewId, view: &View) -> Result<(), LayoutError> {
+        let invalid =
+            |message: &str| LayoutError::InvalidWorkspace(format!("DiffView {} {message}", id.0));
+        if !view.switchable() || view.panes().spaces().next().is_some() {
+            return Err(invalid("must be a switchable zero-Pane parent"));
+        }
+        let [left, right] = view.children() else {
+            return Err(invalid("must own exactly left and right child Views"));
+        };
+        for (binding, child) in [(LEFT_BINDING, *left), (RIGHT_BINDING, *right)] {
+            let child = self
+                .views
+                .get(&child)
+                .ok_or_else(|| invalid("references a missing child View"))?;
+            if child.definition().as_str() != BUFFER_VIEW_DEFINITION
+                || child.switchable()
+                || child.document_content() != view.binding(binding)
+            {
+                return Err(invalid("binding and BufferView child are inconsistent"));
             }
         }
         Ok(())

@@ -17,7 +17,7 @@ use crate::scene_model::{CloseResult, SplitResult};
 use crate::theme::{FaceEnvironment, SessionFaces};
 use crate::view::View;
 use crate::view_context::require_mode_view_context;
-use crate::view_workspace::{RemovedView, ViewWorkspace};
+use crate::view_workspace::{DiffViewResult, RemovedView, ViewWorkspace, WorkspaceMutation};
 use vell_core::content::ContentChange;
 use vell_core::content_store::ContentStore;
 use vell_core::content_view_state::ContentViewStateError;
@@ -57,6 +57,19 @@ pub(super) struct SessionWorkspaceMutation<T> {
 pub(super) struct RemovedSessionView {
     pub view: ViewId,
     pub document: Option<ContentId>,
+}
+
+struct PreparedAttachment {
+    plan: ModeAttachmentPlan,
+    target: Vec<ModeId>,
+    view: View,
+}
+
+pub(super) struct PreparedDiffReplacement {
+    workspace: ViewWorkspace,
+    mutation: WorkspaceMutation<DiffViewResult>,
+    attachments: Vec<PreparedAttachment>,
+    previous_view: ViewId,
 }
 
 impl ClientSession {
@@ -771,6 +784,10 @@ impl ClientSession {
         self.workspace.body_space_for_view(view)
     }
 
+    pub(super) fn replacement_space_for_view(&self, view: ViewId) -> Option<SpaceId> {
+        self.workspace.replacement_space_for_view(view)
+    }
+
     pub(super) fn resize(&mut self, width: u16, height: u16) {
         self.workspace.resize(width, height);
     }
@@ -1216,6 +1233,161 @@ impl ClientSession {
         Ok(previous_content)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "DiffView rebind receives independent app-owned stores"
+    )]
+    pub(super) fn rebind_diff_right(
+        &mut self,
+        parent: ViewId,
+        content: ContentId,
+        registry: &ModeRegistry,
+        classifier: &ContentClassifier,
+        content_modes: &mut ModeContentStore,
+        contents: &ContentStore,
+    ) -> Result<(ContentId, ViewId), LayoutError> {
+        if !contents.contains(content) {
+            return Err(LayoutError::MissingContent(content));
+        }
+        let previous_parent = self
+            .workspace
+            .view(parent)
+            .ok_or(LayoutError::MissingView(parent))?
+            .clone();
+        let [_, right] = previous_parent.children() else {
+            return Err(LayoutError::InvalidWorkspace(format!(
+                "DiffView {} does not own exactly two children",
+                parent.0
+            )));
+        };
+        let right = *right;
+        let previous_right = self
+            .workspace
+            .view(right)
+            .ok_or(LayoutError::MissingView(right))?
+            .clone();
+        let previous_content = previous_parent
+            .binding(vell_protocol::view::RIGHT_BINDING)
+            .ok_or_else(|| LayoutError::MissingBinding {
+                view: parent,
+                binding: BindingKey::new(vell_protocol::view::RIGHT_BINDING),
+            })?;
+        if previous_content == content {
+            return Ok((previous_content, right));
+        }
+        let state = contents
+            .create_view_state(content)
+            .ok_or(LayoutError::MissingContent(content))?;
+        let mut planned_parent = previous_parent.clone();
+        planned_parent
+            .rebind(
+                &BindingKey::new(vell_protocol::view::RIGHT_BINDING),
+                content,
+                None,
+            )
+            .map_err(|error| LayoutError::ModeAttachment(format!("{error:?}")))?;
+        let mut planned_right = previous_right.clone();
+        planned_right
+            .rebind(
+                &BindingKey::new(DOCUMENT_BINDING),
+                content,
+                Some(state.clone()),
+            )
+            .map_err(|error| LayoutError::ModeAttachment(format!("{error:?}")))?;
+
+        let parent_plan = self
+            .mode_resolver
+            .resolve(parent, &planned_parent, registry, classifier, contents)
+            .map_err(|error| LayoutError::ModeAttachment(error.to_string()))?;
+        let parent_target = self
+            .validate_attachment_plan_for_view(&parent_plan, &planned_parent, registry, contents)
+            .map_err(|error| LayoutError::ModeAttachment(error.to_string()))?;
+        let right_plan = self
+            .mode_resolver
+            .resolve(right, &planned_right, registry, classifier, contents)
+            .map_err(|error| LayoutError::ModeAttachment(error.to_string()))?;
+        let right_target = self
+            .validate_attachment_plan_for_view(&right_plan, &planned_right, registry, contents)
+            .map_err(|error| LayoutError::ModeAttachment(error.to_string()))?;
+        let current_modes = self.view_modes.mode_ids(right).to_vec();
+        let retained_modes = current_modes
+            .iter()
+            .copied()
+            .filter(|mode| right_target.contains(mode))
+            .collect::<Vec<_>>();
+        let removed_modes = current_modes
+            .iter()
+            .copied()
+            .filter(|mode| !right_target.contains(mode))
+            .collect::<Vec<_>>();
+
+        self.workspace.rebind_diff_right(parent, content, state)?;
+        self.dispatcher.invalidate_view(
+            right,
+            &previous_right,
+            &mut self.view_modes,
+            content_modes,
+            contents,
+        );
+        let content_context = ModeContentContext::new(content, contents);
+        for mode in &retained_modes {
+            let instance = self
+                .view_modes
+                .instance(*mode, right)
+                .expect("retained Mode is attached to the right child");
+            content_modes.attach_retained_view_with_context(content, instance, &content_context);
+        }
+        for mode in &current_modes {
+            content_modes.detach_view(previous_content, *mode);
+        }
+        for mode in &removed_modes {
+            self.view_modes.remove_mode(right, *mode);
+        }
+        let rebound_right = self
+            .workspace
+            .view(right)
+            .expect("rebound right child remains installed")
+            .clone();
+        self.install_attachment_plan(
+            right_plan,
+            right_target,
+            rebound_right,
+            registry,
+            content_modes,
+            contents,
+        );
+        let rebound_parent = self
+            .workspace
+            .view(parent)
+            .expect("rebound DiffView parent remains installed")
+            .clone();
+        self.install_attachment_plan(
+            parent_plan,
+            parent_target,
+            rebound_parent,
+            registry,
+            content_modes,
+            contents,
+        );
+        if !self
+            .workspace
+            .views()
+            .values()
+            .any(|view| view.references(previous_content))
+        {
+            self.faces.remove_content_remaps(previous_content);
+        }
+        for mode in removed_modes {
+            if !self.view_modes.contains_mode(mode) {
+                self.faces.remove_mode_remaps(mode);
+            }
+        }
+        if self.view_for_space(self.workspace.focused()) == Some(right) {
+            self.sync_changed_input_source(content_modes, contents);
+        }
+        Ok((previous_content, right))
+    }
+
     pub(super) fn close_content_views(
         &mut self,
         content: ContentId,
@@ -1308,6 +1480,85 @@ impl ClientSession {
             output: mutation.output,
             removed,
         })
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "compound View creation receives independent app-owned stores"
+    )]
+    pub(super) fn prepare_diff_replacement(
+        &self,
+        target: SpaceId,
+        parent: View,
+        left: NewView,
+        right: NewView,
+        registry: &ModeRegistry,
+        classifier: &ContentClassifier,
+        contents: &ContentStore,
+    ) -> Result<PreparedDiffReplacement, LayoutError> {
+        let previous_view = self
+            .view_for_space(self.workspace.focused())
+            .expect("focused space hosts a view");
+        let mut candidate = self.workspace.clone();
+        let mutation = candidate.replace_with_diff(target, parent, left.view, right.view)?;
+        let created = [
+            mutation.output.parent,
+            mutation.output.left,
+            mutation.output.right,
+        ];
+        let mut attachments = Vec::with_capacity(created.len());
+        for view in created {
+            let view_data = candidate
+                .view(view)
+                .expect("candidate workspace contains created DiffView subtree")
+                .clone();
+            let plan = self
+                .mode_resolver
+                .resolve(view, &view_data, registry, classifier, contents)
+                .map_err(|error| LayoutError::ModeAttachment(error.to_string()))?;
+            let target = self
+                .validate_attachment_plan_for_view(&plan, &view_data, registry, contents)
+                .map_err(|error| LayoutError::ModeAttachment(error.to_string()))?;
+            attachments.push(PreparedAttachment {
+                plan,
+                target,
+                view: view_data,
+            });
+        }
+
+        Ok(PreparedDiffReplacement {
+            workspace: candidate,
+            mutation,
+            attachments,
+            previous_view,
+        })
+    }
+
+    pub(super) fn publish_diff_replacement(
+        &mut self,
+        prepared: PreparedDiffReplacement,
+        registry: &ModeRegistry,
+        content_modes: &mut ModeContentStore,
+        contents: &ContentStore,
+    ) -> SessionWorkspaceMutation<DiffViewResult> {
+        let PreparedDiffReplacement {
+            workspace,
+            mutation,
+            attachments,
+            previous_view,
+        } = prepared;
+        self.workspace = workspace;
+        for PreparedAttachment { plan, target, view } in attachments {
+            self.install_attachment_plan(plan, target, view, registry, content_modes, contents);
+        }
+        let removed = self.cleanup_removed_views(mutation.removed, content_modes, contents);
+        if removed.iter().any(|removed| removed.view == previous_view) {
+            self.sync_changed_input_source(content_modes, contents);
+        }
+        SessionWorkspaceMutation {
+            output: mutation.output,
+            removed,
+        }
     }
 
     pub(super) fn set_space_sizing(

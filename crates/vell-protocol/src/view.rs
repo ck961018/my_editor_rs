@@ -3,7 +3,10 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 pub const BUFFER_VIEW_DEFINITION: &str = "core.buffer";
+pub const DIFF_VIEW_DEFINITION: &str = "core.diff";
 pub const DOCUMENT_BINDING: &str = "document";
+pub const LEFT_BINDING: &str = "left";
+pub const RIGHT_BINDING: &str = "right";
 
 /// View definition 内稳定的 Content 角色名。
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -87,6 +90,16 @@ impl ViewDefinition {
         }
     }
 
+    pub fn diff() -> Self {
+        Self {
+            id: ViewDefinitionId::new(DIFF_VIEW_DEFINITION),
+            bindings: BTreeSet::from([
+                BindingKey::new(LEFT_BINDING),
+                BindingKey::new(RIGHT_BINDING),
+            ]),
+        }
+    }
+
     pub fn id(&self) -> &ViewDefinitionId {
         &self.id
     }
@@ -125,5 +138,15 @@ mod tests {
                 "left"
             )))
         );
+    }
+
+    #[test]
+    fn built_in_diff_definition_declares_only_left_and_right() {
+        let definition = ViewDefinition::diff();
+
+        assert_eq!(definition.id().as_str(), DIFF_VIEW_DEFINITION);
+        assert!(definition.declares(LEFT_BINDING));
+        assert!(definition.declares(RIGHT_BINDING));
+        assert!(!definition.declares(DOCUMENT_BINDING));
     }
 }

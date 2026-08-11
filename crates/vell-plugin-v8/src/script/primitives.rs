@@ -1084,48 +1084,70 @@ fn view_spec(
     let object = value
         .as_object()
         .ok_or_else(|| ScriptError::new("view spec must be an object"))?;
-    if object.get("type").and_then(serde_json::Value::as_str) != Some("core.buffer") {
-        return Err(ScriptError::new("view spec type must be 'core.buffer'"));
-    }
-    if object
-        .keys()
-        .any(|key| !matches!(key.as_str(), "type" | "content" | "create" | "path"))
-    {
-        return Err(ScriptError::new(
-            "buffer view spec contains an unknown field",
-        ));
-    }
-    let sources = [
-        object.contains_key("content"),
-        object.contains_key("create"),
-        object.contains_key("path"),
-    ];
-    if sources.into_iter().filter(|present| *present).count() != 1 {
-        return Err(ScriptError::new(
-            "buffer view spec requires exactly one of content, create, or path",
-        ));
-    }
-    let source = if let Some(content) = object.get("content") {
-        let content = content
-            .as_u64()
-            .map(ContentId)
-            .ok_or_else(|| ScriptError::new("view spec content must be an integer"))?;
-        BufferViewSource::Content(content)
-    } else if let Some(create) = object.get("create") {
-        if create.as_bool() != Some(true) {
-            return Err(ScriptError::new("view spec create must be true"));
+    match object.get("type").and_then(serde_json::Value::as_str) {
+        Some("core.buffer") => {
+            if object
+                .keys()
+                .any(|key| !matches!(key.as_str(), "type" | "content" | "create" | "path"))
+            {
+                return Err(ScriptError::new(
+                    "buffer view spec contains an unknown field",
+                ));
+            }
+            let sources = [
+                object.contains_key("content"),
+                object.contains_key("create"),
+                object.contains_key("path"),
+            ];
+            if sources.into_iter().filter(|present| *present).count() != 1 {
+                return Err(ScriptError::new(
+                    "buffer view spec requires exactly one of content, create, or path",
+                ));
+            }
+            let source = if let Some(content) = object.get("content") {
+                let content = content
+                    .as_u64()
+                    .map(ContentId)
+                    .ok_or_else(|| ScriptError::new("view spec content must be an integer"))?;
+                BufferViewSource::Content(content)
+            } else if let Some(create) = object.get("create") {
+                if create.as_bool() != Some(true) {
+                    return Err(ScriptError::new("view spec create must be true"));
+                }
+                BufferViewSource::Create
+            } else {
+                let path = object
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|path| !path.is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| ScriptError::new("view spec path must be a non-empty string"))?;
+                BufferViewSource::Open { path }
+            };
+            Ok(ViewSpec::Buffer { source })
         }
-        BufferViewSource::Create
-    } else {
-        let path = object
-            .get("path")
-            .and_then(serde_json::Value::as_str)
-            .filter(|path| !path.is_empty())
-            .map(str::to_owned)
-            .ok_or_else(|| ScriptError::new("view spec path must be a non-empty string"))?;
-        BufferViewSource::Open { path }
-    };
-    Ok(ViewSpec::Buffer { source })
+        Some("core.diff") => {
+            if object
+                .keys()
+                .any(|key| !matches!(key.as_str(), "type" | "left" | "right"))
+            {
+                return Err(ScriptError::new("diff view spec contains an unknown field"));
+            }
+            let content = |name: &str| {
+                object
+                    .get(name)
+                    .and_then(serde_json::Value::as_u64)
+                    .map(ContentId)
+                    .ok_or_else(|| {
+                        ScriptError::new(format!("diff view spec {name} must be an integer"))
+                    })
+            };
+            Ok(ViewSpec::diff(content("left")?, content("right")?))
+        }
+        _ => Err(ScriptError::new(
+            "view spec type must be 'core.buffer' or 'core.diff'",
+        )),
+    }
 }
 
 fn optional_content_target(

@@ -64,7 +64,10 @@ use vell_protocol::revision::Revision;
 use vell_protocol::scene::Scene;
 use vell_protocol::selection::{Selection, Selections, TextOffset, TextPoint};
 use vell_protocol::space::{Sizing, SpaceKind, SplitDirection};
-use vell_protocol::view::{BindingKey, DOCUMENT_BINDING, ViewDefinition, ViewDefinitionId};
+use vell_protocol::view::{
+    BindingKey, DIFF_VIEW_DEFINITION, DOCUMENT_BINDING, LEFT_BINDING, RIGHT_BINDING,
+    ViewDefinition, ViewDefinitionId,
+};
 use vell_protocol::viewport::{
     ResolvedViewportCommand, ViewportCommand, ViewportCursorBehavior, ViewportMoveAmount,
     ViewportMoveDirection,
@@ -133,6 +136,10 @@ struct RebindViewStateProbeMode {
 struct ClassifiedAttachmentMode {
     name: ModeName,
     language: LanguageId,
+}
+
+struct ViewOnlyDiffMode {
+    name: ModeName,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -809,6 +816,24 @@ impl Mode for ClassifiedAttachmentMode {
 
     fn attachment(&self) -> ModeAttachmentRule {
         ModeAttachmentRule::buffer_document().with_languages([self.language.clone()])
+    }
+}
+
+impl Mode for ViewOnlyDiffMode {
+    fn name(&self) -> &ModeName {
+        &self.name
+    }
+
+    fn actions(&self) -> &[ModeActionName] {
+        &[]
+    }
+
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer()
+    }
+
+    fn attachment(&self) -> ModeAttachmentRule {
+        ModeAttachmentRule::for_view(ViewDefinitionId::new(DIFF_VIEW_DEFINITION))
     }
 }
 
@@ -2095,6 +2120,30 @@ fn switch_focused_view(
 ) -> Result<ViewId, LayoutError> {
     let target = app.switch_target().expect("focused view is switchable");
     app.switch_view_at(target, content)
+}
+
+fn switch_focused_to_diff(
+    app: &mut App<ScriptedFrontend>,
+    left: ContentId,
+    right: ContentId,
+) -> (ViewId, ViewId, ViewId) {
+    let source = view_id(app, app.session.focused());
+    let source_content = app.session.view(source).unwrap().require_document();
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::ViewLifecycle(
+            ViewLifecycleOperation::Switch {
+                spec: ViewSpec::diff(left, right),
+            },
+        )],
+        view: source,
+        content: source_content,
+    })
+    .unwrap();
+    let parent = app.switch_target().expect("DiffView parent is switchable");
+    let [left, right] = app.session.view(parent).unwrap().children() else {
+        panic!("DiffView must own exactly two children");
+    };
+    (parent, *left, *right)
 }
 
 fn view_at(app: &App<ScriptedFrontend>, space: SpaceId) -> &View {
@@ -3410,6 +3459,412 @@ fn compound_view_children_keep_independent_selections() {
         .char_index;
     assert_eq!(left_head, "shared".chars().count());
     assert_eq!(right_head, 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_diff_view_routes_input_and_switches_as_one_view() {
+    let mut app = make_app(vec![], None);
+    let right_content = app.new_buffer();
+    let replacement = app.new_buffer();
+    let left_language_mode = app
+        .kernel
+        .modes_mut()
+        .register(ClassifiedAttachmentMode {
+            name: ModeName::new("diff-left-language"),
+            language: LanguageId::new("rust"),
+        })
+        .unwrap();
+    let right_language_mode = app
+        .kernel
+        .modes_mut()
+        .register(ClassifiedAttachmentMode {
+            name: ModeName::new("diff-right-language"),
+            language: LanguageId::new("markdown"),
+        })
+        .unwrap();
+    app.kernel
+        .classifier_mut_for_test()
+        .set_language_override(editor_cid(), Some(LanguageId::new("rust")));
+    app.kernel
+        .classifier_mut_for_test()
+        .set_language_override(right_content, Some(LanguageId::new("markdown")));
+    let (parent, left, right) = switch_focused_to_diff(&mut app, editor_cid(), right_content);
+    let parent_view = app.session.view(parent).unwrap();
+
+    assert_eq!(parent_view.definition().as_str(), DIFF_VIEW_DEFINITION);
+    assert_eq!(parent_view.binding(LEFT_BINDING), Some(editor_cid()));
+    assert_eq!(parent_view.binding(RIGHT_BINDING), Some(right_content));
+    assert!(parent_view.panes().spaces().next().is_none());
+    assert!(parent_view.switchable());
+    assert_eq!(app.session.view(left).unwrap().parent(), Some(parent));
+    assert_eq!(app.session.view(right).unwrap().parent(), Some(parent));
+    assert!(!app.session.view(left).unwrap().switchable());
+    assert!(!app.session.view(right).unwrap().switchable());
+    assert!(app.session.view_modes().mode_ids(parent).is_empty());
+    assert!(!app.session.view_modes().mode_ids(left).is_empty());
+    assert!(!app.session.view_modes().mode_ids(right).is_empty());
+    assert!(
+        app.session
+            .view_modes()
+            .mode_ids(left)
+            .contains(&left_language_mode)
+    );
+    assert!(
+        !app.session
+            .view_modes()
+            .mode_ids(left)
+            .contains(&right_language_mode)
+    );
+    assert!(
+        app.session
+            .view_modes()
+            .mode_ids(right)
+            .contains(&right_language_mode)
+    );
+    assert!(
+        !app.session
+            .view_modes()
+            .mode_ids(right)
+            .contains(&left_language_mode)
+    );
+
+    let left_space = app.session.body_space_for_view(left).unwrap();
+    let right_space = app.session.body_space_for_view(right).unwrap();
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+    assert!(matches!(
+        query.view(left, left_space).unwrap().presentation,
+        ViewPresentation::Text(_)
+    ));
+    assert!(matches!(
+        query.view(right, right_space).unwrap().presentation,
+        ViewPresentation::Text(_)
+    ));
+    assert!(
+        scene_views(app.session.scene())
+            .into_iter()
+            .all(|(_, view)| view != parent)
+    );
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::ViewLifecycle(
+            ViewLifecycleOperation::Focus { view: right },
+        )],
+        view: left,
+        content: editor_cid(),
+    })
+    .unwrap();
+    send_key(&mut app, KeyEvent::char('i')).await;
+    send_key(&mut app, KeyEvent::char('x')).await;
+    assert_eq!(
+        app.kernel
+            .contents()
+            .text_snapshot(right_content)
+            .unwrap()
+            .to_owned_string(),
+        "x"
+    );
+    assert_eq!(
+        app.kernel
+            .contents()
+            .text_snapshot(editor_cid())
+            .unwrap()
+            .to_owned_string(),
+        ""
+    );
+
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::ViewLifecycle(
+            ViewLifecycleOperation::Switch {
+                spec: ViewSpec::buffer(replacement),
+            },
+        )],
+        view: right,
+        content: right_content,
+    })
+    .unwrap();
+
+    let replacement_view = view_id(&app, right_space);
+    assert_eq!(app.session.views().len(), 1);
+    assert_eq!(
+        app.session
+            .view(replacement_view)
+            .unwrap()
+            .document_content(),
+        Some(replacement)
+    );
+    assert!(!app.session.scene().contains(left_space));
+    for removed in [parent, left, right] {
+        assert!(app.session.view(removed).is_none());
+        assert!(app.session.view_modes().mode_ids(removed).is_empty());
+    }
+}
+
+#[test]
+fn switching_buffer_to_diff_preserves_shared_mode_content_state() {
+    let mut app = make_app(vec![], None);
+    let mode_name = ModeName::new("diff-shared-content-state");
+    let mode = app
+        .kernel
+        .modes_mut()
+        .register(SharedContentMode {
+            name: mode_name.clone(),
+            actions: vec![ModeActionName::new("advance")],
+            keymap: Keymap::new(),
+        })
+        .unwrap();
+    app.attach_mode_to_content(editor_cid(), &mode_name)
+        .unwrap();
+    let command = ModeCommand::new(mode_name, ModeActionName::new("advance"));
+    assert_eq!(
+        app.kernel
+            .execute_mode_content_action(editor_cid(), &command)
+            .unwrap(),
+        ModeResult::operations(vec![history(TransactionIntent::Undo)])
+    );
+    let right_content = app.new_buffer();
+
+    let (_, left, _) = switch_focused_to_diff(&mut app, editor_cid(), right_content);
+
+    assert!(app.session.view_modes().mode_ids(left).contains(&mode));
+    assert_eq!(
+        app.kernel
+            .content_modes()
+            .state_for_test::<SharedContentState>(mode, editor_cid())
+            .unwrap()
+            .executions,
+        1
+    );
+}
+
+#[test]
+fn unsupported_diff_attachment_fails_before_frame_publication() {
+    let mut app = make_app(vec![], None);
+    app.kernel
+        .modes_mut()
+        .register(ViewOnlyDiffMode {
+            name: ModeName::new("unsupported-diff-view-only"),
+        })
+        .unwrap();
+    let right_content = app.new_buffer();
+    let source_space = app.session.focused();
+    let source = view_id(&app, source_space);
+    let scene_revision = app.session.scene_revision();
+    let next_view_id = app.session.next_view_id_for_test();
+
+    let error = app
+        .execute_command(DispatchCommand::ModeOperations {
+            operations: vec![OperationRequest::ViewLifecycle(
+                ViewLifecycleOperation::Switch {
+                    spec: ViewSpec::diff(editor_cid(), right_content),
+                },
+            )],
+            view: source,
+            content: editor_cid(),
+        })
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("cannot attach without a content binding yet")
+    );
+    assert_eq!(app.session.scene_revision(), scene_revision);
+    assert_eq!(app.session.next_view_id_for_test(), next_view_id);
+    assert_eq!(view_id(&app, source_space), source);
+    assert_eq!(app.session.views().len(), 1);
+}
+
+#[test]
+fn diff_set_right_content_rebinds_parent_and_child_atomically() {
+    let mut app = make_app(vec![], None);
+    let mode_name = ModeName::new("diff-rebind-view-state-probe");
+    let create_view_calls = Rc::new(Cell::new(0));
+    let mode = app
+        .kernel
+        .modes_mut()
+        .register(RebindViewStateProbeMode {
+            name: mode_name,
+            create_view_calls: create_view_calls.clone(),
+        })
+        .unwrap();
+    let previous_right = app.new_buffer();
+    let replacement = app.new_buffer();
+    let (parent, left, right) = switch_focused_to_diff(&mut app, editor_cid(), previous_right);
+    let right_space = app.session.body_space_for_view(right).unwrap();
+    let scene_revision = app.session.scene_revision();
+    let parent_revision = app.session.view(parent).unwrap().revision();
+    let right_revision = app.session.view(right).unwrap().revision();
+    assert_eq!(create_view_calls.get(), 2);
+
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(
+            CommandId::new("diff.setRightContent").unwrap(),
+            vec![CommandValue::from(replacement.0)],
+        ),
+        view: right,
+        content: previous_right,
+    })
+    .unwrap();
+
+    assert_eq!(app.session.scene_revision(), scene_revision);
+    assert_eq!(app.session.view(parent).unwrap().children(), [left, right]);
+    assert_eq!(
+        app.session.view(parent).unwrap().binding(LEFT_BINDING),
+        Some(editor_cid())
+    );
+    assert_eq!(
+        app.session.view(parent).unwrap().binding(RIGHT_BINDING),
+        Some(replacement)
+    );
+    assert_eq!(
+        app.session.view(right).unwrap().document_content(),
+        Some(replacement)
+    );
+    assert_eq!(view_id(&app, right_space), right);
+    assert_eq!(
+        app.session.view(parent).unwrap().revision(),
+        Revision(parent_revision.0 + 1)
+    );
+    assert_eq!(
+        app.session.view(right).unwrap().revision(),
+        Revision(right_revision.0 + 1)
+    );
+    assert_eq!(create_view_calls.get(), 2);
+    assert_eq!(
+        app.session
+            .view_modes()
+            .state_for_test::<RebindViewStateProbe>(mode, right),
+        Some(&RebindViewStateProbe { created_by_call: 2 })
+    );
+    assert!(
+        app.kernel
+            .content_modes()
+            .state_for_test::<()>(mode, previous_right)
+            .is_none()
+    );
+    assert!(
+        app.kernel
+            .content_modes()
+            .state_for_test::<()>(mode, replacement)
+            .is_some()
+    );
+
+    let failed = app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(
+            CommandId::new("diff.setRightContent").unwrap(),
+            vec![CommandValue::from(u64::MAX)],
+        ),
+        view: right,
+        content: replacement,
+    });
+    assert!(failed.is_err());
+    assert_eq!(
+        app.session.view(parent).unwrap().binding(RIGHT_BINDING),
+        Some(replacement)
+    );
+    assert_eq!(
+        app.session.view(right).unwrap().document_content(),
+        Some(replacement)
+    );
+}
+
+#[test]
+fn closing_a_native_diff_child_cleans_up_the_whole_diff_view() {
+    let mut app = make_app(vec![], None);
+    app.set_status_bar_placement(StatusBarPlacement::PerPane)
+        .unwrap();
+    let original_space = app.session.focused();
+    let survivor_content = app.new_buffer();
+    let survivor_space = app
+        .split_space(
+            original_space,
+            survivor_content,
+            true,
+            SplitDirection::Right,
+            false,
+        )
+        .unwrap()
+        .new_space;
+    let survivor = view_id(&app, survivor_space);
+    let right_content = app.new_buffer();
+    let (parent, left, right) = switch_focused_to_diff(&mut app, editor_cid(), right_content);
+    let left_space = app.session.body_space_for_view(left).unwrap();
+    let right_space = app.session.body_space_for_view(right).unwrap();
+    let left_status = app.status_bar_for_view(left).unwrap().space;
+    let right_status = app.status_bar_for_view(right).unwrap().space;
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![OperationRequest::ViewLifecycle(
+            ViewLifecycleOperation::Focus { view: right },
+        )],
+        view: left,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    app.close_space(right_space).unwrap();
+
+    assert_eq!(app.session.focused(), survivor_space);
+    assert_eq!(app.session.views().len(), 1);
+    assert!(app.session.view(survivor).is_some());
+    for removed in [parent, left, right] {
+        assert!(app.session.view(removed).is_none());
+        assert!(app.session.view_modes().mode_ids(removed).is_empty());
+    }
+    assert!(!app.session.scene().contains(left_space));
+    assert!(!app.session.scene().contains(right_space));
+    assert!(!app.session.scene().contains(left_status));
+    assert!(!app.session.scene().contains(right_status));
+    assert!(app.status_bar_for_view(survivor).is_some());
+    assert!(app.kernel.contents().contains(editor_cid()));
+    assert!(app.kernel.contents().contains(right_content));
+}
+
+#[test]
+fn closing_content_from_native_diff_removes_the_lifecycle_owner() {
+    let mut app = make_app(vec![], None);
+    let right_content = app.new_buffer();
+    let (parent, left, right) = switch_focused_to_diff(&mut app, editor_cid(), right_content);
+
+    app.close_buffer(right_content, true).unwrap();
+
+    assert!(!app.kernel.contents().contains(right_content));
+    for removed in [parent, left, right] {
+        assert!(app.session.view(removed).is_none());
+    }
+    assert_eq!(app.session.views().len(), 1);
+    assert_eq!(
+        app.session
+            .view(view_id(&app, app.session.focused()))
+            .unwrap()
+            .document_content(),
+        Some(editor_cid())
+    );
+}
+
+#[test]
+fn closing_content_shared_by_both_diff_sides_removes_the_owner_once() {
+    let mut app = make_app(vec![], None);
+    let (parent, left, right) = switch_focused_to_diff(&mut app, editor_cid(), editor_cid());
+
+    app.close_buffer(editor_cid(), true).unwrap();
+
+    assert!(!app.kernel.contents().contains(editor_cid()));
+    for removed in [parent, left, right] {
+        assert!(app.session.view(removed).is_none());
+    }
+    assert_eq!(app.session.views().len(), 1);
+    assert_ne!(
+        app.session
+            .view(view_id(&app, app.session.focused()))
+            .unwrap()
+            .require_document(),
+        editor_cid()
+    );
 }
 
 #[test]

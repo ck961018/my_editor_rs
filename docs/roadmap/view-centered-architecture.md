@@ -456,6 +456,8 @@ View 顺序覆盖按部分优先列表解释：列出的活动 Mode 按用户顺
 
 ### M5：用 Native DiffView 验证 contract
 
+实现状态：已完成。
+
 目标：在开放 TypeScript View API 前验证复合 View 的真实需求。
 
 工作：
@@ -466,6 +468,19 @@ View 顺序覆盖按部分优先列表解释：列出的活动 Mode 按用户顺
 - 验证事件路由、Mode 解析、rollback、渲染和关闭清理。
 
 验收：本文 3.2 节的全部行为由集成测试覆盖，且不需要 Pane 自有状态。
+
+实现结果：内建 `core.diff` definition 持有 `left/right` bindings，实例是
+可切换的零 Pane 父 View；左右子 BufferView 不可切换并各自拥有 body Pane、
+selection 与解析后的语言 Mode。`view.switch` 和关闭从任一子 Pane 解析到
+父 DiffView，再复用当前子 Pane 替换完整语义子树。`diff.setRightContent`
+在一个 workspace draft 中同步重绑父 `right` 与右子 `document`，保持 Scene、
+父子 ViewId 和右子 Mode view state，并迁移 Mode content state 引用。
+
+这一步确认生命周期 owner 与 Scene 替换锚点必须分离，也确认复合 View 不应
+通过第三个协调 Pane 表达身份。输入、双 Pane 渲染、attachment、失败不发布、
+整体切换和关闭清理均由集成测试覆盖。Diff 替换在进入 prepared effects 前
+校验完整 workspace 与 attachment candidate；发布时先安装新 attachment，
+再清理旧 View。关闭任一侧 Content 会先提升并去重 DiffView 生命周期 owner。
 
 ### M6：开放 TypeScript View extension
 

@@ -263,6 +263,26 @@ editor.modes.define({
 两个 View 中，而这两个 View 可以有不同的 Mode attachment；如果都附加了
 同一 Mode，它们共享 Content state，但各自拥有 View state。
 
+内建 DiffView 可以直接作为 `view.switch` 的目标：
+
+```ts
+view.switch({
+  type: "core.diff",
+  left: originalContent,
+  right: changedContent,
+});
+```
+
+DiffView 是整体切换边界，左右子 BufferView 各自解析语言 Mode。焦点位于任一
+侧时，`view.switch(...)` 替换整个 DiffView；只改变右侧 Content 时使用：
+
+```ts
+diff.setRightContent(nextContent);
+```
+
+该命令保留 DiffView 和右子 BufferView 的身份，不等价于切换 View。它不会
+创建或关闭 Content；调用方传入的 Content 必须已经存在。
+
 `attach` 省略时，为兼容现有插件，等价于匹配
 `core.buffer` 的 `document` binding 且不限制语言。新插件应显式声明
 `attach`，让读者只看 definition 就能理解 Mode 的适用范围。当前运行时只

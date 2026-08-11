@@ -109,8 +109,12 @@ Resolver 对 `before` 约束做稳定拓扑排序：前向引用合法，无约�
 
 省略 binding 的 rule 表示只依赖 View definition，计划中不伪造 Content。
 当前 Mode context 只支持 BufferView 的 `document` binding。Resolver 的
-规则模型可表达 View-only 和其他 binding，但安装器在 Native 复合 View 验证
-contract 前会明确拒绝它们。
+规则模型可表达 View-only 和其他 binding，但安装器在相应 View adapter
+contract 开放前会明确拒绝它们。
+
+Native DiffView 的父 View 不合并左右 Content 的 Mode。两个子 BufferView
+分别按自己的 `document` classification 解析 Mode，因而各自保持独立 input
+和 view state；相同 `(ModeId, ContentId)` 仍按既有规则共享 content state。
 
 ## 6. 输入处理
 

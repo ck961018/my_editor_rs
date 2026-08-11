@@ -95,6 +95,12 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
 - `ViewWorkspace` 是 View 语义树、直属 Pane 映射、Scene、SceneBuilder、
   结构 ID、焦点和状态栏结构的唯一所有者。创建、替换和关闭先在完整结构
   草稿上校验，再一次发布；调用方只消费 View 生命周期事件。
+- Native DiffView 是持有 `left/right` bindings 的零 Pane 语义父 View；左右
+  子 BufferView 不可切换并各自拥有 Pane、selection 和语言 Mode。通用切换
+  与关闭从子 Pane 解析到 DiffView，替换锚点仍是一个实际子 Pane。
+- DiffView replacement 必须在进入 prepared effects 前校验完整 workspace 和
+  attachment candidate；发布时先接续新 attachment，再清理旧 View，避免共享
+  Mode content state 引用短暂归零。
 - `ContentStore` 是唯一 Content 表。`Content` 与 `ContentViewState` 都是
   和 `ContentKind` 对齐的封闭枚举。
 - `View` 持有稳定的 `ViewDefinitionId`、具名 Content bindings、可选的
@@ -103,8 +109,11 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
   viewport 或渲染缓存。同一 View 可占据多个 Content Space。
 - BufferView 使用保留的 `document` binding；只在明确要求 BufferView 的
   内部路径读取它。rebind 保留 ViewId，`view.switch` 替换完整 View。
+- `diff.setRightContent` 必须原子同步父 `right` 与右子 `document` binding，
+  保留父子 ViewId、Scene、右子 Mode view state，并迁移 Mode content state。
 - 关闭 Content 前必须拒绝仍会存活的具名 binding 引用；`force` 只覆盖脏
-  数据保护，不覆盖 binding 引用。
+  数据保护，不覆盖 binding 引用。document View 必须先提升到最近的
+  switchable 生命周期 owner 并去重，再计算删除范围。
 - selection 使用 `anchor/head`；collapsed cursor 等于 primary selection
   的 `head`。不要添加冗余方向字段。
 - Mode content state 按 `(ModeId, ContentId)` 共享，view state 按

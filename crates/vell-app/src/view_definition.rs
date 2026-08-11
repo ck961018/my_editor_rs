@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use vell_protocol::view::{BUFFER_VIEW_DEFINITION, ViewDefinition, ViewDefinitionId};
+use vell_protocol::view::{
+    BUFFER_VIEW_DEFINITION, DIFF_VIEW_DEFINITION, ViewDefinition, ViewDefinitionId,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ViewDefinitionRegistrationError {
@@ -20,6 +22,9 @@ impl ViewDefinitionRegistry {
         registry
             .register(ViewDefinition::buffer())
             .expect("built-in BufferView definition is unique");
+        registry
+            .register(ViewDefinition::diff())
+            .expect("built-in DiffView definition is unique");
         registry
     }
 
@@ -46,6 +51,11 @@ impl ViewDefinitionRegistry {
     pub(super) fn buffer(&self) -> &ViewDefinition {
         self.get(&ViewDefinitionId::new(BUFFER_VIEW_DEFINITION))
             .expect("registry contains built-in BufferView definition")
+    }
+
+    pub(super) fn diff(&self) -> &ViewDefinition {
+        self.get(&ViewDefinitionId::new(DIFF_VIEW_DEFINITION))
+            .expect("registry contains built-in DiffView definition")
     }
 }
 

@@ -1371,6 +1371,12 @@ editor.modes.define({
         switchView(ctx) {
           ctx.view.switch({ type: "core.buffer", create: true });
         },
+        switchDiff(ctx) {
+          ctx.view.switch({ type: "core.diff", left: 1, right: 2 });
+        },
+        invalidDiff(ctx) {
+          ctx.view.switch({ type: "core.diff", left: 1, right: 2, extra: true });
+        },
       },
       keys: { "\"": "quote" },
     },
@@ -1531,6 +1537,28 @@ editor.modes.define({
                 }
             )]
         ));
+        assert!(matches!(
+            execute("switchDiff").as_slice(),
+            [vell_mode::operation::OperationRequest::ViewLifecycle(
+                vell_mode::operation::ViewLifecycleOperation::Switch {
+                    spec: vell_mode::operation::ViewSpec::Diff { left, right },
+                }
+            )] if *left == ContentId(1) && *right == ContentId(2)
+        ));
+        let error = mode
+            .execute_view_with_arguments(
+                content_state.as_mut(),
+                view_state.as_mut(),
+                &context,
+                &ModeActionName::new("invalidDiff"),
+                &ModeValue::Null,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("diff view spec contains an unknown field"),
+            "{error}"
+        );
     }
 
     #[test]

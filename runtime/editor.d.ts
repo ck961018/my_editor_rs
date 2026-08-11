@@ -455,7 +455,13 @@ type BufferViewSpec =
 		readonly path: string;
 	};
 
-type ViewSpec = BufferViewSpec;
+type DiffViewSpec = {
+	readonly type: "core.diff";
+	readonly left: number;
+	readonly right: number;
+};
+
+type ViewSpec = BufferViewSpec | DiffViewSpec;
 
 interface ViewPrimitives {
 	focus(viewId: number): void;

@@ -5,7 +5,8 @@ use crate::buffer_lifecycle::BufferInfo;
 use crate::dispatcher::DispatcherInputSnapshot;
 use crate::kernel::{FileBaseline, OpenCompletion};
 use crate::mode::ModeDraftJournal;
-use crate::operation::{OperationError, ViewSpec};
+use crate::operation::{BufferViewSource, OperationError};
+use crate::session::PreparedDiffReplacement;
 use crate::theme::{FaceRemapOwner, ResolvedFaceOperation};
 use crate::transaction::TransactionRecord;
 use vell_core::clipboard::ClipboardPayload;
@@ -99,8 +100,9 @@ pub(super) enum PreparedEffect {
     ContentOpen(PathBuf),
     ViewSwitch {
         target: ViewId,
-        spec: ViewSpec,
+        source: BufferViewSource,
     },
+    DiffViewSwitch(PreparedDiffReplacement),
     ViewRebind {
         view: ViewId,
         binding: BindingKey,

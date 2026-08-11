@@ -2,13 +2,16 @@ use std::fmt;
 
 use crate::application::App;
 use crate::scene_model::{CloseResult, SceneError, SplitResult};
+use crate::session::PreparedDiffReplacement;
 use crate::view::View;
 use vell_core::content_store::ContentStore;
 use vell_frontend::Frontend;
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 use vell_protocol::space::{Sizing, SplitDirection};
 use vell_protocol::view::ViewDefinition;
-use vell_protocol::view::{BindingKey, DOCUMENT_BINDING};
+use vell_protocol::view::{
+    BindingKey, DIFF_VIEW_DEFINITION, DOCUMENT_BINDING, LEFT_BINDING, RIGHT_BINDING,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StatusBarPlacement {
@@ -163,6 +166,61 @@ impl<F: Frontend> App<F> {
         Ok(mutation.output)
     }
 
+    pub(super) fn prepare_diff_replacement(
+        &mut self,
+        target: SpaceId,
+        left: ContentId,
+        right: ContentId,
+    ) -> Result<PreparedDiffReplacement, LayoutError> {
+        let left_view = create_view(
+            left,
+            self.kernel.contents(),
+            self.kernel.buffer_view_definition(),
+        )
+        .ok_or(LayoutError::MissingContent(left))?;
+        let right_view = create_view(
+            right,
+            self.kernel.contents(),
+            self.kernel.buffer_view_definition(),
+        )
+        .ok_or(LayoutError::MissingContent(right))?;
+        let parent = View::with_definition(
+            self.kernel.diff_view_definition(),
+            [
+                (BindingKey::new(LEFT_BINDING), left),
+                (BindingKey::new(RIGHT_BINDING), right),
+            ],
+            None,
+        )
+        .expect("built-in DiffView definition and bindings are valid");
+        let (contents, modes, classifier, _) = self.kernel.attachment_runtime_parts();
+        self.session.prepare_diff_replacement(
+            target, parent, left_view, right_view, modes, classifier, contents,
+        )
+    }
+
+    pub(super) fn publish_diff_replacement(
+        &mut self,
+        prepared: PreparedDiffReplacement,
+    ) -> crate::view_workspace::DiffViewResult {
+        let (contents, modes, _, content_modes) = self.kernel.attachment_runtime_parts();
+        let mutation =
+            self.session
+                .publish_diff_replacement(prepared, modes, content_modes, contents);
+        for removed in &mutation.removed {
+            self.cancel_pending_commands_for_view(removed.view);
+            if let Some(content) = removed.document
+                && self.kernel.active_transaction_owner(content) == Some(Some(removed.view))
+            {
+                self.kernel.commit_transaction(content);
+            }
+        }
+        self.kernel.schedule_mode_jobs();
+        self.session
+            .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
+        mutation.output
+    }
+
     pub(super) fn switch_view_at(
         &mut self,
         target: ViewId,
@@ -175,7 +233,7 @@ impl<F: Frontend> App<F> {
         }
         let space = self
             .session
-            .body_space_for_view(target)
+            .replacement_space_for_view(target)
             .ok_or(LayoutError::MissingView(target))?;
         self.replace_space_content(space, content, true)
     }
@@ -186,6 +244,33 @@ impl<F: Frontend> App<F> {
         binding: &BindingKey,
         content: ContentId,
     ) -> Result<ContentId, LayoutError> {
+        if self
+            .session
+            .view(view)
+            .is_some_and(|view| view.definition().as_str() == DIFF_VIEW_DEFINITION)
+            && binding.as_str() == RIGHT_BINDING
+        {
+            let (contents, modes, classifier, content_modes) =
+                self.kernel.attachment_runtime_parts();
+            let (previous, right) = self.session.rebind_diff_right(
+                view,
+                content,
+                modes,
+                classifier,
+                content_modes,
+                contents,
+            )?;
+            if previous != content {
+                if self.kernel.active_transaction_owner(previous) == Some(Some(right)) {
+                    self.kernel.commit_transaction(previous);
+                }
+                self.cancel_pending_commands_for_view(right);
+                self.kernel.schedule_mode_jobs();
+            }
+            self.session
+                .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
+            return Ok(previous);
+        }
         let (contents, modes, classifier, content_modes) = self.kernel.attachment_runtime_parts();
         let previous = self.session.rebind_view_content(
             view,

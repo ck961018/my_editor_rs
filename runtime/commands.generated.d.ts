@@ -11,6 +11,7 @@ interface EditorCommandSeeds {
 	readonly "content.reload": (contentId?: number, force?: boolean) => void;
 	readonly "view.focus": (viewId: number) => void;
 	readonly "view.switch": (spec: ViewSpec) => void;
+	readonly "diff.setRightContent": (contentId: number) => void;
 	readonly undo: () => void;
 	readonly redo: () => void;
 	readonly quit: () => void;
@@ -42,6 +43,9 @@ interface EditorCommands {
 		readonly focus: EditorCommandSeeds["view.focus"];
 		readonly switch: EditorCommandSeeds["view.switch"];
 	};
+	readonly diff: {
+		readonly setRightContent: EditorCommandSeeds["diff.setRightContent"];
+	};
 	readonly undo: EditorCommandSeeds["undo"];
 	readonly redo: EditorCommandSeeds["redo"];
 	readonly quit: EditorCommandSeeds["quit"];
@@ -58,6 +62,7 @@ interface EditorCommands {
 
 declare const content: EditorCommands["content"];
 declare const view: EditorCommands["view"];
+declare const diff: EditorCommands["diff"];
 declare const undo: EditorCommands["undo"];
 declare const redo: EditorCommands["redo"];
 declare const quit: EditorCommands["quit"];

@@ -247,6 +247,15 @@ impl Kernel {
         self.view_definitions.buffer()
     }
 
+    pub(super) fn diff_view_definition(&self) -> &vell_protocol::view::ViewDefinition {
+        self.view_definitions.diff()
+    }
+
+    #[cfg(test)]
+    pub(super) fn classifier_mut_for_test(&mut self) -> &mut ContentClassifier {
+        &mut self.classifier
+    }
+
     #[cfg(test)]
     pub(super) fn view_definitions_mut_for_test(&mut self) -> &mut ViewDefinitionRegistry {
         &mut self.view_definitions

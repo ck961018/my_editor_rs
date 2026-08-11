@@ -30,6 +30,7 @@ pub enum ContentTarget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewTarget {
     Current,
+    Switchable,
     Id(ViewId),
 }
 
@@ -214,6 +215,7 @@ pub enum BufferViewSource {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ViewSpec {
     Buffer { source: BufferViewSource },
+    Diff { left: ContentId, right: ContentId },
 }
 
 impl ViewSpec {
@@ -221,6 +223,10 @@ impl ViewSpec {
         Self::Buffer {
             source: BufferViewSource::Content(content),
         }
+    }
+
+    pub fn diff(left: ContentId, right: ContentId) -> Self {
+        Self::Diff { left, right }
     }
 }
 

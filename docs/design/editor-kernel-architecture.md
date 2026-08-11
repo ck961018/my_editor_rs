@@ -182,12 +182,27 @@ history。Mode chain、输入状态和呈现缓存由 `ClientSession` 中的
 `ViewBindingOperation::Rebind` 只改变一个已声明 binding，保留 ViewId、
 definition、其他 bindings、Pane 和语义树。`document` rebind 会重建匹配
 新 Content 的 view state 和 Mode attachment；`view.switch` 则替换完整
-View。关闭 Content 时，`ViewWorkspace` 先计算会随 document View 删除的
-语义子树，再拒绝所有仍会存活的 binding 引用；`force` 不绕过引用保护。
+View。关闭 Content 时，`ViewWorkspace` 先把匹配的 document View 提升到
+最近的 switchable 生命周期 owner，去重将删除的语义子树，再拒绝所有仍会
+存活的 binding 引用；`force` 不绕过引用保护。
 
 `switchable` 是实例属性：通用 View 切换沿焦点 Pane 所属 view 的
 语义 `parent` 链向上，第一个 switchable 的 view 即切换目标。语义
 父子（复合 view 的组合关系）与 Space 布局父子是不同维度。
+
+Native `core.diff` 验证了复合 View 的语义根可以没有直属 Pane。它持有
+`left/right` bindings，两个不可切换的子 BufferView 分别拥有实际 body
+Pane。生命周期 owner 与 Scene 替换锚点因此是两个概念：前者是 DiffView，
+后者优先选择当前焦点子 Pane，否则选择第一个子 body Pane。整体切换和关闭
+删除完整语义子树，但复用该叶 Pane 安装替代 View，不增加协调 Pane。
+Diff 替换在进入 `ExecutionFrame` 的 prepared effects 前生成完整 workspace
+candidate 并预校验全部 attachment。发布时先接续新 attachment，再清理旧
+View，避免共享 Mode content state 和 Face remap 因引用短暂归零而重建。
+
+`diff.setRightContent` 在一个 `ViewWorkspace` draft 中同时改变父 `right`
+binding 和右子 BufferView 的 `document` binding。Scene 与父子 ViewId
+保持不变；右子的 ContentViewState 按新 Content 重建，已有 Mode view state
+保留，Mode content state 引用从旧 Content 迁移到新 Content。
 
 状态栏不是 Content（ADR 0001），也不是独立 View：状态栏 Space 直接
 引用其服务的 editor view，并在该 view 的 `ViewPaneMap` 中登记为

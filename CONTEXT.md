@@ -100,6 +100,13 @@ binding revision。安装器只发布仍然有效的计划，并增量保留已�
 Mode 保持静态拓扑顺序；它不会启用原本被筛掉的 Mode。
 _Avoid_: Mode 列表缓存、启动 Mode 顺序
 
+**Native DiffView**：
+内建的 `core.diff` View。它是可切换的零 Pane 语义父 View，持有 `left`、
+`right` bindings；两个不可切换的子 BufferView 才拥有实际 Pane、selection
+和语言 Mode。通用生命周期从子 Pane 解析到父 View，但替换时复用一个子
+Pane 作为 Scene 锚点。
+_Avoid_: 第三个协调 Pane、Pane state、左右 Content 的 Mode 并集
+
 ## Rules
 
 - Content 是"可以打开和关闭的东西"；派生呈现永远
@@ -113,6 +120,12 @@ _Avoid_: Mode 列表缓存、启动 Mode 顺序
   存活的 binding 引用；引用者必须先 rebind 或关闭。
 - Mode attachment 位于 View；多个 attachment 可以按
   Content 共享 Mode state。
+- DiffView 的父 binding 与对应子 BufferView `document` binding 必须在一个
+  workspace draft 中同步改变。
+- DiffView replacement 在 prepared effects 前校验完整 workspace 与
+  attachment candidate；发布时先接续新 attachment，再清理旧 View。
+- 关闭 Content 时，document View 先提升到最近的 switchable 生命周期 owner
+  并去重；同一 DiffView 的两侧引用同一 Content 也只删除一次。
 - ContentClassifier 只负责分类；ModeResolver 结合 View、binding、分类、
   override 和 Mode 规则产生 attachment plan。
 - 用户可见编号只对 listed content 派生；插件 API

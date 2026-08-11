@@ -12,6 +12,7 @@ use vell_mode::command_registry::{
 use vell_mode::mode_name::{ModeActionName, ModeName};
 use vell_protocol::ids::{ContentId, ViewId};
 use vell_protocol::space::SplitDirection;
+use vell_protocol::view::{BindingKey, RIGHT_BINDING};
 
 pub const NATIVE_COMMAND_IDS: &[&str] = &[
     "content.create",
@@ -23,6 +24,7 @@ pub const NATIVE_COMMAND_IDS: &[&str] = &[
     "content.reload",
     "view.focus",
     "view.switch",
+    "diff.setRightContent",
     "undo",
     "redo",
     "quit",
@@ -94,6 +96,19 @@ pub(super) fn native_command_registry() -> CommandRegistry {
             host.request(execute(OperationRequest::ViewLifecycle(
                 ViewLifecycleOperation::Switch { spec },
             )))
+        },
+    ));
+    registry.register(CommandEntry::new(
+        command_id("diff.setRightContent"),
+        |host: &mut dyn CommandHost, arguments: Vec<CommandValue>| {
+            let content = one_content_id(arguments)?;
+            host.request(execute(OperationRequest::ViewBinding {
+                target: crate::operation::ViewTarget::Switchable,
+                operation: crate::operation::ViewBindingOperation::Rebind {
+                    binding: BindingKey::new(RIGHT_BINDING),
+                    content: ContentTarget::Id(content),
+                },
+            }))
         },
     ));
     register_no_args(&mut registry, "undo", history(TransactionIntent::Undo));
@@ -223,6 +238,17 @@ fn one_view_id(arguments: Vec<CommandValue>) -> Result<ViewId, CommandError> {
     })
 }
 
+fn one_content_id(arguments: Vec<CommandValue>) -> Result<ContentId, CommandError> {
+    let [value] = arguments.as_slice() else {
+        return Err(CommandError::InvalidArguments(
+            "expected one content id".to_owned(),
+        ));
+    };
+    value.as_u64().map(ContentId).ok_or_else(|| {
+        CommandError::InvalidArguments("content id must be a non-negative integer".to_owned())
+    })
+}
+
 fn one_string(arguments: Vec<CommandValue>, name: &str) -> Result<String, CommandError> {
     let [value] = arguments.as_slice() else {
         return Err(CommandError::InvalidArguments(format!(
@@ -321,9 +347,31 @@ fn one_view_spec(arguments: Vec<CommandValue>) -> Result<ViewSpec, CommandError>
     let object = value
         .as_object()
         .ok_or_else(|| CommandError::InvalidArguments("view spec must be an object".to_owned()))?;
+    if object.get("type").and_then(CommandValue::as_str) == Some("core.diff") {
+        if object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "type" | "left" | "right"))
+        {
+            return Err(CommandError::InvalidArguments(
+                "diff view spec contains an unknown field".to_owned(),
+            ));
+        }
+        let content = |name: &str| {
+            object
+                .get(name)
+                .and_then(CommandValue::as_u64)
+                .map(ContentId)
+                .ok_or_else(|| {
+                    CommandError::InvalidArguments(format!(
+                        "diff view spec {name} must be a non-negative content id"
+                    ))
+                })
+        };
+        return Ok(ViewSpec::diff(content("left")?, content("right")?));
+    }
     if object.get("type").and_then(CommandValue::as_str) != Some("core.buffer") {
         return Err(CommandError::InvalidArguments(
-            "view spec type must be 'core.buffer'".to_owned(),
+            "view spec type must be 'core.buffer' or 'core.diff'".to_owned(),
         ));
     }
     if object
@@ -426,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn view_switch_requires_one_closed_buffer_view_source() {
+    fn view_switch_accepts_closed_buffer_and_diff_specs() {
         assert_eq!(
             one_view_spec(vec![serde_json::json!({
                 "type": "core.buffer",
@@ -449,6 +497,30 @@ mod tests {
                 "type": "core.buffer",
                 "content": 7,
                 "create": true,
+            })])
+            .is_err()
+        );
+        assert_eq!(
+            one_view_spec(vec![serde_json::json!({
+                "type": "core.diff",
+                "left": 7,
+                "right": 8,
+            })]),
+            Ok(ViewSpec::diff(ContentId(7), ContentId(8)))
+        );
+        assert!(
+            one_view_spec(vec![serde_json::json!({
+                "type": "core.diff",
+                "left": 7,
+            })])
+            .is_err()
+        );
+        assert!(
+            one_view_spec(vec![serde_json::json!({
+                "type": "core.diff",
+                "left": 7,
+                "right": 8,
+                "document": 9,
             })])
             .is_err()
         );

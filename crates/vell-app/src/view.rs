@@ -245,10 +245,6 @@ impl View {
         self.switchable
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "reserved for ViewWorkspace compound creation")
-    )]
     pub(crate) fn set_switchable(&mut self, switchable: bool) {
         self.switchable = switchable;
     }
@@ -265,10 +261,6 @@ impl View {
         &self.children
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "reserved for ViewWorkspace compound creation")
-    )]
     pub(crate) fn push_child(&mut self, child: ViewId) {
         if !self.children.contains(&child) {
             self.children.push(child);
