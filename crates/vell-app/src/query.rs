@@ -2,13 +2,13 @@ use std::collections::HashMap;
 
 use crate::presentation::PresentationLayerStore;
 use crate::theme::SessionFaces;
-use crate::view::{BODY_PANE, STATUS_PANE, View};
+use crate::view::{BODY_PANE, GUTTER_PANE, STATUS_PANE, View};
 use vell_core::content_store::ContentStore;
 use vell_core::content_view_state::ContentViewState;
 use vell_protocol::content_query::{
     BufferBackingState, ContentData, ContentQuery, ContentQueryKind, CursorStyle,
-    DEFAULT_TAB_WIDTH, DirtyState, FaceName, FacePatch, LinesPresentation, MAX_TAB_WIDTH,
-    PaintFace, RenderQuery, RenderQueryError, RowRange, SaveState, SelectionShape,
+    DEFAULT_TAB_WIDTH, DirtyState, FaceName, FacePatch, LineNumberPresentation, LinesPresentation,
+    MAX_TAB_WIDTH, PaintFace, RenderQuery, RenderQueryError, RowRange, SaveState, SelectionShape,
     StatusBarPresentation, StatusBarSegment, TextDecoration, TextPresentation, ViewData,
     ViewPresentation,
 };
@@ -50,6 +50,10 @@ impl RenderQuery for AppQuery<'_> {
             Some(BODY_PANE) => {
                 let content = self.document_content(id, view)?;
                 self.body_pane_view(id, content, view)
+            }
+            Some(GUTTER_PANE) => {
+                let content = self.document_content(id, view)?;
+                self.gutter_pane_view(id, content, view)
             }
             Some(STATUS_PANE) => {
                 let content = self.document_content(id, view)?;
@@ -161,6 +165,76 @@ impl AppQuery<'_> {
         Ok(ViewData {
             content: Some(content),
             presentation,
+        })
+    }
+
+    fn gutter_pane_view(
+        &self,
+        id: ViewId,
+        content: ContentId,
+        view: &View,
+    ) -> Result<ViewData, RenderQueryError> {
+        let (_, document_state) = view
+            .document()
+            .filter(|(document, _)| *document == content)
+            .ok_or(RenderQueryError::IncompatibleContentViewState { view: id, content })?;
+        let ContentViewState::Buffer(state) = document_state;
+        let current_row = match self.contents.query(
+            content,
+            ContentQuery::TextPoints(vec![state.selections().primary().head()]),
+        ) {
+            ContentData::TextPoints(points) => points.first().map_or(0, |point| point.row),
+            _ => {
+                return Err(RenderQueryError::InvalidContentData {
+                    content,
+                    query: ContentQueryKind::TextPoints,
+                });
+            }
+        };
+        let mut line_count = match self.contents.query(content, ContentQuery::TextMetrics) {
+            ContentData::TextMetrics(metrics) => metrics.line_count,
+            _ => {
+                return Err(RenderQueryError::InvalidContentData {
+                    content,
+                    query: ContentQueryKind::TextMetrics,
+                });
+            }
+        };
+        if line_count > 1 && current_row < line_count - 1 {
+            let last_row = RowRange {
+                start: line_count - 1,
+                end: line_count,
+            };
+            match self
+                .contents
+                .query(content, ContentQuery::TextRows(last_row))
+            {
+                ContentData::TextRows(rows) if rows.first().is_some_and(String::is_empty) => {
+                    line_count -= 1;
+                }
+                ContentData::TextRows(_) => {}
+                _ => {
+                    return Err(RenderQueryError::InvalidContentData {
+                        content,
+                        query: ContentQueryKind::TextRows,
+                    });
+                }
+            }
+        }
+        Ok(ViewData {
+            content: Some(content),
+            presentation: ViewPresentation::LineNumbers(LineNumberPresentation {
+                base_face: self
+                    .faces
+                    .resolve_root_for(&FaceName::new("ui.gutter"), content, id),
+                current_face: self.faces.resolve_for(
+                    &FaceName::new("ui.gutter.current"),
+                    content,
+                    id,
+                ),
+                current_row,
+                line_count,
+            }),
         })
     }
 

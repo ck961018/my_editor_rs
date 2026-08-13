@@ -8,9 +8,12 @@ use std::collections::{HashMap, HashSet};
 
 use crate::layout::{LayoutError, StatusBarHandle, StatusBarPlacement};
 use crate::mode::CompoundViewDefinition;
-use crate::scene_model::{CloseResult, SceneBuilder, SceneError, SplitResult, build_editor_scene};
-use crate::view::{BODY_PANE, ContentBindingError, STATUS_PANE, View};
+use crate::scene_model::{
+    BufferPaneRecipe, CloseResult, SceneBuilder, SceneError, SplitResult, build_editor_scene,
+};
+use crate::view::{BODY_PANE, ContentBindingError, GUTTER_PANE, STATUS_PANE, View};
 use vell_core::content_view_state::ContentViewState;
+use vell_protocol::editor_options::EditorOptions;
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 use vell_protocol::revision::Revision;
 use vell_protocol::scene::Scene;
@@ -32,6 +35,7 @@ pub(super) struct ViewWorkspace {
     global_status_space: Option<SpaceId>,
     /// PerPane 布局下每个 View 的状态栏 Space。
     status_by_editor: HashMap<ViewId, SpaceId>,
+    options: EditorOptions,
 }
 
 pub(super) struct RemovedView {
@@ -56,11 +60,16 @@ impl ViewWorkspace {
         editor_id: ViewId,
         mut editor: View,
         next_view_id: u64,
+        options: EditorOptions,
     ) -> Self {
         let mut scene_builder = SceneBuilder::new();
-        let (scene, editor_space, status_space) =
+        let (mut scene, editor_space, status_space) =
             build_editor_scene(&mut scene_builder, width as i32, height as i32, editor_id);
+        let gutter = scene_builder
+            .wrap_with_gutter(&mut scene, editor_space, editor_id, options.gutter_width())
+            .expect("initial BufferView accepts its native gutter");
         editor.assign_pane(editor_space, BODY_PANE);
+        editor.assign_pane(gutter.gutter_space, GUTTER_PANE);
         editor.assign_pane(status_space, STATUS_PANE);
         let focused = resolve_focus(&scene, editor_space, Some(editor_space))
             .expect("initial scene has a focusable content space");
@@ -74,6 +83,7 @@ impl ViewWorkspace {
             status_placement: StatusBarPlacement::Global,
             global_status_space: Some(status_space),
             status_by_editor: HashMap::new(),
+            options,
         };
         debug_assert!(workspace.validate().is_ok());
         workspace
@@ -154,7 +164,7 @@ impl ViewWorkspace {
         side: crate::mode::ViewExtensionPaneSide,
         size: u16,
     ) -> Result<SpaceId, LayoutError> {
-        if matches!(key, BODY_PANE | STATUS_PANE) {
+        if matches!(key, BODY_PANE | GUTTER_PANE | STATUS_PANE) {
             return Err(LayoutError::InvalidWorkspace(format!(
                 "view extension pane key '{key}' is reserved"
             )));
@@ -166,7 +176,7 @@ impl ViewWorkspace {
         if let Some(space) = target.panes().space_for_key(key) {
             return Ok(space);
         }
-        let anchor = self.replacement_space_for_view(view).ok_or_else(|| {
+        let anchor = self.layout_root_for_view(view).ok_or_else(|| {
             LayoutError::InvalidWorkspace(format!(
                 "View {} has no Pane anchor for extension '{key}'",
                 view.0
@@ -181,7 +191,7 @@ impl ViewWorkspace {
         let mut draft = self.clone();
         let result = draft
             .scene_builder
-            .split(&mut draft.scene, anchor, view, false, direction)?;
+            .attach_pane(&mut draft.scene, anchor, view, direction)?;
         draft.scene_builder.set_sizing(
             &mut draft.scene,
             result.new_space,
@@ -221,7 +231,7 @@ impl ViewWorkspace {
         targets.sort_by_key(|(_, space, _)| std::cmp::Reverse(space.0));
         let mut draft = self.clone();
         for (view, space, key) in &targets {
-            if matches!(key.as_str(), BODY_PANE | STATUS_PANE) {
+            if matches!(key.as_str(), BODY_PANE | GUTTER_PANE | STATUS_PANE) {
                 return Err(LayoutError::InvalidWorkspace(format!(
                     "cannot remove reserved Pane '{key}' as a view extension"
                 )));
@@ -284,8 +294,12 @@ impl ViewWorkspace {
                     .collect::<Vec<_>>();
                 self.status_by_editor.clear();
                 for (editor_space, editor_view) in editors {
+                    let pane_root = self
+                        .layout_root_for_view(editor_view)
+                        .ok_or(LayoutError::MissingView(editor_view))?;
                     let pane = self.scene_builder.wrap_with_status(
                         &mut self.scene,
+                        pane_root,
                         editor_space,
                         editor_view,
                     )?;
@@ -680,39 +694,43 @@ impl ViewWorkspace {
         draft.reject_non_body_space(target)?;
         let previous = draft.focused;
         let id = draft.alloc_view_id();
-        let result = match draft.status_placement {
-            StatusBarPlacement::Global => {
-                let result = draft.scene_builder.split(
-                    &mut draft.scene,
-                    target,
-                    id,
+        let target_view = draft
+            .view_for_space(target)
+            .ok_or(SceneError::ExpectedContentLeaf(target))?;
+        let target_pane = draft
+            .layout_root_for_view(target_view)
+            .ok_or(LayoutError::MissingView(target_view))?;
+        let result = if view.definition().as_str() == BUFFER_VIEW_DEFINITION {
+            let pane = draft.scene_builder.split_buffer_pane(
+                &mut draft.scene,
+                target_pane,
+                direction,
+                BufferPaneRecipe {
+                    view: id,
                     focusable,
-                    direction,
-                )?;
-                view.assign_pane(result.new_space, BODY_PANE);
-                result
+                    gutter_width: draft.options.gutter_width(),
+                    with_status: draft.status_placement == StatusBarPlacement::PerPane,
+                },
+            )?;
+            view.assign_pane(pane.editor_space, BODY_PANE);
+            view.assign_pane(pane.gutter_space, GUTTER_PANE);
+            if let Some(status_space) = pane.status_space {
+                view.assign_pane(status_space, STATUS_PANE);
+                draft.status_by_editor.insert(id, status_space);
             }
-            StatusBarPlacement::PerPane => {
-                let target_pane = draft
-                    .scene
-                    .node(target)
-                    .parent
-                    .ok_or(SceneError::InvalidTree)?;
-                let pane = draft.scene_builder.split_pane(
-                    &mut draft.scene,
-                    target_pane,
-                    id,
-                    id,
-                    focusable,
-                    direction,
-                )?;
-                view.assign_pane(pane.editor_space, BODY_PANE);
-                view.assign_pane(pane.status_space, STATUS_PANE);
-                draft.status_by_editor.insert(id, pane.status_space);
-                SplitResult {
-                    new_space: pane.editor_space,
-                }
+            SplitResult {
+                new_space: pane.editor_space,
             }
+        } else {
+            let result = draft.scene_builder.split(
+                &mut draft.scene,
+                target_pane,
+                id,
+                focusable,
+                direction,
+            )?;
+            view.assign_pane(result.new_space, BODY_PANE);
+            result
         };
         assert!(
             draft.views.insert(id, view).is_none(),
@@ -957,6 +975,15 @@ impl ViewWorkspace {
             .scene_builder
             .replace_view(&mut draft.scene, target, new_view, focusable)?;
         replacement.assign_pane(target, BODY_PANE);
+        if replacement.definition().as_str() == BUFFER_VIEW_DEFINITION {
+            let gutter = draft.scene_builder.wrap_with_gutter(
+                &mut draft.scene,
+                target,
+                new_view,
+                draft.options.gutter_width(),
+            )?;
+            replacement.assign_pane(gutter.gutter_space, GUTTER_PANE);
+        }
         if let Some(status) = per_pane_status {
             draft
                 .scene_builder
@@ -1046,6 +1073,82 @@ impl ViewWorkspace {
             return Err(LayoutError::StatusBarSpace(target));
         }
         Ok(())
+    }
+
+    fn buffer_content_root(&self, view: ViewId) -> Result<SpaceId, LayoutError> {
+        let data = self
+            .views
+            .get(&view)
+            .ok_or(LayoutError::MissingView(view))?;
+        if data.definition().as_str() != BUFFER_VIEW_DEFINITION {
+            return Err(LayoutError::InvalidWorkspace(format!(
+                "View {} is not a BufferView",
+                view.0
+            )));
+        }
+        let body = data.panes().space_for_key(BODY_PANE).ok_or_else(|| {
+            LayoutError::InvalidWorkspace(format!(
+                "BufferView {} is missing its '{BODY_PANE}' Pane",
+                view.0
+            ))
+        })?;
+        let gutter = data.panes().space_for_key(GUTTER_PANE).ok_or_else(|| {
+            LayoutError::InvalidWorkspace(format!(
+                "BufferView {} is missing its '{GUTTER_PANE}' Pane",
+                view.0
+            ))
+        })?;
+        let root = self
+            .scene
+            .node(body)
+            .parent
+            .ok_or(SceneError::InvalidTree)?;
+        if self.scene.node(gutter).parent != Some(root)
+            || self.scene.node(root).children.as_slice() != [gutter, body]
+        {
+            return Err(LayoutError::InvalidWorkspace(format!(
+                "BufferView {} has an invalid gutter/body pane recipe",
+                view.0
+            )));
+        }
+        Ok(root)
+    }
+
+    fn layout_root_for_view(&self, view: ViewId) -> Option<SpaceId> {
+        let subtree = self.semantic_subtree(view).ok()?;
+        let spaces = subtree
+            .into_iter()
+            .flat_map(|view| self.views.get(&view).into_iter())
+            .flat_map(|view| view.panes().spaces())
+            .filter(|space| Some(*space) != self.global_status_space)
+            .collect::<Vec<_>>();
+        let first = *spaces.first()?;
+        self.ancestors(first).into_iter().find(|candidate| {
+            spaces
+                .iter()
+                .all(|space| self.is_ancestor(*candidate, *space))
+        })
+    }
+
+    fn ancestors(&self, mut space: SpaceId) -> Vec<SpaceId> {
+        let mut ancestors = vec![space];
+        while let Some(parent) = self.scene.node(space).parent {
+            ancestors.push(parent);
+            space = parent;
+        }
+        ancestors
+    }
+
+    fn is_ancestor(&self, ancestor: SpaceId, mut space: SpaceId) -> bool {
+        loop {
+            if space == ancestor {
+                return true;
+            }
+            let Some(parent) = self.scene.node(space).parent else {
+                return false;
+            };
+            space = parent;
+        }
     }
 
     fn semantic_subtree(&self, root: ViewId) -> Result<Vec<ViewId>, LayoutError> {
@@ -1273,6 +1376,8 @@ impl ViewWorkspace {
             }
             if view.definition().as_str() == DIFF_VIEW_DEFINITION {
                 self.validate_diff_view(*id, view)?;
+            } else if view.definition().as_str() == BUFFER_VIEW_DEFINITION {
+                self.buffer_content_root(*id)?;
             }
         }
         let mut reachable = HashSet::new();
@@ -1351,6 +1456,7 @@ impl ViewWorkspace {
             |message: &str| LayoutError::InvalidWorkspace(format!("DiffView {} {message}", id.0));
         if !view.switchable()
             || view.panes().space_for_key(BODY_PANE).is_some()
+            || view.panes().space_for_key(GUTTER_PANE).is_some()
             || view.panes().space_for_key(STATUS_PANE).is_some()
         {
             return Err(invalid(

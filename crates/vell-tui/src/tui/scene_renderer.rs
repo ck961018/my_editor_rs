@@ -7,9 +7,10 @@ use std::io;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::protocol::content_query::{
-    ContentData, ContentQuery, ContentQueryKind, DEFAULT_TAB_WIDTH, FacePatch, LinesPresentation,
-    PaintFace, RenderQuery, RenderQueryError, RowRange, SelectionShape, StatusBarPresentation,
-    StatusBarSegment, TextPresentation, ViewData, ViewPresentation,
+    ContentData, ContentQuery, ContentQueryKind, DEFAULT_TAB_WIDTH, FacePatch,
+    LineNumberPresentation, LinesPresentation, PaintFace, RenderQuery, RenderQueryError, RowRange,
+    SelectionShape, StatusBarPresentation, StatusBarSegment, TextPresentation, ViewData,
+    ViewPresentation,
 };
 use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::revision::Revision;
@@ -88,7 +89,9 @@ impl SceneRenderer {
             .expect("focused space has render data");
         let focused_text = match &focused_view.presentation {
             ViewPresentation::Text(text) => Some(text),
-            ViewPresentation::StatusBar(_) | ViewPresentation::Lines(_) => None,
+            ViewPresentation::LineNumbers(_)
+            | ViewPresentation::StatusBar(_)
+            | ViewPresentation::Lines(_) => None,
         };
         let focused_head = focused_text
             .map(|text| {
@@ -423,9 +426,75 @@ fn paint_item(
             })?;
             paint_text_item(item, query, content, text, viewports, canvas)
         }
+        ViewPresentation::LineNumbers(presentation) => {
+            paint_line_numbers(item, presentation, viewports, canvas)
+        }
         ViewPresentation::StatusBar(presentation) => paint_status_bar(item, presentation, canvas),
         ViewPresentation::Lines(presentation) => paint_lines(item, presentation, canvas),
     }
+}
+
+fn paint_line_numbers(
+    item: &RenderItem,
+    presentation: &LineNumberPresentation,
+    viewports: &HashMap<ViewId, Viewport>,
+    canvas: &mut dyn Canvas,
+) -> io::Result<()> {
+    let viewport = viewports
+        .get(&item.view_id)
+        .copied()
+        .unwrap_or_else(Viewport::origin);
+    let height = item.rect.height.max(0) as usize;
+    let width = item.rect.width.max(0) as usize;
+    let item_row = item.rect.y.max(0) as usize;
+    let item_col = item.rect.x.max(0) as usize;
+    for offset in 0..height {
+        let row = viewport.top_row.saturating_add(offset);
+        let current = row == presentation.current_row;
+        let face = if current {
+            presentation.current_face.resolve(&presentation.base_face)
+        } else {
+            presentation.base_face.clone()
+        };
+        clear_item_row(canvas, item_row + offset, item_col, width, &face)?;
+        if row >= presentation.line_count || width == 0 {
+            continue;
+        }
+        let number = if current {
+            row.saturating_add(1)
+        } else {
+            row.abs_diff(presentation.current_row)
+        };
+        let label = line_number_label(number, width);
+        canvas.move_cursor(item_row + offset, item_col)?;
+        canvas.set_face(&face)?;
+        canvas.write_str(&label)?;
+    }
+    Ok(())
+}
+
+fn line_number_label(number: usize, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return if number < 10 {
+            number.to_string()
+        } else {
+            ">".to_owned()
+        };
+    }
+    let number_width = width - 1;
+    let number = number.to_string();
+    let label = if number.len() <= number_width {
+        format!("{number:>number_width$}")
+    } else if number_width == 1 {
+        ">".to_owned()
+    } else {
+        let suffix = &number[number.len() - (number_width - 1)..];
+        format!(">{suffix}")
+    };
+    format!("{label} ")
 }
 
 fn paint_lines(
@@ -880,14 +949,16 @@ mod tests {
     use super::*;
     use crate::protocol::content_query::{
         BufferBackingState, Color, ContentData, ContentQuery, CursorStyle, DirtyState, FaceValue,
-        RenderQuery, SaveState, StatusBarPresentation, StatusBarSegment, TextMetrics,
-        TextPresentation, ViewData, ViewPresentation,
+        LineNumberPresentation, RenderQuery, SaveState, StatusBarPresentation, StatusBarSegment,
+        TextMetrics, TextPresentation, ViewData, ViewPresentation,
     };
     use crate::protocol::ids::{ContentId, ViewId};
     use crate::protocol::selection::{Selection, Selections, TextOffset};
     use crate::protocol::viewport::ViewportAlignment;
     use crate::terminal::output::Output;
-    use crate::tui::test_scene::{editor_scene, nested_focus_scene, split_editor_scene};
+    use crate::tui::test_scene::{
+        buffer_view_scene, editor_scene, nested_focus_scene, split_editor_scene,
+    };
     use std::collections::HashMap;
 
     fn points_for_lines(lines: &[String], offsets: Vec<TextOffset>) -> Vec<TextPoint> {
@@ -1077,6 +1148,166 @@ mod tests {
                 .cloned()
                 .unwrap_or_else(|| status_view(ContentId(1))))
         }
+    }
+
+    struct LineNumberQuery {
+        lines: Vec<String>,
+        gutter: SpaceId,
+        current_row: usize,
+    }
+
+    impl RenderQuery for LineNumberQuery {
+        fn content(
+            &self,
+            _content: ContentId,
+            query: ContentQuery,
+        ) -> Result<ContentData, RenderQueryError> {
+            Ok(match query {
+                ContentQuery::TextRows(range) => ContentData::TextRows(
+                    self.lines
+                        .iter()
+                        .skip(range.start)
+                        .take(range.end.saturating_sub(range.start))
+                        .cloned()
+                        .collect(),
+                ),
+                ContentQuery::TextPoints(offsets) => {
+                    ContentData::TextPoints(points_for_lines(&self.lines, offsets))
+                }
+                ContentQuery::TextMetrics => ContentData::TextMetrics(TextMetrics {
+                    line_count: self.lines.len(),
+                    char_count: self.lines.iter().map(|line| line.chars().count()).sum(),
+                }),
+                ContentQuery::ResourceName => ContentData::ResourceName(None),
+                ContentQuery::ResourcePath => ContentData::ResourcePath(None),
+                ContentQuery::BackingState => {
+                    ContentData::BackingState(BufferBackingState::Untitled)
+                }
+                ContentQuery::DirtyState => ContentData::DirtyState(DirtyState::Clean),
+                ContentQuery::SaveState => ContentData::SaveState(SaveState::Idle),
+            })
+        }
+
+        fn view(&self, _view: ViewId, space: SpaceId) -> Result<ViewData, RenderQueryError> {
+            let content = ContentId(0);
+            if space == self.gutter {
+                return Ok(ViewData {
+                    content: Some(content),
+                    presentation: ViewPresentation::LineNumbers(LineNumberPresentation {
+                        base_face: PaintFace::default(),
+                        current_face: FacePatch::default(),
+                        current_row: self.current_row,
+                        line_count: self.lines.len(),
+                    }),
+                });
+            }
+            let cursor = self
+                .lines
+                .iter()
+                .take(self.current_row)
+                .map(|line| line.chars().count() + 1)
+                .sum();
+            Ok(text_view(
+                content,
+                Selections::single(Selection::collapsed(TextOffset { char_index: cursor })),
+                CursorStyle::Default,
+            ))
+        }
+    }
+
+    #[test]
+    fn buffer_view_gutter_renders_current_absolute_and_other_relative_lines() {
+        let (scene, gutter, body) = buffer_view_scene(20, 5, ViewId(0), 4);
+        let query = LineNumberQuery {
+            lines: (1..=5).map(|line| format!("text {line}")).collect(),
+            gutter,
+            current_row: 2,
+        };
+        let mut renderer = SceneRenderer::new();
+        let mut output = Output::new(Vec::new());
+
+        renderer
+            .render(&scene, Revision(0), &query, body, &mut output)
+            .unwrap();
+
+        let output = String::from_utf8(output.into_inner()).unwrap();
+        assert!(output.contains("  3 "), "current absolute line: {output}");
+        assert_eq!(
+            output.matches("  1 ").count(),
+            2,
+            "relative lines: {output}"
+        );
+        assert_eq!(
+            output.matches("  2 ").count(),
+            2,
+            "relative lines: {output}"
+        );
+    }
+
+    #[test]
+    fn buffer_view_gutter_keeps_a_blank_cell_before_the_text() {
+        let (scene, gutter, body) = buffer_view_scene(20, 1, ViewId(0), 4);
+        let query = LineNumberQuery {
+            lines: vec!["text".to_owned()],
+            gutter,
+            current_row: 0,
+        };
+        let mut renderer = SceneRenderer::new();
+        let mut output = Output::new(Vec::new());
+
+        renderer
+            .render(&scene, Revision(0), &query, body, &mut output)
+            .unwrap();
+
+        let output = String::from_utf8(output.into_inner()).unwrap();
+        assert!(
+            output.contains("  1 "),
+            "line number must leave a trailing separator cell: {output}"
+        );
+    }
+
+    #[test]
+    fn gutter_uses_the_shared_viewport_and_ignores_horizontal_scroll() {
+        let (scene, gutter, body) = buffer_view_scene(20, 4, ViewId(0), 4);
+        let query = LineNumberQuery {
+            lines: (1..=12).map(|line| format!("text {line}")).collect(),
+            gutter,
+            current_row: 7,
+        };
+        let mut renderer = SceneRenderer::new();
+        renderer.viewports.insert(
+            ViewId(0),
+            Viewport {
+                top_row: 5,
+                left_col: 9,
+            },
+        );
+        let mut output = Output::new(Vec::new());
+
+        renderer
+            .render(&scene, Revision(0), &query, body, &mut output)
+            .unwrap();
+
+        let output = String::from_utf8(output.into_inner()).unwrap();
+        assert!(output.contains("  8 "), "current absolute line: {output}");
+        assert_eq!(
+            output.matches("  1 ").count(),
+            2,
+            "relative lines: {output}"
+        );
+        assert_eq!(
+            output.matches("  2 ").count(),
+            1,
+            "relative lines: {output}"
+        );
+    }
+
+    #[test]
+    fn gutter_labels_right_align_and_mark_overflow() {
+        assert_eq!(line_number_label(7, 4), "  7 ");
+        assert_eq!(line_number_label(12_345, 4), ">45 ");
+        assert_eq!(line_number_label(12_345, 1), ">");
+        assert_eq!(line_number_label(12_345, 0), "");
     }
 
     #[test]

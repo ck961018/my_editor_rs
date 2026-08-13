@@ -19,8 +19,8 @@
    一个文件编辑器、一个左右对比器，都是 **View**。View 可以绑定零个、
    一个或多个 Content，并拥有自己的 selection、Mode 组合和生命周期。
 3. 屏幕上要增加什么显示区域？
-   正文、状态栏、minimap 都是 **Pane**。Pane 只是 View 的显示入口；它不
-   拥有 Content、Mode 或独立生命周期。
+   正文、原生行号 gutter、状态栏和 minimap 都是 **Pane**。Pane 只是 View
+   的显示入口；它不拥有 Content、Mode 或独立生命周期。
 4. 你要增加的是行为、附加显示，还是新的交互单元？
    这一步决定使用哪一种扩展方式。
 
@@ -89,12 +89,40 @@ extension、View definition、后台运行时、Theme 和 Face override，再用
 `prepare_commands()` 安装原生命令视图并取回命令，最后构建 App。内建配置
 的测试或 headless 入口可使用 `load_default_configuration()`。
 
+## 配置 BufferView 原生 gutter
+
+每个 `core.buffer` 默认显示宿主原生行号 gutter。当前逻辑行显示一基绝对
+行号，其他可见行显示相对距离。插件不需要定义 Mode、View extension 或
+render callback；DiffView 的两个子 BufferView 会各自获得 gutter。
+
+用户可以在顶层 `config.ts` 调整 session 默认值：
+
+```ts
+editor.configure({
+  bufferView: {
+    gutter: {
+      visible: true,
+      width: 4,
+    },
+  },
+});
+```
+
+`visible` 默认为 `true`，`width` 默认为 4，只接受 1 到 16 的整数。配置对象
+可以只写任一字段；多次调用按字段合并，后一次覆盖前一次。隐藏 gutter 会
+保留 Pane identity，只把布局宽度设为零。
+
+`editor.configure` 只在模块加载期可用。Mode callback、View extension
+callback、交互求值和 Worker 不能改变启动配置；模块失败时，本次 options
+修改会与其他注册项一起回滚。
+
 ## 扩展已有 View
 
-View extension 适合 minimap、gutter、outline 摘要等派生显示。插件作者只需回答
-三个问题：扩展哪一种 View、增加哪个 Pane、该 Pane 显示什么。插件不创建
-ViewId、SpaceId 或布局树，也不能通过 extension 改变宿主 View 的 Content 和
-生命周期。
+View extension 适合 minimap、outline 摘要等可卸载派生显示。插件作者只需
+回答三个问题：扩展哪一种 View、增加哪个 Pane、该 Pane 显示什么。插件不
+创建 ViewId、SpaceId 或布局树，也不能通过 extension 改变宿主 View 的
+Content 和生命周期。默认行号 gutter 是 BufferView 的宿主结构，不应使用
+extension 重复实现。
 
 ```ts
 editor.views.extend("core.buffer", {
@@ -195,8 +223,8 @@ contract。需要给已有 View 增加派生 Pane 时继续使用 `editor.views.
 [view-definition-diff.ts](../runtime/examples/view-definition-diff.ts)。
 
 `editor.views.define` 与 extension 一样只在插件模块加载期间可用。模块失败
-时，该模块新增的 Mode、View definition、View extension、命令、Theme 和
-Face override 一起回滚。成功后，根二进制把 owned
+时，该模块新增的 Mode、View definition、View extension、命令、Theme、
+Face override 和 Editor options 一起回滚。成功后，根二进制把 owned
 `CompoundViewDefinition` 交给 Kernel registry，再创建初始 session；因此
 App 和 V8 之间不共享 callback 或可变 View factory。卸载 definition 前，
 宿主会拒绝仍被活动 View、Mode 或 extension 使用的 owner。

@@ -16,6 +16,8 @@ pub type PaneKey = String;
 
 /// 正文 Pane：view 的主编辑区域。
 pub const BODY_PANE: &str = "body";
+/// BufferView 内建行号 gutter Pane。
+pub const GUTTER_PANE: &str = "builtin.gutter";
 /// 内建状态栏 Pane。
 pub const STATUS_PANE: &str = "builtin.status";
 

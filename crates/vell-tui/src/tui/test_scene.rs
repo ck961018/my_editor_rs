@@ -41,6 +41,35 @@ pub(crate) fn editor_scene(
     )
 }
 
+pub(crate) fn buffer_view_scene(
+    width: i32,
+    height: i32,
+    view: ViewId,
+    gutter_width: i32,
+) -> (Scene, SpaceId, SpaceId) {
+    let gutter = SpaceId(0);
+    let body = SpaceId(1);
+    let root = SpaceId(2);
+    let nodes = [
+        (
+            gutter,
+            content_node(Some(root), view, false, Sizing::Fixed(gutter_width)),
+        ),
+        (body, content_node(Some(root), view, true, Sizing::Grow(1))),
+        (
+            root,
+            container_node(None, Axis::Horizontal, vec![gutter, body], Sizing::Grow(1)),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    (
+        Scene::from_parts(root, Size { width, height }, nodes),
+        gutter,
+        body,
+    )
+}
+
 pub(crate) fn split_editor_scene(
     width: i32,
     height: i32,

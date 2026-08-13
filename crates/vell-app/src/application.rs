@@ -4,7 +4,7 @@ use std::time::Instant;
 
 #[cfg(test)]
 use crate::behavior::BehaviorRecorder;
-use crate::bootstrap::{bootstrap_editor, bootstrap_editor_with_theme};
+use crate::bootstrap::bootstrap_editor_with_options_and_theme;
 use crate::buffer_lifecycle::normalize_path;
 use crate::diagnostics::RuntimeDiagnostic;
 use crate::kernel::{FileBaseline, Kernel};
@@ -19,6 +19,7 @@ use vell_core::transaction::TextStateId;
 use vell_frontend::Frontend;
 use vell_mode::command_registry::{CommandEntry, CommandPending, CommandTaskId};
 use vell_protocol::content_query::{FaceOverride, ThemeName};
+use vell_protocol::editor_options::EditorOptions;
 use vell_protocol::ids::{ContentId, ViewId};
 
 pub(super) struct CommandTaskTarget {
@@ -63,6 +64,7 @@ impl<F: Frontend> App<F> {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            EditorOptions::default(),
         )
     }
 
@@ -84,6 +86,7 @@ impl<F: Frontend> App<F> {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            EditorOptions::default(),
         )
     }
 
@@ -107,6 +110,7 @@ impl<F: Frontend> App<F> {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            EditorOptions::default(),
         )
     }
 
@@ -130,6 +134,7 @@ impl<F: Frontend> App<F> {
             face_overrides,
             Vec::new(),
             Vec::new(),
+            EditorOptions::default(),
         )
     }
 
@@ -156,6 +161,7 @@ impl<F: Frontend> App<F> {
             face_overrides,
             Vec::new(),
             Vec::new(),
+            EditorOptions::default(),
         )
     }
 
@@ -172,6 +178,7 @@ impl<F: Frontend> App<F> {
         face_overrides: Vec<FaceOverride>,
         view_definitions: Vec<CompoundViewDefinition>,
         view_extensions: Vec<Box<dyn ViewExtension>>,
+        options: EditorOptions,
     ) -> io::Result<Self> {
         Self::build(
             path,
@@ -184,6 +191,7 @@ impl<F: Frontend> App<F> {
             face_overrides,
             view_definitions,
             view_extensions,
+            options,
         )
     }
 
@@ -200,7 +208,11 @@ impl<F: Frontend> App<F> {
         face_overrides: Vec<FaceOverride>,
         view_definitions: Vec<CompoundViewDefinition>,
         view_extensions: Vec<Box<dyn ViewExtension>>,
+        options: EditorOptions,
     ) -> io::Result<Self> {
+        options
+            .validate()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let display_profile = frontend.display_profile();
         let opened_path = path
             .map(|path| normalize_path(std::path::Path::new(path)))
@@ -220,20 +232,15 @@ impl<F: Frontend> App<F> {
         } else {
             (Buffer::new(), None)
         };
-        let mut bootstrap = match theme {
-            Some(theme) => bootstrap_editor_with_theme(
-                buffer,
-                width,
-                height,
-                modes,
-                Some(theme),
-                face_overrides,
-            )?,
-            None if face_overrides.is_empty() => bootstrap_editor(buffer, width, height, modes)?,
-            None => {
-                bootstrap_editor_with_theme(buffer, width, height, modes, None, face_overrides)?
-            }
-        };
+        let mut bootstrap = bootstrap_editor_with_options_and_theme(
+            buffer,
+            width,
+            height,
+            modes,
+            theme,
+            face_overrides,
+            options,
+        )?;
         for background in backgrounds {
             bootstrap.kernel.register_mode_background(background);
         }

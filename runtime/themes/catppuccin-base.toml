@@ -5,6 +5,8 @@ selectable = false
 
 [faces]
 "ui.editor" = { foreground = "text", background = "base" }
+"ui.gutter" = { foreground = "surface2", background = "base" }
+"ui.gutter.current" = { foreground = "text", bold = true }
 "ui.selection" = { background = "surface1" }
 "ui.status-bar" = { foreground = "text", background = "mantle" }
 "ui.status-bar.inactive" = { foreground = "subtext0", background = "surface0" }

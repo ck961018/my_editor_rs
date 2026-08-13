@@ -25,6 +25,7 @@ use vell_core::content::ContentChange;
 use vell_core::content_store::ContentStore;
 use vell_core::content_view_state::ContentViewStateError;
 use vell_protocol::content_query::RowRange;
+use vell_protocol::editor_options::EditorOptions;
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 use vell_protocol::revision::Revision;
 use vell_protocol::scene::Scene;
@@ -90,6 +91,7 @@ impl ClientSession {
         height: usize,
         init: EditorSessionInit,
         face_environment: FaceEnvironment,
+        options: EditorOptions,
     ) -> Result<Self, AttachmentPlanError> {
         let editor = create_view(init.editor.content, contents, &init.buffer_definition)
             .expect("editor content exists");
@@ -99,6 +101,7 @@ impl ClientSession {
             init.editor.view,
             editor.view,
             init.next_view_id,
+            options,
         );
         let view_modes = ModeViewStore::default();
         let faces = FaceRegistry::default();

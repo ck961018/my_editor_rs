@@ -114,7 +114,8 @@ _Avoid_: Mode 列表缓存、启动 Mode 顺序
 **Native DiffView**：
 内建的 `core.diff` View。它是可切换的零 recipe Pane 语义父 View，持有
 `left`、`right` bindings；View extension 可以给父 View 增加直属 Pane。
-两个不可切换的子 BufferView 拥有正文 Pane、selection 和语言 Mode。通用
+两个不可切换的子 BufferView 各自拥有原生 gutter、正文 Pane、selection 和
+语言 Mode。通用
 生命周期从子 Pane 解析到父 View，但替换时复用一个子 Pane 作为 Scene
 锚点。
 _Avoid_: 第三个协调 Pane、Pane state、左右 Content 的 Mode 并集
@@ -143,3 +144,5 @@ _Avoid_: 第三个协调 Pane、Pane state、左右 Content 的 Mode 并集
   使用不透明 ContentId。
 - View extension 只贡献 Pane 与派生呈现；卸载时必须移除贡献，且不得改变宿主
   View 的 identity、binding、状态或生命周期。
+- `core.buffer` 的 `builtin.gutter` 是宿主默认 recipe，不是 View extension。
+  隐藏只把 gutter Space 设为零宽，不改变 Pane identity 或生命周期。

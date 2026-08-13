@@ -704,7 +704,17 @@ interface CompoundViewDefinition {
 	};
 }
 
+interface EditorOptions {
+	readonly bufferView?: {
+		readonly gutter?: {
+			readonly visible?: boolean;
+			readonly width?: number;
+		};
+	};
+}
+
 declare const editor: {
+	configure(options: EditorOptions): void;
 	readonly commands: EditorCommands;
 	readonly theme: {
 		use(name: string): void;

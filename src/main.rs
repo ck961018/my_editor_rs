@@ -44,6 +44,7 @@ async fn main() -> io::Result<()> {
         configuration.face_overrides,
         configuration.view_definitions,
         configuration.view_extensions,
+        configuration.options,
     )?;
     for command in commands {
         app.register_command(command);

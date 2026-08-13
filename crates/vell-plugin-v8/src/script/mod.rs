@@ -26,6 +26,7 @@ use vell_protocol::content_query::{
     Color, Face, FaceDefinition, FaceName, FaceOverride, FacePatch, FaceValue, NamedTextDecoration,
     RowRange, ThemeName, UnderlineStyle,
 };
+use vell_protocol::editor_options::{EditorOptions, MAX_GUTTER_WIDTH, MIN_GUTTER_WIDTH};
 use vell_protocol::ids::ContentId;
 use vell_protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
 use vell_protocol::view::{BindingKey, ViewDefinitionId};
@@ -287,6 +288,7 @@ struct ScriptActionDefinition {
 struct ScriptConfigurationDraft {
     theme: Option<ThemeName>,
     face_overrides: Vec<FaceOverride>,
+    options: EditorOptions,
 }
 
 #[derive(Clone)]
@@ -758,6 +760,7 @@ fn loaded_editor_configuration(
         view_extensions: ScriptHost::script_view_extensions(&host),
         theme: configuration.theme,
         face_overrides: configuration.face_overrides,
+        options: configuration.options,
         host,
     })
 }
@@ -1471,6 +1474,70 @@ throw new Error("rollback");
         assert_eq!(
             configuration.face_overrides[1].patch.background,
             FaceValue::Reset
+        );
+    }
+
+    #[test]
+    fn editor_options_merge_validate_and_rollback_with_the_module() {
+        let mut host = ScriptHost::new();
+        host.execute_typescript(
+            "file:///options.ts",
+            r#"
+editor.configure({ bufferView: { gutter: { visible: false } } });
+editor.configure({ bufferView: { gutter: { width: 6 } } });
+"#,
+        )
+        .unwrap();
+        let before = host.configuration.borrow().clone();
+        assert!(!before.options.buffer_view.gutter.visible);
+        assert_eq!(before.options.buffer_view.gutter.width, 6);
+
+        for source in [
+            "editor.configure({ bufferView: { gutter: { width: 0 } } });",
+            "editor.configure({ bufferView: { gutter: { width: 17 } } });",
+            "editor.configure({ bufferView: { gutter: { width: 1.5 } } });",
+            "editor.configure({ bufferView: { gutter: { width: '4' } } });",
+            "editor.configure({ bufferView: { gutter: { extra: true } } });",
+        ] {
+            let error = host
+                .execute_typescript("file:///invalid-options.ts", source)
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("BufferView gutter"),
+                "unexpected error: {error}"
+            );
+            assert_eq!(host.configuration.borrow().options, before.options);
+        }
+
+        let error = host
+            .execute_typescript(
+                "file:///rollback-options.ts",
+                r#"
+editor.configure({ bufferView: { gutter: { visible: true, width: 8 } } });
+throw new Error("rollback options");
+"#,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("rollback options"));
+        assert_eq!(host.configuration.borrow().options, before.options);
+    }
+
+    #[test]
+    fn editor_configure_is_not_available_from_action_evaluation() {
+        let mut host = ScriptHost::new();
+
+        let error = host
+            .evaluate_script("editor.configure({ bufferView: { gutter: { visible: false } } })")
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("only available during module loading")
+        );
+        assert_eq!(
+            host.configuration.borrow().options,
+            EditorOptions::default()
         );
     }
 

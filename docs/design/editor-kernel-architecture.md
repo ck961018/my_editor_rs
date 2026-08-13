@@ -172,8 +172,9 @@ View definition 由 Kernel 的 `ViewDefinitionRegistry` 唯一持有，View
 `ContentViewState` 是与封闭 Content 对齐的显式枚举，因此始终有
 `BufferViewState { selections }`。没有 `document` binding 的复合 View
 不伪造 ContentViewState。
-View 是完整的展示单元：它可以控制多个直属 Pane（正文 `body`、
-状态栏 `builtin.status` 等），`ViewPaneMap` 维护 SpaceId 与 PaneKey
+View 是完整的展示单元：它可以控制多个直属 Pane（正文 `body`、原生行号
+`builtin.gutter`、状态栏 `builtin.status` 等），`ViewPaneMap` 维护
+SpaceId 与 PaneKey
 的双向映射；渲染与事件查询携带来源 SpaceId，由 view 决定该 Pane
 的 presentation。View 不保存 Mode instance、presentation layer 或
 history。Mode chain、输入状态和呈现缓存由 `ClientSession` 中的
@@ -207,6 +208,18 @@ operation 或生命周期语义。
 Diff 替换在进入 `ExecutionFrame` 的 prepared effects 前生成完整 workspace
 candidate 并预校验全部 attachment。发布时先接续新 attachment，再清理旧
 View，避免共享 Mode content state 和 Face remap 因引用短暂归零而重建。
+
+`core.buffer` 的 gutter 是 `ViewWorkspace` 管理的默认 pane recipe，不是
+插件 extension、Content、Mode 或独立 View。每个 BufferView 恰有一个不可
+聚焦的 `builtin.gutter` 和一个 body；split、switch、close、Diff child 与
+per-pane status 都把完整 recipe 当成一个布局槽位。session 级
+`EditorOptions` 决定 gutter 的启动宽度；隐藏时仍保留 Space，只使用
+`Fixed(0)`。
+
+`AppQuery` 从该 BufferView 的 primary selection 和 Content 文本统计组装
+owned `LineNumberPresentation`。当前逻辑行显示一基绝对行号，其他可见行显示
+相对距离。TUI 与 body 共用同一 ViewId viewport，只绘制 presentation，不进入
+Mode、V8 或 Worker。
 
 复合 View 的具名 binding operation 通过 recipe 找到对应子 binding，并在一个
 `ViewWorkspace` draft 中同时改变父 binding 和子 BufferView 的 `document`

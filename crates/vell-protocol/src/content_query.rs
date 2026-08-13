@@ -502,6 +502,14 @@ pub struct LinesPresentation {
     pub rows: Vec<Vec<StatusBarSegment>>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LineNumberPresentation {
+    pub base_face: PaintFace,
+    pub current_face: FacePatch,
+    pub current_row: usize,
+    pub line_count: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorStyle {
     Default,
@@ -532,6 +540,7 @@ pub struct TextPresentation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ViewPresentation {
     Text(TextPresentation),
+    LineNumbers(LineNumberPresentation),
     StatusBar(StatusBarPresentation),
     Lines(LinesPresentation),
 }

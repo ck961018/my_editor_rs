@@ -641,6 +641,44 @@ mod tests {
     }
 
     #[test]
+    fn terminal_theme_dims_relative_line_numbers_and_emphasizes_the_current_line() {
+        let registry = ThemeRegistry::with_builtins().unwrap();
+        let theme = registry
+            .resolve(&ThemeName::new("terminal-default"))
+            .unwrap();
+
+        let gutter = theme.face(&FaceName::new("ui.gutter")).unwrap();
+        assert_eq!(gutter.foreground, FaceValue::Value(Color::Ansi(238)));
+        assert_eq!(gutter.bold, FaceValue::Unspecified);
+
+        let current = theme.face(&FaceName::new("ui.gutter.current")).unwrap();
+        assert_eq!(current.foreground, FaceValue::Value(Color::Ansi(252)));
+        assert_eq!(current.bold, FaceValue::Value(true));
+    }
+
+    #[test]
+    fn catppuccin_emphasizes_only_the_current_line_number() {
+        let registry = ThemeRegistry::with_builtins().unwrap();
+        let theme = registry
+            .resolve(&ThemeName::new("catppuccin-mocha"))
+            .unwrap();
+
+        let gutter = theme.face(&FaceName::new("ui.gutter")).unwrap();
+        let current = theme.face(&FaceName::new("ui.gutter.current")).unwrap();
+        assert_eq!(
+            gutter.foreground,
+            FaceValue::Value(Color::Rgb {
+                red: 0x58,
+                green: 0x5b,
+                blue: 0x70,
+            })
+        );
+        assert_ne!(gutter.foreground, current.foreground);
+        assert_eq!(gutter.bold, FaceValue::Unspecified);
+        assert_eq!(current.bold, FaceValue::Value(true));
+    }
+
+    #[test]
     fn inheritance_cycles_report_the_full_path() {
         let mut registry = ThemeRegistry::default();
         for source in [

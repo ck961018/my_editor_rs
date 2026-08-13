@@ -665,7 +665,13 @@ impl Buffer {
         self.reconcile_selections(selections);
         for selection in selections.all_mut() {
             let collapsed = selection.anchor == selection.head;
-            let row = self.rope.char_to_line(selection.head.char_index);
+            let mut row = self.rope.char_to_line(selection.head.char_index);
+            if row > 0
+                && row == self.rope.len_lines().saturating_sub(1)
+                && line_content_len(&self.rope, row) == 0
+            {
+                row -= 1;
+            }
             selection.head.char_index = selection
                 .head
                 .char_index
@@ -2944,6 +2950,21 @@ mod tests {
         );
         Buffer::collapse_to_head(s.primary_mut());
         assert_eq!(s.primary().anchor, s.primary().head());
+    }
+
+    #[test]
+    fn character_cursor_cannot_reach_the_trailing_rope_line() {
+        let mut buffer = Buffer::new();
+        buffer.insert_at_selections(&mut single_sel(TextOffset::origin()), "text\n");
+        let mut selections = single_sel(TextOffset { char_index: 5 });
+
+        buffer.clamp_cursor_to_character(&mut selections);
+
+        assert_eq!(
+            buffer.text_point(selections.primary().head()),
+            TextPoint { row: 0, col: 3 }
+        );
+        assert_eq!(selections.primary().anchor, selections.primary().head());
     }
 
     #[test]

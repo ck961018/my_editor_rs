@@ -1,4 +1,5 @@
 pub mod content_query;
+pub mod editor_options;
 pub mod frontend_event;
 pub mod geometry;
 pub mod ids;

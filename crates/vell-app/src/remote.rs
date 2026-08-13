@@ -96,6 +96,7 @@ mod tests {
                 .unwrap();
             let mut view = View::buffer(content, contents.create_view_state(content).unwrap());
             view.assign_pane(SpaceId(0), crate::view::BODY_PANE);
+            view.assign_pane(SpaceId(1), crate::view::GUTTER_PANE);
             Self {
                 contents,
                 views: HashMap::from([(ViewId(0), view)]),
@@ -139,6 +140,32 @@ mod tests {
                     presentation: ViewPresentation::Text(_),
                     ..
                 },
+            })
+        ));
+    }
+
+    #[test]
+    fn gutter_view_response_uses_owned_line_number_presentation() {
+        let fixture = Fixture::new();
+        let response = respond(
+            &fixture.query(),
+            Request {
+                id: RequestId(10),
+                data: RequestData::View {
+                    view: ViewId(0),
+                    space: SpaceId(1),
+                },
+            },
+        );
+
+        assert!(matches!(
+            response.result,
+            Ok(ResponseData::View {
+                data: vell_protocol::content_query::ViewData {
+                    presentation: ViewPresentation::LineNumbers(_),
+                    ..
+                },
+                ..
             })
         ));
     }

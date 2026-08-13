@@ -46,7 +46,7 @@ pub use diagnostics::{
 pub use layout::{StatusBarHandle, StatusBarPlacement};
 pub use native_commands::native_command_ids;
 pub use vell_mode::{FaceRegistrationError, FaceRegistrationErrorReason};
-pub use view::{BODY_PANE, PaneKey, STATUS_PANE, View, ViewPaneMap};
+pub use view::{BODY_PANE, GUTTER_PANE, PaneKey, STATUS_PANE, View, ViewPaneMap};
 
 #[cfg(test)]
 mod tests;

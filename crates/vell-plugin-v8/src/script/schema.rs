@@ -4,6 +4,11 @@ pub(super) fn install_editor_api(scope: &mut v8::PinScope<'_, '_>) {
     let context = scope.get_current_context();
     let global = context.global(scope);
     let editor = v8::Object::new(scope);
+    let configure_name = v8::String::new(scope, "configure").unwrap();
+    let configure = v8::FunctionTemplate::new(scope, configure_editor)
+        .get_function(scope)
+        .unwrap();
+    editor.set(scope, configure_name.into(), configure.into());
     let modes = v8::Object::new(scope);
     let define_name = v8::String::new(scope, "define").unwrap();
     let define = v8::FunctionTemplate::new(scope, define_mode)
@@ -52,6 +57,124 @@ pub(super) fn install_editor_api(scope: &mut v8::PinScope<'_, '_>) {
         .cloned()
         .expect("command registry slot");
     commands.borrow().install_api(scope);
+}
+
+fn configure_editor(
+    scope: &mut v8::PinScope,
+    arguments: v8::FunctionCallbackArguments,
+    mut return_value: v8::ReturnValue,
+) {
+    if reject_view_extension_host_mutation(scope, "editor.configure") {
+        return;
+    }
+    let module_loading = scope
+        .get_slot::<Rc<ScriptViewDefinitionRegistration>>()
+        .and_then(|registration| registration.owner())
+        .is_some();
+    if !module_loading {
+        throw_script_error(
+            scope,
+            "editor.configure is only available during module loading",
+        );
+        return;
+    }
+    let object = match v8::Local::<v8::Object>::try_from(arguments.get(0)) {
+        Ok(object) => object,
+        Err(_) => {
+            throw_script_error(scope, "editor.configure expects an options object");
+            return;
+        }
+    };
+    let patch = match parse_editor_options_patch(scope, object) {
+        Ok(patch) => patch,
+        Err(error) => {
+            throw_script_error(scope, &error.to_string());
+            return;
+        }
+    };
+    let Some(configuration) = scope
+        .get_slot::<Rc<RefCell<ScriptConfigurationDraft>>>()
+        .cloned()
+    else {
+        throw_script_error(scope, "script configuration draft is unavailable");
+        return;
+    };
+    let mut configuration = configuration.borrow_mut();
+    if let Some(visible) = patch.visible {
+        configuration.options.buffer_view.gutter.visible = visible;
+    }
+    if let Some(width) = patch.width {
+        configuration.options.buffer_view.gutter.width = width;
+    }
+    return_value.set_undefined();
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct EditorOptionsPatch {
+    visible: Option<bool>,
+    width: Option<u8>,
+}
+
+fn parse_editor_options_patch(
+    scope: &mut v8::PinScope,
+    object: v8::Local<v8::Object>,
+) -> Result<EditorOptionsPatch, ScriptError> {
+    ensure_v8_fields(scope, object, &["bufferView"], "editor options")?;
+    let Some(buffer_view) = property(scope, object, "bufferView") else {
+        return Ok(EditorOptionsPatch::default());
+    };
+    if buffer_view.is_null_or_undefined() {
+        return Ok(EditorOptionsPatch::default());
+    }
+    let buffer_view = v8::Local::<v8::Object>::try_from(buffer_view)
+        .map_err(|_| ScriptError::new("editor options bufferView must be an object"))?;
+    ensure_v8_fields(scope, buffer_view, &["gutter"], "BufferView options")?;
+    let Some(gutter) = property(scope, buffer_view, "gutter") else {
+        return Ok(EditorOptionsPatch::default());
+    };
+    if gutter.is_null_or_undefined() {
+        return Ok(EditorOptionsPatch::default());
+    }
+    let gutter = v8::Local::<v8::Object>::try_from(gutter)
+        .map_err(|_| ScriptError::new("BufferView gutter options must be an object"))?;
+    ensure_v8_fields(
+        scope,
+        gutter,
+        &["visible", "width"],
+        "BufferView gutter options",
+    )?;
+    let visible = match property(scope, gutter, "visible") {
+        Some(value) if !value.is_null_or_undefined() && !value.is_boolean() => {
+            return Err(ScriptError::new(
+                "BufferView gutter visible must be a boolean",
+            ));
+        }
+        Some(value) if !value.is_null_or_undefined() => Some(value.boolean_value(scope)),
+        _ => None,
+    };
+    let width = match property(scope, gutter, "width") {
+        Some(value) if !value.is_null_or_undefined() => {
+            if !value.is_number() {
+                return Err(ScriptError::new(
+                    "BufferView gutter width must be an integer",
+                ));
+            }
+            let width = value
+                .number_value(scope)
+                .ok_or_else(|| ScriptError::new("BufferView gutter width must be an integer"))?;
+            if width.fract() != 0.0
+                || width < f64::from(MIN_GUTTER_WIDTH)
+                || width > f64::from(MAX_GUTTER_WIDTH)
+            {
+                return Err(ScriptError::new(format!(
+                    "BufferView gutter width must be an integer between {MIN_GUTTER_WIDTH} and {MAX_GUTTER_WIDTH}"
+                )));
+            }
+            Some(width as u8)
+        }
+        _ => None,
+    };
+    Ok(EditorOptionsPatch { visible, width })
 }
 
 fn define_compound_view(

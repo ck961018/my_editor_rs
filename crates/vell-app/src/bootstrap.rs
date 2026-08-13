@@ -10,6 +10,7 @@ use vell_core::buffer::Buffer;
 use vell_core::content::Content;
 use vell_core::content_store::ContentStore;
 use vell_protocol::content_query::{FaceOverride, ThemeName};
+use vell_protocol::editor_options::EditorOptions;
 use vell_protocol::ids::{ContentId, ViewId};
 
 pub(super) struct EditorBootstrap {
@@ -43,22 +44,32 @@ impl BootstrapIds {
     }
 }
 
+#[cfg(test)]
 pub(super) fn bootstrap_editor(
     buffer: Buffer,
     width: usize,
     height: usize,
     configured_modes: Vec<Box<dyn Mode>>,
 ) -> io::Result<EditorBootstrap> {
-    bootstrap_editor_with_theme(buffer, width, height, configured_modes, None, Vec::new())
+    bootstrap_editor_with_options_and_theme(
+        buffer,
+        width,
+        height,
+        configured_modes,
+        None,
+        Vec::new(),
+        EditorOptions::default(),
+    )
 }
 
-pub(super) fn bootstrap_editor_with_theme(
+pub(super) fn bootstrap_editor_with_options_and_theme(
     buffer: Buffer,
     width: usize,
     height: usize,
     configured_modes: Vec<Box<dyn Mode>>,
     theme: Option<&ThemeName>,
     face_overrides: Vec<FaceOverride>,
+    options: EditorOptions,
 ) -> io::Result<EditorBootstrap> {
     let mut ids = BootstrapIds::default();
     let editor_content = ids.content();
@@ -94,6 +105,7 @@ pub(super) fn bootstrap_editor_with_theme(
             buffer_definition,
         },
         face_environment,
+        options,
     )
     .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     Ok(EditorBootstrap { kernel, session })
@@ -132,6 +144,7 @@ pub(super) fn create_editor_session(
             buffer_definition,
         },
         FaceEnvironment::new(None).expect("built-in themes must be valid"),
+        EditorOptions::default(),
     )
     .expect("test session attachment plan is valid")
 }

@@ -111,6 +111,29 @@ pub struct PaneResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GutterResult {
+    pub pane: SpaceId,
+    pub editor_space: SpaceId,
+    pub gutter_space: SpaceId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BufferPaneResult {
+    pub pane: SpaceId,
+    pub editor_space: SpaceId,
+    pub gutter_space: SpaceId,
+    pub status_space: Option<SpaceId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BufferPaneRecipe {
+    pub view: ViewId,
+    pub focusable: bool,
+    pub gutter_width: i32,
+    pub with_status: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CloseResult {
     pub removed_space: SpaceId,
     pub surviving_neighbor: Option<SpaceId>,
@@ -222,6 +245,77 @@ impl SceneBuilder {
         result
     }
 
+    pub fn attach_pane(
+        &mut self,
+        scene: &mut Scene,
+        target: SpaceId,
+        view: ViewId,
+        direction: SplitDirection,
+    ) -> Result<SplitResult, SceneError> {
+        let mut draft = MutableScene::take(scene);
+        let result = self.attach_pane_draft(&mut draft, target, view, direction);
+        *scene = draft.into_scene();
+        result
+    }
+
+    fn attach_pane_draft(
+        &mut self,
+        scene: &mut MutableScene,
+        target: SpaceId,
+        view: ViewId,
+        direction: SplitDirection,
+    ) -> Result<SplitResult, SceneError> {
+        if !is_tree_valid(scene) {
+            return Err(SceneError::InvalidTree);
+        }
+        let target_node = scene
+            .nodes
+            .get(&target)
+            .ok_or(SceneError::UnknownSpace(target))?;
+        let target_parent = target_node.parent;
+        let target_sizing = target_node.space.sizing.clone();
+        let target_index = target_parent.and_then(|parent| {
+            scene.nodes[&parent]
+                .children
+                .iter()
+                .position(|child| *child == target)
+        });
+        let new_space = self.add_view(scene, view, false, Sizing::Grow(1));
+        let container = self.add_container(
+            scene,
+            Arrangement::Flex {
+                direction: direction.axis(),
+                gap: 0,
+                align: Align::Stretch,
+            },
+            target_sizing,
+        );
+        if let Some(parent) = target_parent {
+            self.replace_child(
+                scene,
+                parent,
+                target_index.ok_or(SceneError::InvalidTree)?,
+                container,
+            );
+        } else {
+            scene.root = container;
+        }
+        scene
+            .nodes
+            .get_mut(&target)
+            .expect("validated attachment target exists")
+            .space
+            .sizing = Sizing::Grow(1);
+        let children = if direction.inserts_before() {
+            [new_space, target]
+        } else {
+            [target, new_space]
+        };
+        self.set_children(scene, container, &children);
+        debug_assert!(is_tree_valid(scene));
+        Ok(SplitResult { new_space })
+    }
+
     fn split_draft(
         &mut self,
         scene: &mut MutableScene,
@@ -327,24 +421,26 @@ impl SceneBuilder {
         Ok(())
     }
 
-    pub fn wrap_with_status(
+    pub fn wrap_with_gutter(
         &mut self,
         scene: &mut Scene,
         editor_space: SpaceId,
-        status_view: ViewId,
-    ) -> Result<PaneResult, SceneError> {
+        editor_view: ViewId,
+        width: i32,
+    ) -> Result<GutterResult, SceneError> {
         let mut draft = MutableScene::take(scene);
-        let result = self.wrap_with_status_draft(&mut draft, editor_space, status_view);
+        let result = self.wrap_with_gutter_draft(&mut draft, editor_space, editor_view, width);
         *scene = draft.into_scene();
         result
     }
 
-    fn wrap_with_status_draft(
+    fn wrap_with_gutter_draft(
         &mut self,
         draft: &mut MutableScene,
         editor_space: SpaceId,
-        status_view: ViewId,
-    ) -> Result<PaneResult, SceneError> {
+        editor_view: ViewId,
+        width: i32,
+    ) -> Result<GutterResult, SceneError> {
         if !is_tree_valid(draft) {
             return Err(SceneError::InvalidTree);
         }
@@ -362,6 +458,71 @@ impl SceneBuilder {
                 .children
                 .iter()
                 .position(|child| *child == editor_space)
+        });
+        let gutter_space = self.add_view(draft, editor_view, false, Sizing::Fixed(width));
+        let pane = self.add_container(
+            draft,
+            Arrangement::Flex {
+                direction: Axis::Horizontal,
+                gap: 0,
+                align: Align::Stretch,
+            },
+            sizing,
+        );
+        if let Some(parent) = parent {
+            self.replace_child(
+                draft,
+                parent,
+                parent_index.ok_or(SceneError::InvalidTree)?,
+                pane,
+            );
+        } else {
+            draft.root = pane;
+        }
+        draft.nodes.get_mut(&editor_space).unwrap().space.sizing = Sizing::Grow(1);
+        self.set_children(draft, pane, &[gutter_space, editor_space]);
+        debug_assert!(is_tree_valid(draft));
+        Ok(GutterResult {
+            pane,
+            editor_space,
+            gutter_space,
+        })
+    }
+
+    pub fn wrap_with_status(
+        &mut self,
+        scene: &mut Scene,
+        pane_root: SpaceId,
+        editor_space: SpaceId,
+        status_view: ViewId,
+    ) -> Result<PaneResult, SceneError> {
+        let mut draft = MutableScene::take(scene);
+        let result = self.wrap_with_status_draft(&mut draft, pane_root, editor_space, status_view);
+        *scene = draft.into_scene();
+        result
+    }
+
+    fn wrap_with_status_draft(
+        &mut self,
+        draft: &mut MutableScene,
+        pane_root: SpaceId,
+        editor_space: SpaceId,
+        status_view: ViewId,
+    ) -> Result<PaneResult, SceneError> {
+        if !is_tree_valid(draft) {
+            return Err(SceneError::InvalidTree);
+        }
+        let pane_node = draft
+            .nodes
+            .get(&pane_root)
+            .ok_or(SceneError::UnknownSpace(pane_root))?;
+        let parent = pane_node.parent;
+        let sizing = pane_node.space.sizing.clone();
+        let parent_index = parent.and_then(|parent| {
+            draft.nodes[&parent]
+                .children
+                .iter()
+                .position(|child| *child == pane_root)
         });
         let status_space = self.add_view(draft, status_view, false, Sizing::Fixed(1));
         let pane = self.add_container(
@@ -383,8 +544,8 @@ impl SceneBuilder {
         } else {
             draft.root = pane;
         }
-        draft.nodes.get_mut(&editor_space).unwrap().space.sizing = Sizing::Grow(1);
-        self.set_children(draft, pane, &[editor_space, status_space]);
+        draft.nodes.get_mut(&pane_root).unwrap().space.sizing = Sizing::Grow(1);
+        self.set_children(draft, pane, &[pane_root, status_space]);
         debug_assert!(is_tree_valid(draft));
         Ok(PaneResult {
             pane,
@@ -430,60 +591,71 @@ impl SceneBuilder {
         Ok(status)
     }
 
-    pub fn split_pane(
+    pub fn split_buffer_pane(
         &mut self,
         scene: &mut Scene,
         target_pane: SpaceId,
-        editor_view: ViewId,
-        status_view: ViewId,
-        focusable: bool,
         direction: SplitDirection,
-    ) -> Result<PaneResult, SceneError> {
+        recipe: BufferPaneRecipe,
+    ) -> Result<BufferPaneResult, SceneError> {
         let mut draft = MutableScene::take(scene);
-        let result = self.split_pane_draft(
-            &mut draft,
-            target_pane,
-            editor_view,
-            status_view,
-            focusable,
-            direction,
-        );
+        let result = self.split_buffer_pane_draft(&mut draft, target_pane, direction, recipe);
         *scene = draft.into_scene();
         result
     }
 
-    fn split_pane_draft(
+    fn split_buffer_pane_draft(
         &mut self,
         draft: &mut MutableScene,
         target_pane: SpaceId,
-        editor_view: ViewId,
-        status_view: ViewId,
-        focusable: bool,
         direction: SplitDirection,
-    ) -> Result<PaneResult, SceneError> {
+        recipe: BufferPaneRecipe,
+    ) -> Result<BufferPaneResult, SceneError> {
         if !is_tree_valid(draft) {
             return Err(SceneError::InvalidTree);
         }
         if !draft.nodes.contains_key(&target_pane) {
             return Err(SceneError::UnknownSpace(target_pane));
         }
-        let editor_space = self.add_view(draft, editor_view, focusable, Sizing::Grow(1));
-        let status_space = self.add_view(draft, status_view, false, Sizing::Fixed(1));
-        let pane = self.add_container(
+        let editor_space = self.add_view(draft, recipe.view, recipe.focusable, Sizing::Grow(1));
+        let gutter_space = self.add_view(
+            draft,
+            recipe.view,
+            false,
+            Sizing::Fixed(recipe.gutter_width),
+        );
+        let buffer = self.add_container(
             draft,
             Arrangement::Flex {
-                direction: Axis::Vertical,
+                direction: Axis::Horizontal,
                 gap: 0,
                 align: Align::Stretch,
             },
             Sizing::Grow(1),
         );
-        self.set_children(draft, pane, &[editor_space, status_space]);
+        self.set_children(draft, buffer, &[gutter_space, editor_space]);
+        let (pane, status_space) = if recipe.with_status {
+            let status = self.add_view(draft, recipe.view, false, Sizing::Fixed(1));
+            let pane = self.add_container(
+                draft,
+                Arrangement::Flex {
+                    direction: Axis::Vertical,
+                    gap: 0,
+                    align: Align::Stretch,
+                },
+                Sizing::Grow(1),
+            );
+            self.set_children(draft, pane, &[buffer, status]);
+            (pane, Some(status))
+        } else {
+            (buffer, None)
+        };
         self.insert_split_node(draft, target_pane, pane, direction)?;
         debug_assert!(is_tree_valid(draft));
-        Ok(PaneResult {
+        Ok(BufferPaneResult {
             pane,
             editor_space,
+            gutter_space,
             status_space,
         })
     }

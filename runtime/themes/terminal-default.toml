@@ -4,6 +4,8 @@ appearance = "dark"
 
 [faces]
 "ui.editor" = {}
+"ui.gutter" = { foreground = 238 }
+"ui.gutter.current" = { foreground = 252, bold = true }
 "ui.selection" = {}
 "ui.status-bar" = {}
 "ui.status-bar.inactive" = {}

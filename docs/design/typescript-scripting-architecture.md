@@ -33,9 +33,9 @@ source
 `vell-app` 的普通依赖不含 V8。根二进制先调用
 `vell_plugin_v8::load_user_configuration()`，再把 Mode、View extension、
 owned `CompoundViewDefinition`、后台运行时、ThemeName 和纯 protocol Face
-override DTO 注入 App。`prepare_commands()` 在同一步安装 native 命令的
-TypeScript 视图，并返回语言中立的 `CommandEntry` 列表。V8 类型不跨出
-`vell-plugin-v8` 的公共边界。
+override DTO，以及 owned `EditorOptions` 注入 App。`prepare_commands()`
+在同一步安装 native 命令的 TypeScript 视图，并返回语言中立的
+`CommandEntry` 列表。V8 类型不跨出 `vell-plugin-v8` 的公共边界。
 
 ## 2. 加载与所有权
 
@@ -44,8 +44,8 @@ TypeScript 视图，并返回语言中立的 `CommandEntry` 列表。V8 类型�
 
 1. 枚举内嵌 `plugin.json`；
 2. 按 manifest `order` 稳定加载入口；
-3. 在同一 `ScriptHost` draft 中收集 Mode、View definition、View extension
-   和视觉配置；
+3. 在同一 `ScriptHost` draft 中收集 Mode、View definition、View extension、
+   `EditorOptions` 和视觉配置；
 4. 加载可选用户 `config.ts`；
 5. 把 Mode definition 包装为 `ScriptMode`，把 View definition 转成 owned
    `CompoundViewDefinition`；
@@ -60,7 +60,12 @@ App 不识别具体 ScriptHost 类型。
 
 内建插件失败表示安装损坏，会阻止启动。可选用户配置失败会输出 warning，
 原子回滚该模块新增的 Mode、View definition、View extension、命令、Theme
-选择和 Face override，并继续使用内建配置。
+选择、Face override 和 `EditorOptions`，并继续使用内建配置。
+
+`editor.configure` 是模块加载期的 typed 配置入口。当前只开放 session 级
+BufferView gutter 默认值；字段级调用会合并进 `ScriptConfigurationDraft`，
+宽度在 V8 边界严格校验为 1 到 16 的整数。Mode action、View extension
+callback、交互求值和 Worker 都不能修改该启动配置。
 
 App bootstrap 先把 `CompoundViewDefinition` 注册到 Kernel 的唯一
 `ViewDefinitionRegistry`，再创建初始 session 并安装 extension。definition

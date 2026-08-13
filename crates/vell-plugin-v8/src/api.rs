@@ -5,6 +5,7 @@ use std::rc::Rc;
 use vell_mode::command_registry::{CommandEntry, CommandId, CommandInvocation};
 use vell_mode::{CompoundViewDefinition, Mode, ModeBackground, ViewExtension};
 use vell_protocol::content_query::{FaceOverride, ThemeName};
+use vell_protocol::editor_options::EditorOptions;
 use vell_protocol::ids::ContentId;
 
 use crate::script::{ScriptError, ScriptHost};
@@ -78,6 +79,7 @@ pub struct LoadedEditorConfiguration {
     pub view_extensions: Vec<Box<dyn ViewExtension>>,
     pub theme: Option<ThemeName>,
     pub face_overrides: Vec<FaceOverride>,
+    pub options: EditorOptions,
     pub(crate) host: Rc<RefCell<ScriptHost>>,
 }
 

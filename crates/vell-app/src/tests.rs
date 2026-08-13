@@ -60,6 +60,7 @@ use vell_protocol::content_query::{
     FaceName, NamedTextDecoration, RenderQuery, RenderQueryError, RowRange, SaveState,
     StatusBarPresentation, TextPresentation, ViewData, ViewPresentation,
 };
+use vell_protocol::editor_options::{BufferViewGutterOptions, BufferViewOptions, EditorOptions};
 use vell_protocol::frontend_event::{FrontendEvent, ResizeEvent};
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 use vell_protocol::key_event::{ArrowKey, KeyCode, KeyEvent};
@@ -1733,6 +1734,7 @@ fn make_app(events: Vec<FrontendEvent>, path: Option<&str>) -> App<ScriptedFront
         configuration.face_overrides,
         configuration.view_definitions,
         configuration.view_extensions,
+        configuration.options,
     )
     .unwrap();
     for command in commands {
@@ -1755,6 +1757,7 @@ fn make_extension_app(
         Vec::new(),
         Vec::new(),
         extensions,
+        vell_protocol::editor_options::EditorOptions::default(),
     )
 }
 
@@ -1939,6 +1942,7 @@ fn minimap_example_runs_through_v8_app_query_and_owner_unload() {
         Vec::new(),
         loaded.view_definitions,
         loaded.view_extensions,
+        vell_protocol::editor_options::EditorOptions::default(),
     )
     .unwrap();
     assert!(
@@ -2026,6 +2030,7 @@ editor.views.extend("example.diff", {
         Vec::new(),
         loaded.view_definitions,
         loaded.view_extensions,
+        vell_protocol::editor_options::EditorOptions::default(),
     )
     .unwrap();
     let right_content = ContentId(9);
@@ -2854,7 +2859,9 @@ fn replace_view_mode_for_test(
 fn text_presentation(view: &ViewData) -> &TextPresentation {
     match &view.presentation {
         ViewPresentation::Text(text) => text,
-        ViewPresentation::StatusBar(_) | ViewPresentation::Lines(_) => {
+        ViewPresentation::LineNumbers(_)
+        | ViewPresentation::StatusBar(_)
+        | ViewPresentation::Lines(_) => {
             panic!("expected text presentation")
         }
     }
@@ -3775,6 +3782,203 @@ async fn stale_view_presentation_layer_is_not_observed() {
 }
 
 #[test]
+fn buffer_view_exposes_a_default_gutter_line_number_presentation() {
+    let app = make_app(vec![], None);
+    let editor = view_id(&app, app.session.focused());
+    let gutter = app
+        .session
+        .view(editor)
+        .unwrap()
+        .panes()
+        .space_for_key(super::GUTTER_PANE)
+        .expect("BufferView has a native gutter");
+    assert!(matches!(
+        app.session.scene().node(gutter).space.kind,
+        SpaceKind::Content {
+            view,
+            focusable: false,
+        } if view == editor
+    ));
+    assert!(matches!(
+        app.session.scene().node(gutter).space.sizing,
+        Sizing::Fixed(4)
+    ));
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+
+    let view = query.view(editor, gutter).unwrap();
+    let ViewPresentation::LineNumbers(numbers) = view.presentation else {
+        panic!("gutter must use line-number presentation");
+    };
+    assert_eq!(view.content, Some(editor_cid()));
+    assert_eq!(numbers.current_row, 0);
+    assert_eq!(numbers.line_count, 1);
+}
+
+#[test]
+fn gutter_does_not_number_the_unoccupied_trailing_rope_line() {
+    let mut app = make_app(vec![], None);
+    let editor = view_id(&app, app.session.focused());
+    for command in [
+        EditCommand::InsertText("text\n".to_owned()),
+        EditCommand::MoveLeftBy(1),
+    ] {
+        app.execute_command(DispatchCommand::ContentWithView {
+            command: ContentCommand::Edit(command),
+            view: editor,
+            content: editor_cid(),
+        })
+        .unwrap();
+    }
+    let gutter = app.session.views()[&editor]
+        .panes()
+        .space_for_key(super::GUTTER_PANE)
+        .unwrap();
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+
+    let ViewPresentation::LineNumbers(numbers) = query.view(editor, gutter).unwrap().presentation
+    else {
+        panic!("gutter must use line-number presentation");
+    };
+    assert_eq!(numbers.current_row, 0);
+    assert_eq!(numbers.line_count, 1);
+}
+
+fn app_with_editor_options(options: EditorOptions) -> App<ScriptedFrontend> {
+    App::with_modes_visuals_backgrounds_and_extensions(
+        None,
+        40,
+        5,
+        ScriptedFrontend::new(Vec::new()),
+        Vec::new(),
+        Vec::new(),
+        None,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        options,
+    )
+    .unwrap()
+}
+
+#[test]
+fn editor_options_control_every_new_buffer_view_gutter_width() {
+    let hidden = app_with_editor_options(EditorOptions {
+        buffer_view: BufferViewOptions {
+            gutter: BufferViewGutterOptions {
+                visible: false,
+                width: 6,
+            },
+        },
+    });
+    let hidden_gutter = hidden.session.views()[&ViewId(0)]
+        .panes()
+        .space_for_key(super::GUTTER_PANE)
+        .unwrap();
+    assert!(matches!(
+        hidden.session.scene().node(hidden_gutter).space.sizing,
+        Sizing::Fixed(0)
+    ));
+
+    let mut visible = app_with_editor_options(EditorOptions {
+        buffer_view: BufferViewOptions {
+            gutter: BufferViewGutterOptions {
+                visible: true,
+                width: 6,
+            },
+        },
+    });
+    let second_space = visible
+        .split_space(
+            visible.session.focused(),
+            editor_cid(),
+            true,
+            SplitDirection::Right,
+            false,
+        )
+        .unwrap()
+        .new_space;
+    for view in [ViewId(0), view_id(&visible, second_space)] {
+        let gutter = visible.session.views()[&view]
+            .panes()
+            .space_for_key(super::GUTTER_PANE)
+            .unwrap();
+        assert!(matches!(
+            visible.session.scene().node(gutter).space.sizing,
+            Sizing::Fixed(6)
+        ));
+    }
+}
+
+fn assert_buffer_view_pane_recipe(app: &App<ScriptedFrontend>, view: ViewId) -> SpaceId {
+    let data = app.session.view(view).expect("BufferView exists");
+    let body = data
+        .panes()
+        .space_for_key(super::BODY_PANE)
+        .expect("BufferView owns its body");
+    let gutter = data
+        .panes()
+        .space_for_key(super::GUTTER_PANE)
+        .expect("BufferView owns its gutter");
+    let pane = app
+        .session
+        .scene()
+        .node(body)
+        .parent
+        .expect("body belongs to a BufferView pane root");
+    assert_eq!(app.session.scene().node(gutter).parent, Some(pane));
+    assert_eq!(app.session.scene().node(pane).children, [gutter, body]);
+    assert!(matches!(
+        app.session.scene().node(pane).space.kind,
+        SpaceKind::Container {
+            arrangement: vell_protocol::space::Arrangement::Flex {
+                direction: vell_protocol::space::Axis::Horizontal,
+                ..
+            },
+        }
+    ));
+    pane
+}
+
+#[test]
+fn split_treats_each_buffer_view_pane_recipe_as_one_layout_slot() {
+    let mut app = make_app(vec![], None);
+    let first_space = app.session.focused();
+    let first_view = view_id(&app, first_space);
+    let second_space = app
+        .split_space(
+            first_space,
+            editor_cid(),
+            true,
+            SplitDirection::Right,
+            false,
+        )
+        .unwrap()
+        .new_space;
+    let second_view = view_id(&app, second_space);
+
+    let first_pane = assert_buffer_view_pane_recipe(&app, first_view);
+    let second_pane = assert_buffer_view_pane_recipe(&app, second_view);
+    assert_ne!(first_pane, second_pane);
+    let split = app
+        .session
+        .scene()
+        .node(first_pane)
+        .parent
+        .expect("split owns the first complete BufferView pane");
+    assert_eq!(app.session.scene().node(second_pane).parent, Some(split));
+}
+
+#[test]
 fn status_pane_query_returns_status_bar_presentation() {
     let app = make_app(vec![], None);
     let editor = view_id(&app, app.session.focused());
@@ -3896,6 +4100,7 @@ fn compound_view_switch_replaces_the_complete_subtree_atomically() {
             .spaces()
             .all(|space| view_for_space(app.session.scene(), space) == Some(replacement_view))
     );
+    assert_buffer_view_pane_recipe(&app, replacement_view);
 }
 
 #[test]
@@ -3980,7 +4185,7 @@ fn compound_view_switch_removes_descendant_per_pane_status_bars() {
     for removed in [left_space, left_status, right_space, right_status] {
         assert!(!app.session.scene().contains(removed));
     }
-    assert_eq!(scene_views(app.session.scene()).len(), 2);
+    assert_eq!(scene_views(app.session.scene()).len(), 3);
     assert!(
         scene_views(app.session.scene())
             .into_iter()
@@ -4136,6 +4341,53 @@ fn compound_view_children_keep_independent_selections() {
     assert_eq!(right_head, 3);
 }
 
+#[test]
+fn shared_content_gutters_use_each_buffer_views_primary_selection() {
+    let mut app = make_app(vec![], None);
+    let left_space = app.session.focused();
+    let left = view_id(&app, left_space);
+    let right_space = app
+        .split_space(left_space, editor_cid(), true, SplitDirection::Right, false)
+        .unwrap()
+        .new_space;
+    let right = view_id(&app, right_space);
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("a\nb\nc".to_owned())),
+        view: left,
+        content: editor_cid(),
+    })
+    .unwrap();
+    app.session
+        .apply_view_action(
+            right,
+            ViewAction::SetSelections(Selections::single(Selection::collapsed(TextOffset {
+                char_index: 2,
+            }))),
+            app.kernel.contents(),
+        )
+        .unwrap();
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+    let current_row = |view| {
+        let gutter = app.session.views()[&view]
+            .panes()
+            .space_for_key(super::GUTTER_PANE)
+            .unwrap();
+        let ViewPresentation::LineNumbers(numbers) = query.view(view, gutter).unwrap().presentation
+        else {
+            panic!("gutter must use line-number presentation");
+        };
+        numbers.current_row
+    };
+
+    assert_eq!(current_row(left), 2);
+    assert_eq!(current_row(right), 1);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn native_diff_view_routes_input_and_switches_as_one_view() {
     let mut app = make_app(vec![], None);
@@ -4173,6 +4425,8 @@ async fn native_diff_view_routes_input_and_switches_as_one_view() {
     assert!(parent_view.switchable());
     assert_eq!(app.session.view(left).unwrap().parent(), Some(parent));
     assert_eq!(app.session.view(right).unwrap().parent(), Some(parent));
+    assert_buffer_view_pane_recipe(&app, left);
+    assert_buffer_view_pane_recipe(&app, right);
     assert!(!app.session.view(left).unwrap().switchable());
     assert!(!app.session.view(right).unwrap().switchable());
     assert!(app.session.view_modes().mode_ids(parent).is_empty());
@@ -4273,6 +4527,7 @@ async fn native_diff_view_routes_input_and_switches_as_one_view() {
         Some(replacement)
     );
     assert!(!app.session.scene().contains(left_space));
+    assert_buffer_view_pane_recipe(&app, replacement_view);
     for removed in [parent, left, right] {
         assert!(app.session.view(removed).is_none());
         assert!(app.session.view_modes().mode_ids(removed).is_empty());
@@ -5032,7 +5287,9 @@ editor.modes.define({
         .presentation
     {
         ViewPresentation::StatusBar(presentation) => presentation,
-        ViewPresentation::Text(_) | ViewPresentation::Lines(_) => {
+        ViewPresentation::Text(_)
+        | ViewPresentation::LineNumbers(_)
+        | ViewPresentation::Lines(_) => {
             panic!("expected status-bar presentation")
         }
     };
@@ -5872,6 +6129,12 @@ fn typed_document_rebind_preserves_view_identity_instead_of_switching() {
     let replacement = app.new_buffer();
     let scene_revision = app.session.scene_revision();
     let view_revision = app.session.view(view).unwrap().revision();
+    let gutter = app
+        .session
+        .view(view)
+        .unwrap()
+        .panes()
+        .space_for_key(super::GUTTER_PANE);
 
     app.execute_command(DispatchCommand::ModeOperations {
         operations: vec![OperationRequest::ViewBinding {
@@ -5892,6 +6155,14 @@ fn typed_document_rebind_preserves_view_identity_instead_of_switching() {
         Some(replacement)
     );
     assert_eq!(app.session.scene_revision(), scene_revision);
+    assert_eq!(
+        app.session
+            .view(view)
+            .unwrap()
+            .panes()
+            .space_for_key(super::GUTTER_PANE),
+        gutter
+    );
     assert_eq!(
         app.session.view(view).unwrap().revision(),
         Revision(view_revision.0 + 1)
@@ -7603,12 +7874,9 @@ async fn vim_ctrl_w_s_and_v_split_the_focused_buffer() {
                 .head(),
             original_head
         );
-        let parent = app
-            .session
-            .scene()
-            .node(app.session.focused())
-            .parent
-            .unwrap();
+        let focused_view = view_id(&app, app.session.focused());
+        let pane = assert_buffer_view_pane_recipe(&app, focused_view);
+        let parent = app.session.scene().node(pane).parent.unwrap();
         assert!(matches!(
             app.session.scene().node(parent).space.kind,
             SpaceKind::Container {
@@ -8346,7 +8614,9 @@ async fn ctrl_s_saves_file_and_marks_saved() {
         .presentation
     {
         ViewPresentation::StatusBar(presentation) => presentation,
-        ViewPresentation::Text(_) | ViewPresentation::Lines(_) => {
+        ViewPresentation::Text(_)
+        | ViewPresentation::LineNumbers(_)
+        | ViewPresentation::Lines(_) => {
             panic!("expected status-bar presentation")
         }
     };
