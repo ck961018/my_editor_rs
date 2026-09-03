@@ -3,8 +3,9 @@ use crate::command::AppCommand;
 #[cfg(test)]
 use crate::operation::BufferViewSource;
 use crate::operation::{
-    AppOperation, ContentLifecycleOperation, ContentTarget, ModeFlowPropagation, ModeInvocation,
-    ModeTarget, OperationRequest, ViewLifecycleOperation, ViewSpec,
+    AppOperation, CompletionOperation, ContentLifecycleOperation, ContentTarget,
+    ModeFlowPropagation, ModeInvocation, ModeTarget, OperationRequest, ViewLifecycleOperation,
+    ViewSpec, ViewTarget,
 };
 use vell_mode::command::{ModeCommand, ModeValue};
 use vell_mode::command_registry::{
@@ -39,6 +40,11 @@ pub const NATIVE_COMMAND_IDS: &[&str] = &[
     "focusUp",
     "focusRight",
     "invokeMode",
+    "completion.trigger",
+    "completion.next",
+    "completion.previous",
+    "completion.accept",
+    "completion.cancel",
 ];
 
 pub(super) fn native_command_registry() -> CommandRegistry {
@@ -148,6 +154,31 @@ pub(super) fn native_command_registry() -> CommandRegistry {
         "focusRight",
         app(AppCommand::Focus(SplitDirection::Right)),
     );
+    register_no_args(
+        &mut registry,
+        "completion.trigger",
+        completion(CompletionOperation::ManualTrigger),
+    );
+    register_no_args(
+        &mut registry,
+        "completion.next",
+        completion(CompletionOperation::Next),
+    );
+    register_no_args(
+        &mut registry,
+        "completion.previous",
+        completion(CompletionOperation::Previous),
+    );
+    register_no_args(
+        &mut registry,
+        "completion.accept",
+        completion(CompletionOperation::Accept),
+    );
+    register_no_args(
+        &mut registry,
+        "completion.cancel",
+        completion(CompletionOperation::Cancel),
+    );
     registry.register(CommandEntry::new(
         command_id("invokeMode"),
         |host: &mut dyn CommandHost, arguments: Vec<CommandValue>| {
@@ -223,6 +254,13 @@ fn history(operation: TransactionIntent) -> CommandRequest {
 
 fn app(command: AppCommand) -> CommandRequest {
     execute(OperationRequest::App(AppOperation::Command(command)))
+}
+
+fn completion(operation: CompletionOperation) -> CommandRequest {
+    execute(OperationRequest::Completion {
+        target: ViewTarget::Current,
+        operation,
+    })
 }
 
 fn command_id(value: &str) -> CommandId {

@@ -2,7 +2,7 @@
 
 **状态：** 当前实现
 
-**更新日期：** 2026-08-02
+**更新日期：** 2026-08-13
 
 ## 1. 目标
 
@@ -18,8 +18,11 @@ vell-protocol
 
 vell-frontend  -> vell-protocol
 vell-core      -> vell-protocol
+vell-completion -> vell-protocol
+vell-theme     -> vell-protocol
 
-vell-mode      -> vell-core
+vell-mode      -> vell-completion
+              -> vell-core
               -> vell-protocol
 
 vell-plugin-v8 -> vell-mode
@@ -27,8 +30,10 @@ vell-plugin-v8 -> vell-mode
                -> vell-protocol
 
 vell-app       -> vell-frontend
+               -> vell-completion
                -> vell-mode
                -> vell-core
+               -> vell-theme
                -> vell-protocol
 
 vell-tui       -> vell-frontend
@@ -56,12 +61,16 @@ V8，`vell-protocol` 也不承担本地命令枚举或调用。
   status 和远程语义消息。它没有内部依赖，也不执行业务 IO。
 - `vell-core` 保存封闭 Content 模型、Buffer、ContentStore、编辑计划、
   文本事务和通用输入算法。它不依赖 Mode、Tokio、Frontend 或终端。
+- `vell-completion` 保存 completion request、batch、session、matcher、top-K
+  与 acceptance 状态机。它不执行 source、异步 IO 或渲染，也不依赖
+  ContentStore、Mode、TUI、LSP 或 V8。
+- `vell-theme` 保存主题解析与 Face 注册适配，只依赖共享协议。
 - `vell-mode` 定义 Mode、typed adapter、state store、presentation、
-  command、命令 registry 契约和 `OperationRequest`。它不知道 app 执行器和
-  具体 VM。
+  completion source、command、命令 registry 契约和 `OperationRequest`。
+  它不知道 app 执行器和具体 VM。
 - `vell-frontend` 只定义 `Frontend` trait，避免 app 与具体前端互相依赖。
-- `vell-app` 拥有运行时编排、目标解析、命令注册表和宿主状态，不依赖 TUI
-  或 V8。
+- `vell-app` 拥有运行时编排、目标解析、命令注册表、completion task/inbox
+  和宿主状态，不依赖 TUI 或 V8。
 - `vell-plugin-v8` 把 TypeScript schema 适配为通用 Mode 与命令，不向外泄漏
   V8 类型。
 - `vell-tui` 同时拥有 crossterm 封装、Taffy 布局和渲染，不依赖 app、

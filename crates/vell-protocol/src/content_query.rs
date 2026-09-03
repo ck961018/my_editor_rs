@@ -1,6 +1,7 @@
 //! 前端 pull 后端内容的契约。同进程同步调用，返回 owned 数据。
 
 use std::fmt;
+use std::sync::Arc;
 
 use crate::ids::{ContentId, SpaceId, ViewId};
 use crate::selection::{Selections, TextOffset, TextPoint};
@@ -537,6 +538,62 @@ pub struct TextPresentation {
     pub tab_width: usize,
 }
 
+/// Owned completion menu snapshot. Frontends only place and clip these rows;
+/// source callbacks and matching never run on the render path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompletionPresentation {
+    pub view: ViewId,
+    pub space: SpaceId,
+    pub anchor: TextOffset,
+    pub rows: Arc<[CompletionRow]>,
+    pub selected: Option<CompletionSelection>,
+    pub status: CompletionStatus,
+    pub documentation: Option<Arc<str>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompletionSelection {
+    pub candidate: CompletionCandidateIdentity,
+    pub visible_index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompletionCandidateIdentity(Arc<str>);
+
+impl CompletionCandidateIdentity {
+    pub fn new(value: impl Into<Arc<str>>) -> Option<Self> {
+        const MAX_IDENTITY_BYTES: usize = 512;
+        let value = value.into();
+        (!value.is_empty() && value.len() <= MAX_IDENTITY_BYTES).then_some(Self(value))
+    }
+}
+
+impl Default for CompletionCandidateIdentity {
+    fn default() -> Self {
+        Self(Arc::from("_"))
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CompletionStatus {
+    pub collecting: bool,
+    pub incomplete: bool,
+    pub source_faults: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CompletionRow {
+    pub candidate: CompletionCandidateIdentity,
+    pub label: Arc<str>,
+    pub kind: Option<Arc<str>>,
+    pub detail: Option<Arc<str>>,
+    pub source: Arc<str>,
+    pub group: Option<Arc<str>>,
+    pub deprecated: bool,
+    /// Character offsets in `label`, not UTF-8 byte offsets.
+    pub match_positions: Arc<[usize]>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ViewPresentation {
     Text(TextPresentation),
@@ -682,6 +739,13 @@ pub trait RenderQuery {
         _visible_rows: RowRange,
     ) -> Result<Vec<TextDecoration>, RenderQueryError> {
         Ok(Vec::new())
+    }
+
+    fn completion(
+        &self,
+        _view: ViewId,
+    ) -> Result<Option<Arc<CompletionPresentation>>, RenderQueryError> {
+        Ok(None)
     }
 }
 

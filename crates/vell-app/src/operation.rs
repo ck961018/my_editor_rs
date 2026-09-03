@@ -74,6 +74,11 @@ pub enum ResolvedOperation {
         content: ContentId,
         operation: SearchOperation,
     },
+    Completion {
+        view: ViewId,
+        content: ContentId,
+        operation: CompletionOperation,
+    },
     ContentLifecycle(ResolvedContentLifecycleOperation),
     ViewLifecycle(ResolvedViewLifecycleOperation),
     App(AppOperation),

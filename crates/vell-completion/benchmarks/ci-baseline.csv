@@ -1,0 +1,7 @@
+kind,size,p95_us
+Ascii,10000,509.8
+Ascii,100000,5772.5
+Unicode,10000,2628.3
+Unicode,100000,26098.9
+LongIdentifiers,10000,736.5
+LongIdentifiers,100000,8106.7

@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.88"
 
 [dependencies]
+vell-completion = { path = "../vell-completion" }
 vell-core = { path = "../vell-core" }
 vell-frontend = { path = "../vell-frontend" }
 vell-mode = { path = "../vell-mode" }

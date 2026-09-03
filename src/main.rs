@@ -1,4 +1,4 @@
-use vell_app::{App, native_command_ids};
+use vell_app::{App, buffer_word_completion_mode, native_command_ids};
 use vell_plugin_v8::load_user_configuration;
 use vell_protocol::content_query::ThemeName;
 use vell_tui::TuiFrontend;
@@ -29,6 +29,7 @@ async fn main() -> io::Result<()> {
     let (width, height) = term_size().unwrap_or((80, 24));
     let frontend = TuiFrontend::new(Output::new(io::BufWriter::new(io::stdout())));
     let mut configuration = load_user_configuration().map_err(io::Error::other)?;
+    configuration.modes.push(buffer_word_completion_mode());
     let commands = configuration
         .prepare_commands(&native_command_ids())
         .map_err(io::Error::other)?;

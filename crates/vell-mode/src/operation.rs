@@ -83,9 +83,22 @@ pub enum OperationRequest {
         target: ViewTarget,
         operation: SearchOperation,
     },
+    Completion {
+        target: ViewTarget,
+        operation: CompletionOperation,
+    },
     ContentLifecycle(ContentLifecycleOperation),
     ViewLifecycle(ViewLifecycleOperation),
     App(AppOperation),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompletionOperation {
+    ManualTrigger,
+    Next,
+    Previous,
+    Accept,
+    Cancel,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

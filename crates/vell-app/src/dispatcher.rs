@@ -154,7 +154,14 @@ pub(crate) enum DispatchOutcome {
         command: DispatchCommand,
         replay: Vec<DispatchInput>,
         continuation: Option<DispatchInput>,
+        origin: DispatchOrigin,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DispatchOrigin {
+    Binding,
+    Typing,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -428,6 +435,7 @@ impl Dispatcher {
                             command,
                             replay: Vec::new(),
                             continuation: None,
+                            origin: DispatchOrigin::Binding,
                         };
                     }
                 } else {
@@ -575,6 +583,7 @@ impl Dispatcher {
                                     view: mode_view,
                                     mode_index: index + 1,
                                 }),
+                                origin: DispatchOrigin::Binding,
                             };
                         }
                     }
@@ -628,6 +637,7 @@ impl Dispatcher {
                             view: mode_view,
                             mode_index: index + 1,
                         }),
+                        origin: DispatchOrigin::Typing,
                     };
                 }
             }
@@ -797,6 +807,7 @@ impl Dispatcher {
                     command,
                     replay,
                     continuation,
+                    origin: DispatchOrigin::Binding,
                 }
             }
             None => {
@@ -850,6 +861,7 @@ fn emit_resolved(
         command,
         replay: Vec::new(),
         continuation: mode_continuation(resolved.source, key),
+        origin: DispatchOrigin::Binding,
     }
 }
 
@@ -925,6 +937,7 @@ fn fallback(
             view,
             mode_index: index + 1,
         }),
+        origin: DispatchOrigin::Typing,
     }
 }
 
@@ -1127,6 +1140,7 @@ mod tests {
                 command: DispatchCommand::App(AppCommand::Quit),
                 replay: Vec::new(),
                 continuation: None,
+                origin: DispatchOrigin::Binding,
             }
         );
     }
@@ -1205,6 +1219,7 @@ mod tests {
                     view: parent,
                     mode_index: 1,
                 }),
+                origin: DispatchOrigin::Binding,
             }
         );
     }
@@ -1242,6 +1257,7 @@ mod tests {
                 },
                 replay: Vec::new(),
                 continuation: None,
+                origin: DispatchOrigin::Binding,
             }
         );
     }
@@ -1278,6 +1294,7 @@ mod tests {
                 },
                 replay: Vec::new(),
                 continuation: None,
+                origin: DispatchOrigin::Binding,
             }
         );
     }
@@ -1395,6 +1412,7 @@ mod tests {
                 command: DispatchCommand::App(AppCommand::FocusNext),
                 replay: Vec::new(),
                 continuation: None,
+                origin: DispatchOrigin::Binding,
             }
         );
     }
@@ -1438,6 +1456,7 @@ mod tests {
                 command: DispatchCommand::App(AppCommand::FocusNext),
                 replay: vec![DispatchInput::Normal(KeyEvent::char('!'))],
                 continuation: None,
+                origin: DispatchOrigin::Binding,
             }
         );
     }

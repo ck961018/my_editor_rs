@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::time::Instant;
 
@@ -6,6 +6,7 @@ use std::time::Instant;
 use crate::behavior::BehaviorRecorder;
 use crate::bootstrap::bootstrap_editor_with_options_and_theme;
 use crate::buffer_lifecycle::normalize_path;
+use crate::completion::CompletionDiagnostic;
 use crate::diagnostics::RuntimeDiagnostic;
 use crate::kernel::{FileBaseline, Kernel};
 use crate::mode::{
@@ -42,6 +43,7 @@ pub struct App<F: Frontend> {
     pub(super) next_command_task: u64,
     pub(super) command_tasks: HashMap<CommandTaskId, CommandTaskTarget>,
     pub(super) pending_commands: Vec<PendingCommandInvocation>,
+    pub(super) completion_diagnostics: VecDeque<CompletionDiagnostic>,
     #[cfg(test)]
     pub(super) behavior: BehaviorRecorder,
 }
@@ -269,6 +271,7 @@ impl<F: Frontend> App<F> {
             next_command_task: 0,
             command_tasks: HashMap::new(),
             pending_commands: Vec::new(),
+            completion_diagnostics: VecDeque::new(),
             #[cfg(test)]
             behavior: BehaviorRecorder::default(),
         };

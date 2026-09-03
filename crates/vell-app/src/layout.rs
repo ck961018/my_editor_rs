@@ -112,6 +112,7 @@ impl<F: Frontend> App<F> {
         self.kernel.schedule_mode_jobs();
         self.session
             .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
+        self.reconcile_completion_state();
         Ok(result)
     }
 
@@ -128,6 +129,7 @@ impl<F: Frontend> App<F> {
         }
         self.session
             .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
+        self.reconcile_completion_state();
         Ok(mutation.output)
     }
 
@@ -164,6 +166,7 @@ impl<F: Frontend> App<F> {
         self.kernel.schedule_mode_jobs();
         self.session
             .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
+        self.reconcile_completion_state();
         Ok(mutation.output)
     }
 
@@ -240,6 +243,7 @@ impl<F: Frontend> App<F> {
         self.kernel.schedule_mode_jobs();
         self.session
             .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
+        self.reconcile_completion_state();
         mutation.output
     }
 
@@ -294,6 +298,7 @@ impl<F: Frontend> App<F> {
             }
             self.session
                 .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
+            self.reconcile_completion_state();
             return Ok(previous);
         }
         let compound_root = self.session.view(view).and_then(|current| {
@@ -331,6 +336,7 @@ impl<F: Frontend> App<F> {
         }
         self.session
             .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
+        self.reconcile_completion_state();
         Ok(previous)
     }
 

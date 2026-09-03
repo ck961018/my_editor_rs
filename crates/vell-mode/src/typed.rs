@@ -83,6 +83,28 @@ pub trait TypedMode: 'static {
     fn actions(&self) -> &[ModeActionName];
     fn adapters(&self) -> ModeAdapters;
 
+    fn completion_sources(&self) -> &[crate::CompletionSourceDefinition] {
+        &[]
+    }
+
+    fn prepare_completion_source(
+        &self,
+        _content_state: &Self::ContentState,
+        _view_state: &Self::ViewState,
+        _context: &ModeViewContext<'_>,
+        source: &crate::CompletionSourceId,
+        _request: &vell_completion::CompletionRequest,
+    ) -> Result<crate::CompletionSourceTask, ModeError> {
+        self.completion_sources()
+            .iter()
+            .find(|definition| definition.id() == source)
+            .map(crate::CompletionSourceDefinition::task)
+            .ok_or_else(|| ModeError::CallbackFailed {
+                mode: self.name().clone(),
+                message: format!("completion source '{}' is not registered", source.as_str()),
+            })
+    }
+
     fn before(&self) -> Option<&ModeName> {
         None
     }
@@ -373,6 +395,27 @@ impl<M: TypedMode> Mode for ErasedMode<M> {
 
     fn adapters(&self) -> ModeAdapters {
         self.mode.adapters()
+    }
+
+    fn completion_sources(&self) -> &[crate::CompletionSourceDefinition] {
+        self.mode.completion_sources()
+    }
+
+    fn prepare_completion_source(
+        &self,
+        content_state: &dyn ModeState,
+        view_state: &dyn ModeState,
+        context: &ModeViewContext<'_>,
+        source: &crate::CompletionSourceId,
+        request: &vell_completion::CompletionRequest,
+    ) -> Result<crate::CompletionSourceTask, ModeError> {
+        self.mode.prepare_completion_source(
+            self.content_state(content_state)?,
+            self.view_state(view_state)?,
+            context,
+            source,
+            request,
+        )
     }
 
     fn before(&self) -> Option<&ModeName> {

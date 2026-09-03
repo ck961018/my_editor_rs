@@ -23,6 +23,11 @@ interface EditorCommandSeeds {
 	readonly focusDown: () => void;
 	readonly focusUp: () => void;
 	readonly focusRight: () => void;
+	readonly "completion.trigger": () => void;
+	readonly "completion.next": () => void;
+	readonly "completion.previous": () => void;
+	readonly "completion.accept": () => void;
+	readonly "completion.cancel": () => void;
 	readonly invokeMode: (
 		command: `${string}.${string}`,
 		arguments?: ScriptData,
@@ -46,6 +51,13 @@ interface EditorCommands {
 	readonly diff: {
 		readonly setRightContent: EditorCommandSeeds["diff.setRightContent"];
 	};
+	readonly completion: {
+		readonly trigger: EditorCommandSeeds["completion.trigger"];
+		readonly next: EditorCommandSeeds["completion.next"];
+		readonly previous: EditorCommandSeeds["completion.previous"];
+		readonly accept: EditorCommandSeeds["completion.accept"];
+		readonly cancel: EditorCommandSeeds["completion.cancel"];
+	};
 	readonly undo: EditorCommandSeeds["undo"];
 	readonly redo: EditorCommandSeeds["redo"];
 	readonly quit: EditorCommandSeeds["quit"];
@@ -63,6 +75,7 @@ interface EditorCommands {
 declare const content: EditorCommands["content"];
 declare const view: EditorCommands["view"];
 declare const diff: EditorCommands["diff"];
+declare const completion: EditorCommands["completion"];
 declare const undo: EditorCommands["undo"];
 declare const redo: EditorCommands["redo"];
 declare const quit: EditorCommands["quit"];

@@ -1,10 +1,9 @@
 # Vell Context
 
-Vell 是一个终端文本编辑器。本文档定义升级目标的
-核心领域语言：Content（数据模型）、View（完整交互
-单元）与 Pane（View 的显示区域）的边界和关系。
-它不表示所有阶段均已实现；当前差距与迁移顺序见
-[View 中心架构路线图](docs/roadmap/view-centered-architecture.md)。
+Vell 是一个终端文本编辑器。本文档定义当前核心领域语言：
+Content（数据模型）、View（完整交互单元）与 Pane（View 的显示区域）的
+边界和关系。下一项主要功能演进见
+[高性能可扩展补全系统 roadmap](docs/roadmap/completion.md)。
 
 ## Language
 

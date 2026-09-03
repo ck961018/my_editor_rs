@@ -62,6 +62,7 @@ jobs:
         run: >-
           cargo test --locked
           -p vell-protocol
+          -p vell-completion
           -p vell-core
           -p vell-frontend
           -p vell-mode
@@ -86,6 +87,56 @@ jobs:
             throw 'vell-app must not depend on V8'
           }
 
+  completion-performance:
+    name: Completion performance gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check out the PR base for relative regression
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: completion-reference
+      - name: Install Rust 1.88
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+      - name: Check absolute budgets and normalized scaling
+        env:
+          REFERENCE_DIR: ${{ github.workspace }}/completion-reference
+        shell: bash
+        run: |
+          if [[ -f "$REFERENCE_DIR/crates/vell-completion/Cargo.toml" ]]; then
+            reference_log="$RUNNER_TEMP/completion-reference.log"
+            cargo test --manifest-path \
+              "$REFERENCE_DIR/crates/vell-completion/Cargo.toml" --release \
+              --features benchmarking \
+              completion_matcher_absolute_and_scaling_gate -- \
+              --ignored --nocapture | tee "$reference_log"
+            echo "COMPLETION_REFERENCE_LOG=$reference_log" >> "$GITHUB_ENV"
+          fi
+      - name: Check current absolute and relative budgets
+        run: >-
+          cargo test --locked -p vell-completion --release
+          --features benchmarking completion_matcher_absolute_and_scaling_gate
+          -- --ignored --nocapture
+      - name: Check the 100k session memory budget
+        run: >-
+          cargo test --locked -p vell-completion --release
+          --features benchmarking
+          hundred_thousand_item_session_stays_below_memory_budget
+          -- --nocapture
+      - name: Check M2 local-source latency budgets
+        run: >-
+          cargo test --locked -p vell-app --release
+          m2_completion_performance_gate
+          -- --ignored --nocapture
+      - name: Check M2 completion render budget
+        run: >-
+          cargo test --locked -p vell-tui --release
+          completion_popup_render_performance_gate
+          -- --ignored --nocapture
   full-host:
     name: Full V8 host (${{ matrix.os }})
     strategy:

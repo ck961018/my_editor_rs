@@ -9,6 +9,7 @@ use crate::operation::{BufferViewSource, OperationError};
 use crate::session::PreparedCompoundReplacement;
 use crate::theme::{FaceRemapOwner, ResolvedFaceOperation};
 use crate::transaction::TransactionRecord;
+use vell_completion::{CandidateId, CompletionTaskKey, CompletionTrigger};
 use vell_core::clipboard::ClipboardPayload;
 use vell_core::content::SaveSnapshot;
 use vell_core::content_store::ContentSnapshot;
@@ -37,6 +38,8 @@ pub(super) struct ExecutionFrame {
     topology_effect_prepared: bool,
     viewport_effect_prepared: bool,
     pending_command: Option<PendingCommandStart>,
+    input_completion_trigger: Option<CompletionTrigger>,
+    completion_after_input: Option<CompletionAfterInput>,
     budget: ExecutionBudget,
 }
 
@@ -132,7 +135,28 @@ pub(super) enum PreparedEffect {
         payload: ClipboardPayload,
         write_system: bool,
     },
+    Completion {
+        view: ViewId,
+        action: PreparedCompletionAction,
+    },
     Quit,
+}
+
+pub(super) enum PreparedCompletionAction {
+    ManualTrigger,
+    Next,
+    Previous,
+    Cancel,
+    AcceptanceCommitted {
+        task: CompletionTaskKey,
+        candidate: CandidateId,
+    },
+}
+
+#[derive(Clone)]
+pub(super) enum CompletionAfterInput {
+    Trigger(CompletionTrigger),
+    Cancel,
 }
 
 pub(super) struct ExecutionBudget {
@@ -160,6 +184,8 @@ impl ExecutionFrame {
             topology_effect_prepared: false,
             viewport_effect_prepared: false,
             pending_command: None,
+            input_completion_trigger: None,
+            completion_after_input: None,
             budget: ExecutionBudget::default(),
         }
     }
@@ -170,6 +196,22 @@ impl ExecutionFrame {
 
     pub(super) fn prepared_effect_count(&self) -> usize {
         self.prepared_effects.len()
+    }
+
+    pub(super) fn completion_after_input(&self) -> Option<CompletionAfterInput> {
+        self.completion_after_input.clone()
+    }
+
+    pub(super) fn set_input_completion_trigger(&mut self, trigger: Option<CompletionTrigger>) {
+        self.input_completion_trigger = trigger;
+    }
+
+    pub(super) fn input_completion_trigger(&self) -> Option<&CompletionTrigger> {
+        self.input_completion_trigger.as_ref()
+    }
+
+    pub(super) fn record_completion_after_input(&mut self, action: CompletionAfterInput) {
+        self.completion_after_input = Some(action);
     }
 
     pub(super) fn attach_task_to_save_since(&mut self, start: usize, task: CommandTaskId) -> bool {

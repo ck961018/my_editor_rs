@@ -2,7 +2,7 @@
 
 **状态：** 当前实现架构
 
-**更新日期：** 2026-08-10
+**更新日期：** 2026-08-13
 
 ## 1. 文档定位
 
@@ -23,9 +23,13 @@ TUI 是当前唯一生产 Frontend，但 `app` 不依赖 `tui`，`tui` 也不反
 ```text
 vell-frontend  -> vell-protocol
 vell-core      -> vell-protocol
-vell-mode      -> vell-core + vell-protocol
+vell-completion -> vell-protocol
+vell-theme     -> vell-protocol
+vell-mode      -> vell-completion + vell-core + vell-protocol
 vell-plugin-v8 -> vell-mode + vell-core + vell-protocol
-vell-app       -> vell-frontend + vell-mode + vell-core + vell-protocol
+vell-app       -> vell-frontend + vell-completion + vell-mode + vell-core
+               -> vell-theme
+               -> vell-protocol
 vell-tui       -> vell-frontend + vell-protocol
 vell binary    -> vell-app + vell-plugin-v8 + vell-tui
 ```
@@ -34,7 +38,9 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
 | --- | --- |
 | `vell-protocol` | ID、Scene、输入、viewport、查询与远程语义数据 |
 | `vell-core` | Content、Buffer、领域 action、文本事务和输入算法 |
-| `vell-mode` | Mode、adapter、state、命令、operation 和 presentation |
+| `vell-completion` | completion session、batch、matcher 与 acceptance 状态机 |
+| `vell-theme` | 主题解析与 Face 注册适配 |
+| `vell-mode` | Mode、adapter、state、completion source、命令和 presentation |
 | `vell-frontend` | 只定义 `Frontend` 行为接缝 |
 | `vell-app` | 主循环、执行、View、Scene、history、保存和后台任务 |
 | `vell-plugin-v8` | TypeScript/V8 宿主与通用 Mode adapter |
@@ -56,6 +62,7 @@ App<F: Frontend>
 │   ├── ModeContentStore
 │   ├── TransactionManager
 │   ├── mode jobs + save tasks
+│   ├── bounded completion source tasks + inbox
 │   └── AppMessage channel
 ├── ClientSession
 │   ├── ViewWorkspace
@@ -67,7 +74,8 @@ App<F: Frontend>
 │   ├── ModeResolver + attachment overrides
 │   ├── Dispatcher
 │   ├── FaceRegistry
-│   └── PresentationLayerStore
+│   ├── PresentationLayerStore
+│   └── CompletionEngine
 └── F: Frontend
 ```
 
@@ -75,6 +83,19 @@ App<F: Frontend>
 state、history 和后台任务。`ViewWorkspace` 保存 View 与 Scene 的完整结构状态；
 `ClientSession` 组合 workspace、Mode view state、输入状态和呈现缓存。
 当前仍是一对一组合，没有 session registry 或并发共享容器。
+
+Completion source 由 Buffer Mode 声明为可克隆的 owned definition。App 从
+当前 Mode chain 的 `(ModeId, source-local id)` 派生无歧义 `SourceKey`。
+source prepare callback 可只读观察 Mode content/view state 和 Buffer context，
+但只能返回 owned async task，不能把借用带入后台。
+
+`ClientSession` 中的 `CompletionEngine` 生成 session-local task identity，
+`Kernel` 才在输入 frame 提交后启动 provider。Provider batch 进入按 session
+共享的有界 inbox；`AppMessage` 只携带 source 通知。App 取出 batch 后再次
+校验 content/view revision、selection、epoch 和当前 Mode source 顺序，再
+交给 engine 安装。全局 task 数、inbox batch/item/byte 与错误字符串都有
+上限。取消 source 会 cancel token、abort pending future、移除 task 并丢弃
+inbox payload；provider future 不得在一次 poll 中执行无界同步工作。
 
 根二进制先加载内建与用户 TypeScript Mode，再由 `vell-app::bootstrap`
 分配 editor 的 `ContentId` 与初始 `ViewId`。
@@ -364,6 +385,32 @@ KeyEvent { code: KeyCode, modifiers: KeyModifiers }
 App 在 `tokio::select!` 中等待 Frontend event、最近输入 deadline、后台
 `AppMessage` 和取消信号。replay 使用显式队列，并继续归属当前 frame 的
 统一 replay 预算。
+
+### 9.1 Completion
+
+`ClientSession` 按 View 持有 `CompletionEngine` session；`Kernel` 持有
+有界 source task、session inbox 和实际存活 task permit。Buffer adapter 在
+受控阶段从 content/view state 与 Buffer context 创建 owned task。worker
+只消费冻结的 request 与文本 snapshot，结果经 `AppMessage` 回到 app，并以
+session、epoch、source、sequence、content revision 和 attachment identity
+校验后安装。
+
+物理输入在 frame 中携带显式 completion trigger intent；只有单个 identifier
+字符插入和 Backspace 分别产生 identifier/delete trigger。paste、history 和
+其他 edit 使用显式 cancel 策略，不从 revision 或 edit 形状猜来源。app 只为
+单个 collapsed selection 建立 request。内建 buffer-word source 以
+`(ContentId, Revision)` 缓存有界 Unicode word index；本地缓存路径为零
+debounce。selection、focus、rebind、switch 与 close 变化会取消旧 session。
+显式 incomplete retrigger 才在同一 session 内推进 epoch。
+
+Engine 生成 owned `CompletionPresentation`，`AppQuery` 只从 presentation
+cache 返回快照。TUI 在 focused text body 内按 viewport 显示 menu，不调用
+Mode 或 source。session-owned transient keymap 先把可配置按键解析成 typed
+completion operation；未绑定或当前不可执行的按键继续进入 Mode chain。普通
+键 fallback 只读轻量 interaction state，selection 移动只更新 presentation
+identity，不重建候选行。accept 先冻结 candidate/range/revision，再把文本
+edit、selection、history 与 session commit 放入同一个 `ExecutionFrame`，
+失败时一起回滚。
 
 ## 10. Scene、布局与 pull 渲染
 

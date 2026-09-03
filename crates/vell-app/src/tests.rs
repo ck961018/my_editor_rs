@@ -1,6 +1,9 @@
 use std::cell::{Cell, RefCell};
 use std::io;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use super::App;
 use super::behavior::{
@@ -23,6 +26,7 @@ use crate::command::{
 };
 use crate::kernel::FileBaseline;
 use crate::mode::{
+    CompletionSourceBatch, CompletionSourceDefinition, CompletionSourceId, CompletionSourceTask,
     LanguageId, Mode, ModeActionScope, ModeAdapters, ModeAttachmentError, ModeAttachmentRule,
     ModeContentContext, ModeError, ModeFaultPhase, ModeResult, ModeState, ModeViewContext,
     ModeViewInstance, ModeViewPolicy, NamedLineSegment, NamedLinesPresentation,
@@ -39,6 +43,12 @@ use crate::operation::{
     ViewSpec, ViewTarget,
 };
 use std::collections::{BTreeMap, VecDeque};
+use tokio::sync::Barrier;
+use vell_completion::{
+    CompletionBatch, CompletionEvent, CompletionItem, CompletionRequestContext,
+    CompletionRequestSeed, CompletionTextRange, CompletionTrigger, IncompleteDirections,
+    SelectionMove, SourceBatchVersion, SourceRequestKey,
+};
 use vell_core::action::ContentAction;
 use vell_core::buffer::Buffer;
 use vell_core::clipboard::{ClipboardKind, PastePlacement};
@@ -146,6 +156,186 @@ struct ViewOnlyDiffMode {
     name: ModeName,
     actions: Vec<ModeActionName>,
     keymap: Keymap<Command>,
+}
+
+struct CompletionTestMode {
+    name: ModeName,
+    sources: Vec<CompletionSourceDefinition>,
+}
+
+struct BoundInsertCompletionMode {
+    name: ModeName,
+    keymap: Keymap<Command>,
+}
+
+struct StatefulCompletionMode {
+    name: ModeName,
+    sources: Vec<CompletionSourceDefinition>,
+}
+
+struct FailingCompletionPrepareMode {
+    name: ModeName,
+    sources: Vec<CompletionSourceDefinition>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl Mode for CompletionTestMode {
+    fn name(&self) -> &ModeName {
+        &self.name
+    }
+
+    fn actions(&self) -> &[ModeActionName] {
+        &[]
+    }
+
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer()
+    }
+
+    fn completion_sources(&self) -> &[CompletionSourceDefinition] {
+        &self.sources
+    }
+}
+
+impl BoundInsertCompletionMode {
+    fn new() -> Self {
+        let mut keymap = Keymap::new();
+        keymap.bind(
+            KeyEvent::char('x'),
+            Command::Content(ContentCommand::Edit(EditCommand::InsertText(
+                "q".to_owned(),
+            ))),
+        );
+        Self {
+            name: ModeName::new("test.bound-insert-completion"),
+            keymap,
+        }
+    }
+}
+
+impl Mode for BoundInsertCompletionMode {
+    fn name(&self) -> &ModeName {
+        &self.name
+    }
+
+    fn actions(&self) -> &[ModeActionName] {
+        &[]
+    }
+
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer()
+    }
+
+    fn input_keymap<'a>(
+        &'a self,
+        _content_state: &dyn ModeState,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) -> &'a Keymap<Command> {
+        &self.keymap
+    }
+}
+
+impl Mode for StatefulCompletionMode {
+    fn name(&self) -> &ModeName {
+        &self.name
+    }
+
+    fn actions(&self) -> &[ModeActionName] {
+        &[]
+    }
+
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer()
+    }
+
+    fn completion_sources(&self) -> &[CompletionSourceDefinition] {
+        &self.sources
+    }
+
+    fn create_content_state(
+        &self,
+        _context: &ModeContentContext<'_>,
+    ) -> Result<Box<dyn ModeState>, ModeError> {
+        Ok(Box::new(7_u8))
+    }
+
+    fn create_view_state(
+        &self,
+        _content_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+    ) -> Result<Box<dyn ModeState>, ModeError> {
+        Ok(Box::new(5_u8))
+    }
+
+    fn prepare_completion_source(
+        &self,
+        content_state: &dyn ModeState,
+        view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+        _source: &CompletionSourceId,
+        _request: &vell_completion::CompletionRequest,
+    ) -> Result<CompletionSourceTask, ModeError> {
+        let content = *content_state.as_any().downcast_ref::<u8>().unwrap();
+        let view = *view_state.as_any().downcast_ref::<u8>().unwrap();
+        CompletionSourceTask::new(Duration::ZERO, Duration::from_secs(1), move |_, _, sink| {
+            Box::pin(async move {
+                let label = (content + view).to_string();
+                let _ = sink.publish(CompletionSourceBatch::replace(
+                    SourceBatchVersion(1),
+                    vec![CompletionItem::new(label.clone(), label)],
+                    true,
+                    IncompleteDirections::default(),
+                ));
+                Ok(())
+            })
+        })
+        .map_err(|error| ModeError::CallbackFailed {
+            mode: self.name.clone(),
+            message: error.to_string(),
+        })
+    }
+}
+
+impl Mode for FailingCompletionPrepareMode {
+    fn name(&self) -> &ModeName {
+        &self.name
+    }
+
+    fn actions(&self) -> &[ModeActionName] {
+        &[]
+    }
+
+    fn adapters(&self) -> ModeAdapters {
+        ModeAdapters::buffer()
+    }
+
+    fn completion_sources(&self) -> &[CompletionSourceDefinition] {
+        &self.sources
+    }
+
+    fn prepare_completion_source(
+        &self,
+        _content_state: &dyn ModeState,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+        source: &CompletionSourceId,
+        _request: &vell_completion::CompletionRequest,
+    ) -> Result<CompletionSourceTask, ModeError> {
+        if source.as_str() == "failing" {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            return Err(ModeError::CallbackFailed {
+                mode: self.name.clone(),
+                message: "completion prepare failed".to_owned(),
+            });
+        }
+        Ok(self
+            .sources
+            .iter()
+            .find(|definition| definition.id() == source)
+            .expect("declared completion source exists")
+            .task())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1761,6 +1951,49 @@ fn make_extension_app(
     )
 }
 
+fn make_completion_app(sources: Vec<CompletionSourceDefinition>) -> App<ScriptedFrontend> {
+    App::with_modes(
+        None,
+        40,
+        5,
+        ScriptedFrontend::new(Vec::new()),
+        vec![Box::new(CompletionTestMode {
+            name: ModeName::new("test.completion"),
+            sources,
+        })],
+    )
+    .unwrap()
+}
+
+fn completion_request(app: &App<ScriptedFrontend>, view: ViewId) -> CompletionRequestSeed {
+    let view_data = app.session.view(view).unwrap();
+    let content = view_data.document_content().unwrap();
+    let selection = *view_data.selections().unwrap().primary();
+    let range = CompletionTextRange::new(selection.head, selection.head).unwrap();
+    CompletionRequestSeed::new(
+        view,
+        content,
+        app.kernel.contents().revision(content).unwrap(),
+        view_data.revision(),
+        selection,
+        range,
+        "",
+        CompletionTrigger::Manual,
+        CompletionRequestContext::new(None::<String>, "untitled", None::<String>, "", ""),
+    )
+    .unwrap()
+}
+
+fn completion_batch(key: SourceRequestKey, label: &str) -> CompletionBatch {
+    CompletionBatch::replace(
+        key,
+        SourceBatchVersion(1),
+        vec![CompletionItem::new(label, label)],
+        true,
+        IncompleteDirections::default(),
+    )
+}
+
 #[test]
 fn view_extension_panes_follow_buffer_views_and_unload_without_owning_them() {
     let calls = Rc::new(Cell::new(0));
@@ -2234,6 +2467,7 @@ fn make_script_app(source: &str) -> App<ScriptedFrontend> {
         next_command_task: 0,
         command_tasks: Default::default(),
         pending_commands: Vec::new(),
+        completion_diagnostics: Default::default(),
         behavior: BehaviorRecorder::default(),
     }
 }
@@ -2280,6 +2514,7 @@ editor.modes.define({
         next_command_task: 0,
         command_tasks: Default::default(),
         pending_commands: Vec::new(),
+        completion_diagnostics: Default::default(),
         behavior: BehaviorRecorder::default(),
     };
     let (_, identity) = normalize_path(&path).unwrap();
@@ -12726,4 +12961,981 @@ fn native_history_command_uses_the_registered_execution_path() {
     .unwrap();
 
     assert_eq!(text_rows(&app, editor_cid()), [""]);
+}
+
+#[test]
+fn rejected_source_overflow_does_not_retain_presentation_metadata() {
+    let sources = (0..4_096)
+        .map(|index| {
+            CompletionSourceDefinition::new(
+                CompletionSourceId::new(format!("source-{index}")).unwrap(),
+                Duration::ZERO,
+                Duration::from_secs(1),
+                |_, _, _| Box::pin(async { Ok(()) }),
+            )
+            .unwrap()
+        })
+        .collect();
+    let mut app = App::with_modes(
+        None,
+        40,
+        5,
+        ScriptedFrontend::new(Vec::new()),
+        vec![Box::new(CompletionTestMode {
+            name: ModeName::new("test.too-many-completion-sources"),
+            sources,
+        })],
+    )
+    .unwrap();
+    let view = view_id(&app, app.session.focused());
+
+    assert!(!app.trigger_completion_for_view(view, CompletionTrigger::Manual));
+    assert!(app.session.completion().snapshot(view).is_none());
+    assert_eq!(app.completion_source_label_count(view), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn completion_sources_run_off_frame_and_install_fast_results_first() {
+    let barrier = Arc::new(Barrier::new(2));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let source = |id: &'static str, label: &'static str, delay: Duration| {
+        let barrier = barrier.clone();
+        let calls = calls.clone();
+        CompletionSourceDefinition::new(
+            CompletionSourceId::new(id).unwrap(),
+            Duration::from_millis(20),
+            Duration::from_secs(2),
+            move |_, cancellation, sink| {
+                let barrier = barrier.clone();
+                let calls = calls.clone();
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    barrier.wait().await;
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                    if !cancellation.is_cancelled() {
+                        let _ = sink.publish(CompletionSourceBatch::replace(
+                            SourceBatchVersion(1),
+                            vec![CompletionItem::new(label, label)],
+                            true,
+                            IncompleteDirections::default(),
+                        ));
+                    }
+                    Ok(())
+                })
+            },
+        )
+        .unwrap()
+    };
+    let mut app = make_completion_app(vec![
+        source("fast", "fast", Duration::ZERO),
+        source("slow", "slow", Duration::from_millis(100)),
+    ]);
+    let view = view_id(&app, app.session.focused());
+
+    assert!(app.trigger_completion(completion_request(&app, view)));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    for _ in 0..4 {
+        let message = tokio::time::timeout(Duration::from_secs(1), app.kernel.receive_message())
+            .await
+            .unwrap()
+            .unwrap();
+        app.handle_app_message(message).unwrap();
+        if app
+            .session
+            .completion()
+            .snapshot(view)
+            .is_some_and(|snapshot| snapshot.item_count == 1)
+        {
+            break;
+        }
+    }
+
+    let snapshot = app.session.completion().snapshot(view).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(snapshot.collecting);
+    assert_eq!(snapshot.candidates.len(), 1);
+    assert_eq!(&*snapshot.candidates[0].label, "fast");
+    app.kernel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completion_task_preparation_snapshots_read_only_mode_state() {
+    let definition = CompletionSourceDefinition::new(
+        CompletionSourceId::new("state").unwrap(),
+        Duration::ZERO,
+        Duration::from_secs(1),
+        |_, _, _| Box::pin(async { Ok(()) }),
+    )
+    .unwrap();
+    let mut app = App::with_modes(
+        None,
+        40,
+        5,
+        ScriptedFrontend::new(Vec::new()),
+        vec![Box::new(StatefulCompletionMode {
+            name: ModeName::new("stateful"),
+            sources: vec![definition],
+        })],
+    )
+    .unwrap();
+    let view = view_id(&app, app.session.focused());
+    app.trigger_completion(completion_request(&app, view));
+
+    for _ in 0..2 {
+        let message = tokio::time::timeout(Duration::from_secs(1), app.kernel.receive_message())
+            .await
+            .unwrap()
+            .unwrap();
+        app.handle_app_message(message).unwrap();
+        if app
+            .session
+            .completion()
+            .snapshot(view)
+            .is_some_and(|snapshot| snapshot.item_count == 1)
+        {
+            break;
+        }
+    }
+
+    let snapshot = app.session.completion().snapshot(view).unwrap();
+    assert_eq!(&*snapshot.candidates[0].label, "12");
+    app.kernel.cancel();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn completion_prepare_failure_is_source_local_and_manual_trigger_retries_it() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let definition = CompletionSourceDefinition::new(
+        CompletionSourceId::new("failing").unwrap(),
+        Duration::ZERO,
+        Duration::from_secs(1),
+        |_, _, _| Box::pin(async { Ok(()) }),
+    )
+    .unwrap();
+    let healthy = CompletionSourceDefinition::new(
+        CompletionSourceId::new("healthy").unwrap(),
+        Duration::ZERO,
+        Duration::from_secs(1),
+        |_, _, _| Box::pin(std::future::pending()),
+    )
+    .unwrap();
+    let name = ModeName::new("failing-completion");
+    let mut app = App::with_modes(
+        None,
+        40,
+        5,
+        ScriptedFrontend::new(Vec::new()),
+        vec![Box::new(FailingCompletionPrepareMode {
+            name: name.clone(),
+            sources: vec![definition, healthy],
+            calls: calls.clone(),
+        })],
+    )
+    .unwrap();
+    let view = view_id(&app, app.session.focused());
+    assert!(app.trigger_completion(completion_request(&app, view)));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(app.session.view_modes().faults_for_test().is_empty());
+    let snapshot = app.session.completion().snapshot(view).unwrap();
+    assert!(snapshot.collecting);
+    assert_eq!(app.kernel.completion_task_count_for_test(), 1);
+
+    assert!(app.trigger_completion(completion_request(&app, view)));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(app.session.view_modes().faults_for_test().is_empty());
+    assert_eq!(app.kernel.completion_task_count_for_test(), 1);
+    assert!(app.completion_diagnostics().any(|diagnostic| {
+        diagnostic.kind == crate::CompletionDiagnosticKind::Failed
+            && diagnostic
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("completion prepare failed"))
+    }));
+    app.kernel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completion_source_keys_are_injective_across_mode_and_local_ids() {
+    let source = |id: &str| {
+        CompletionSourceDefinition::new(
+            CompletionSourceId::new(id.to_owned()).unwrap(),
+            Duration::ZERO,
+            Duration::from_secs(1),
+            |_, _, _| Box::pin(std::future::pending()),
+        )
+        .unwrap()
+    };
+    let mut app = App::with_modes(
+        None,
+        40,
+        5,
+        ScriptedFrontend::new(Vec::new()),
+        vec![
+            Box::new(CompletionTestMode {
+                name: ModeName::new("a/b"),
+                sources: vec![source("c")],
+            }),
+            Box::new(CompletionTestMode {
+                name: ModeName::new("a"),
+                sources: vec![source("b/c")],
+            }),
+        ],
+    )
+    .unwrap();
+    let view = view_id(&app, app.session.focused());
+    app.trigger_completion(completion_request(&app, view));
+
+    let snapshot = app.session.completion().snapshot(view).unwrap();
+    assert_eq!(snapshot.source_count, 2);
+    assert_ne!(snapshot.sources[0], snapshot.sources[1]);
+    assert_eq!(app.kernel.completion_task_count_for_test(), 2);
+    app.kernel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buffer_word_completion_commands_accept_once_and_join_history() {
+    let mut app = App::with_modes(
+        None,
+        40,
+        5,
+        ScriptedFrontend::new(Vec::new()),
+        vec![crate::buffer_word_completion_mode()],
+    )
+    .unwrap();
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("alpha beta al".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(
+            CommandId::new("completion.trigger").unwrap(),
+            Vec::new(),
+        ),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    for _ in 0..8 {
+        let message = tokio::time::timeout(Duration::from_secs(1), app.kernel.receive_message())
+            .await
+            .unwrap()
+            .unwrap();
+        app.handle_app_message(message).unwrap();
+        if app
+            .session
+            .completion()
+            .snapshot(view)
+            .is_some_and(|snapshot| !snapshot.candidates.is_empty())
+        {
+            break;
+        }
+    }
+    let snapshot = app.session.completion().snapshot(view).unwrap();
+    assert_eq!(snapshot.candidates.len(), 1);
+    assert_eq!(&*snapshot.candidates[0].label, "alpha");
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+    let presentation = query.completion(view).unwrap().unwrap();
+    let repeated = query.completion(view).unwrap().unwrap();
+    assert!(Arc::ptr_eq(&presentation, &repeated));
+    assert_eq!(presentation.view, view);
+    assert_eq!(
+        presentation.space,
+        app.session.body_space_for_view(view).unwrap()
+    );
+    assert_eq!(presentation.rows[0].label.as_ref(), "alpha");
+    assert_eq!(presentation.rows[0].source.as_ref(), "buffer-words");
+    assert!(!presentation.rows[0].deprecated);
+    assert_eq!(
+        presentation
+            .selected
+            .as_ref()
+            .map(|selection| selection.visible_index),
+        Some(0)
+    );
+    assert_eq!(
+        presentation
+            .selected
+            .as_ref()
+            .map(|selection| &selection.candidate),
+        Some(&presentation.rows[0].candidate)
+    );
+
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(
+            CommandId::new("completion.accept").unwrap(),
+            Vec::new(),
+        ),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    assert_eq!(text_rows(&app, editor_cid()), ["alpha beta alpha"]);
+    assert!(app.session.completion().snapshot(view).is_none());
+
+    app.execute_command(DispatchCommand::Registered {
+        invocation: CommandInvocation::new(CommandId::new("undo").unwrap(), Vec::new()),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    assert_eq!(text_rows(&app, editor_cid()), ["alpha beta al"]);
+    app.kernel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completion_selection_cancel_and_unicode_buffer_words_are_owned_per_view() {
+    let mut app = App::with_modes(
+        None,
+        40,
+        5,
+        ScriptedFrontend::new(Vec::new()),
+        vec![crate::buffer_word_completion_mode()],
+    )
+    .unwrap();
+    let first = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("变量一 变量二 变".to_owned())),
+        view: first,
+        content: editor_cid(),
+    })
+    .unwrap();
+    assert!(app.trigger_completion_for_view(first, CompletionTrigger::Manual));
+    for _ in 0..8 {
+        let message = tokio::time::timeout(Duration::from_secs(1), app.kernel.receive_message())
+            .await
+            .unwrap()
+            .unwrap();
+        app.handle_app_message(message).unwrap();
+        if app
+            .session
+            .completion()
+            .snapshot(first)
+            .is_some_and(|snapshot| snapshot.candidates.len() == 2)
+        {
+            break;
+        }
+    }
+    let before = app.session.completion().snapshot(first).unwrap().selected;
+    app.publish_completion_action(first, crate::execution::PreparedCompletionAction::Next);
+    let after = app.session.completion().snapshot(first).unwrap().selected;
+    assert_ne!(before, after);
+
+    let split = app
+        .split_space(
+            app.session.focused(),
+            editor_cid(),
+            true,
+            SplitDirection::Right,
+            true,
+        )
+        .unwrap();
+    let second = view_id(&app, split.new_space);
+    assert_ne!(first, second);
+    assert!(app.session.completion().snapshot(first).is_none());
+    assert!(app.trigger_completion_for_view(second, CompletionTrigger::Manual));
+    assert!(app.session.completion().snapshot(second).is_some());
+    app.publish_completion_action(second, crate::execution::PreparedCompletionAction::Cancel);
+    assert!(app.session.completion().snapshot(second).is_none());
+    app.kernel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completion_interactor_consumes_navigation_and_accept_before_modes() {
+    let mut app = App::with_modes(
+        None,
+        40,
+        5,
+        ScriptedFrontend::new(Vec::new()),
+        vec![crate::buffer_word_completion_mode()],
+    )
+    .unwrap();
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("alpha alpine al".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    assert!(app.trigger_completion_for_view(view, CompletionTrigger::Manual));
+    for _ in 0..8 {
+        let message = tokio::time::timeout(Duration::from_secs(1), app.kernel.receive_message())
+            .await
+            .unwrap()
+            .unwrap();
+        app.handle_app_message(message).unwrap();
+        if app
+            .session
+            .completion()
+            .snapshot(view)
+            .is_some_and(|snapshot| snapshot.candidates.len() == 2)
+        {
+            break;
+        }
+    }
+    app.session
+        .completion_mut()
+        .transition(CompletionEvent::MoveSelection {
+            view,
+            movement: SelectionMove::None,
+        });
+    assert!(
+        app.session
+            .completion()
+            .snapshot(view)
+            .unwrap()
+            .selected
+            .is_none()
+    );
+    assert!(
+        app.handle_completion_interaction(KeyEvent::ctrl('n'))
+            .unwrap()
+    );
+    let before = app.session.completion().snapshot(view).unwrap().selected;
+    assert!(before.is_some());
+
+    app.bind_completion_key(KeyEvent::ctrl('n'), None);
+    app.handle_event(FrontendEvent::Key(KeyEvent::ctrl('n')))
+        .await
+        .unwrap();
+    assert_eq!(
+        app.session.completion().snapshot(view).unwrap().selected,
+        before
+    );
+    app.bind_completion_key(KeyEvent::ctrl('j'), Some(crate::CompletionKeyAction::Next));
+    app.handle_event(FrontendEvent::Key(KeyEvent::ctrl('j')))
+        .await
+        .unwrap();
+    let after = app.session.completion().snapshot(view).unwrap().selected;
+    assert_ne!(before, after);
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::plain(KeyCode::Enter)))
+        .await
+        .unwrap();
+    assert_eq!(text_rows(&app, editor_cid()), ["alpha alpine alpine"]);
+    assert!(app.session.completion().snapshot(view).is_none());
+    app.kernel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completion_interactor_falls_through_accept_without_a_selection() {
+    let pending = CompletionSourceDefinition::new(
+        CompletionSourceId::new("pending").unwrap(),
+        Duration::ZERO,
+        Duration::from_secs(10),
+        |_, _, _| Box::pin(std::future::pending()),
+    )
+    .unwrap();
+    let mut configuration = vell_plugin_v8::load_default_configuration().unwrap();
+    configuration.modes.push(Box::new(CompletionTestMode {
+        name: ModeName::new("test.pending-completion"),
+        sources: vec![pending],
+    }));
+    let mut app = App::with_modes(
+        None,
+        40,
+        5,
+        ScriptedFrontend::new(Vec::new()),
+        configuration.modes,
+    )
+    .unwrap();
+    let view = view_id(&app, app.session.focused());
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('i')))
+        .await
+        .unwrap();
+    assert!(app.trigger_completion_for_view(view, CompletionTrigger::Manual));
+    assert!(
+        app.session
+            .completion()
+            .snapshot(view)
+            .is_some_and(|snapshot| snapshot.selected.is_none())
+    );
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::plain(KeyCode::Enter)))
+        .await
+        .unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), ["", ""]);
+    app.kernel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_completion_preserves_character_and_backspace_semantics() {
+    let mut configuration = vell_plugin_v8::load_default_configuration().unwrap();
+    configuration
+        .modes
+        .push(crate::buffer_word_completion_mode());
+    let commands = configuration
+        .prepare_commands(&crate::native_command_ids())
+        .unwrap();
+    let mut app = App::with_modes_visuals_backgrounds_and_extensions(
+        None,
+        40,
+        5,
+        ScriptedFrontend::new(Vec::new()),
+        configuration.modes,
+        configuration.backgrounds,
+        configuration.theme,
+        configuration.face_overrides,
+        configuration.view_definitions,
+        configuration.view_extensions,
+        configuration.options,
+    )
+    .unwrap();
+    for command in commands {
+        app.register_command(command);
+    }
+    let view = view_id(&app, app.session.focused());
+    for key in ['i', 'a', 'l', 'p', 'h', 'a', ' ', 'a', 'l'] {
+        app.handle_event(FrontendEvent::Key(KeyEvent::char(key)))
+            .await
+            .unwrap();
+    }
+    assert_eq!(text_rows(&app, editor_cid()), ["alpha al"]);
+    assert!(app.session.completion().snapshot(view).is_some());
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::plain(KeyCode::Backspace)))
+        .await
+        .unwrap();
+    assert_eq!(text_rows(&app, editor_cid()), ["alpha a"]);
+    assert!(app.session.completion().snapshot(view).is_some());
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::plain(KeyCode::Backspace)))
+        .await
+        .unwrap();
+    assert_eq!(text_rows(&app, editor_cid()), ["alpha "]);
+    assert!(app.session.completion().snapshot(view).is_none());
+    app.kernel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completion_escape_cancels_and_falls_through_to_vim_normal_mode() {
+    let mut configuration = vell_plugin_v8::load_default_configuration().unwrap();
+    configuration
+        .modes
+        .push(crate::buffer_word_completion_mode());
+    let commands = configuration
+        .prepare_commands(&crate::native_command_ids())
+        .unwrap();
+    let mut app = App::with_modes_visuals_backgrounds_and_extensions(
+        None,
+        40,
+        5,
+        ScriptedFrontend::new(Vec::new()),
+        configuration.modes,
+        configuration.backgrounds,
+        configuration.theme,
+        configuration.face_overrides,
+        configuration.view_definitions,
+        configuration.view_extensions,
+        configuration.options,
+    )
+    .unwrap();
+    for command in commands {
+        app.register_command(command);
+    }
+    let view = view_id(&app, app.session.focused());
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('i')))
+        .await
+        .unwrap();
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('a')))
+        .await
+        .unwrap();
+    assert!(app.session.completion().snapshot(view).is_some());
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)))
+        .await
+        .unwrap();
+
+    assert!(app.session.completion().snapshot(view).is_none());
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+    let body = app.session.body_space_for_view(view).unwrap();
+    assert_eq!(
+        text_presentation(&query.view(view, body).unwrap()).cursor_style,
+        CursorStyle::Block,
+        "Escape must continue into Vim and leave insert mode"
+    );
+    app.kernel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mode_bound_single_character_edit_is_not_treated_as_typing() {
+    let mut app = App::with_modes(
+        None,
+        40,
+        5,
+        ScriptedFrontend::new(Vec::new()),
+        vec![
+            Box::new(BoundInsertCompletionMode::new()),
+            crate::buffer_word_completion_mode(),
+        ],
+    )
+    .unwrap();
+    let view = view_id(&app, app.session.focused());
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('x')))
+        .await
+        .unwrap();
+
+    assert_eq!(text_rows(&app, editor_cid()), ["q"]);
+    assert!(app.session.completion().snapshot(view).is_none());
+    app.kernel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn paste_and_history_use_explicit_non_identifier_completion_policies() {
+    let mut configuration = vell_plugin_v8::load_default_configuration().unwrap();
+    configuration
+        .modes
+        .push(crate::buffer_word_completion_mode());
+    let mut app = App::with_modes(
+        None,
+        40,
+        5,
+        ScriptedFrontend::new(Vec::new()),
+        configuration.modes,
+    )
+    .unwrap();
+    let view = view_id(&app, app.session.focused());
+
+    app.handle_event(FrontendEvent::Paste("a".to_owned()))
+        .await
+        .unwrap();
+    assert!(app.session.completion().snapshot(view).is_none());
+
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('i')))
+        .await
+        .unwrap();
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('a')))
+        .await
+        .unwrap();
+    assert!(app.session.completion().snapshot(view).is_some());
+    app.handle_event(FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)))
+        .await
+        .unwrap();
+    app.handle_event(FrontendEvent::Key(KeyEvent::plain(KeyCode::Escape)))
+        .await
+        .unwrap();
+    app.handle_event(FrontendEvent::Key(KeyEvent::char('u')))
+        .await
+        .unwrap();
+    assert!(app.session.completion().snapshot(view).is_none());
+    app.kernel.cancel();
+}
+
+#[test]
+fn automatic_completion_skips_an_identifier_beyond_the_owned_query_bound() {
+    let mut app = App::with_modes(
+        None,
+        40,
+        5,
+        ScriptedFrontend::new(Vec::new()),
+        vec![crate::buffer_word_completion_mode()],
+    )
+    .unwrap();
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("x".repeat(4 * 1024 + 1))),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+
+    assert!(!app.trigger_completion_for_view(view, CompletionTrigger::Identifier));
+    assert!(app.session.completion().snapshot(view).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn completion_timeout_ends_only_the_slow_source() {
+    let fast = CompletionSourceDefinition::new(
+        CompletionSourceId::new("fast").unwrap(),
+        Duration::ZERO,
+        Duration::from_secs(1),
+        |_, _, sink| {
+            Box::pin(async move {
+                let _ = sink.publish(CompletionSourceBatch::replace(
+                    SourceBatchVersion(1),
+                    vec![CompletionItem::new("kept", "kept")],
+                    true,
+                    IncompleteDirections::default(),
+                ));
+                Ok(())
+            })
+        },
+    )
+    .unwrap();
+    let slow = CompletionSourceDefinition::new(
+        CompletionSourceId::new("slow").unwrap(),
+        Duration::ZERO,
+        Duration::from_millis(30),
+        |_, _, _| Box::pin(std::future::pending()),
+    )
+    .unwrap();
+    let mut app = make_completion_app(vec![fast, slow]);
+    let view = view_id(&app, app.session.focused());
+    app.trigger_completion(completion_request(&app, view));
+
+    for _ in 0..6 {
+        let message = tokio::time::timeout(Duration::from_secs(1), app.kernel.receive_message())
+            .await
+            .unwrap()
+            .unwrap();
+        app.handle_app_message(message).unwrap();
+        if app
+            .completion_diagnostics()
+            .any(|diagnostic| diagnostic.kind == crate::CompletionDiagnosticKind::TimedOut)
+        {
+            break;
+        }
+    }
+
+    let snapshot = app.session.completion().snapshot(view).unwrap();
+    assert!(!snapshot.collecting);
+    assert_eq!(snapshot.source_faults, 1);
+    assert_eq!(snapshot.candidates.len(), 1);
+    assert_eq!(&*snapshot.candidates[0].label, "kept");
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+    assert_eq!(
+        query
+            .completion(view)
+            .unwrap()
+            .unwrap()
+            .status
+            .source_faults,
+        1
+    );
+    app.kernel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completion_rejects_old_revision_epoch_and_mode_attachment() {
+    let source = CompletionSourceDefinition::new(
+        CompletionSourceId::new("blocking").unwrap(),
+        Duration::ZERO,
+        Duration::from_secs(2),
+        |_, _, _| Box::pin(std::future::pending()),
+    )
+    .unwrap();
+    let mut app = make_completion_app(vec![source]);
+    let view = view_id(&app, app.session.focused());
+
+    app.trigger_completion(completion_request(&app, view));
+    let snapshot = app.session.completion().snapshot(view).unwrap();
+    let revision_key = snapshot.request.source_key(snapshot.sources[0].clone());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("x".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    app.handle_app_message(AppMessage::CompletionBatchForTest(completion_batch(
+        revision_key,
+        "stale-revision",
+    )))
+    .unwrap();
+    assert!(app.session.completion().snapshot(view).is_none());
+
+    app.trigger_completion(completion_request(&app, view));
+    let snapshot = app.session.completion().snapshot(view).unwrap();
+    let old_epoch_key = snapshot.request.source_key(snapshot.sources[0].clone());
+    app.trigger_completion(completion_request(&app, view));
+    app.handle_app_message(AppMessage::CompletionBatchForTest(completion_batch(
+        old_epoch_key,
+        "stale-epoch",
+    )))
+    .unwrap();
+    assert_eq!(
+        app.session.completion().snapshot(view).unwrap().item_count,
+        0
+    );
+
+    let snapshot = app.session.completion().snapshot(view).unwrap();
+    let attachment_key = snapshot.request.source_key(snapshot.sources[0].clone());
+    app.session.view_modes_mut_for_test().remove(view);
+    app.handle_app_message(AppMessage::CompletionBatchForTest(completion_batch(
+        attachment_key,
+        "stale-attachment",
+    )))
+    .unwrap();
+    assert!(app.session.completion().snapshot(view).is_none());
+    assert_eq!(app.kernel.completion_task_count_for_test(), 0);
+    assert!(
+        app.completion_diagnostics().any(|diagnostic| {
+            diagnostic.kind == crate::CompletionDiagnosticKind::StaleRejected
+        })
+    );
+    app.kernel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completion_lifecycle_cancels_selection_focus_rebind_and_switch() {
+    let make_app = || {
+        let source = CompletionSourceDefinition::new(
+            CompletionSourceId::new("pending").unwrap(),
+            Duration::ZERO,
+            Duration::from_secs(2),
+            |_, _, _| Box::pin(std::future::pending()),
+        )
+        .unwrap();
+        make_completion_app(vec![source])
+    };
+
+    let mut app = make_app();
+    let view = view_id(&app, app.session.focused());
+    app.execute_command(DispatchCommand::ContentWithView {
+        command: ContentCommand::Edit(EditCommand::InsertText("x".to_owned())),
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    app.trigger_completion(completion_request(&app, view));
+    let snapshot = app.session.completion().snapshot(view).unwrap();
+    let stale_selection = snapshot.request.source_key(snapshot.sources[0].clone());
+    app.execute_command(DispatchCommand::ModeOperations {
+        operations: vec![view_action(ViewAction::SetSelections(Selections::single(
+            Selection::collapsed(TextOffset::origin()),
+        )))],
+        view,
+        content: editor_cid(),
+    })
+    .unwrap();
+    assert!(app.session.completion().snapshot(view).is_none());
+    assert_eq!(app.kernel.completion_task_count_for_test(), 0);
+    app.handle_app_message(AppMessage::CompletionBatchForTest(completion_batch(
+        stale_selection,
+        "late-selection",
+    )))
+    .unwrap();
+    assert!(app.session.completion().snapshot(view).is_none());
+    app.kernel.cancel();
+
+    let mut app = make_app();
+    let original_space = app.session.focused();
+    let view = view_id(&app, original_space);
+    let right = app
+        .split_space(
+            original_space,
+            editor_cid(),
+            true,
+            SplitDirection::Right,
+            false,
+        )
+        .unwrap()
+        .new_space;
+    app.trigger_completion(completion_request(&app, view));
+    app.frontend.focus_targets.push_back(Some(right));
+    app.execute_command(DispatchCommand::App(AppCommand::Focus(
+        SplitDirection::Right,
+    )))
+    .unwrap();
+    assert!(app.session.completion().snapshot(view).is_none());
+    assert_eq!(app.kernel.completion_task_count_for_test(), 0);
+    app.kernel.cancel();
+
+    let mut app = make_app();
+    let view = view_id(&app, app.session.focused());
+    let replacement = app.new_buffer();
+    app.trigger_completion(completion_request(&app, view));
+    app.rebind_view_content(view, &BindingKey::new(DOCUMENT_BINDING), replacement)
+        .unwrap();
+    assert!(app.session.completion().snapshot(view).is_none());
+    assert_eq!(app.kernel.completion_task_count_for_test(), 0);
+    app.kernel.cancel();
+
+    let mut app = make_app();
+    let view = view_id(&app, app.session.focused());
+    let replacement = app.new_buffer();
+    app.trigger_completion(completion_request(&app, view));
+    let switched = app.switch_view_at(view, replacement).unwrap();
+    assert!(app.session.completion().snapshot(view).is_none());
+    assert!(app.session.completion().snapshot(switched).is_none());
+    assert_eq!(app.kernel.completion_task_count_for_test(), 0);
+    app.kernel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_completion_view_releases_session_task_and_provider_payload() {
+    let payload = Arc::new(());
+    let provider_payload = payload.clone();
+    let queued_label: Arc<str> = Arc::from("queued");
+    let provider_label = queued_label.clone();
+    let started = Arc::new(AtomicUsize::new(0));
+    let provider_started = started.clone();
+    let source = CompletionSourceDefinition::new(
+        CompletionSourceId::new("blocking").unwrap(),
+        Duration::ZERO,
+        Duration::from_secs(2),
+        move |_, _, sink| {
+            let provider_payload = provider_payload.clone();
+            let provider_label = provider_label.clone();
+            let provider_started = provider_started.clone();
+            Box::pin(async move {
+                let _held_for_request = provider_payload.clone();
+                let _ = sink.publish(CompletionSourceBatch::replace(
+                    SourceBatchVersion(1),
+                    vec![CompletionItem::new(
+                        provider_label.clone(),
+                        provider_label.clone(),
+                    )],
+                    true,
+                    IncompleteDirections::default(),
+                ));
+                provider_started.store(1, Ordering::SeqCst);
+                std::future::pending().await
+            })
+        },
+    )
+    .unwrap();
+    let mut app = make_completion_app(vec![source]);
+    let original = app.session.focused();
+    let split = app
+        .split_space(original, editor_cid(), true, SplitDirection::Right, true)
+        .unwrap();
+    let view = view_id(&app, split.new_space);
+    app.trigger_completion(completion_request(&app, view));
+    for _ in 0..1_000 {
+        if started.load(Ordering::SeqCst) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+    assert_eq!(Arc::strong_count(&payload), 4);
+    assert_eq!(Arc::strong_count(&queued_label), 5);
+
+    app.close_space(split.new_space).unwrap();
+    for _ in 0..100 {
+        if Arc::strong_count(&payload) == 2 && Arc::strong_count(&queued_label) == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+
+    assert!(app.session.completion().snapshot(view).is_none());
+    assert_eq!(app.kernel.completion_task_count_for_test(), 0);
+    assert_eq!(Arc::strong_count(&payload), 2);
+    assert_eq!(Arc::strong_count(&queued_label), 2);
+    app.kernel.cancel();
 }

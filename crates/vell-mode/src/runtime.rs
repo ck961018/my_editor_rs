@@ -12,9 +12,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::attachment::ModeAttachmentRule;
 use crate::command::{Command, ModeValue};
+use crate::completion::{CompletionSourceDefinition, CompletionSourceId, CompletionSourceTask};
 use crate::mode_name::{ModeActionName, ModeName};
 use crate::operation::OperationRequest;
 use crate::presentation::{ContentPresentationLayer, ViewPresentationLayer};
+use vell_completion::CompletionRequest;
 use vell_core::content::{ContentChange, ContentKind};
 use vell_core::content_store::ContentStore;
 use vell_core::content_view_state::{BufferViewState, ContentViewState};
@@ -36,6 +38,10 @@ static EMPTY_KEYMAP: LazyLock<Keymap<Command>> = LazyLock::new(Keymap::new);
 pub struct ModeId(u32);
 
 impl ModeId {
+    pub fn get(self) -> u32 {
+        self.0
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_test(id: u32) -> Self {
         Self(id)
@@ -1207,6 +1213,26 @@ pub trait Mode {
     fn name(&self) -> &ModeName;
     fn actions(&self) -> &[ModeActionName];
     fn adapters(&self) -> ModeAdapters;
+    fn completion_sources(&self) -> &[CompletionSourceDefinition] {
+        &[]
+    }
+    fn prepare_completion_source(
+        &self,
+        _content_state: &dyn ModeState,
+        _view_state: &dyn ModeState,
+        _context: &ModeViewContext<'_>,
+        source: &CompletionSourceId,
+        _request: &CompletionRequest,
+    ) -> Result<CompletionSourceTask, ModeError> {
+        self.completion_sources()
+            .iter()
+            .find(|definition| definition.id() == source)
+            .map(CompletionSourceDefinition::task)
+            .ok_or_else(|| ModeError::CallbackFailed {
+                mode: self.name().clone(),
+                message: format!("completion source '{}' is not registered", source.as_str()),
+            })
+    }
     fn before(&self) -> Option<&ModeName> {
         None
     }
@@ -1472,6 +1498,11 @@ pub enum ModeRegistrationError {
         mode: ModeName,
         action: ModeActionName,
     },
+    DuplicateCompletionSource {
+        mode: ModeName,
+        source: CompletionSourceId,
+    },
+    CompletionSourceWithoutBufferAdapter(ModeName),
 }
 
 impl fmt::Display for ModeRegistrationError {
@@ -1488,6 +1519,17 @@ impl fmt::Display for ModeRegistrationError {
                 "mode '{}' defines action '{}' more than once",
                 mode.as_str(),
                 action.as_str()
+            ),
+            Self::DuplicateCompletionSource { mode, source } => write!(
+                formatter,
+                "mode '{}' defines completion source '{}' more than once",
+                mode.as_str(),
+                source.as_str()
+            ),
+            Self::CompletionSourceWithoutBufferAdapter(mode) => write!(
+                formatter,
+                "mode '{}' defines a document completion source without a Buffer adapter",
+                mode.as_str()
             ),
         }
     }
@@ -1660,6 +1702,20 @@ impl ModeRegistry {
             return Err(ModeRegistrationError::MissingAdapter(name));
         }
         let has_buffer = declared_adapters.contains(ContentKind::Buffer);
+        if !has_buffer && !definition.completion_sources().is_empty() {
+            return Err(ModeRegistrationError::CompletionSourceWithoutBufferAdapter(
+                name,
+            ));
+        }
+        let mut completion_sources = std::collections::HashSet::new();
+        for source in definition.completion_sources() {
+            if !completion_sources.insert(source.id().clone()) {
+                return Err(ModeRegistrationError::DuplicateCompletionSource {
+                    mode: name,
+                    source: source.id().clone(),
+                });
+            }
+        }
         let mut actions = HashMap::new();
         for (index, action_name) in action_names.iter().cloned().enumerate() {
             let action = ModeActionId(u32::try_from(index).expect("mode action id overflow"));
@@ -1713,6 +1769,14 @@ impl ModeRegistry {
 
     pub fn adapter(&self, mode: ModeId, kind: ContentKind) -> Option<ModeAdapter<'_>> {
         self.definitions.get(&mode)?.adapter(kind)
+    }
+
+    pub fn completion_sources(
+        &self,
+        mode: ModeId,
+        kind: ContentKind,
+    ) -> Option<&[CompletionSourceDefinition]> {
+        Some(self.adapter(mode, kind)?.behavior().completion_sources())
     }
 
     pub fn ensure_adapter(
@@ -2630,6 +2694,51 @@ impl ModeViewStore {
         self.chains.get(&view).map_or(&[], Vec::as_slice)
     }
 
+    pub fn prepare_completion_source(
+        &self,
+        mode: ModeId,
+        view: ViewId,
+        source: &CompletionSourceId,
+        request: &CompletionRequest,
+        mode_contents: &ModeContentStore,
+        context: &ModeViewContext<'_>,
+    ) -> Result<CompletionSourceTask, ModeError> {
+        let view_instance =
+            self.instances
+                .get(&(mode, view))
+                .ok_or_else(|| ModeError::InactiveMode {
+                    requested: ModeName::new(format!("mode-{}", mode.get())),
+                    active: None,
+                })?;
+        let content =
+            view_instance
+                .bound_content_id()
+                .ok_or_else(|| ModeError::UnsupportedContent {
+                    mode: view_instance.name().clone(),
+                    kind: ContentKind::Buffer,
+                })?;
+        let content_instance =
+            mode_contents
+                .instance(mode, content)
+                .ok_or_else(|| ModeError::InactiveMode {
+                    requested: view_instance.name().clone(),
+                    active: None,
+                })?;
+        if view_instance.fault.is_some() || content_instance.fault.is_some() {
+            return Err(ModeError::InactiveMode {
+                requested: view_instance.name().clone(),
+                active: None,
+            });
+        }
+        view_instance.adapter().prepare_completion_source(
+            content_instance.state.as_ref(),
+            view_instance.state.as_ref(),
+            context,
+            source,
+            request,
+        )
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn mode_names(&self, view: ViewId) -> Vec<ModeName> {
         self.mode_ids(view)
@@ -3196,6 +3305,7 @@ impl ModeViewStore {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::time::Duration;
 
     use super::*;
     use crate::TypedMode;
@@ -3225,6 +3335,11 @@ mod tests {
     struct NoAdapterMode(ModeName);
 
     struct StandardFaceMode(ModeName);
+
+    struct ViewOnlyCompletionMode {
+        name: ModeName,
+        sources: Vec<CompletionSourceDefinition>,
+    }
 
     impl Mode for NoAdapterMode {
         fn name(&self) -> &ModeName {
@@ -3261,6 +3376,24 @@ mod tests {
                     ..Face::default()
                 },
             )]
+        }
+    }
+
+    impl Mode for ViewOnlyCompletionMode {
+        fn name(&self) -> &ModeName {
+            &self.name
+        }
+
+        fn actions(&self) -> &[ModeActionName] {
+            &[]
+        }
+
+        fn adapters(&self) -> ModeAdapters {
+            ModeAdapters::view()
+        }
+
+        fn completion_sources(&self) -> &[CompletionSourceDefinition] {
+            &self.sources
         }
     }
 
@@ -3374,6 +3507,29 @@ mod tests {
         assert_eq!(
             registry.register(NoAdapterMode(name.clone())),
             Err(ModeRegistrationError::MissingAdapter(name))
+        );
+    }
+
+    #[test]
+    fn registration_rejects_document_completion_on_a_view_only_mode() {
+        let name = ModeName::new("view-only-completion");
+        let source = CompletionSourceDefinition::new(
+            CompletionSourceId::new("invalid").unwrap(),
+            Duration::ZERO,
+            Duration::from_secs(1),
+            |_, _, _| Box::pin(async { Ok(()) }),
+        )
+        .unwrap();
+        let mut registry = ModeRegistry::new();
+
+        assert_eq!(
+            registry.register(ViewOnlyCompletionMode {
+                name: name.clone(),
+                sources: vec![source],
+            }),
+            Err(ModeRegistrationError::CompletionSourceWithoutBufferAdapter(
+                name
+            ))
         );
     }
 

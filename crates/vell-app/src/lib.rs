@@ -9,7 +9,9 @@ mod application;
 mod behavior;
 mod bootstrap;
 mod buffer_lifecycle;
+mod buffer_word_completion;
 mod command_resolver;
+mod completion;
 mod content_classifier;
 mod diagnostics;
 mod dispatcher;
@@ -40,6 +42,8 @@ pub(crate) use vell_mode::{action, command, mode_name, presentation};
 
 pub use application::App;
 pub use buffer_lifecycle::{BufferInfo, BufferLifecycleError};
+pub use buffer_word_completion::buffer_word_completion_mode;
+pub use completion::{CompletionDiagnostic, CompletionDiagnosticKind, CompletionKeyAction};
 pub use diagnostics::{
     ModeDecorationDiagnostics, NamedPolicySources, RuntimeDiagnostic, ViewModeDiagnostics,
 };

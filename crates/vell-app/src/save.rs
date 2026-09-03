@@ -9,7 +9,15 @@ use vell_protocol::ids::ContentId;
 
 impl<F: Frontend> App<F> {
     pub(super) fn handle_app_message(&mut self, message: AppMessage) -> io::Result<bool> {
-        let changed = match message {
+        let mut changed = match message {
+            message @ (AppMessage::CompletionBatchReady(_)
+            | AppMessage::CompletionSourceFinished { .. }) => {
+                self.handle_completion_message(message)
+            }
+            #[cfg(test)]
+            message @ AppMessage::CompletionBatchForTest(_) => {
+                self.handle_completion_message(message)
+            }
             AppMessage::OpenCompleted { content, result } => {
                 match self.complete_async_open(content, result) {
                     Ok(changed) => changed,
@@ -92,6 +100,7 @@ impl<F: Frontend> App<F> {
         };
         self.session
             .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
+        changed |= self.reconcile_completion_state();
         Ok(changed)
     }
 

@@ -19,6 +19,12 @@ pub(super) fn terminal_grapheme(grapheme: &str) -> String {
     grapheme.chars().map(terminal_char).collect()
 }
 
+pub(super) fn sanitized_display_width(text: &str) -> usize {
+    text.graphemes(true)
+        .map(|grapheme| UnicodeWidthStr::width(terminal_grapheme(grapheme).as_str()))
+        .sum()
+}
+
 pub(super) fn grapheme_width(grapheme: &str, cell_col: usize, tab_width: usize) -> usize {
     if grapheme == "\t" {
         let tab_width = tab_width.max(1);

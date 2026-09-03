@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/vell-app",
+    "crates/vell-completion",
     "crates/vell-core",
     "crates/vell-frontend",
     "crates/vell-mode",

@@ -11,21 +11,21 @@ use crate::application::{App, CommandTaskTarget, PendingCommandInvocation};
 use crate::behavior::EffectBehavior;
 use crate::command::{AppCommand, ContentCommand};
 use crate::diagnostics::RuntimeDiagnostic;
-use crate::dispatcher::{DispatchCommand, DispatchInput, DispatchOutcome};
+use crate::dispatcher::{DispatchCommand, DispatchInput, DispatchOrigin, DispatchOutcome};
 use crate::execution::{
-    ExecutionFrame, ExecutionFrameParts, InputCheckpoint, PendingCommandStart, PreparedEffect,
-    StateRollback,
+    CompletionAfterInput, ExecutionFrame, ExecutionFrameParts, InputCheckpoint,
+    PendingCommandStart, PreparedCompletionAction, PreparedEffect, StateRollback,
 };
 use crate::layout::LayoutError;
 use crate::mode::{CursorDomain, InputFlow};
 use crate::operation::{
     AppOperation, BufferViewSource, ClipboardDestination, ClipboardOperation, ClipboardSource,
-    ContentLifecycleOperation, ContentOperation, ContentTarget, FaceOperation, FaceRemapTarget,
-    ModeFlowPropagation, ModeTarget, OperationError, OperationOrigin, OperationOriginScope,
-    OperationRequest, QueuedOperation, ResolvedContentLifecycleOperation, ResolvedModeScope,
-    ResolvedOperation, ResolvedViewLifecycleOperation, SearchOperation, ViewBindingOperation,
-    ViewEditPlan, ViewLifecycleOperation, ViewOperation, ViewPrecondition, ViewSpec, ViewTarget,
-    adapt_dispatch_command, prepend_operations,
+    CompletionOperation, ContentLifecycleOperation, ContentOperation, ContentTarget, FaceOperation,
+    FaceRemapTarget, ModeFlowPropagation, ModeTarget, OperationError, OperationOrigin,
+    OperationOriginScope, OperationRequest, QueuedOperation, ResolvedContentLifecycleOperation,
+    ResolvedModeScope, ResolvedOperation, ResolvedViewLifecycleOperation, SearchOperation,
+    ViewBindingOperation, ViewEditPlan, ViewLifecycleOperation, ViewOperation, ViewPrecondition,
+    ViewSpec, ViewTarget, adapt_dispatch_command, prepend_operations,
 };
 use crate::query::AppQuery;
 use crate::theme::{FaceRemapOwner, ResolvedFaceOperation};
@@ -34,7 +34,7 @@ use vell_core::clipboard::ClipboardPayload;
 use vell_core::command::EditCommand;
 use vell_core::content::{ContentActionResult, ContentEffect, ContentInput, ContentResult};
 use vell_core::search::SearchDirection;
-use vell_core::transaction::TransactionDirection;
+use vell_core::transaction::{TextChangeSet, TextEdit, TransactionDirection};
 use vell_frontend::Frontend;
 use vell_mode::command_registry::{
     COMMAND_LINE_COMMAND_ID, CommandCompletion, CommandEntry, CommandError, CommandHost, CommandId,
@@ -44,6 +44,7 @@ use vell_mode::command_registry::{
 use vell_protocol::content_query::{ContentData, ContentQuery, RenderQuery};
 use vell_protocol::frontend_event::FrontendEvent;
 use vell_protocol::ids::{ContentId, ViewId};
+use vell_protocol::key_event::{KeyCode, KeyEvent};
 use vell_protocol::selection::{Selection, Selections, TextOffset};
 use vell_protocol::viewport::{
     ResolvedViewportCommand, ViewportCommand, ViewportCursorBehavior, ViewportMoveDirection,
@@ -51,6 +52,26 @@ use vell_protocol::viewport::{
 
 const MAX_RUNTIME_DIAGNOSTICS: usize = 128;
 const MAX_REGISTERED_COMMAND_DEPTH: usize = 256;
+
+fn completion_trigger_for_input(
+    input: DispatchInput,
+) -> Option<vell_completion::CompletionTrigger> {
+    let key = match input {
+        DispatchInput::Normal(key)
+        | DispatchInput::Unmapped(key)
+        | DispatchInput::Continue { key, .. } => key,
+    };
+    if key.modifiers != vell_protocol::key_event::KeyModifiers::none() {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char(character) if crate::completion::is_identifier_char(character) => {
+            Some(vell_completion::CompletionTrigger::Identifier)
+        }
+        KeyCode::Backspace => Some(vell_completion::CompletionTrigger::Delete),
+        _ => None,
+    }
+}
 
 struct ScopedCommandHost<'a, F: Frontend> {
     app: &'a mut App<F>,
@@ -281,6 +302,7 @@ impl PreparedEffect {
             Self::Focus { target } => EffectBehavior::Focus { target: *target },
             Self::Face(_) => EffectBehavior::Face,
             Self::ClipboardStore { .. } => EffectBehavior::Clipboard,
+            Self::Completion { .. } => EffectBehavior::Completion,
             Self::ReloadCommit { .. }
             | Self::ContentOpenCommit(_)
             | Self::ContentList(_)
@@ -531,7 +553,9 @@ impl<F: Frontend> App<F> {
                 true
             }
             FrontendEvent::Key(k) => {
-                self.process_input_queue(VecDeque::from([DispatchInput::Normal(k)]))?;
+                if !self.handle_completion_interaction(k)? {
+                    self.process_input_queue(VecDeque::from([DispatchInput::Normal(k)]))?;
+                }
                 true
             }
             FrontendEvent::Paste(text) => {
@@ -568,6 +592,39 @@ impl<F: Frontend> App<F> {
             self.process_input_frame(input, &mut queue)?;
         }
         Ok(())
+    }
+
+    pub(super) fn handle_completion_interaction(&mut self, key: KeyEvent) -> io::Result<bool> {
+        let action = self.session.completion_key_binding(&key);
+        if key == KeyEvent::plain(KeyCode::Escape) && action.is_none() {
+            if let Some(view) = self.session.view_for_space(self.session.focused())
+                && self.session.completion().interaction_state(view).is_some()
+            {
+                // Escape is an input-cancel side effect, not a completion
+                // binding. Leave the same physical key for the normal Mode
+                // chain so Vim can leave insert mode in that input frame.
+                self.cancel_completion_view(view);
+            }
+            return Ok(false);
+        }
+        let Some(action) = action else {
+            return Ok(false);
+        };
+        let Some(view) = self.session.view_for_space(self.session.focused()) else {
+            return Ok(false);
+        };
+        let Some(state) = self.session.completion().interaction_state(view) else {
+            return Ok(false);
+        };
+        let operation = action.operation();
+        if matches!(operation, CompletionOperation::Accept) && !state.has_selection {
+            return Ok(false);
+        }
+        let content = state.content;
+        let mut frame = self.begin_execution_frame(Some(content), None);
+        let result = self.execute_completion_operation(operation, view, content, &mut frame);
+        self.finish_execution_frame(frame, result)?;
+        Ok(true)
     }
 
     fn begin_execution_frame(
@@ -834,6 +891,7 @@ impl<F: Frontend> App<F> {
             self.kernel.schedule_mode_jobs();
             self.session
                 .refresh_presentation(self.kernel.contents(), self.kernel.content_modes());
+            self.reconcile_completion_state();
         }
         result
     }
@@ -863,6 +921,7 @@ impl<F: Frontend> App<F> {
             let Some(input) = queue.pop_front() else {
                 break;
             };
+            let physical_trigger = completion_trigger_for_input(input);
             let now = Instant::now();
             let (contents, mode_contents) = self.kernel.mode_runtime_parts();
             let (outcome, mode_revisions) =
@@ -881,27 +940,35 @@ impl<F: Frontend> App<F> {
                     command,
                     replay,
                     continuation,
-                } => match self.execute_command_inner(command, &mut frame) {
-                    Ok(flow) => {
-                        self.session.sync_focused_input_in_draft(
-                            now,
-                            self.kernel.content_modes(),
-                            self.kernel.contents(),
-                            frame.mode_drafts_mut(),
-                        );
-                        if let Err(error) = frame.consume_replayed_inputs(replay.len()) {
-                            result = Err(operation_error(error));
-                        } else {
-                            prepend_inputs(&mut queue, replay);
-                            if flow == InputFlow::Continue
-                                && let Some(continuation) = continuation
-                            {
-                                queue.push_front(continuation);
+                    origin,
+                } => {
+                    frame.set_input_completion_trigger(
+                        (origin == DispatchOrigin::Typing)
+                            .then_some(physical_trigger)
+                            .flatten(),
+                    );
+                    match self.execute_command_inner(command, &mut frame) {
+                        Ok(flow) => {
+                            self.session.sync_focused_input_in_draft(
+                                now,
+                                self.kernel.content_modes(),
+                                self.kernel.contents(),
+                                frame.mode_drafts_mut(),
+                            );
+                            if let Err(error) = frame.consume_replayed_inputs(replay.len()) {
+                                result = Err(operation_error(error));
+                            } else {
+                                prepend_inputs(&mut queue, replay);
+                                if flow == InputFlow::Continue
+                                    && let Some(continuation) = continuation
+                                {
+                                    queue.push_front(continuation);
+                                }
                             }
                         }
+                        Err(error) => result = Err(error),
                     }
-                    Err(error) => result = Err(error),
-                },
+                }
             }
             if result.is_ok() {
                 for (view, revision) in mode_revisions {
@@ -932,9 +999,20 @@ impl<F: Frontend> App<F> {
                 &mut frame,
             );
         }
+        let completion_after_input = frame.completion_after_input();
         let result = self.finish_execution_frame(frame, result);
         if result.is_ok() {
             outer_queue.extend(queue);
+            if let (Some(view), Some(action)) = (view, completion_after_input) {
+                match action {
+                    CompletionAfterInput::Trigger(trigger) => {
+                        self.trigger_completion_for_view(view, trigger);
+                    }
+                    CompletionAfterInput::Cancel => {
+                        self.cancel_completion_view(view);
+                    }
+                }
+            }
         }
         result
     }
@@ -1108,6 +1186,9 @@ impl<F: Frontend> App<F> {
                         ));
                     }
                 }
+                PreparedEffect::Completion { view, action } => {
+                    self.publish_completion_action(view, action);
+                }
                 PreparedEffect::Quit => {
                     self.cancel_pending_commands(
                         "command cancelled because the editor is quitting",
@@ -1137,7 +1218,9 @@ impl<F: Frontend> App<F> {
                 command,
                 replay,
                 continuation,
+                origin: _,
             } => {
+                frame.set_input_completion_trigger(None);
                 let flow = self.execute_command_in_frame(command, true, frame)?;
                 self.session.sync_focused_input_in_draft(
                     now,
@@ -1828,6 +1911,11 @@ impl<F: Frontend> App<F> {
                     content,
                     operation,
                 } => self.execute_search(operation, view, content, frame),
+                ResolvedOperation::Completion {
+                    view,
+                    content,
+                    operation,
+                } => self.execute_completion_operation(operation, view, content, frame),
                 ResolvedOperation::Mode {
                     mode,
                     scope,
@@ -2188,6 +2276,19 @@ impl<F: Frontend> App<F> {
                 }
                 let (view, content) = self.resolve_view_target(target, origin)?;
                 Ok(ResolvedOperation::Search {
+                    view,
+                    content,
+                    operation,
+                })
+            }
+            OperationRequest::Completion { target, operation } => {
+                if origin.scope != OperationOriginScope::View {
+                    return Err(invalid_operation(
+                        "completion operation requires a view-scoped origin",
+                    ));
+                }
+                let (view, content) = self.resolve_view_target(target, origin)?;
+                Ok(ResolvedOperation::Completion {
                     view,
                     content,
                     operation,
@@ -2560,6 +2661,18 @@ impl<F: Frontend> App<F> {
         content: ContentId,
         frame: &mut ExecutionFrame,
     ) -> io::Result<()> {
+        let completion_after_input = match (&command, frame.input_completion_trigger()) {
+            (
+                EditCommand::InsertText(text),
+                Some(vell_completion::CompletionTrigger::Identifier),
+            ) if crate::completion::is_single_identifier_text(text) => {
+                CompletionAfterInput::Trigger(vell_completion::CompletionTrigger::Identifier)
+            }
+            (EditCommand::Delete(-1), Some(vell_completion::CompletionTrigger::Delete)) => {
+                CompletionAfterInput::Trigger(vell_completion::CompletionTrigger::Delete)
+            }
+            _ => CompletionAfterInput::Cancel,
+        };
         let before = self
             .session
             .view(view)
@@ -2570,6 +2683,9 @@ impl<F: Frontend> App<F> {
             .kernel
             .plan_edit(content, command, &before)
             .ok_or_else(|| invalid_operation("content does not support text edits"))?;
+        if plan.action.is_some() {
+            frame.record_completion_after_input(completion_after_input);
+        }
         self.apply_view_edit_plan(
             ViewEditPlan {
                 expected: ViewPrecondition::Selections(before),
@@ -2808,6 +2924,90 @@ impl<F: Frontend> App<F> {
                 )
             }
         }
+    }
+
+    fn execute_completion_operation(
+        &mut self,
+        operation: CompletionOperation,
+        view: ViewId,
+        content: ContentId,
+        frame: &mut ExecutionFrame,
+    ) -> io::Result<()> {
+        let prepared = match operation {
+            CompletionOperation::ManualTrigger => PreparedCompletionAction::ManualTrigger,
+            CompletionOperation::Next => PreparedCompletionAction::Next,
+            CompletionOperation::Previous => PreparedCompletionAction::Previous,
+            CompletionOperation::Cancel => PreparedCompletionAction::Cancel,
+            CompletionOperation::Accept => {
+                let effects = self
+                    .session
+                    .completion_mut()
+                    .transition(vell_completion::CompletionEvent::AcceptSelected { view });
+                let Some(acceptance) = effects.into_iter().find_map(|effect| match effect {
+                    vell_completion::CompletionEffect::Accept(acceptance) => Some(acceptance),
+                    _ => None,
+                }) else {
+                    return Ok(());
+                };
+                let current_view = self
+                    .session
+                    .view(view)
+                    .ok_or_else(|| invalid_operation("completion target view disappeared"))?;
+                let current_selections = current_view
+                    .selections()
+                    .ok_or_else(|| invalid_operation("completion target is not editable"))?;
+                let current_revision = self.kernel.contents().revision(content);
+                if acceptance.content != content
+                    || acceptance.content_revision != current_revision.unwrap_or_default()
+                    || acceptance.view_revision != current_view.revision()
+                    || current_selections.primary() != &acceptance.selection
+                    || current_selections.all().count() != 1
+                {
+                    return Err(recoverable_message(
+                        io::ErrorKind::InvalidData,
+                        "stale completion acceptance",
+                    ));
+                }
+                let snapshot = self
+                    .kernel
+                    .contents()
+                    .text_snapshot(content)
+                    .ok_or_else(|| invalid_operation("completion target is not text"))?;
+                let range = acceptance.range.start().char_index..acceptance.range.end().char_index;
+                let change = TextChangeSet::from_edits(
+                    snapshot.len_chars(),
+                    vec![TextEdit::new(range.clone(), acceptance.text.to_string())],
+                )
+                .map_err(|error| {
+                    recoverable_message(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid completion edit: {error:?}"),
+                    )
+                })?;
+                let cursor = range.start.saturating_add(acceptance.text.chars().count());
+                self.apply_view_edit_plan(
+                    ViewEditPlan {
+                        expected: ViewPrecondition::Selections(current_selections.clone()),
+                        content: Some(vell_core::action::ContentAction::Text(change)),
+                        view: Some(ViewAction::SetSelections(Selections::single(
+                            Selection::collapsed(TextOffset { char_index: cursor }),
+                        ))),
+                    },
+                    view,
+                    content,
+                    frame,
+                )?;
+                PreparedCompletionAction::AcceptanceCommitted {
+                    task: acceptance.task,
+                    candidate: acceptance.candidate,
+                }
+            }
+        };
+        frame.prepare(PreparedEffect::Completion {
+            view,
+            action: prepared,
+        });
+        Ok(())
     }
 
     fn apply_view_edit_plan(

@@ -6,7 +6,7 @@
 ## 项目概览
 
 `Vell` 是一个 Rust 2024 终端文本编辑器。仓库由一个轻量二进制 crate、
-七个内部 library crate，以及内嵌 TypeScript 插件运行时组成。
+九个内部 library crate，以及内嵌 TypeScript 插件运行时组成。
 
 主要技术栈：
 
@@ -41,6 +41,8 @@
   render query 和远程语义消息。
 - `crates/vell-core/`：Content、Buffer、文本编辑、selection 映射、
   ContentStore 和纯输入算法。
+- `crates/vell-completion/`：纯 completion session、batch、matcher、top-K
+  与 acceptance 状态机。
 - `crates/vell-mode/`：Mode contract、typed adapter、Mode state、
   presentation、命令与 operation 请求。
 - `crates/vell-frontend/`：只定义 `Frontend` 接缝。
@@ -49,6 +51,7 @@
 - `crates/vell-plugin-v8/`：TypeScript schema、V8 host、模块加载、
   callback 原语、Mode adapter、worker 与诊断。
 - `crates/vell-tui/`：终端生命周期与 IO、Taffy 布局、viewport 和渲染。
+- `crates/vell-theme/`：主题解析与 Face 注册适配。
 - `runtime/editor.d.ts`：公开 TypeScript API 的唯一真相源。
 - `runtime/plugins/`：内建插件及其清单、脚本和 worker。
 - `runtime/examples/`：受 TypeScript 与 Rust 测试覆盖的迁移示例。
@@ -65,9 +68,13 @@
 ```text
 vell-frontend  -> vell-protocol
 vell-core      -> vell-protocol
-vell-mode      -> vell-core + vell-protocol
+vell-completion -> vell-protocol
+vell-theme     -> vell-protocol
+vell-mode      -> vell-completion + vell-core + vell-protocol
 vell-plugin-v8 -> vell-mode + vell-core + vell-protocol
-vell-app       -> vell-frontend + vell-mode + vell-core + vell-protocol
+vell-app       -> vell-frontend + vell-completion + vell-mode + vell-core
+               -> vell-theme
+               -> vell-protocol
 vell-tui       -> vell-frontend + vell-protocol
 vell binary    -> vell-app + vell-plugin-v8 + vell-tui
 ```
@@ -76,6 +83,8 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
 
 - `vell-protocol` 保持零内部依赖和零业务 IO。
 - `vell-core` 不依赖异步运行时、Mode、Frontend、终端、布局或 V8。
+- `vell-completion` 不依赖异步运行时、ContentStore、Mode、Frontend、TUI、
+  LSP 或 V8；调用方只通过 owned event/effect/snapshot 驱动它。
 - `vell-mode` 定义扩展契约，不依赖 app、Frontend、TUI 或 V8。
 - `vell-app` 的普通依赖图不得包含 V8、Taffy 或 crossterm。
 - `vell-tui` 不依赖 app、core、mode 或 V8；终端实现属于该 crate。
@@ -88,10 +97,10 @@ vell binary    -> vell-app + vell-plugin-v8 + vell-tui
 
 - `Kernel` 持有 `ContentStore`、`ContentClassifier`、`ModeRegistry`、
   `ViewDefinitionRegistry`、共享 Mode content state、`TransactionManager`、
-  保存任务和 Mode 后台任务。
+  保存任务、Mode 后台任务和有界 completion source inbox/task。
 - `ClientSession` 持有 `ViewWorkspace`、`ModeResolver`、Mode view state、
-  输入状态、Face 与 presentation cache。当前生产路径是一对一
-  `Kernel + ClientSession`。
+  输入状态、Face、presentation cache 与 `CompletionEngine`。当前生产路径
+  是一对一 `Kernel + ClientSession`。
 - `ViewWorkspace` 是 View 语义树、直属 Pane 映射、Scene、SceneBuilder、
   结构 ID、焦点和状态栏结构的唯一所有者。创建、替换和关闭先在完整结构
   草稿上校验，再一次发布；调用方只消费 View 生命周期事件。

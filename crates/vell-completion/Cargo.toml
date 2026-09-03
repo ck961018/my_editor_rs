@@ -1,0 +1,19 @@
+[package]
+name = "vell-completion"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[features]
+benchmarking = []
+
+[dependencies]
+vell-protocol = { path = "../vell-protocol" }
+
+[dev-dependencies]
+criterion = "0.7"
+
+[[bench]]
+name = "completion"
+harness = false
+required-features = ["benchmarking"]

@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use crate::protocol::content_query::{Color, CursorStyle, PaintFace, UnderlineStyle};
 use crossterm::style::{
     Attribute, Color as TerminalColor, ResetColor, SetAttribute, SetBackgroundColor,
-    SetForegroundColor,
+    SetForegroundColor, force_color_output,
 };
 use crossterm::{cursor, queue, terminal};
 
@@ -54,6 +54,10 @@ pub struct Output<W: Write> {
 
 impl<W: Write> Output<W> {
     pub fn new(out: W) -> Self {
+        // `DisplayProfile` is the frontend capability boundary. Faces reaching
+        // Output have already been adapted, so crossterm must not apply a
+        // second, process-global NO_COLOR policy while serializing them.
+        force_color_output(true);
         Self { out }
     }
 

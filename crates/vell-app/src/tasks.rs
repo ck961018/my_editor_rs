@@ -31,11 +31,11 @@ impl AppTasks {
         self.cancel.clone()
     }
 
-    pub(crate) fn spawn_detached<F>(&self, task: F)
+    pub(crate) fn spawn_detached<F>(&self, task: F) -> tokio::task::AbortHandle
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        self.detached_tasks.spawn(task);
+        self.detached_tasks.spawn(task).abort_handle()
     }
 
     pub(crate) fn spawn_critical<F>(&self, task: F)

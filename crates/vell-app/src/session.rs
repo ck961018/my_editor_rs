@@ -1,9 +1,12 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::action::ViewAction;
 use crate::command::ModeCommand;
 use crate::command_resolver::default_global_keymap;
+use crate::completion::{CompletionKeyAction, default_completion_keymap};
 use crate::content_classifier::ContentClassifier;
 use crate::dispatcher::{DispatchInput, DispatchOutcome, Dispatcher, DispatcherInputSnapshot};
 use crate::layout::{LayoutError, NewView, StatusBarHandle, StatusBarPlacement, create_view};
@@ -21,12 +24,14 @@ use crate::view_context::require_mode_view_context;
 use crate::view_definition::ViewDefinitionRegistry;
 use crate::view_extension::{ViewExtensionRegistrationError, ViewExtensionStore};
 use crate::view_workspace::{CompoundViewResult, RemovedView, ViewWorkspace, WorkspaceMutation};
+use vell_completion::{CompletionEngine, CompletionSourceKey};
 use vell_core::content::ContentChange;
 use vell_core::content_store::ContentStore;
 use vell_core::content_view_state::ContentViewStateError;
-use vell_protocol::content_query::RowRange;
+use vell_protocol::content_query::{CompletionPresentation, RowRange};
 use vell_protocol::editor_options::EditorOptions;
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
+use vell_protocol::key_event::KeyEvent;
 use vell_protocol::revision::Revision;
 use vell_protocol::scene::Scene;
 use vell_protocol::space::{Sizing, SplitDirection};
@@ -38,9 +43,62 @@ pub(super) struct ClientSession {
     mode_resolver: ModeResolver,
     view_modes: ModeViewStore,
     faces: SessionFaces,
-    presentation: PresentationLayerStore,
+    presentation: SessionPresentation,
     view_extensions: ViewExtensionStore,
     dispatcher: Dispatcher,
+    completion: CompletionEngine,
+    completion_keymap: HashMap<KeyEvent, CompletionKeyAction>,
+    completion_source_labels: HashMap<ViewId, HashMap<CompletionSourceKey, String>>,
+}
+
+#[derive(Default)]
+pub(super) struct SessionPresentation {
+    mode_layers: PresentationLayerStore,
+    completion: HashMap<ViewId, Arc<CompletionPresentation>>,
+}
+
+impl SessionPresentation {
+    pub(super) fn set_completion(
+        &mut self,
+        view: ViewId,
+        presentation: Option<CompletionPresentation>,
+    ) {
+        if let Some(presentation) = presentation {
+            self.completion.insert(view, Arc::new(presentation));
+        } else {
+            self.completion.remove(&view);
+        }
+    }
+
+    pub(super) fn completion(&self, view: ViewId) -> Option<&Arc<CompletionPresentation>> {
+        self.completion.get(&view)
+    }
+
+    pub(super) fn set_selection(
+        &mut self,
+        view: ViewId,
+        selected: Option<vell_protocol::content_query::CompletionSelection>,
+    ) {
+        if let Some(presentation) = self.completion.get_mut(&view) {
+            let presentation = Arc::make_mut(presentation);
+            presentation.selected = selected;
+            presentation.documentation = None;
+        }
+    }
+}
+
+impl Deref for SessionPresentation {
+    type Target = PresentationLayerStore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.mode_layers
+    }
+}
+
+impl DerefMut for SessionPresentation {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.mode_layers
+    }
 }
 
 pub(super) struct InitialView {
@@ -110,9 +168,12 @@ impl ClientSession {
             mode_resolver: ModeResolver::new(modes)?,
             view_modes,
             faces: SessionFaces::new(faces, face_environment),
-            presentation: PresentationLayerStore::default(),
+            presentation: SessionPresentation::default(),
             view_extensions: ViewExtensionStore::empty(),
             dispatcher: Dispatcher::new(default_global_keymap()),
+            completion: CompletionEngine::default(),
+            completion_keymap: default_completion_keymap(),
+            completion_source_labels: HashMap::new(),
         };
         session.reconcile_view_modes(
             init.editor.view,
@@ -174,6 +235,39 @@ impl ClientSession {
 
     pub(super) fn view_modes_mut(&mut self) -> &mut ModeViewStore {
         &mut self.view_modes
+    }
+
+    pub(super) fn completion(&self) -> &CompletionEngine {
+        &self.completion
+    }
+
+    pub(super) fn completion_mut(&mut self) -> &mut CompletionEngine {
+        &mut self.completion
+    }
+
+    pub(super) fn prepare_completion_source(
+        &self,
+        mode: ModeId,
+        source: &crate::mode::CompletionSourceId,
+        request: &vell_completion::CompletionRequest,
+        mode_contents: &ModeContentStore,
+        contents: &ContentStore,
+    ) -> Result<crate::mode::CompletionSourceTask, ModeError> {
+        let view = self.workspace.view(request.view()).ok_or_else(|| {
+            ModeError::InvalidViewContext(crate::mode::ModeContextError::MissingDocument {
+                view: request.view(),
+            })
+        })?;
+        let context = require_mode_view_context(request.view(), view, contents)
+            .map_err(ModeError::InvalidViewContext)?;
+        self.view_modes.prepare_completion_source(
+            mode,
+            request.view(),
+            source,
+            request,
+            mode_contents,
+            &context,
+        )
     }
 
     pub(super) fn forget_content(&mut self, content: ContentId) {
@@ -500,8 +594,77 @@ impl ClientSession {
         &mut self.faces
     }
 
-    pub(super) fn presentation(&self) -> &PresentationLayerStore {
+    pub(super) fn presentation(&self) -> &SessionPresentation {
         &self.presentation
+    }
+
+    pub(super) fn set_completion_presentation(
+        &mut self,
+        view: ViewId,
+        presentation: Option<CompletionPresentation>,
+    ) {
+        self.presentation.set_completion(view, presentation);
+        if self.presentation.completion(view).is_none() {
+            self.completion_source_labels.remove(&view);
+        }
+    }
+
+    pub(super) fn update_completion_presentation_selection(
+        &mut self,
+        view: ViewId,
+        selected: Option<vell_protocol::content_query::CompletionSelection>,
+    ) {
+        self.presentation.set_selection(view, selected);
+    }
+
+    pub(super) fn completion_key_binding(&self, key: &KeyEvent) -> Option<CompletionKeyAction> {
+        self.completion_keymap.get(key).copied()
+    }
+
+    pub(super) fn bind_completion_key(
+        &mut self,
+        key: KeyEvent,
+        action: Option<CompletionKeyAction>,
+    ) -> bool {
+        const MAX_COMPLETION_KEY_BINDINGS: usize = 64;
+        if let Some(action) = action {
+            if !self.completion_keymap.contains_key(&key)
+                && self.completion_keymap.len() == MAX_COMPLETION_KEY_BINDINGS
+            {
+                return false;
+            }
+            self.completion_keymap.insert(key, action);
+        } else {
+            self.completion_keymap.remove(&key);
+        }
+        true
+    }
+
+    pub(super) fn set_completion_source_labels(
+        &mut self,
+        view: ViewId,
+        labels: impl IntoIterator<Item = (CompletionSourceKey, String)>,
+    ) {
+        self.completion_source_labels
+            .insert(view, labels.into_iter().collect());
+    }
+
+    pub(super) fn completion_source_label(
+        &self,
+        view: ViewId,
+        source: &CompletionSourceKey,
+    ) -> Option<&str> {
+        self.completion_source_labels
+            .get(&view)?
+            .get(source)
+            .map(String::as_str)
+    }
+
+    #[cfg(test)]
+    pub(super) fn completion_source_label_count(&self, view: ViewId) -> usize {
+        self.completion_source_labels
+            .get(&view)
+            .map_or(0, HashMap::len)
     }
 
     pub(super) fn set_status_message(&mut self, message: String) {
@@ -1789,6 +1952,8 @@ impl ClientSession {
                 contents,
             );
             self.faces.remove_view_remaps(id);
+            self.presentation.set_completion(id, None);
+            self.completion_source_labels.remove(&id);
             self.mode_resolver.forget_view(id);
             let attachments = self
                 .view_modes

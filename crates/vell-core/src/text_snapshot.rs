@@ -32,6 +32,15 @@ impl TextSnapshot {
         self.rope.len_lines()
     }
 
+    pub fn char_at(&self, offset: usize) -> Option<char> {
+        (offset < self.rope.len_chars()).then(|| self.rope.char(offset))
+    }
+
+    pub fn char_range_to_string(&self, range: std::ops::Range<usize>) -> Option<String> {
+        (range.start <= range.end && range.end <= self.rope.len_chars())
+            .then(|| self.rope.slice(range).to_string())
+    }
+
     pub fn char_range_for_rows(&self, start: usize, end: usize) -> std::ops::Range<usize> {
         let len_lines = self.rope.len_lines();
         let start = start.min(len_lines);

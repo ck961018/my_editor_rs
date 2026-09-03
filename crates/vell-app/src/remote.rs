@@ -83,7 +83,7 @@ mod tests {
     struct Fixture {
         contents: ContentStore,
         views: HashMap<ViewId, View>,
-        presentation: crate::presentation::PresentationLayerStore,
+        presentation: crate::session::SessionPresentation,
         faces: crate::theme::SessionFaces,
     }
 
@@ -100,7 +100,7 @@ mod tests {
             Self {
                 contents,
                 views: HashMap::from([(ViewId(0), view)]),
-                presentation: crate::presentation::PresentationLayerStore::default(),
+                presentation: crate::session::SessionPresentation::default(),
                 faces: crate::theme::SessionFaces::default(),
             }
         }

@@ -2,6 +2,7 @@ pub mod action;
 mod attachment;
 pub mod command;
 pub mod command_registry;
+mod completion;
 pub mod editing;
 pub mod mode_name;
 pub mod operation;
@@ -12,6 +13,7 @@ mod view_definition;
 mod view_extension;
 
 pub use attachment::*;
+pub use completion::*;
 pub use runtime::*;
 pub use typed::*;
 pub use view_definition::*;

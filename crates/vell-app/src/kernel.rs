@@ -1,17 +1,20 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
+use std::mem;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
 use crate::buffer_lifecycle::normalize_path;
 use crate::command::ModeCommand;
 use crate::content_classifier::ContentClassifier;
-use crate::message::{AppMessage, OpenedBuffer, OpenedPath};
+use crate::message::{AppMessage, CompletionSourceTaskOutcome, OpenedBuffer, OpenedPath};
 use crate::mode::{
-    ModeBackground, ModeContentStore, ModeDraftJournal, ModeError, ModeId, ModeJobKey,
-    ModeJobRequest, ModeJobResult, ModeJobRunner, ModeRegistry, ModeResult,
+    CompletionSourceError, CompletionSourcePublishError, CompletionSourceSink,
+    CompletionSourceTask, ModeBackground, ModeContentStore, ModeDraftJournal, ModeError, ModeId,
+    ModeJobKey, ModeJobRequest, ModeJobResult, ModeJobRunner, ModeRegistry, ModeResult,
 };
 use crate::native_commands::native_command_registry;
 use crate::tasks::AppTasks;
@@ -19,6 +22,9 @@ use crate::transaction::{
     TransactionManager, TransactionManagerError, TransactionRecord, TransactionSnapshot,
 };
 use crate::view_definition::ViewDefinitionRegistry;
+use vell_completion::{
+    CompletionBatch, CompletionItem, CompletionLimits, CompletionRequest, SourceRequestKey,
+};
 use vell_core::action::{ContentAction, ContentEditPlan};
 use vell_core::clipboard::{ClipboardKind, ClipboardPayload, PastePlacement};
 use vell_core::content::{
@@ -31,6 +37,8 @@ use vell_core::transaction::{TextStateId, TransactionDirection};
 use vell_mode::command_registry::CommandRegistry;
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 use vell_protocol::selection::Selections;
+
+const MAX_COMPLETION_TASKS: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum FileBaseline {
@@ -69,6 +77,8 @@ pub(super) struct Kernel {
     message_rx: mpsc::UnboundedReceiver<AppMessage>,
     tasks: AppTasks,
     mode_jobs: HashMap<ModeJobKey, ModeJobSlot>,
+    completion_tasks: HashMap<SourceRequestKey, RunningCompletionTask>,
+    completion_task_slots: Arc<Semaphore>,
     pending_saves: HashMap<ContentId, PendingSave>,
     command_transaction: Option<CommandTransaction>,
     clipboard: ClipboardPayload,
@@ -100,6 +110,8 @@ impl Kernel {
             message_rx,
             tasks: AppTasks::new(),
             mode_jobs: HashMap::new(),
+            completion_tasks: HashMap::new(),
+            completion_task_slots: Arc::new(Semaphore::new(MAX_COMPLETION_TASKS)),
             pending_saves: HashMap::new(),
             command_transaction: None,
             clipboard: ClipboardPayload::character(""),
@@ -233,6 +245,13 @@ impl Kernel {
 
     pub(super) fn modes(&self) -> &ModeRegistry {
         &self.modes
+    }
+
+    pub(super) fn classify_content(
+        &self,
+        content: ContentId,
+    ) -> Option<crate::content_classifier::ContentClassification> {
+        self.classifier.classify(content, &self.contents)
     }
 
     pub(super) fn view_definitions(&self) -> &ViewDefinitionRegistry {
@@ -564,6 +583,179 @@ impl Kernel {
 
     pub(super) fn cancellation_token(&self) -> tokio_util::sync::CancellationToken {
         self.tasks.cancellation_token()
+    }
+
+    pub(super) fn queue_completion_source(
+        &mut self,
+        key: SourceRequestKey,
+        request: CompletionRequest,
+        task: CompletionSourceTask,
+    ) -> bool {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return false;
+        }
+        // A map entry may disappear before an aborted future is next polled.
+        // The permit therefore follows the future itself and bounds actual
+        // live provider payloads, including aborted-but-not-yet-dropped tasks.
+        let Ok(slot) = self.completion_task_slots.clone().try_acquire_owned() else {
+            return false;
+        };
+        if let Some(running) = self.completion_tasks.remove(&key) {
+            running.cancellation.cancel();
+            running.abort.abort();
+            running.inbox.remove_source(&key);
+        }
+        let inbox = self
+            .completion_tasks
+            .iter()
+            .find_map(|(running_key, running)| {
+                (running_key.task() == key.task()).then(|| running.inbox.clone())
+            })
+            .unwrap_or_default();
+        inbox.register_source(key.clone());
+        let cancellation = self.tasks.cancellation_token().child_token();
+        let abort = self.spawn_completion_source(
+            key.clone(),
+            request,
+            task,
+            cancellation.clone(),
+            inbox.clone(),
+            slot,
+        );
+        self.completion_tasks.insert(
+            key,
+            RunningCompletionTask {
+                cancellation,
+                abort,
+                inbox,
+            },
+        );
+        true
+    }
+
+    fn spawn_completion_source(
+        &self,
+        key: SourceRequestKey,
+        request: CompletionRequest,
+        task: CompletionSourceTask,
+        cancellation: tokio_util::sync::CancellationToken,
+        inbox: CompletionSessionInbox,
+        slot: OwnedSemaphorePermit,
+    ) -> tokio::task::AbortHandle {
+        let tx = self.message_tx.clone();
+        self.tasks.spawn_detached(async move {
+            let _slot = slot;
+            let debounce = task.debounce();
+            if debounce.is_zero() {
+                if cancellation.is_cancelled() {
+                    let _ = tx.send(AppMessage::CompletionSourceFinished {
+                        key,
+                        outcome: CompletionSourceTaskOutcome::Cancelled,
+                    });
+                    return;
+                }
+            } else {
+                tokio::select! {
+                    _ = cancellation.cancelled() => {
+                        let _ = tx.send(AppMessage::CompletionSourceFinished {
+                            key,
+                            outcome: CompletionSourceTaskOutcome::Cancelled,
+                        });
+                        return;
+                    }
+                    _ = tokio::time::sleep(debounce) => {}
+                }
+            }
+
+            let sink_tx = tx.clone();
+            let sink_key = key.clone();
+            let sink_cancellation = cancellation.clone();
+            let sink = CompletionSourceSink::new(move |source_batch| {
+                if sink_cancellation.is_cancelled() {
+                    return Err(CompletionSourcePublishError::Cancelled);
+                }
+                let batch = CompletionBatch {
+                    key: sink_key.clone(),
+                    version: source_batch.version,
+                    kind: source_batch.kind,
+                    items: source_batch.items,
+                    is_final: source_batch.is_final,
+                    incomplete: source_batch.incomplete,
+                };
+                if !inbox.push(batch) {
+                    sink_cancellation.cancel();
+                    let _ = sink_tx.send(AppMessage::CompletionSourceFinished {
+                        key: sink_key.clone(),
+                        outcome: CompletionSourceTaskOutcome::Failed(CompletionSourceError::new(
+                            "completion source inbox limit exceeded",
+                        )),
+                    });
+                    return Err(CompletionSourcePublishError::LimitExceeded);
+                }
+                if sink_tx
+                    .send(AppMessage::CompletionBatchReady(sink_key.clone()))
+                    .is_err()
+                {
+                    inbox.remove_source(&sink_key);
+                    return Err(CompletionSourcePublishError::HostClosed);
+                }
+                Ok(())
+            });
+            let run_cancellation = cancellation.clone();
+            let timeout = task.timeout();
+            let provider = task.run(request, run_cancellation, sink);
+            let outcome = tokio::select! {
+                _ = cancellation.cancelled() => CompletionSourceTaskOutcome::Cancelled,
+                result = tokio::time::timeout(timeout, provider) => match result {
+                    Err(_) => {
+                        cancellation.cancel();
+                        CompletionSourceTaskOutcome::TimedOut
+                    }
+                    Ok(Err(error)) => CompletionSourceTaskOutcome::Failed(error),
+                    Ok(Ok(())) => CompletionSourceTaskOutcome::Completed,
+                },
+            };
+            let _ = tx.send(AppMessage::CompletionSourceFinished { key, outcome });
+        })
+    }
+
+    pub(super) fn cancel_completion_source(&mut self, key: &SourceRequestKey) -> bool {
+        let Some(running) = self.completion_tasks.remove(key) else {
+            return false;
+        };
+        running.cancellation.cancel();
+        running.abort.abort();
+        running.inbox.remove_source(key);
+        true
+    }
+
+    pub(super) fn completion_source_is_running(&self, key: &SourceRequestKey) -> bool {
+        self.completion_tasks.contains_key(key)
+    }
+
+    pub(super) fn finish_completion_source(&mut self, key: &SourceRequestKey) -> bool {
+        let Some(running) = self.completion_tasks.remove(key) else {
+            return false;
+        };
+        running.inbox.remove_source(key);
+        true
+    }
+
+    pub(super) fn take_completion_batch(
+        &mut self,
+        key: &SourceRequestKey,
+    ) -> Option<CompletionBatch> {
+        self.completion_tasks.get(key)?.inbox.pop(key)
+    }
+
+    #[cfg(test)]
+    pub(super) fn completion_task_count_for_test(&self) -> usize {
+        self.completion_tasks.len()
+    }
+
+    #[cfg(test)]
+    fn live_completion_task_count_for_test(&self) -> usize {
+        MAX_COMPLETION_TASKS - self.completion_task_slots.available_permits()
     }
 
     pub(super) fn schedule_mode_jobs(&mut self) -> bool {
@@ -1133,6 +1325,108 @@ struct RunningModeJob {
     cancellation: tokio_util::sync::CancellationToken,
 }
 
+struct RunningCompletionTask {
+    cancellation: tokio_util::sync::CancellationToken,
+    abort: tokio::task::AbortHandle,
+    inbox: CompletionSessionInbox,
+}
+
+#[derive(Clone)]
+struct CompletionSessionInbox {
+    state: Arc<Mutex<CompletionInboxState>>,
+    limits: CompletionLimits,
+}
+
+#[derive(Default)]
+struct CompletionInboxState {
+    active_sources: HashSet<SourceRequestKey>,
+    batches: HashMap<SourceRequestKey, VecDeque<CompletionBatch>>,
+    batch_count: usize,
+    item_count: usize,
+    bytes: usize,
+}
+
+impl Default for CompletionSessionInbox {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(CompletionInboxState::default())),
+            limits: CompletionLimits::default(),
+        }
+    }
+}
+
+impl CompletionSessionInbox {
+    fn register_source(&self, key: SourceRequestKey) {
+        self.state
+            .lock()
+            .expect("completion inbox lock poisoned")
+            .active_sources
+            .insert(key);
+    }
+
+    fn push(&self, mut batch: CompletionBatch) -> bool {
+        batch.items = batch.items.into_boxed_slice().into_vec();
+        let item_count = batch.items.len();
+        let bytes = completion_batch_bytes(&batch);
+        let mut state = self.state.lock().expect("completion inbox lock poisoned");
+        if !state.active_sources.contains(&batch.key)
+            || item_count > self.limits.max_source_items
+            || bytes > self.limits.max_batch_bytes
+            || state.batch_count >= self.limits.max_source_batches
+            || state.item_count.saturating_add(item_count) > self.limits.max_session_items
+            || state.bytes.saturating_add(bytes) > self.limits.max_session_bytes
+        {
+            return false;
+        }
+        state.batch_count += 1;
+        state.item_count += item_count;
+        state.bytes += bytes;
+        state
+            .batches
+            .entry(batch.key.clone())
+            .or_default()
+            .push_back(batch);
+        true
+    }
+
+    fn pop(&self, key: &SourceRequestKey) -> Option<CompletionBatch> {
+        let mut state = self.state.lock().expect("completion inbox lock poisoned");
+        let batch = state.batches.get_mut(key)?.pop_front()?;
+        if state.batches.get(key).is_some_and(VecDeque::is_empty) {
+            state.batches.remove(key);
+        }
+        state.batch_count -= 1;
+        state.item_count -= batch.items.len();
+        state.bytes -= completion_batch_bytes(&batch);
+        Some(batch)
+    }
+
+    fn remove_source(&self, key: &SourceRequestKey) {
+        let mut state = self.state.lock().expect("completion inbox lock poisoned");
+        state.active_sources.remove(key);
+        let Some(batches) = state.batches.remove(key) else {
+            return;
+        };
+        for batch in batches {
+            state.batch_count -= 1;
+            state.item_count -= batch.items.len();
+            state.bytes -= completion_batch_bytes(&batch);
+        }
+    }
+}
+
+fn completion_batch_bytes(batch: &CompletionBatch) -> usize {
+    mem::size_of::<CompletionBatch>()
+        .saturating_add(batch.key.source().as_str().len())
+        .saturating_add(
+            batch
+                .items
+                .iter()
+                .map(CompletionItem::estimated_heap_bytes)
+                .fold(0_usize, usize::saturating_add),
+        )
+}
+
 struct PendingModeJob {
     version: u64,
     run: ModeJobRunner,
@@ -1193,6 +1487,13 @@ async fn atomic_write(snapshot: SaveSnapshot, guard: SaveGuard) -> io::Result<()
 mod tests {
     use super::*;
     use crate::mode_name::ModeName;
+    use vell_completion::{
+        CompletionEngine, CompletionEvent, CompletionRequestContext, CompletionRequestSeed,
+        CompletionSourceKey, CompletionTextRange, CompletionTrigger,
+    };
+    use vell_protocol::ids::ViewId;
+    use vell_protocol::revision::Revision;
+    use vell_protocol::selection::{Selection, TextOffset};
 
     struct TestMode(ModeName);
 
@@ -1301,6 +1602,51 @@ mod tests {
                 .as_ref()
                 .map(|running| running.version),
             Some(2)
+        );
+        kernel.cancel();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completion_task_cap_counts_aborted_futures_until_they_are_dropped() {
+        let modes = ModeRegistry::new();
+        let mut kernel = Kernel::new(ContentStore::default(), modes);
+        let view = ViewId(1);
+        let source = CompletionSourceKey::from("bounded");
+        let origin = TextOffset::origin();
+        let seed = CompletionRequestSeed::new(
+            view,
+            ContentId(1),
+            Revision::default(),
+            Revision::default(),
+            Selection::collapsed(origin),
+            CompletionTextRange::new(origin, origin).unwrap(),
+            "",
+            CompletionTrigger::Manual,
+            CompletionRequestContext::default(),
+        )
+        .unwrap();
+        let mut engine = CompletionEngine::default();
+        engine.transition(CompletionEvent::Trigger {
+            request: seed,
+            sources: vec![source.clone()],
+        });
+        let request = engine.snapshot(view).unwrap().request;
+        let key = request.source_key(source);
+        let task = CompletionSourceTask::new(
+            std::time::Duration::ZERO,
+            std::time::Duration::from_secs(1),
+            |_, _, _| Box::pin(std::future::pending()),
+        )
+        .unwrap();
+
+        for _ in 0..MAX_COMPLETION_TASKS {
+            assert!(kernel.queue_completion_source(key.clone(), request.clone(), task.clone(),));
+        }
+        assert!(!kernel.queue_completion_source(key, request, task));
+        assert_eq!(kernel.completion_task_count_for_test(), 1);
+        assert_eq!(
+            kernel.live_completion_task_count_for_test(),
+            MAX_COMPLETION_TASKS
         );
         kernel.cancel();
     }

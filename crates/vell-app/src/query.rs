@@ -1,23 +1,24 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use crate::presentation::PresentationLayerStore;
+use crate::session::SessionPresentation;
 use crate::theme::SessionFaces;
 use crate::view::{BODY_PANE, GUTTER_PANE, STATUS_PANE, View};
 use vell_core::content_store::ContentStore;
 use vell_core::content_view_state::ContentViewState;
 use vell_protocol::content_query::{
-    BufferBackingState, ContentData, ContentQuery, ContentQueryKind, CursorStyle,
-    DEFAULT_TAB_WIDTH, DirtyState, FaceName, FacePatch, LineNumberPresentation, LinesPresentation,
-    MAX_TAB_WIDTH, PaintFace, RenderQuery, RenderQueryError, RowRange, SaveState, SelectionShape,
-    StatusBarPresentation, StatusBarSegment, TextDecoration, TextPresentation, ViewData,
-    ViewPresentation,
+    BufferBackingState, CompletionPresentation, ContentData, ContentQuery, ContentQueryKind,
+    CursorStyle, DEFAULT_TAB_WIDTH, DirtyState, FaceName, FacePatch, LineNumberPresentation,
+    LinesPresentation, MAX_TAB_WIDTH, PaintFace, RenderQuery, RenderQueryError, RowRange,
+    SaveState, SelectionShape, StatusBarPresentation, StatusBarSegment, TextDecoration,
+    TextPresentation, ViewData, ViewPresentation,
 };
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 
 pub(super) struct AppQuery<'a> {
     pub(super) contents: &'a ContentStore,
     pub(super) views: &'a HashMap<ViewId, View>,
-    pub(super) presentation: &'a PresentationLayerStore,
+    pub(super) presentation: &'a SessionPresentation,
     pub(super) faces: &'a SessionFaces,
 }
 
@@ -108,6 +109,16 @@ impl RenderQuery for AppQuery<'_> {
                 face: self.faces.resolve_for(&decoration.face, content, id),
             })
             .collect())
+    }
+
+    fn completion(
+        &self,
+        id: ViewId,
+    ) -> Result<Option<Arc<CompletionPresentation>>, RenderQueryError> {
+        if !self.views.contains_key(&id) {
+            return Err(RenderQueryError::MissingView(id));
+        }
+        Ok(self.presentation.completion(id).cloned())
     }
 }
 
