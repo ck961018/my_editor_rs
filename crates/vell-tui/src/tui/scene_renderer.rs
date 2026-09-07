@@ -14,10 +14,10 @@ use crate::protocol::content_query::{
     CompletionCandidateIdentity, CompletionSelection, CompletionStatus,
 };
 use crate::protocol::content_query::{
-    CompletionPresentation, CompletionRow, ContentData, ContentQuery, ContentQueryKind,
-    DEFAULT_TAB_WIDTH, FacePatch, LineNumberPresentation, LinesPresentation, PaintFace,
-    RenderQuery, RenderQueryError, RowRange, SelectionShape, StatusBarPresentation,
-    StatusBarSegment, TextPresentation, ViewData, ViewPresentation,
+    CompletionPresentation, CompletionRow, CompletionStyle, ContentData, ContentQuery,
+    ContentQueryKind, DEFAULT_TAB_WIDTH, FacePatch, FaceValue, LineNumberPresentation,
+    LinesPresentation, PaintFace, RenderQuery, RenderQueryError, RowRange, SelectionShape,
+    StatusBarPresentation, StatusBarSegment, TextPresentation, ViewData, ViewPresentation,
 };
 use crate::protocol::ids::{SpaceId, ViewId};
 use crate::protocol::revision::Revision;
@@ -56,6 +56,22 @@ struct RowDecoration {
     start: usize,
     end: usize,
     face: FacePatch,
+}
+
+struct CompletionTextStyle<'a> {
+    base_face: &'a PaintFace,
+    match_face: &'a FacePatch,
+    deprecated_face: &'a FacePatch,
+    deprecated: bool,
+    reverse: bool,
+}
+
+struct CompletionRowStyle<'a> {
+    base_face: &'a PaintFace,
+    match_face: &'a FacePatch,
+    deprecated_face: &'a FacePatch,
+    metadata_face: &'a PaintFace,
+    reverse: bool,
 }
 
 impl SceneRenderer {
@@ -161,6 +177,9 @@ impl SceneRenderer {
             && completion.view == item.view_id
             && completion.space == item.space_id
         {
+            let completion_style = query
+                .completion_style(item.view_id)
+                .map_err(io::Error::other)?;
             paint_completion_menu(
                 item,
                 focused_view
@@ -168,6 +187,7 @@ impl SceneRenderer {
                     .expect("focused completion view has text content"),
                 focused_text.expect("focused completion view has text presentation"),
                 &completion,
+                completion_style.as_ref(),
                 query,
                 self.viewports
                     .get(&item.view_id)
@@ -335,6 +355,8 @@ impl SceneRenderer {
 
 const MAX_COMPLETION_MENU_ROWS: usize = 8;
 const MAX_COMPLETION_FIELD_SCAN_BYTES: usize = 4 * 1024;
+const COMPLETION_MENU_PADDING: usize = 1;
+const COMPLETION_MENU_BORDER: usize = 1;
 
 #[allow(clippy::too_many_arguments)]
 fn paint_completion_menu(
@@ -342,10 +364,14 @@ fn paint_completion_menu(
     content: crate::protocol::ids::ContentId,
     text: &TextPresentation,
     completion: &CompletionPresentation,
+    style: Option<&CompletionStyle>,
     query: &dyn RenderQuery,
     viewport: Viewport,
     canvas: &mut dyn Canvas,
 ) -> io::Result<()> {
+    let legacy_style = CompletionStyle::default();
+    let legacy_styling = style.is_none();
+    let style = style.unwrap_or(&legacy_style);
     if item.rect.width <= 0 || item.rect.height <= 0 {
         return Ok(());
     }
@@ -365,7 +391,7 @@ fn paint_completion_menu(
     } else {
         completion.rows.len() + usize::from(status_needed)
     };
-    let wanted_height = total_rows.clamp(1, MAX_COMPLETION_MENU_ROWS);
+    let wanted_inner_height = total_rows.clamp(1, MAX_COMPLETION_MENU_ROWS);
     let item_top = item.rect.y.max(0) as usize;
     let item_bottom = item
         .rect
@@ -374,22 +400,44 @@ fn paint_completion_menu(
         .max(item.rect.y) as usize;
     let below = item_bottom.saturating_sub(display.row.saturating_add(1));
     let above = display.row.saturating_sub(item_top);
-    let height = wanted_height.min(below.max(above));
-    if height == 0 {
+    let available = below.max(above);
+    if available == 0 {
         return Ok(());
     }
-    let top = if below >= height {
-        display.row + 1
-    } else {
-        display.row.saturating_sub(height)
-    };
     let item_left = item.rect.x.max(0) as usize;
     let item_width = item.rect.width.max(0) as usize;
-    let show_status = status_needed && (completion.rows.is_empty() || height > 1);
+    let frame_possible = style.border_face != PaintFace::default()
+        && item_width > COMPLETION_MENU_BORDER * 2 + COMPLETION_MENU_PADDING * 2
+        && available > COMPLETION_MENU_BORDER * 2;
+    let wanted_outer_height = wanted_inner_height.saturating_add(if frame_possible {
+        COMPLETION_MENU_BORDER * 2
+    } else {
+        0
+    });
+    let framed = frame_possible && wanted_outer_height <= available;
+    let outer_height = if framed {
+        wanted_outer_height
+    } else {
+        wanted_inner_height.min(available)
+    };
+    if outer_height == 0 {
+        return Ok(());
+    }
+    let inner_height = if framed {
+        outer_height.saturating_sub(COMPLETION_MENU_BORDER * 2)
+    } else {
+        outer_height
+    };
+    let top = if below >= outer_height {
+        display.row + 1
+    } else {
+        display.row.saturating_sub(outer_height)
+    };
+    let show_status = status_needed && (completion.rows.is_empty() || inner_height > 1);
     let candidate_slots = if completion.rows.is_empty() {
         0
     } else {
-        height.saturating_sub(usize::from(show_status))
+        inner_height.saturating_sub(usize::from(show_status))
     };
     let selected = completion
         .selected
@@ -412,32 +460,167 @@ fn paint_completion_menu(
         .unwrap_or(0)
         .max(sanitized_display_width(&status_text))
         .max(1);
-    let width = content_width.min(item_width);
-    if width == 0 {
+    let (outer_width, inner_width, text_width, padding) = if framed {
+        let max_inner_width = item_width.saturating_sub(COMPLETION_MENU_BORDER * 2);
+        let inner_width = content_width
+            .saturating_add(COMPLETION_MENU_PADDING * 2)
+            .min(max_inner_width)
+            .max(COMPLETION_MENU_PADDING * 2 + 1);
+        (
+            inner_width.saturating_add(COMPLETION_MENU_BORDER * 2),
+            inner_width,
+            inner_width.saturating_sub(COMPLETION_MENU_PADDING * 2),
+            COMPLETION_MENU_PADDING,
+        )
+    } else {
+        let width = content_width.min(item_width);
+        (width, width, width, 0)
+    };
+    if outer_width == 0 || inner_width == 0 || text_width == 0 {
         return Ok(());
     }
     let left = display
         .col
-        .min(item_left.saturating_add(item_width).saturating_sub(width))
+        .min(
+            item_left
+                .saturating_add(item_width)
+                .saturating_sub(outer_width),
+        )
         .max(item_left);
 
+    let selected_face = style.selected_face.resolve(&style.base_face);
+    let default_match_face = FacePatch {
+        bold: FaceValue::Value(true),
+        ..FacePatch::default()
+    };
+    let default_deprecated_face = FacePatch {
+        strikethrough: FaceValue::Value(true),
+        ..FacePatch::default()
+    };
+    let match_face = if legacy_styling && style.match_face == FacePatch::default() {
+        &default_match_face
+    } else {
+        &style.match_face
+    };
+    let deprecated_face = if legacy_styling && style.deprecated_face == FacePatch::default() {
+        &default_deprecated_face
+    } else {
+        &style.deprecated_face
+    };
+    let use_reverse_for_selection =
+        style.selected_face == FacePatch::default() || selected_face == style.base_face;
+    if framed {
+        paint_completion_border_line(top, left, outer_width, true, style, canvas)?;
+    }
     for menu_row in 0..candidate_slots {
-        let screen_row = top + menu_row;
+        let screen_row = top + menu_row + usize::from(framed);
         let candidate_index = first + menu_row;
         canvas.move_cursor(screen_row, left)?;
+        let selected = selected == Some(candidate_index);
+        let row_face = if selected {
+            &selected_face
+        } else {
+            &style.base_face
+        };
+        let reverse = selected && use_reverse_for_selection;
+        if framed {
+            canvas.set_face(&style.border_face)?;
+            canvas.set_reverse(false)?;
+            canvas.write_str("│")?;
+            canvas.set_face(row_face)?;
+            canvas.set_reverse(reverse)?;
+            canvas.write_str(&" ".repeat(padding))?;
+        }
         if let Some(row) = completion.rows.get(candidate_index) {
-            paint_completion_row(row, width, selected == Some(candidate_index), canvas)?;
+            let mut metadata_face = row_face.clone();
+            metadata_face.apply_patch(&style.metadata_face, &style.base_face);
+            let row_style = CompletionRowStyle {
+                base_face: row_face,
+                match_face,
+                deprecated_face,
+                metadata_face: &metadata_face,
+                reverse,
+            };
+            paint_completion_row(row, text_width, &row_style, canvas)?;
+        } else if text_width > 0 {
+            canvas.set_face(row_face)?;
+            canvas.set_reverse(reverse)?;
+            canvas.write_str(&" ".repeat(text_width))?;
+        }
+        if framed {
+            canvas.set_face(row_face)?;
+            canvas.set_reverse(reverse)?;
+            canvas.write_str(&" ".repeat(padding))?;
+            canvas.set_face(&style.border_face)?;
+            canvas.set_reverse(false)?;
+            canvas.write_str("│")?;
         }
     }
     if show_status {
-        canvas.move_cursor(top + candidate_slots, left)?;
-        let used = paint_completion_text(&status_text, &[], width, false, false, canvas)?;
-        if used < width {
-            canvas.write_str(&" ".repeat(width - used))?;
+        let screen_row = top + candidate_slots + usize::from(framed);
+        canvas.move_cursor(screen_row, left)?;
+        let status_face = style.status_face.resolve(&style.base_face);
+        if framed {
+            canvas.set_face(&style.border_face)?;
+            canvas.set_reverse(false)?;
+            canvas.write_str("│")?;
+            canvas.set_face(&status_face)?;
+            canvas.write_str(&" ".repeat(padding))?;
         }
+        let used = paint_completion_text(
+            &status_text,
+            &[],
+            text_width,
+            &CompletionTextStyle {
+                base_face: &status_face,
+                match_face: &FacePatch::default(),
+                deprecated_face: &FacePatch::default(),
+                deprecated: false,
+                reverse: false,
+            },
+            canvas,
+        )?;
+        if used < text_width {
+            canvas.set_face(&status_face)?;
+            canvas.set_reverse(false)?;
+            canvas.write_str(&" ".repeat(text_width - used))?;
+        }
+        if framed {
+            canvas.set_face(&status_face)?;
+            canvas.write_str(&" ".repeat(padding))?;
+            canvas.set_face(&style.border_face)?;
+            canvas.set_reverse(false)?;
+            canvas.write_str("│")?;
+        }
+    }
+    if framed {
+        paint_completion_border_line(
+            top + outer_height.saturating_sub(1),
+            left,
+            outer_width,
+            false,
+            style,
+            canvas,
+        )?;
     }
     canvas.set_reverse(false)?;
     canvas.set_face(&PaintFace::default())
+}
+
+fn paint_completion_border_line(
+    row: usize,
+    left: usize,
+    width: usize,
+    top: bool,
+    style: &CompletionStyle,
+    canvas: &mut dyn Canvas,
+) -> io::Result<()> {
+    let corners = if top { ('╭', '╮') } else { ('╰', '╯') };
+    let horizontal = "─".repeat(width.saturating_sub(2));
+    canvas.move_cursor(row, left)?;
+    canvas.set_face(&style.border_face)?;
+    canvas.set_reverse(false)?;
+    canvas.write_str(&format!("{}{}{}", corners.0, horizontal, corners.1))
 }
 
 fn completion_row_width(row: &CompletionRow, max_width: usize) -> usize {
@@ -541,15 +724,20 @@ fn completion_status_text(
 fn paint_completion_row(
     row: &CompletionRow,
     width: usize,
-    selected: bool,
+    style: &CompletionRowStyle<'_>,
     canvas: &mut dyn Canvas,
 ) -> io::Result<()> {
     let mut used = paint_completion_text(
         &row.label,
         &row.match_positions,
         width,
-        selected,
-        row.deprecated,
+        &CompletionTextStyle {
+            base_face: style.base_face,
+            match_face: style.match_face,
+            deprecated_face: style.deprecated_face,
+            deprecated: row.deprecated,
+            reverse: style.reverse,
+        },
         canvas,
     )?;
     for metadata in completion_metadata(row) {
@@ -557,15 +745,19 @@ fn paint_completion_row(
             break;
         }
         let separator = take_display_width("  ", width - used);
-        canvas.set_face(&PaintFace::default())?;
-        canvas.set_reverse(selected)?;
+        canvas.set_face(style.metadata_face)?;
+        canvas.set_reverse(style.reverse)?;
         canvas.write_str(&separator)?;
         used += sanitized_display_width(&separator);
         let metadata = take_completion_display_width(metadata, width - used);
+        canvas.set_face(style.metadata_face)?;
+        canvas.set_reverse(style.reverse)?;
         canvas.write_str(&metadata)?;
         used += sanitized_display_width(&metadata);
     }
     if used < width {
+        canvas.set_face(style.base_face)?;
+        canvas.set_reverse(style.reverse)?;
         canvas.write_str(&" ".repeat(width - used))?;
     }
     Ok(())
@@ -575,8 +767,7 @@ fn paint_completion_text(
     value: &str,
     match_positions: &[usize],
     width: usize,
-    selected: bool,
-    deprecated: bool,
+    style: &CompletionTextStyle<'_>,
     canvas: &mut dyn Canvas,
 ) -> io::Result<usize> {
     let mut used: usize = 0;
@@ -602,12 +793,15 @@ fn paint_completion_text(
         let highlighted = match_positions
             .get(next_match)
             .is_some_and(|position| *position < char_offset + char_count);
-        canvas.set_face(&PaintFace {
-            bold: highlighted,
-            strikethrough: deprecated,
-            ..PaintFace::default()
-        })?;
-        canvas.set_reverse(selected)?;
+        let mut face = style.base_face.clone();
+        if style.deprecated && style.deprecated_face != &FacePatch::default() {
+            face.apply_patch(style.deprecated_face, style.base_face);
+        }
+        if highlighted {
+            face.apply_patch(style.match_face, style.base_face);
+        }
+        canvas.set_face(&face)?;
+        canvas.set_reverse(style.reverse)?;
         canvas.write_str(&sanitized)?;
         used += cells;
         char_offset += char_count;
@@ -1435,6 +1629,39 @@ mod tests {
             view: ViewId,
         ) -> Result<Option<Arc<CompletionPresentation>>, RenderQueryError> {
             Ok((view == self.view).then(|| Arc::new(self.presentation.clone())))
+        }
+    }
+
+    struct StyledCompletionQuery {
+        base: CompletionQuery,
+        style: CompletionStyle,
+    }
+
+    impl RenderQuery for StyledCompletionQuery {
+        fn content(
+            &self,
+            id: ContentId,
+            query: ContentQuery,
+        ) -> Result<ContentData, RenderQueryError> {
+            self.base.content(id, query)
+        }
+
+        fn view(&self, id: ViewId, space: SpaceId) -> Result<ViewData, RenderQueryError> {
+            self.base.view(id, space)
+        }
+
+        fn completion(
+            &self,
+            view: ViewId,
+        ) -> Result<Option<Arc<CompletionPresentation>>, RenderQueryError> {
+            self.base.completion(view)
+        }
+
+        fn completion_style(
+            &self,
+            view: ViewId,
+        ) -> Result<Option<CompletionStyle>, RenderQueryError> {
+            Ok((view == self.base.view).then(|| self.style.clone()))
         }
     }
 
@@ -3010,6 +3237,267 @@ mod tests {
         assert!(
             !output.contains('\u{fffd}'),
             "graphemes remain intact: {output:?}"
+        );
+    }
+
+    #[test]
+    fn completion_menu_uses_theme_resolved_popup_faces() {
+        let (scene, body) = editor_scene(40, 10, ViewId(0), ViewId(1));
+        let base = CompletionQuery {
+            base: StubQuery {
+                editor_cid: ContentId(0),
+                lines: vec!["word".to_owned()],
+                selections: Selections::single(Selection::collapsed(TextOffset { char_index: 4 })),
+            },
+            view: ViewId(0),
+            presentation: CompletionPresentation {
+                view: ViewId(0),
+                space: body,
+                anchor: TextOffset { char_index: 4 },
+                rows: vec![CompletionRow {
+                    label: Arc::from("abc"),
+                    kind: Some(Arc::from("fn")),
+                    match_positions: Arc::from([0]),
+                    ..CompletionRow::default()
+                }]
+                .into(),
+                selected: Some(CompletionSelection {
+                    candidate: CompletionCandidateIdentity::default(),
+                    visible_index: 0,
+                }),
+                status: CompletionStatus::default(),
+                documentation: None,
+            },
+        };
+        let style = CompletionStyle {
+            base_face: PaintFace {
+                foreground: Some(Color::Ansi(21)),
+                background: Some(Color::Ansi(22)),
+                ..PaintFace::default()
+            },
+            border_face: PaintFace {
+                foreground: Some(Color::Ansi(23)),
+                background: Some(Color::Ansi(22)),
+                ..PaintFace::default()
+            },
+            selected_face: FacePatch {
+                background: FaceValue::Value(Color::Ansi(24)),
+                ..FacePatch::default()
+            },
+            match_face: FacePatch {
+                foreground: FaceValue::Value(Color::Ansi(25)),
+                bold: FaceValue::Value(true),
+                ..FacePatch::default()
+            },
+            metadata_face: FacePatch {
+                foreground: FaceValue::Value(Color::Ansi(26)),
+                ..FacePatch::default()
+            },
+            ..CompletionStyle::default()
+        };
+        let query = StyledCompletionQuery { base, style };
+        let mut renderer = SceneRenderer::new();
+        let mut output = Output::new(Vec::new());
+
+        renderer
+            .render(&scene, Revision(0), &query, body, &mut output)
+            .unwrap();
+
+        let output = String::from_utf8(output.into_inner()).unwrap();
+        assert!(
+            output.contains("\x1b[48;5;22m"),
+            "popup background: {output:?}"
+        );
+        assert!(output.contains("\x1b[38;5;23m"), "popup border: {output:?}");
+        assert!(output.contains("\x1b[48;5;24m"), "selected row: {output:?}");
+        assert!(output.contains("\x1b[38;5;25m"), "matched text: {output:?}");
+        assert!(output.contains("\x1b[38;5;26m"), "metadata: {output:?}");
+    }
+
+    #[test]
+    fn completion_menu_applies_deprecated_face_only_to_deprecated_rows() {
+        let (scene, body) = editor_scene(40, 10, ViewId(0), ViewId(1));
+        let base = CompletionQuery {
+            base: StubQuery {
+                editor_cid: ContentId(0),
+                lines: vec!["word".to_owned()],
+                selections: Selections::single(Selection::collapsed(TextOffset { char_index: 4 })),
+            },
+            view: ViewId(0),
+            presentation: CompletionPresentation {
+                view: ViewId(0),
+                space: body,
+                anchor: TextOffset { char_index: 4 },
+                rows: vec![
+                    CompletionRow {
+                        label: Arc::from("normal"),
+                        ..CompletionRow::default()
+                    },
+                    CompletionRow {
+                        label: Arc::from("deprecated"),
+                        deprecated: true,
+                        ..CompletionRow::default()
+                    },
+                ]
+                .into(),
+                selected: None,
+                status: CompletionStatus::default(),
+                documentation: None,
+            },
+        };
+        let style = CompletionStyle {
+            base_face: PaintFace {
+                foreground: Some(Color::Ansi(21)),
+                background: Some(Color::Ansi(22)),
+                ..PaintFace::default()
+            },
+            border_face: PaintFace {
+                foreground: Some(Color::Ansi(23)),
+                background: Some(Color::Ansi(22)),
+                ..PaintFace::default()
+            },
+            deprecated_face: FacePatch {
+                strikethrough: FaceValue::Value(true),
+                ..FacePatch::default()
+            },
+            ..CompletionStyle::default()
+        };
+        let query = StyledCompletionQuery { base, style };
+        let mut renderer = SceneRenderer::new();
+        let mut output = Output::new(Vec::new());
+
+        renderer
+            .render(&scene, Revision(0), &query, body, &mut output)
+            .unwrap();
+
+        let output = String::from_utf8(output.into_inner()).unwrap();
+        let plain = without_ansi(&output);
+        assert!(
+            plain.contains("normal"),
+            "normal row is rendered: {output:?}"
+        );
+        assert!(
+            plain.contains("deprecated"),
+            "deprecated row is rendered: {output:?}"
+        );
+        assert_eq!(
+            output.matches("\x1b[9m").count(),
+            "deprecated".chars().count(),
+            "only deprecated row must be crossed out: {output:?}"
+        );
+    }
+
+    #[test]
+    fn completion_menu_uses_reverse_when_theme_selection_has_no_visible_face() {
+        let (scene, body) = editor_scene(40, 10, ViewId(0), ViewId(1));
+        let base = CompletionQuery {
+            base: StubQuery {
+                editor_cid: ContentId(0),
+                lines: vec!["word".to_owned()],
+                selections: Selections::single(Selection::collapsed(TextOffset { char_index: 4 })),
+            },
+            view: ViewId(0),
+            presentation: CompletionPresentation {
+                view: ViewId(0),
+                space: body,
+                anchor: TextOffset { char_index: 4 },
+                rows: vec![CompletionRow {
+                    label: Arc::from("selected"),
+                    ..CompletionRow::default()
+                }]
+                .into(),
+                selected: Some(CompletionSelection {
+                    candidate: CompletionCandidateIdentity::default(),
+                    visible_index: 0,
+                }),
+                status: CompletionStatus::default(),
+                documentation: None,
+            },
+        };
+        let query = StyledCompletionQuery {
+            base,
+            style: CompletionStyle::default(),
+        };
+        let mut renderer = SceneRenderer::new();
+        let mut output = Output::new(Vec::new());
+
+        renderer
+            .render(&scene, Revision(0), &query, body, &mut output)
+            .unwrap();
+
+        let output = String::from_utf8(output.into_inner()).unwrap();
+        assert!(
+            output.contains("\x1b[7m"),
+            "selected row remains visible in monochrome mode: {output:?}"
+        );
+        assert!(
+            !output.contains('╭'),
+            "an invisible border should not be emitted: {output:?}"
+        );
+    }
+
+    #[test]
+    fn completion_menu_drops_frame_when_it_would_hide_rows() {
+        let (scene, body) = editor_scene(20, 5, ViewId(0), ViewId(1));
+        let base = CompletionQuery {
+            base: StubQuery {
+                editor_cid: ContentId(0),
+                lines: vec!["word".to_owned()],
+                selections: Selections::single(Selection::collapsed(TextOffset { char_index: 4 })),
+            },
+            view: ViewId(0),
+            presentation: CompletionPresentation {
+                view: ViewId(0),
+                space: body,
+                anchor: TextOffset { char_index: 4 },
+                rows: vec![
+                    CompletionRow {
+                        label: Arc::from("first"),
+                        ..CompletionRow::default()
+                    },
+                    CompletionRow {
+                        label: Arc::from("second"),
+                        ..CompletionRow::default()
+                    },
+                ]
+                .into(),
+                selected: None,
+                status: CompletionStatus::default(),
+                documentation: None,
+            },
+        };
+        let query = StyledCompletionQuery {
+            base,
+            style: CompletionStyle {
+                base_face: PaintFace {
+                    background: Some(Color::Ansi(22)),
+                    ..PaintFace::default()
+                },
+                border_face: PaintFace {
+                    foreground: Some(Color::Ansi(23)),
+                    background: Some(Color::Ansi(22)),
+                    ..PaintFace::default()
+                },
+                ..CompletionStyle::default()
+            },
+        };
+        let mut renderer = SceneRenderer::new();
+        let mut output = Output::new(Vec::new());
+
+        renderer
+            .render(&scene, Revision(0), &query, body, &mut output)
+            .unwrap();
+
+        let output = String::from_utf8(output.into_inner()).unwrap();
+        let plain = without_ansi(&output);
+        assert!(plain.contains("first"), "first row is visible: {output:?}");
+        assert!(
+            plain.contains("second"),
+            "second row is visible: {output:?}"
+        );
+        assert!(
+            !plain.contains('╭') && !plain.contains('╰'),
+            "frame is dropped when it would hide rows: {output:?}"
         );
     }
 

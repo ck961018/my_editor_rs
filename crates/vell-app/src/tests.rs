@@ -7339,6 +7339,76 @@ fn mode_decorations_are_resolved_through_named_faces() {
 }
 
 #[test]
+fn completion_style_resolves_popup_faces_from_active_theme() {
+    let app = App::with_modes_and_theme(
+        None,
+        40,
+        5,
+        ScriptedFrontend::new(Vec::new()),
+        Vec::new(),
+        "catppuccin-mocha",
+    )
+    .unwrap();
+    let view = view_id(&app, app.session.focused());
+    let query = AppQuery {
+        contents: app.kernel.contents(),
+        views: app.session.views(),
+        presentation: app.session.presentation(),
+        faces: app.session.faces(),
+    };
+
+    let style = query.completion_style(view).unwrap().unwrap();
+    assert_eq!(
+        style.base_face.background,
+        Some(Color::Rgb {
+            red: 24,
+            green: 24,
+            blue: 37,
+        })
+    );
+    assert_eq!(
+        style.border_face.foreground,
+        Some(Color::Rgb {
+            red: 88,
+            green: 91,
+            blue: 112,
+        })
+    );
+    assert_eq!(
+        style.border_face.background,
+        Some(Color::Rgb {
+            red: 24,
+            green: 24,
+            blue: 37,
+        })
+    );
+    assert_eq!(
+        style.selected_face.background,
+        vell_protocol::content_query::FaceValue::Value(Color::Rgb {
+            red: 69,
+            green: 71,
+            blue: 90,
+        })
+    );
+    assert_eq!(
+        style.selected_face.foreground,
+        vell_protocol::content_query::FaceValue::Value(Color::Rgb {
+            red: 205,
+            green: 214,
+            blue: 244,
+        })
+    );
+    assert_eq!(
+        style.match_face.foreground,
+        vell_protocol::content_query::FaceValue::Value(Color::Rgb {
+            red: 203,
+            green: 166,
+            blue: 247,
+        })
+    );
+}
+
+#[test]
 fn mode_diagnostics_report_policy_decorations_and_face_conflicts() {
     let mut app = make_app(vec![], None);
     let first = ModeName::new("diagnostic-highlight-first");

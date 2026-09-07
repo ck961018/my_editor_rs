@@ -591,8 +591,9 @@ pub struct FaceResolveContext {
 }
 ```
 
-Text root 使用 `ui.editor`；StatusBar root 使用 `ui.status-bar`。将来 popup、
-menu 和 overlay 使用各自 root Face。
+Text root 使用 `ui.editor`；StatusBar root 使用 `ui.status-bar`；completion
+popup 使用 `ui.popup` 及其 `ui.popup.*` 子 Face。未来 menu 和 overlay 继续
+使用各自的 root Face。
 
 一个文本 cell 的绘制顺序从低到高为：
 
@@ -638,6 +639,8 @@ mantle = "#181825"
 "ui.editor" = { foreground = "text", background = "base" }
 "ui.status-bar" = { foreground = "text", background = "mantle" }
 "ui.selection" = { background = "surface1" }
+"ui.popup" = { foreground = "text", background = "mantle" }
+"ui.popup.selected" = { background = "surface1", bold = true }
 "syntax.keyword" = { foreground = "mauve" }
 "syntax.function.macro" = { foreground = "rosewater" }
 ```
@@ -674,6 +677,8 @@ palette 名的映射。四个 flavor 提供 palette 与 appearance。
 
 - `ui.editor`、`ui.selection`；
 - active/inactive StatusBar；
+- completion popup root, border, selection, match, metadata, status and
+  deprecated Faces；
 - `syntax.*` 当前所有 capture；
 - Markdown heading、link、raw、quote 和 list；
 - `diagnostic.error/warning/info/hint` 的预留定义；
@@ -863,6 +868,7 @@ InvalidFaceRemapOwner
 - 实现 terminal-default 与 Catppuccin 四个 flavor；
 - ClientSession 持有 active Theme；
 - AppQuery 解析 root、selection、status 和 decoration Face；
+- AppQuery 解析 completion popup 的 root 与子 Face；
 - Renderer 正确填充背景并恢复终端状态。
 
 ### 阶段 B：标准语义与 fallback
@@ -940,6 +946,7 @@ InvalidFaceRemapOwner
 - Buffer 空白行使用 `ui.editor` 背景；
 - StatusBar 未写满部分使用 StatusBar base；
 - syntax 前景与 selection 背景正确组合；
+- completion popup 遵循 `ui.popup.*`，空间不足时退化为紧凑模式；
 - Reset 恢复 root 而非较低 decoration；
 - render 与退出恢复 SGR；
 - terminal-default 保持既有基础字节行为。

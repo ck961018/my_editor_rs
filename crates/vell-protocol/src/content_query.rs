@@ -551,6 +551,21 @@ pub struct CompletionPresentation {
     pub documentation: Option<Arc<str>>,
 }
 
+/// Theme-resolved faces used to paint a completion popup.
+///
+/// The semantic completion snapshot stays independent of the active theme;
+/// render queries provide this client-specific style alongside it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CompletionStyle {
+    pub base_face: PaintFace,
+    pub border_face: PaintFace,
+    pub selected_face: FacePatch,
+    pub match_face: FacePatch,
+    pub metadata_face: FacePatch,
+    pub status_face: FacePatch,
+    pub deprecated_face: FacePatch,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompletionSelection {
     pub candidate: CompletionCandidateIdentity,
@@ -745,6 +760,10 @@ pub trait RenderQuery {
         &self,
         _view: ViewId,
     ) -> Result<Option<Arc<CompletionPresentation>>, RenderQueryError> {
+        Ok(None)
+    }
+
+    fn completion_style(&self, _view: ViewId) -> Result<Option<CompletionStyle>, RenderQueryError> {
         Ok(None)
     }
 }

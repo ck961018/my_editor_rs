@@ -9,6 +9,13 @@ appearance = "dark"
 "ui.selection" = {}
 "ui.status-bar" = {}
 "ui.status-bar.inactive" = {}
+"ui.popup" = { foreground = 252, background = 236 }
+"ui.popup.border" = { foreground = 244 }
+"ui.popup.selected" = { foreground = 231, background = 24, bold = true }
+"ui.popup.match" = { foreground = 229, bold = true }
+"ui.popup.metadata" = { foreground = 245 }
+"ui.popup.status" = { foreground = 245, italic = true }
+"ui.popup.deprecated" = { foreground = 243, strikethrough = true }
 "syntax.attribute" = { foreground = 173 }
 "syntax.comment" = { foreground = 244, italic = true }
 "syntax.constant" = { foreground = 141 }

@@ -12,6 +12,11 @@ selectable = false
 "ui.status-bar.inactive" = { foreground = "subtext0", background = "surface0" }
 "ui.popup" = { foreground = "text", background = "mantle" }
 "ui.popup.border" = { foreground = "surface2" }
+"ui.popup.selected" = { foreground = "text", background = "surface1", bold = true }
+"ui.popup.match" = { foreground = "mauve", bold = true }
+"ui.popup.metadata" = { foreground = "subtext0" }
+"ui.popup.status" = { foreground = "overlay2", italic = true }
+"ui.popup.deprecated" = { foreground = "overlay1", strikethrough = true }
 "ui.cursor-line" = { background = "surface0" }
 "syntax.attribute" = { foreground = "yellow" }
 "syntax.comment" = { foreground = "overlay2", italic = true }

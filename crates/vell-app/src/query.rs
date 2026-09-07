@@ -7,11 +7,11 @@ use crate::view::{BODY_PANE, GUTTER_PANE, STATUS_PANE, View};
 use vell_core::content_store::ContentStore;
 use vell_core::content_view_state::ContentViewState;
 use vell_protocol::content_query::{
-    BufferBackingState, CompletionPresentation, ContentData, ContentQuery, ContentQueryKind,
-    CursorStyle, DEFAULT_TAB_WIDTH, DirtyState, FaceName, FacePatch, LineNumberPresentation,
-    LinesPresentation, MAX_TAB_WIDTH, PaintFace, RenderQuery, RenderQueryError, RowRange,
-    SaveState, SelectionShape, StatusBarPresentation, StatusBarSegment, TextDecoration,
-    TextPresentation, ViewData, ViewPresentation,
+    BufferBackingState, CompletionPresentation, CompletionStyle, ContentData, ContentQuery,
+    ContentQueryKind, CursorStyle, DEFAULT_TAB_WIDTH, DirtyState, FaceName, FacePatch,
+    LineNumberPresentation, LinesPresentation, MAX_TAB_WIDTH, PaintFace, RenderQuery,
+    RenderQueryError, RowRange, SaveState, SelectionShape, StatusBarPresentation, StatusBarSegment,
+    TextDecoration, TextPresentation, ViewData, ViewPresentation,
 };
 use vell_protocol::ids::{ContentId, SpaceId, ViewId};
 
@@ -119,6 +119,47 @@ impl RenderQuery for AppQuery<'_> {
             return Err(RenderQueryError::MissingView(id));
         }
         Ok(self.presentation.completion(id).cloned())
+    }
+
+    fn completion_style(&self, id: ViewId) -> Result<Option<CompletionStyle>, RenderQueryError> {
+        let view = self
+            .views
+            .get(&id)
+            .ok_or(RenderQueryError::MissingView(id))?;
+        let Some(content) = view.document_content() else {
+            return Ok(None);
+        };
+        if !self.contents.contains(content) {
+            return Err(RenderQueryError::MissingContent(content));
+        }
+        let base_face = self
+            .faces
+            .resolve_root_for(&FaceName::new("ui.popup"), content, id);
+        let border_face = self
+            .faces
+            .resolve_for(&FaceName::new("ui.popup.border"), content, id)
+            .resolve(&base_face);
+        Ok(Some(CompletionStyle {
+            base_face,
+            border_face,
+            selected_face: self
+                .faces
+                .resolve_for(&FaceName::new("ui.popup.selected"), content, id),
+            match_face: self
+                .faces
+                .resolve_for(&FaceName::new("ui.popup.match"), content, id),
+            metadata_face: self
+                .faces
+                .resolve_for(&FaceName::new("ui.popup.metadata"), content, id),
+            status_face: self
+                .faces
+                .resolve_for(&FaceName::new("ui.popup.status"), content, id),
+            deprecated_face: self.faces.resolve_for(
+                &FaceName::new("ui.popup.deprecated"),
+                content,
+                id,
+            ),
+        }))
     }
 }
 
